@@ -890,6 +890,18 @@ final class _Run {
     }
   }
 
+  /// The first keyed row of what is loaded.
+  String? topRow() {
+    for (final p in w.pages) {
+      final k = p.messages
+          .map(stableTranscriptMessageKey)
+          .whereType<String>()
+          .firstOrNull;
+      if (k != null) return k;
+    }
+    return null;
+  }
+
   void finalTraversal() {
     flushLag(all: true);
     for (final queued in [...queuedPrompts]) {
@@ -932,6 +944,15 @@ final class _Run {
           halved = max(1, limit ~/ 2);
           continue;
         }
+        // The rows between the reader and the page are theirs to read first:
+        // the reader moves up to the top row and asks again.
+        final top = topRow();
+        if (mut.rejection == TranscriptHistoryPageRejection.noRoom &&
+            top != null &&
+            top != reading) {
+          reading = top;
+          continue;
+        }
         throw _Violation('final leading page refused ${mut.rejection}');
       }
       halved = null;
@@ -943,16 +964,7 @@ final class _Run {
       if (firstKeyed != null) reading = firstKeyed;
       check('final leading $leading');
     }
-    for (final p in w.pages) {
-      final k = p.messages
-          .map(stableTranscriptMessageKey)
-          .whereType<String>()
-          .firstOrNull;
-      if (k != null) {
-        reading = k;
-        break;
-      }
-    }
+    reading = topRow() ?? reading;
     // B. Down through every gap, reading each page's last row.
     guard = 0;
     int? halvedB;
@@ -963,10 +975,12 @@ final class _Run {
           : w.pages.indexWhere((p) => p.containsStableKey(rk));
       if (readerAt < 0) readerAt = 0;
       TranscriptHistoryGapSegment? next;
+      var before = readerAt;
       for (var i = readerAt; i + 1 < w.pages.length; i++) {
         final g = _gapBetween(w.pages[i], w.pages[i + 1]);
         if (g != null && g.kind == TranscriptHistoryGapKind.reloadable) {
           next = g;
+          before = i;
           break;
         }
       }
@@ -985,6 +999,17 @@ final class _Run {
         if (mut.rejection == TranscriptHistoryPageRejection.overBudget &&
             limit > 1) {
           halvedB = max(1, limit ~/ 2);
+          continue;
+        }
+        // The reader reads down to the page before the range and asks again.
+        final last = w.pages[before].messages
+            .map(stableTranscriptMessageKey)
+            .whereType<String>()
+            .lastOrNull;
+        if (mut.rejection == TranscriptHistoryPageRejection.noRoom &&
+            last != null &&
+            last != reading) {
+          reading = last;
           continue;
         }
         throw _Violation('final newer page refused ${mut.rejection}');

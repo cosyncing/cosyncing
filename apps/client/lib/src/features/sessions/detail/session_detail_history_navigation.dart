@@ -161,6 +161,8 @@ extension TranscriptHistoryNavigation on TranscriptHistoryWindow {
     required String requestedCursor,
     required String until,
     String? preserveMessageKey,
+    Set<String> inView = const {},
+    bool reportView = false,
     TranscriptHistoryWorkCounter? work,
   }) {
     final reached = event.cursor;
@@ -321,13 +323,21 @@ extension TranscriptHistoryNavigation on TranscriptHistoryWindow {
       protectedKey: preserveMessageKey,
       pinned: settled.inserted,
       shedTail: false,
+      inView: inView,
+      reportView: reportView,
       notWaiting: questionState.withdrawnRequestIds,
       work: work,
     );
     if (!fitted.fits) {
       return TranscriptHistoryPageMutation(
         window: this,
-        rejection: TranscriptHistoryPageRejection.overBudget,
+        rejection: _unfitPageRejection(
+          settled.pages,
+          nextReleased,
+          protectedKey: preserveMessageKey,
+          pinned: settled.inserted,
+          notWaiting: questionState.withdrawnRequestIds,
+        ),
       );
     }
     return TranscriptHistoryPageMutation(
@@ -486,6 +496,7 @@ Map<String, TranscriptReleasedRange> _consumeForwardRanges(
     next[key] = TranscriptReleasedRange(
       olderCursor: reached,
       pageableRows: rows - remaining,
+      holdsReportRows: next[key]!.holdsReportRows,
     );
     break;
   }

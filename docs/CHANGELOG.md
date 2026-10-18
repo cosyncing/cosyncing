@@ -51,6 +51,22 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   starts with its number, in bold and aligned with its question, so it is clear
   where one question ends and the next begins.
 
+### Fixed
+
+- File cards stay beside the messages that created them after reconnects and
+  history refreshes. Old cached files no longer reappear among recent messages;
+  their cards return when the matching earlier history is loaded. File cards
+  anchored to tool-only pages remain reachable with tool calls hidden, even
+  after those pages are released to save memory.
+- With tool calls hidden, scrolling back through a long session keeps loading
+  earlier messages. Before, a page could stay stuck on "Loading earlier
+  messages…", get fetched again and again, or show notices that messages were
+  released with little or nothing between them. When the next page cannot be
+  loaded yet without dropping what is on screen, it now waits until you scroll
+  on, and is not treated as an error. A stretch of nothing but tool calls that
+  was released to save memory shows no notice while tool calls are hidden; it
+  loads again once you show them.
+
 ## 0.6.6 — 2026-10-17
 
 ### Security

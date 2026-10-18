@@ -12,6 +12,7 @@ import type {
   AgentMessage,
   AgentOption,
   AgentRegistry,
+  ArtifactTranscriptAnchor,
   AttachMode,
   BrokerClientCompatibility,
   BrokerContractIdentity,
@@ -573,6 +574,21 @@ function canonicalMessageJson(message: AgentMessage): string {
   return JSON.stringify(canonicalize(message));
 }
 
+function artifactTranscriptAnchor(message: AgentMessage): ArtifactTranscriptAnchor | undefined {
+  switch (message.type) {
+    case 'tool-call':
+    case 'tool-result':
+      return message.callId ? { type: message.type, key: message.callId } : undefined;
+    case 'model-output':
+    case 'thinking':
+      return message.key ? { type: message.type, key: message.key } : undefined;
+    case 'user-message':
+      return message.key && !message.queued ? { type: message.type, key: message.key } : undefined;
+    default:
+      return undefined;
+  }
+}
+
 export class ManagedConn {
   private readonly ring: Array<{ seq: number; message: AgentMessage; bytes: number }> = [];
   private ringBytes = 0;
@@ -587,6 +603,8 @@ export class ManagedConn {
   private readonly artifactReplayLimit: number;
   /** Store-less large-artifact versions still need distinct identities at the same path. */
   private artifactEmissionSequence = 0;
+  private lastArtifactAnchor?: ArtifactTranscriptAnchor;
+  private liveArtifactAnchorObserved = false;
   /** The session working dir: the trust boundary for artifacts (must stay within it). */
   private readonly cwd?: string;
   /** Per-key accumulated in-flight text (model-output/thinking), so a client attaching mid-stream
@@ -857,6 +875,8 @@ export class ManagedConn {
   observeHistory(messages: AgentMessage[]): void {
     const latest = new Map<string, Extract<AgentMessage, { type: 'task-list-state' }>>();
     for (const message of messages) {
+      const anchor = artifactTranscriptAnchor(message);
+      if (anchor && !this.liveArtifactAnchorObserved) this.lastArtifactAnchor = anchor;
       const semantic = planSemanticFromMessage(message);
       if (semantic && message.type === 'task-list-state') latest.set(semantic.planKey, message);
     }
@@ -944,7 +964,12 @@ export class ManagedConn {
   /** Read a workspace file and push it to clients as a file-artifact: inline (data URL) when small,
    *  metadata-only when too big. HTML is bundled (local images/css/js inlined as data-URIs) so it
    *  renders standalone in the app's sandboxed iframe — there are no sibling files on the phone. */
-  private emitArtifact(full: string, name: string, size: number, opts?: { proactive?: boolean }): boolean {
+  private emitArtifact(
+    full: string,
+    name: string,
+    size: number,
+    opts?: { proactive?: boolean; transcriptAnchor?: ArtifactTranscriptAnchor },
+  ): boolean {
     const emissionVersion = ++this.artifactEmissionSequence;
     const mime = mimeFromName(name);
     const rel = this.cwd && isWithin(this.cwd, full) ? relative(this.cwd, full) : basename(name);
@@ -955,6 +980,7 @@ export class ManagedConn {
       path: rel,
       size,
       proactive: opts?.proactive,
+      transcriptAnchor: opts?.transcriptAnchor ?? this.lastArtifactAnchor ?? { type: 'unavailable' },
     };
     if (size > 5_000_000) {
       // Too big to inline. With the artifact store enabled, copy bytes into durable
@@ -1055,7 +1081,9 @@ export class ManagedConn {
       // it here is what made the flag unreadable — a `.md` the agent merely
       // wrote looked identical to one it handed over. The card carries the same
       // open and download actions either way.
-      this.emitArtifact(abs, basename(abs), st.size);
+      this.emitArtifact(abs, basename(abs), st.size, {
+        transcriptAnchor: artifactTranscriptAnchor(message),
+      });
     } catch {
       /* gone/unreadable */
     }
@@ -1063,10 +1091,11 @@ export class ManagedConn {
 
   /** Deliver an explicit file (the agent's send_file tool, any type) from inside cwd. Returns a
    *  short status the tool relays back to the model. Bypasses the DELIVERABLE filter on purpose. */
-  surfaceExplicit(rawPath: string): { ok: boolean; detail: string } {
+  async surfaceExplicit(rawPath: string): Promise<{ ok: boolean; detail: string }> {
     if (!this.cwd) return { ok: false, detail: 'no workspace dir for this session' };
     const abs = resolve(this.cwd, rawPath);
     if (!isWithin(this.cwd, abs)) return { ok: false, detail: 'path is outside the workspace' };
+    await this.seedArtifactAnchor();
     try {
       validateResolvedWorkspacePath(this.cwd, abs);
       const st = lstatSync(abs);
@@ -1077,6 +1106,41 @@ export class ManagedConn {
       return { ok: true, detail: `sent ${basename(abs)} (${st.size} bytes) to the user` };
     } catch {
       return { ok: false, detail: 'file not found' };
+    }
+  }
+
+  /** A send can precede the first app attach. Find its native position without
+   * retaining a whole transcript, and never overwrite live evidence that raced
+   * the read. Workspace validation stays AFTER this await. */
+  private async seedArtifactAnchor(): Promise<void> {
+    if (this.lastArtifactAnchor) return;
+    const conn = this.conn;
+    let candidate: ArtifactTranscriptAnchor | undefined;
+    const observe = (message: AgentMessage): boolean => {
+      candidate = artifactTranscriptAnchor(message) ?? candidate;
+      return true;
+    };
+    try {
+      if (conn.openHistorySnapshot) {
+        const snapshot = await conn.openHistorySnapshot();
+        if (snapshot) {
+          const start = Math.max(0, snapshot.count - 32);
+          const page = await snapshot.reader.read(Array.from({ length: snapshot.count - start }, (_, i) => start + i));
+          if (page && 'messages' in page) for (const message of page.messages) observe(message);
+        }
+      } else if (conn.captureHistorySnapshot) {
+        const captured = await conn.captureHistorySnapshot({
+          readsBoundedTailOnly: true,
+          accept: observe,
+          suppressStateAuthority() { /* only transcript identity is observed */ },
+        });
+        if (!captured || 'refusal' in captured) candidate = undefined;
+      } else {
+        for (const message of await conn.getHistory()) observe(message);
+      }
+      if (this.conn === conn && !this.lastArtifactAnchor) this.lastArtifactAnchor = candidate;
+    } catch {
+      // The file still reaches Files when its original position is unavailable.
     }
   }
 
@@ -1128,6 +1192,8 @@ export class ManagedConn {
     if (message.type === 'history-reset') {
       this.historyEpoch += 1;
       this.clearLiveText();
+      this.lastArtifactAnchor = undefined;
+      this.liveArtifactAnchorObserved = false;
       void this.refreshPendingQueuedUsers();
       this.currentPlans.clear();
       this.resyncResetPending = true;
@@ -1139,6 +1205,11 @@ export class ManagedConn {
       this.noteHistoryWrite();
     }
     this.observePlan(message);
+    const artifactAnchor = artifactTranscriptAnchor(message);
+    if (artifactAnchor) {
+      this.lastArtifactAnchor = artifactAnchor;
+      this.liveArtifactAnchorObserved = true;
+    }
     this.accumulateLive(message);
     try {
       this.attentionHooks.onMessage?.(this.conn.info, message);

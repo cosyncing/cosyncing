@@ -481,6 +481,7 @@ extension _SessionDetailMessaging on SessionDetailController {
     _historyPageRequestId = clientMessageId;
     _historyPageCursorInFlight = requestedCursor;
     _historyPageLimitInFlight = pageLimit;
+    _lastHistoryPageAwaitsReader = false;
     _startHistoryPageTimeout(clientMessageId);
     state = state.copyWith(
       historyPageLoading: true,

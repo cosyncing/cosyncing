@@ -13,6 +13,7 @@ import 'package:cosyncing_client/src/features/sessions/detail/session_question_s
 import 'package:cosyncing_client/src/features/sessions/detail/session_telemetry.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/sessions/requests/session_request_action_helpers.dart';
+import 'package:cosyncing_client/src/features/sessions/transcript/session_artifact_placement.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/session_conversation_turns.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/session_transcript_display.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/tool_display_mode.dart';
@@ -1528,7 +1529,7 @@ final class _TranscriptHistoryDerived {
         continue;
       }
       final previous = pageGroups.last.last;
-      final gap = _historyGapBetween(previous, page);
+      final gap = _historyGapBetween(previous, page, window.releasedRanges);
       if (gap == null) {
         pageGroups.last.add(page);
       } else {

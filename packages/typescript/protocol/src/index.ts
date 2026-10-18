@@ -835,6 +835,16 @@ export interface DiffBodyRef {
   truncated?: boolean;
 }
 
+/** The native message beside which a delivered file belongs. */
+export type ArtifactTranscriptAnchor =
+  | { type: 'tool-call' | 'tool-result' | 'model-output' | 'thinking' | 'user-message'; key: string }
+  /** Older cached writes have no call identity. Recover only within a fully
+   * loaded turn whose timestamp bounds contain the original cache write. */
+  | { type: 'workspace-write'; path: string; createdAt: number }
+  /** The original position cannot be recovered. Keep the file in Files,
+   * rather than presenting a replay as a new delivery in the transcript. */
+  | { type: 'unavailable' };
+
 /**
  * The canonical normalized message. Adapters translate each tool's native event
  * stream into this union; the broker forwards it; the UI renders it.
@@ -944,6 +954,10 @@ export type AgentMessage =
        *  artifact, which made it unreadable — a `.md` the agent merely wrote looked identical to
        *  one it handed over. */
       proactive?: boolean;
+      /** Original transcript position of a broker-delivered file. Replay
+       * transport order is not conversation order. A missing source row is
+       * outside the loaded history; keep the card out of Chat until it loads. */
+      transcriptAnchor?: ArtifactTranscriptAnchor;
       /** The `key` of the user-message this artifact was SENT WITH. Present only on a user
        *  attachment (an image or file the user put on a prompt), never on something the agent
        *  produced. Clients render such an artifact inside the right-aligned user surface, grouped

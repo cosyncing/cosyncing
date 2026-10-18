@@ -14,7 +14,7 @@
  * only come back after them.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { connect, createServer, type Server, type Socket } from 'node:net';
 import { join } from 'node:path';
 import {
@@ -188,6 +188,10 @@ describe('artifact delivery is scoped to the session that sent it', () => {
 
     writeFileSync(join(cwd, 'bare.html'), '<h1>written, never sent</h1>');
     writeFileSync(join(cwd, 'report.txt'), 'version one');
+    await owner.events(
+      { t: 'delta', delta: 'Here is the report.', key: 'report-answer' },
+      { t: 'final', text: 'Here is the report.', key: 'report-answer' },
+    );
     const sent = await owner.sendFile(join(cwd, 'report.txt'), {
       forwarded: 'host=forged.example;proto=https',
       'x-forwarded-host': 'forged.example',
@@ -203,6 +207,7 @@ describe('artifact delivery is scoped to the session that sent it', () => {
     expect(names(ownerStream)).toEqual(['report.txt']);
     expect(names(peerStream)).toEqual(['peer-note.txt']);
     expect(first.proactive).toBe(true);
+    expect(first.transcriptAnchor).toEqual({ type: 'model-output', key: 'report-answer' });
     expect(first.interactionPolicy).toMatchObject({ mode: 'display-only', allowedActions: [] });
     ownerStream.close();
     peerStream.close();
@@ -218,11 +223,27 @@ describe('artifact delivery is scoped to the session that sent it', () => {
     expect(crossSession.response.status).toBe(403);
   });
 
+  test('a file sent before any viewer attaches keeps its position in the saved native turn', async () => {
+    const unopened = await PiBridgeSession.open(viaProxy, {
+      cwd,
+      title: 'not yet opened',
+      hello: { history: [{ t: 'user', key: 'unopened-prompt', text: 'Please send the report' }] },
+    });
+    writeFileSync(join(cwd, 'before-attach.md'), '# delivered before the app opened');
+    expect((await unopened.sendFile(join(cwd, 'before-attach.md'))).status).toBe(200);
+    const stream = await attachSettled(viaProxy, unopened.id);
+    const file = artifacts(stream).find((message) => message.name === 'before-attach.md');
+    expect(file.transcriptAnchor).toEqual({ type: 'user-message', key: 'unopened-prompt' });
+    stream.close();
+    await unopened.bye();
+  });
+
   test('a reattach replays each session its own artifacts and nothing else', async () => {
     const ownerStream = await attachSettled(viaProxy, owner.id);
     const peerStream = await attachSettled(viaProxy, peer.id);
     expect(names(ownerStream)).toEqual(['report.txt']);
     expect(names(peerStream)).toEqual(['peer-note.txt']);
+    expect(artifacts(ownerStream)[0].transcriptAnchor).toEqual(first.transcriptAnchor);
     ownerStream.close();
     peerStream.close();
   });
@@ -318,6 +339,11 @@ describe('artifact delivery is scoped to the session that sent it', () => {
     const surfaced = artifacts(stream).slice(before);
     expect(surfaced.map((message) => message.name)).toEqual(['delivered.txt', 'notes.md', 'summary.html', 'final.md']);
     expect(surfaced.map((message) => message.proactive)).toEqual([true, undefined, undefined, undefined]);
+    expect(surfaced.slice(1).map((message) => message.transcriptAnchor)).toEqual([
+      { type: 'tool-result', key: 'w-lower' },
+      { type: 'tool-result', key: 'w-title' },
+      { type: 'tool-result', key: 'w-final' },
+    ]);
     stream.close();
 
     // Replay carries the value each artifact was stored with, not a blanket assertion.
@@ -329,7 +355,28 @@ describe('artifact delivery is scoped to the session that sent it', () => {
     expect(byName.get('delivered.txt')?.proactive).toBe(true);
     expect(byName.get('notes.md')).toBeDefined();
     expect(byName.get('notes.md')?.proactive).toBeUndefined();
+    expect(byName.get('notes.md')?.transcriptAnchor).toEqual({ type: 'tool-result', key: 'w-lower' });
     replayed.close();
+  });
+
+  test('a pre-upgrade cached write replays with a path recovery hint, without changing its download', async () => {
+    const cache = join(broker.paths.root, 'cache-link', 'cache', 'artifacts', 'index.json');
+    // Emulate the index an older release left, which had bytes and ownership
+    // but no original call id. Only isolated fixture state is rewritten.
+    await broker.stop({ keepState: true });
+    const index = JSON.parse(readFileSync(cache, 'utf8'));
+    const record = index.records.find((entry: any) => entry.sessionId === owner.id && entry.name === 'notes.md');
+    expect(record).toBeDefined();
+    delete record.transcriptAnchor;
+    writeFileSync(cache, JSON.stringify(index));
+    await broker.restart();
+    await owner.rehello();
+    await peer.rehello();
+    const stream = await attachSettled(viaProxy, owner.id);
+    const note = artifacts(stream).find((message) => message.name === 'notes.md');
+    expect(note.transcriptAnchor).toEqual({ type: 'workspace-write', path: 'notes.md', createdAt: record.createdAt });
+    expect((await download(broker.url, note.fetchUrl)).bytes.toString()).toBe('# notes the agent wrote');
+    stream.close();
   });
 
   test('active HTML downloads as sandboxed opaque bytes, and the artifact refuses interaction', async () => {

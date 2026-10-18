@@ -7279,7 +7279,7 @@ server = Bun.serve<WsData>({
       const mc = hub.getConn(toolName, sid);
       if (!mc)
         return new Response('this session is not open in the app right now — open it on your phone, then retry', { status: 404 });
-      const r = mc.surfaceExplicit(fp);
+      const r = await mc.surfaceExplicit(fp);
       return new Response(r.detail, { status: r.ok ? 200 : 400, headers: { 'content-type': 'text/plain' } });
     }
 
@@ -7369,7 +7369,7 @@ server = Bun.serve<WsData>({
       if (!conn) return json({ ok: false, code: 'NOT_FOUND', error: 'unknown bridge' }, 404);
       const mc = hub.getConn('pi', id);
       if (!mc) return json({ ok: false, code: 'NOT_FOUND', error: 'bridge session is not open' }, 404);
-      const result = mc.surfaceExplicit(String(b?.path ?? ''));
+      const result = await mc.surfaceExplicit(String(b?.path ?? ''));
       return json({ ok: result.ok, detail: result.detail }, result.ok ? 200 : 400);
     }
     // commands: the extension long-polls for actions to perform (inject prompt, abort, …).
@@ -7500,7 +7500,7 @@ server = Bun.serve<WsData>({
       if (!conn) return json({ ok: false, code: 'NOT_FOUND', error: 'unknown bridge' }, 404);
       const mc = hub.getConn('omp', id);
       if (!mc) return json({ ok: false, code: 'NOT_FOUND', error: 'bridge session is not open' }, 404);
-      const result = mc.surfaceExplicit(String(b?.path ?? ''));
+      const result = await mc.surfaceExplicit(String(b?.path ?? ''));
       return json({ ok: result.ok, detail: result.detail }, result.ok ? 200 : 400);
     }
     // commands: the extension long-polls for actions to perform (inject prompt, abort, …).

@@ -753,6 +753,40 @@ void defineBudgetCases() {
     });
   });
 
+  group('a page taken in', () {
+    test('never releases a row the reader can see, the tail block included; '
+        'a page with no room waits', () {
+      // Pages of about 1.1 MB: three fit, and the reader page's exemption
+      // lets a fourth in while all of them are on screen.
+      List<AgentMessage> heavy(String prefix) => rows(prefix, 100, chars: 5500);
+      Set<String> keys(TranscriptHistoryWindow window) => {
+        for (final page in window.pages)
+          for (final message in page.messages)
+            ?stableTranscriptMessageKey(message),
+      };
+      var window = TranscriptHistoryWindow.fromHistory(frame(heavy('t')));
+      TranscriptHistoryPageRejection? refused;
+      for (var index = 1; index <= 4; index++) {
+        final onScreen = keys(window);
+        final mutation = window.prependPage(
+          page(heavy('p$index-'), cursor: 'older-$index'),
+          requestedCursor: 'older-${index - 1}',
+          preserveMessageKey: stableTranscriptMessageKey(
+            window.pages.first.messages.first,
+          ),
+          inView: onScreen,
+        );
+        if (!mutation.accepted) {
+          refused = mutation.rejection;
+          break;
+        }
+        expect(onScreen.difference(keys(mutation.window)), isEmpty);
+        window = mutation.window;
+      }
+      expect(refused, TranscriptHistoryPageRejection.noRoom);
+    });
+  });
+
   group('incremental frames with endCursor', () {
     test('each frame seals the previous block as its own page, so repeated '
         'reconnects keep the newest rows', () {

@@ -33,7 +33,8 @@
 /// - After a page in one direction, a page in the other waits until the
 ///   reader has moved [TranscriptPrefetchPolicy.reversalViewports] back, so
 ///   turning around at a boundary cannot ping-pong between loading one side
-///   and releasing the other.
+///   and releasing the other — or until the list ends that way, so a short
+///   list does not keep the page the reader can see from ever loading.
 /// - A page that failed for a reason that can pass is asked for again after a
 ///   backoff that doubles up to [TranscriptPrefetchPolicy.retryCap], at most
 ///   [TranscriptPrefetchPolicy.retryLimit] times, and only while the reader is
@@ -303,7 +304,8 @@ final class TranscriptPrefetchController {
   /// lies [distance] logical pixels beyond the viewport edge toward
   /// [direction] (zero or less when it is on screen), for a reader moving at
   /// [velocity] pixels per second in a viewport [viewport] pixels tall, at
-  /// [now].
+  /// [now]. [atEnd] says the reader can move no farther toward [direction]:
+  /// a turn the list ends before is as far back as it can go.
   TranscriptPrefetchDecision decide({
     required TranscriptPrefetchDirection direction,
     required String key,
@@ -311,6 +313,7 @@ final class TranscriptPrefetchController {
     required double velocity,
     required double viewport,
     required Duration now,
+    bool atEnd = false,
   }) {
     if (_inFlight != null) return TranscriptPrefetchDecision.busy;
     final failure = _failures[key];
@@ -329,7 +332,7 @@ final class TranscriptPrefetchController {
     if (!_active && !(retrying && demanded)) {
       return TranscriptPrefetchDecision.settled;
     }
-    if (_reversing(direction, viewport)) {
+    if (!atEnd && _reversing(direction, viewport)) {
       return TranscriptPrefetchDecision.reversing;
     }
     if (!retrying && !_earned && _flingRequests >= policy.flingPages) {

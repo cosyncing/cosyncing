@@ -343,6 +343,7 @@ extension _SessionDetailHistoryNavigation on SessionDetailController {
     _historyPageLimitInFlight = pageLimit;
     _historyPageNewer = true;
     _historyPageUntilInFlight = until;
+    _lastHistoryPageAwaitsReader = false;
     _startHistoryPageTimeout(clientMessageId);
     state = state.copyWith(
       historyPageLoading: true,
