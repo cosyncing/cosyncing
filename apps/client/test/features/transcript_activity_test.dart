@@ -131,6 +131,75 @@ extension on AppDriver {
 }
 
 void main() {
+  featureTest('Status and chat share compact activity dismissals', (f) async {
+    final app = await openTranscript(f, [
+      activity(
+        'cmd:done',
+        'Run focused checks',
+        'done',
+        kind: 'command',
+        elapsedMs: 14000,
+        extra: {
+          'subtitle':
+              r'PATH=/snap/bin:$PATH bun run check web --only web-composer',
+        },
+      ),
+      activity('agent:live', 'Review layout', 'running'),
+      activity(
+        'cmd:live',
+        'Keep the diagnostics open',
+        'running',
+        kind: 'command',
+        extra: {'subtitle': 'bun run check client'},
+      ),
+    ], viewport: FeatureViewport.phoneTall);
+    await app.tapKey('session-detail-view-menu');
+    expect(
+      find.byKey(const Key('session-detail-view-item-expand')),
+      findsNothing,
+    );
+    await app.tapKey('session-detail-view-item-status');
+    final summary = find.descendant(
+      of: card('cmd:done'),
+      matching: find.byKey(const Key('session-agent-activity-summary')),
+    );
+    expect(app.tester.widget<Text>(summary).data, 'Background command · 14s');
+    await app.tap(
+      find.descendant(
+        of: card('cmd:done'),
+        matching: find.byType(ExpansionTile),
+      ),
+    );
+    expect(find.textContaining('PATH=/snap/bin:'), findsWidgets);
+    await app.tap(
+      find.descendant(
+        of: card('cmd:live'),
+        matching: find.byType(ExpansionTile),
+      ),
+    );
+    expect(find.textContaining('bun run check client'), findsOneWidget);
+    await app.tapKey('session-status-clear-finished');
+    expect(find.textContaining('bun run check client'), findsOneWidget);
+    expect(card('cmd:done'), findsNothing);
+    await app.tester.drag(
+      find.byKey(
+        const ValueKey('session-live-state-swipe-activity:agent:live'),
+      ),
+      const Offset(500, 0),
+    );
+    await app.settle();
+    expect(card('agent:live'), findsNothing);
+    expect(find.textContaining('bun run check client'), findsOneWidget);
+    await app.tapKey('session-detail-view-menu');
+    await app.tapKey('session-detail-view-item-chat');
+    expect(strip('cmd:done'), findsNothing);
+    expect(strip('agent:live'), findsNothing);
+    await app.tapKey('session-detail-information');
+    expect(find.byType(Dialog), findsOneWidget);
+    expect(find.byType(BottomSheet), findsNothing);
+    await app.dismissModal();
+  });
+
   group('band ordering and summary', () {
     featureTest('the strip fronts live work oldest-first and counts the band '
         'by phase; outcomes follow, newest first, behind a fold', (f) async {

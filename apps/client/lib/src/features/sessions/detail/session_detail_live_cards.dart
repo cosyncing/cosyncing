@@ -25,8 +25,7 @@ class _ArchivableLiveStateItem extends StatefulWidget {
       _ArchivableLiveStateItemState();
 }
 
-class _ArchivableLiveStateItemState extends State<_ArchivableLiveStateItem>
-    with SingleTickerProviderStateMixin {
+class _ArchivableLiveStateItemState extends State<_ArchivableLiveStateItem> {
   static const double _archiveThreshold = 72;
 
   final GlobalKey _flightSourceKey = GlobalKey(
@@ -34,10 +33,8 @@ class _ArchivableLiveStateItemState extends State<_ArchivableLiveStateItem>
   );
   late bool _expanded = widget.initiallyExpanded;
   double _dragOffset = 0;
-  bool _committing = false;
+  final bool _committing = false;
   PointerDeviceKind? _pointerKind;
-  AnimationController? _flightController;
-  OverlayEntry? _flightOverlay;
 
   // There is no auto-archive. A finished card stays until the reader dismisses
   // it (swipe, the archive button, a row's dismiss, or Clear finished): the
@@ -54,13 +51,6 @@ class _ArchivableLiveStateItemState extends State<_ArchivableLiveStateItem>
     }
   }
 
-  @override
-  void dispose() {
-    _flightOverlay?.remove();
-    _flightController?.dispose();
-    super.dispose();
-  }
-
   bool get _allowsDrag =>
       _pointerKind == PointerDeviceKind.touch ||
       _pointerKind == PointerDeviceKind.mouse ||
@@ -68,103 +58,8 @@ class _ArchivableLiveStateItemState extends State<_ArchivableLiveStateItem>
 
   Future<void> _commitArchive() async {
     if (_committing) return;
-    // Bound now. The strip outlives the item it fronts, and a frame that lands
-    // during the flight can re-sort the band, so reading `widget` after the
-    // await would archive whichever card fronts it by then.
-    final onArchive = widget.onArchive;
-    final reduceMotion =
-        MediaQuery.maybeOf(context)?.disableAnimations ?? false;
-    final source = _globalRect(_flightSourceKey);
-    final target = _globalRect(widget.archiveTargetKey);
-    setState(() {
-      _committing = true;
-      _dragOffset = 0;
-    });
-    if (!reduceMotion && source != null && target != null) {
-      final overlay = Overlay.maybeOf(context, rootOverlay: true);
-      if (overlay != null) {
-        final controller = AnimationController(
-          vsync: this,
-          duration: const Duration(milliseconds: 250),
-        );
-        final animation = CurvedAnimation(
-          parent: controller,
-          curve: Curves.easeInOutCubic,
-        );
-        _flightController = controller;
-        _flightOverlay = OverlayEntry(
-          builder: (overlayContext) => AnimatedBuilder(
-            animation: animation,
-            builder: (context, child) {
-              final value = animation.value;
-              return Positioned.fromRect(
-                rect: Rect.lerp(source, target, value)!,
-                child: IgnorePointer(
-                  child: Opacity(
-                    opacity: 1 - (value * 0.2),
-                    child: Material(
-                      color: overlayContext.tokens.surface2,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(
-                          overlayContext.tokens.radiusSm,
-                        ),
-                        side: BorderSide(
-                          color: overlayContext.tokens.separator,
-                        ),
-                      ),
-                      clipBehavior: Clip.antiAlias,
-                      child: FittedBox(
-                        fit: BoxFit.scaleDown,
-                        alignment: Alignment.centerLeft,
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 10),
-                          child: Row(
-                            children: [
-                              Icon(widget.item.icon, size: 17),
-                              const SizedBox(width: 7),
-                              Text(widget.item.label),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              );
-            },
-          ),
-        );
-        overlay.insert(_flightOverlay!);
-        try {
-          await controller.forward();
-        } on TickerCanceled {
-          // Disposal cancels an in-flight archive animation. The state teardown
-          // already removes the overlay and owns controller disposal.
-        } finally {
-          if (_flightController == controller) {
-            _flightOverlay?.remove();
-            _flightOverlay = null;
-            controller.dispose();
-            _flightController = null;
-          }
-        }
-      } else {
-        await Future<void>.delayed(const Duration(milliseconds: 200));
-      }
-    } else if (!reduceMotion) {
-      await Future<void>.delayed(const Duration(milliseconds: 200));
-    }
-    if (!mounted) return;
-    onArchive();
-    // The same strip goes on to front the next item, so it must not stay in
-    // the archiving state. If nothing is left the band unmounts it instead.
-    setState(() => _committing = false);
-  }
-
-  Rect? _globalRect(GlobalKey key) {
-    final renderObject = key.currentContext?.findRenderObject();
-    if (renderObject is! RenderBox || !renderObject.hasSize) return null;
-    return renderObject.localToGlobal(Offset.zero) & renderObject.size;
+    widget.onArchive();
+    if (mounted) setState(() => _dragOffset = 0);
   }
 
   void _onDragUpdate(DragUpdateDetails details) {
@@ -228,8 +123,7 @@ class _ArchivableLiveStateItemState extends State<_ArchivableLiveStateItem>
       const SizedBox(width: 12),
       Icon(item.icon, size: 16),
       const SizedBox(width: 8),
-      if (!compact || counts.isEmpty)
-        Text(item.label, style: theme.textTheme.labelLarge),
+      if (!compact) Text(item.label, style: theme.textTheme.labelLarge),
       for (final (index, (phase, count, color, label)) in counts.indexed) ...[
         if (index > 0 || !compact || counts.isEmpty) const SizedBox(width: 8),
         _LiveStateCountChip(
@@ -265,7 +159,7 @@ class _ArchivableLiveStateItemState extends State<_ArchivableLiveStateItem>
       Icon(_expanded ? Icons.expand_less : Icons.expand_more, size: 18),
       IconButton(
         key: ValueKey('session-live-strip-archive-${item.id}'),
-        tooltip: l10n.archiveToStatus,
+        tooltip: l10n.dismiss,
         visualDensity: VisualDensity.compact,
         onPressed: () => unawaited(_commitArchive()),
         icon: const Icon(Icons.close, size: 16),
@@ -564,7 +458,7 @@ class _DismissibleLiveStateRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Row(
+    final row = Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Expanded(child: child),
@@ -582,6 +476,16 @@ class _DismissibleLiveStateRow extends StatelessWidget {
                 ),
         ),
       ],
+    );
+    if (onDismiss == null) return row;
+    return Dismissible(
+      key: ValueKey('session-live-state-swipe-${item.id}'),
+      direction: DismissDirection.startToEnd,
+      confirmDismiss: (_) async {
+        onDismiss!();
+        return false;
+      },
+      child: row,
     );
   }
 }
@@ -822,14 +726,22 @@ class _AgentActivityCardState extends State<_AgentActivityCard> {
       isCommand ? Icons.terminal : Icons.psychology,
       color: statusColor,
     );
-    final title = Text(widget.activity.title);
+    final title = Text(
+      widget.activity.title,
+      maxLines: 2,
+      overflow: TextOverflow.ellipsis,
+      style: theme.textTheme.bodyMedium,
+    );
     final subtitle = Text(
       [
         label,
         if (elapsedText != null) elapsedText,
-        ...details,
+        if (!isCommand) ...details,
       ].join(' · '),
       key: const Key('session-agent-activity-summary'),
+      maxLines: 2,
+      overflow: TextOverflow.ellipsis,
+      style: theme.textTheme.labelMedium?.copyWith(color: tokens.textSecondary),
     );
     final trailing = StatusPill(label: statusLabel, color: statusColor);
     // Only a card with something to reveal expands. On every harness today a
@@ -846,7 +758,6 @@ class _AgentActivityCardState extends State<_AgentActivityCard> {
       color: tokens.surface2,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(tokens.radiusMd),
-        side: BorderSide(color: statusColor.withValues(alpha: 0.45)),
       ),
       clipBehavior: Clip.antiAlias,
       child: !hasBody
@@ -863,6 +774,14 @@ class _AgentActivityCardState extends State<_AgentActivityCard> {
               subtitle: subtitle,
               trailing: trailing,
               children: [
+                if (isCommand)
+                  Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: SelectableText(
+                      [widget.activity.title, ...details].join('\n'),
+                      style: theme.textTheme.bodySmall,
+                    ),
+                  ),
                 for (final child in widget.activity.children)
                   ListTile(
                     dense: true,

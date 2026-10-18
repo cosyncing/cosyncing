@@ -31,6 +31,7 @@ import '../support/feature/app_driver.dart';
 import '../support/feature/cosyncing_app.dart';
 import '../support/feature/fake_broker.dart';
 import '../support/feature/roster_driver.dart';
+import '../support/feature/session_driver.dart';
 import '../support/feature/settings_driver.dart';
 import '../support/feature/settings_wire.dart';
 import '../support/notification_test_support.dart';
@@ -46,6 +47,25 @@ Future<FakeBroker> studioSeeded(FeatureContext f) async {
 }
 
 void main() {
+  featureTest('General opens Storage and cache cleanup requires confirmation', (
+    f,
+  ) async {
+    await studioSeeded(f);
+    final app = await f.launch(
+      initialLocation: generalSettingsRoute,
+      viewport: FeatureViewport.phone,
+    );
+    await app.tapKey('settings-storage');
+    expect(find.text(en.storageDataDescription), findsOneWidget);
+    await app.tapKey('storage-clear-cache');
+    expect(find.text(en.sessionClearAllCacheConfirmTitle), findsOneWidget);
+    await app.dismissModal();
+    await app.tapKey('storage-clear-cache');
+    await app.tapKey('storage-clear-cache-confirm');
+    expect(find.text(en.sessionAllCacheCleared), findsOneWidget);
+    expect(find.text(en.storageDataDescription), findsOneWidget);
+  });
+
   group('appearance', () {
     featureTest('a restyled app stays restyled after a relaunch', (f) async {
       await studioSeeded(f);

@@ -6390,5 +6390,11 @@
         "type": "int"
       }
     }
-  }
+  },
+  "storageTitle": "Storage",
+  "storageSubtitle": "Manage local session cache",
+  "storageCacheTitle": "Session cache",
+  "storageDataTitle": "App data",
+  "storageDataDescription": "Drafts, queued messages, connections and preferences are kept when you clear the cache.",
+  "storageCacheScope": "On this device · All connections"
 }

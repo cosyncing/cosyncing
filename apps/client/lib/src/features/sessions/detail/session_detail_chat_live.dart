@@ -508,6 +508,8 @@ class _FullLiveStatePanel extends StatelessWidget {
     required this.controller,
     required this.isConnected,
     required this.canPrompt,
+    required this.archivedIdentities,
+    required this.onArchive,
   });
 
   final SessionLiveState liveState;
@@ -516,27 +518,52 @@ class _FullLiveStatePanel extends StatelessWidget {
   final SessionDetailController controller;
   final bool isConnected;
   final bool canPrompt;
+  final Map<String, String> archivedIdentities;
+  final ValueChanged<List<_LiveStateItem>> onArchive;
 
   @override
   Widget build(BuildContext context) {
     final goalCommand = _findGoalCommand(commands);
     final items = _orderLiveStateItems(
       _liveStateItemsFromParts(
-        AppLocalizations.of(context),
-        liveState,
-        commandProgress,
-      ),
+            AppLocalizations.of(context),
+            liveState,
+            commandProgress,
+          )
+          .where(
+            (item) =>
+                item.actionRequired ||
+                archivedIdentities[item.id] != item.archiveIdentity,
+          )
+          .toList(),
     );
+    final finished = items.where((item) => item.isFinished).toList();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        if (finished.isNotEmpty)
+          Align(
+            alignment: AlignmentDirectional.centerEnd,
+            child: TextButton(
+              key: const Key('session-status-clear-finished'),
+              onPressed: () => onArchive(finished),
+              child: Text(AppLocalizations.of(context).liveStateClearFinished),
+            ),
+          ),
+        if (items.isEmpty)
+          Text(AppLocalizations.of(context).sessionPlanActivityEmpty),
         for (final item in items) ...[
-          _buildFullLiveStateItem(
-            item,
-            goalCommand: goalCommand,
-            controller: controller,
-            isConnected: isConnected,
-            canPrompt: canPrompt,
+          _DismissibleLiveStateRow(
+            key: ValueKey('session-live-state-row-${item.id}'),
+            item: item,
+            onDismiss: item.actionRequired ? null : () => onArchive([item]),
+            child: _buildFullLiveStateItem(
+              item,
+              goalCommand: goalCommand,
+              controller: controller,
+              isConnected: isConnected,
+              canPrompt: canPrompt,
+            ),
           ),
           const SizedBox(height: 8),
         ],
@@ -717,22 +744,16 @@ List<_LiveStateItem> _liveStateItemsFromParts(
     for (final activity in liveState.activities)
       _LiveStateItem(
         id: 'activity:${activity.key}',
-        // The identity deliberately excludes elapsed and output, so a
-        // ticking card does not un-archive itself every frame. For a
-        // background command it DOES carry whether the work has ended:
-        // archiving one while it runs means "not now", and hiding its result
-        // forever would discard the one fact the card exists to deliver. It
-        // re-surfaces once when it ends, and a second archive is permanent. A
-        // subagent or workflow keeps the original identity — those are read
-        // while they run.
+        // Hide a running activity until its outcome arrives. Elapsed ticks
+        // and streaming output do not change its dismissal identity.
         archiveIdentity: [
           activity.key,
           activity.startedAtMs,
           activity.title,
-          if (activity.kind == AgentActivityKind.command)
-            activity.status == AgentActivityStatus.running
-                ? 'running'
-                : 'ended',
+          if (activity.status == AgentActivityStatus.running)
+            'running'
+          else
+            'ended',
         ].join('|'),
         kind: _LiveStateItemKind.activity,
         value: activity,

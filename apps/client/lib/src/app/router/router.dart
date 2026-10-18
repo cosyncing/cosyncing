@@ -34,6 +34,7 @@ import 'package:cosyncing_client/src/features/settings/view/general_settings_pag
 import 'package:cosyncing_client/src/features/settings/view/keyboard_shortcuts_page.dart';
 import 'package:cosyncing_client/src/features/settings/view/notification_settings_page.dart';
 import 'package:cosyncing_client/src/features/settings/view/settings_page.dart';
+import 'package:cosyncing_client/src/features/settings/view/storage_settings_page.dart';
 import 'package:cosyncing_client/src/features/settings/view/tool_display_settings_page.dart';
 import 'package:cosyncing_client/src/features/transfers/view/transfer_manager_page.dart';
 import 'package:cosyncing_client/src/features/usage/model/usage_period.dart';
@@ -332,6 +333,13 @@ GoRouter createGoRouter({String initialLocation = sessionsRoute}) {
                         path: 'general',
                         builder: (context, state) =>
                             const GeneralSettingsPage(),
+                        routes: [
+                          GoRoute(
+                            path: 'storage',
+                            builder: (context, state) =>
+                                const StorageSettingsPage(),
+                          ),
+                        ],
                       ),
                       GoRoute(
                         path: 'usage',

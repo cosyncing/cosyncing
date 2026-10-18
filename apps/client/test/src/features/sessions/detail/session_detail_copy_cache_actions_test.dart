@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/src/features/sessions/sessions.dart';
+import 'package:cosyncing_client/src/features/settings/view/storage_settings_page.dart';
 import 'package:cosyncing_client/src/local/app_database.dart';
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
@@ -72,17 +75,21 @@ void main() {
       await tester.pumpAndSettle();
       expect(brokerClient.clearSessionCacheCount, 1);
 
-      await showSessionStatusTestItem(
-        tester,
-        const Key('session-detail-clear-all-cache-button'),
+      unawaited(
+        Navigator.of(
+          tester.element(find.byKey(const Key('session-detail-view-menu'))),
+        ).push(
+          MaterialPageRoute<void>(builder: (_) => const StorageSettingsPage()),
+        ),
       );
+      await tester.pumpAndSettle();
       await tester.tap(
-        find.byKey(const Key('session-detail-clear-all-cache-button')),
+        find.byKey(const Key('storage-clear-cache')),
       );
       await tester.pumpAndSettle();
       expect(find.textContaining('all server profiles'), findsWidgets);
       await tester.tap(
-        find.byKey(const Key('session-detail-clear-all-cache-confirm')),
+        find.byKey(const Key('storage-clear-cache-confirm')),
       );
       await tester.pumpAndSettle();
       expect(brokerClient.clearSessionCacheCount, 1);
@@ -156,18 +163,22 @@ void main() {
       );
       await tester.pumpAndSettle();
       await openSessionDetailTestTab(tester, 'session-detail-tab-status');
-      await showSessionStatusTestItem(
-        tester,
-        const Key('session-detail-clear-all-cache-button'),
+      unawaited(
+        Navigator.of(
+          tester.element(find.byKey(const Key('session-detail-view-menu'))),
+        ).push(
+          MaterialPageRoute<void>(builder: (_) => const StorageSettingsPage()),
+        ),
       );
+      await tester.pumpAndSettle();
 
       await tester.tap(
-        find.byKey(const Key('session-detail-clear-all-cache-button')),
+        find.byKey(const Key('storage-clear-cache')),
       );
       await tester.pumpAndSettle();
       expect(find.textContaining('all server profiles'), findsWidgets);
       await tester.tap(
-        find.byKey(const Key('session-detail-clear-all-cache-confirm')),
+        find.byKey(const Key('storage-clear-cache-confirm')),
       );
       await tester.pumpAndSettle();
 

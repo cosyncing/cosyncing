@@ -1731,5 +1731,11 @@
   "fileMediaOpenExternally": "다른 앱에서 이 동영상을 재생하려면 ‘다른 앱으로 열기’를 사용하세요.",
   "filePdfPreviousPage": "이전 페이지",
   "filePdfNextPage": "다음 페이지",
-  "filePdfPage": "{count}페이지 중 {page}페이지"
+  "filePdfPage": "{count}페이지 중 {page}페이지",
+  "storageTitle": "저장 공간",
+  "storageSubtitle": "로컬 세션 캐시 관리",
+  "storageCacheTitle": "세션 캐시",
+  "storageDataTitle": "앱 데이터",
+  "storageDataDescription": "캐시를 지워도 초안, 대기 중인 메시지, 연결 및 환경설정은 유지됩니다.",
+  "storageCacheScope": "이 기기 · 모든 연결"
 }

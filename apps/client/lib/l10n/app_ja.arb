@@ -1731,5 +1731,11 @@
   "fileMediaOpenExternally": "「他のアプリで開く」でこの動画を再生してください。",
   "filePdfPreviousPage": "前のページ",
   "filePdfNextPage": "次のページ",
-  "filePdfPage": "{count} ページ中 {page} ページ"
+  "filePdfPage": "{count} ページ中 {page} ページ",
+  "storageTitle": "ストレージ",
+  "storageSubtitle": "ローカルのセッションキャッシュを管理",
+  "storageCacheTitle": "セッションキャッシュ",
+  "storageDataTitle": "アプリデータ",
+  "storageDataDescription": "キャッシュを削除しても、下書き、送信待ちメッセージ、接続、設定は保持されます。",
+  "storageCacheScope": "このデバイス · すべての接続"
 }

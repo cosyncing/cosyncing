@@ -1637,7 +1637,7 @@ void main() {
         );
         expect(
           find.byKey(const Key('session-detail-view-item-expand')),
-          findsOneWidget,
+          findsNothing,
         );
       });
 

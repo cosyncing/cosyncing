@@ -939,18 +939,6 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byKey(const ValueKey('tool-detail-args')), findsNothing);
-      // Variant C moved both transcript toggles out of the composer and into
-      // the strip's single overflow menu, as checkable items.
-      await toggleSessionDetailViewOption(tester, 'expand');
-      await withSessionDetailViewMenu(tester, () async {
-        expect(
-          find.descendant(
-            of: find.byKey(const Key('session-detail-view-item-expand')),
-            matching: find.byIcon(Icons.check_box_outlined),
-          ),
-          findsOneWidget,
-        );
-      });
       await tester.scrollUntilVisible(
         find.byKey(const ValueKey('tool-tool-1-details')),
         180,
@@ -961,6 +949,8 @@ void main() {
             )
             .first,
       );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('tool-tool-1-details')));
       await tester.pumpAndSettle();
       expect(
         find.descendant(

@@ -40,6 +40,13 @@ class GeneralSettingsPage extends ConsumerWidget {
           SettingsLinkGroup(
             tiles: [
               SettingsLinkTile(
+                tileKey: const Key('settings-storage'),
+                icon: Icons.storage_outlined,
+                title: l10n.storageTitle,
+                subtitle: l10n.storageSubtitle,
+                onTap: () => context.push(storageSettingsRoute),
+              ),
+              SettingsLinkTile(
                 tileKey: const Key('settings-keyboard-shortcuts'),
                 icon: Icons.keyboard_alt_outlined,
                 title: l10n.keyboardShortcutsTitle,

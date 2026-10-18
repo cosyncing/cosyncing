@@ -1731,5 +1731,11 @@
   "fileMediaOpenExternally": "Usa Abrir con para reproducir este vídeo en otra aplicación.",
   "filePdfPreviousPage": "Página anterior",
   "filePdfNextPage": "Página siguiente",
-  "filePdfPage": "Página {page} de {count}"
+  "filePdfPage": "Página {page} de {count}",
+  "storageTitle": "Almacenamiento",
+  "storageSubtitle": "Gestiona la caché local de sesiones",
+  "storageCacheTitle": "Caché de sesiones",
+  "storageDataTitle": "Datos de la aplicación",
+  "storageDataDescription": "Los borradores, mensajes en cola, conexiones y preferencias se conservan al borrar la caché.",
+  "storageCacheScope": "En este dispositivo · Todas las conexiones"
 }

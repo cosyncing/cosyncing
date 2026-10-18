@@ -242,26 +242,6 @@ class _SessionLocalDataZoneState extends ConsumerState<_SessionLocalDataZone> {
               enabled: !_pending,
               onTap: _pending ? null : () => unawaited(_clearCurrentCache()),
             ),
-            const Divider(height: 1),
-            ListTile(
-              key: const Key('session-detail-clear-all-cache-button'),
-              leading: Icon(
-                Icons.delete_forever_outlined,
-                size: 18,
-                color: danger,
-              ),
-              title: Text(
-                l10n.sessionClearAllCache,
-                style: TextStyle(color: danger),
-              ),
-              subtitle: Text(l10n.sessionClearAllCacheDescription),
-              trailing: MetadataChip(
-                key: const Key('session-detail-clear-all-cache-scope-chip'),
-                label: l10n.sessionActionsAllProfilesChip,
-              ),
-              enabled: !_pending,
-              onTap: _pending ? null : () => unawaited(_clearAllCache()),
-            ),
           ],
         ),
       ),
@@ -325,32 +305,6 @@ class _SessionLocalDataZoneState extends ConsumerState<_SessionLocalDataZone> {
           : brokerCleared
           ? l10n.sessionCurrentCacheCleared
           : l10n.sessionCurrentCacheClearedLocally,
-    );
-  }
-
-  Future<void> _clearAllCache() async {
-    if (_pending) return;
-    final l10n = AppLocalizations.of(context);
-    final confirmed = await _confirm(
-      title: l10n.sessionClearAllCacheConfirmTitle,
-      body: l10n.sessionClearAllCacheConfirmBody,
-      label: l10n.sessionClearAllCacheConfirm,
-      key: const Key('session-detail-clear-all-cache-confirm'),
-    );
-    if (!mounted || confirmed != true) return;
-    setState(() => _pending = true);
-    var succeeded = false;
-    try {
-      await ref.read(sessionCacheManagementProvider).clearAll();
-      succeeded = true;
-    } on Object {
-      succeeded = false;
-    } finally {
-      if (mounted) setState(() => _pending = false);
-    }
-    if (!mounted) return;
-    _showResult(
-      succeeded ? l10n.sessionAllCacheCleared : l10n.sessionAllCacheClearFailed,
     );
   }
 

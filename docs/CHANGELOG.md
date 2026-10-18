@@ -11,6 +11,17 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Added
+
+- Settings → General → Storage now houses device-wide session cache cleanup.
+
+### Fixed
+
+- Session activity cards show compact summaries with scripts in expandable
+  details, shared dismissal and clear-finished controls in Status and chat.
+  Session information opens in a centered dialog with more room for its title;
+  the session menu no longer offers Expand all tools.
+
 ## 0.7.0 — 2026-10-18
 
 ### Added

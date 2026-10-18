@@ -1,6 +1,5 @@
 import 'package:cosyncing_client/src/design/app_theme.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
-import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/design/ui_scale.dart';
 import 'package:flutter/material.dart';
@@ -9,7 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 import '../../../../support/session_detail_page_test_harness.dart';
 
 /// V1/V2-R1 Status-action refinements: distinct icons, purposeful groups, a
-/// labeled Local data zone, an All-profiles scope chip, token-driven
+/// labeled single-session Local data zone, token-driven
 /// destructive confirmation, and disabled reasons — in English and Chinese.
 void main() {
   Icon leadingIconOf(WidgetTester tester, Key tileKey) {
@@ -53,7 +52,7 @@ void main() {
         await openStatusTab(tester);
         await showSessionStatusTestItem(
           tester,
-          const Key('session-detail-clear-all-cache-button'),
+          const Key('session-detail-clear-current-cache-button'),
         );
 
         for (final (group, tile) in [
@@ -72,10 +71,6 @@ void main() {
             'session-actions-group-local-data',
             'session-detail-clear-current-cache-button',
           ),
-          (
-            'session-actions-group-local-data',
-            'session-detail-clear-all-cache-button',
-          ),
         ]) {
           expect(
             find.descendant(
@@ -87,8 +82,8 @@ void main() {
           );
         }
 
-        // The Local data zone is labeled, and the all-local action carries the
-        // scope chip. Persistent rows stay ListTiles — no solid red cards.
+        // Local cleanup stays scoped to this session. Device-wide cleanup
+        // belongs to Settings → General → Storage.
         expect(
           find.byKey(const Key('session-actions-local-data-caption')),
           findsOneWidget,
@@ -97,10 +92,10 @@ void main() {
           find.text('Local data — rebuildable, but gone until re-synced'),
           findsOneWidget,
         );
-        final chip = tester.widget<MetadataChip>(
-          find.byKey(const Key('session-detail-clear-all-cache-scope-chip')),
+        expect(
+          find.byKey(const Key('session-detail-clear-all-cache-button')),
+          findsNothing,
         );
-        expect(chip.label, 'All profiles');
       },
     );
 
@@ -111,15 +106,15 @@ void main() {
       await openStatusTab(tester);
       await showSessionStatusTestItem(
         tester,
-        const Key('session-detail-clear-all-cache-button'),
+        const Key('session-detail-clear-current-cache-button'),
       );
       await tester.tap(
-        find.byKey(const Key('session-detail-clear-all-cache-button')),
+        find.byKey(const Key('session-detail-clear-current-cache-button')),
       );
       await tester.pumpAndSettle();
 
       final confirmFinder = find.byKey(
-        const Key('session-detail-clear-all-cache-confirm'),
+        const Key('session-detail-clear-current-cache-confirm'),
       );
       final tokens = Theme.of(
         tester.element(confirmFinder),
@@ -144,7 +139,7 @@ void main() {
       ('Roomy', UiDensity.spacious),
     ]) {
       testWidgets(
-        'grouping, zone label, and chip hold at $densityName density',
+        'grouping and zone label hold at $densityName density',
         (tester) async {
           await tester.pumpWidget(
             buildSessionDetailTestPage(
@@ -159,7 +154,7 @@ void main() {
           await openStatusTab(tester);
           await showSessionStatusTestItem(
             tester,
-            const Key('session-detail-clear-all-cache-button'),
+            const Key('session-detail-clear-current-cache-button'),
           );
 
           for (final key in const [
@@ -167,7 +162,6 @@ void main() {
             Key('session-actions-group-transcript'),
             Key('session-actions-group-local-data'),
             Key('session-actions-local-data-caption'),
-            Key('session-detail-clear-all-cache-scope-chip'),
           ]) {
             expect(
               find.byKey(key),
@@ -179,7 +173,7 @@ void main() {
       );
     }
 
-    testWidgets('grouping, zone label, chip, and reasons render in Chinese', (
+    testWidgets('grouping, zone label, and reasons render in Chinese', (
       tester,
     ) async {
       await tester.pumpWidget(
@@ -196,28 +190,21 @@ void main() {
       await openStatusTab(tester);
       await showSessionStatusTestItem(
         tester,
-        const Key('session-detail-clear-all-cache-button'),
+        const Key('session-detail-clear-current-cache-button'),
       );
 
       expect(find.text('本地数据 — 可重建，重新同步前不可用'), findsOneWidget);
-      expect(
-        tester
-            .widget<MetadataChip>(
-              find.byKey(
-                const Key('session-detail-clear-all-cache-scope-chip'),
-              ),
-            )
-            .label,
-        '所有配置',
-      );
       expect(find.text('此代理类型不支持复制会话。'), findsOneWidget);
       expect(find.text('此代理类型不支持导出对话记录。'), findsOneWidget);
 
       await tester.tap(
-        find.byKey(const Key('session-detail-clear-all-cache-button')),
+        find.byKey(const Key('session-detail-clear-current-cache-button')),
       );
       await tester.pumpAndSettle();
-      expect(find.text('清除全部缓存'), findsOneWidget);
+      expect(
+        find.byKey(const Key('session-detail-clear-current-cache-confirm')),
+        findsOneWidget,
+      );
     });
   });
 }

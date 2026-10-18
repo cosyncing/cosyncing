@@ -267,8 +267,8 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
   bool _permissionModeObserved = false;
   bool _permissionModeReconcileScheduled = false;
   bool _reportView = false;
-  bool _toolsExpanded = false;
-  int _toolExpansionRevision = 0;
+  final bool _toolsExpanded = false;
+  final int _toolExpansionRevision = 0;
   int _promptRevision = 0;
   ({String text, int revision})? _pendingPromptClear;
   _SubmittedPromptSnapshot? _lastSubmittedPrompt;
@@ -1590,6 +1590,8 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
   void _registerSidePanel() {
     if (!mounted) return;
     final binding = _SidePanelBinding(
+      archivedIdentities: _archivedLiveState,
+      onArchive: _archiveLiveStateItems,
       source: RosterSource.of(ref.read(activeBrokerProfileProvider)),
       draft: _promptController,
       onExport: () => unawaited(_startTranscriptExport()),
@@ -1696,6 +1698,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
       _archivedLiveState = archived;
       _liveStateArchiveLoaded = true;
     });
+    _registerSidePanel();
   }
 
   void _archiveLiveStateItems(List<_LiveStateItem> items) {
@@ -1708,6 +1711,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
       next.remove(next.keys.first);
     }
     setState(() => _archivedLiveState = Map.unmodifiable(next));
+    _registerSidePanel();
     unawaited(
       ref
           .read(sessionLiveStateViewStoreProvider)
@@ -1734,6 +1738,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
         ..removeWhere((key, _) => staleKeys.contains(key));
       if (next.length == _archivedLiveState.length) return;
       setState(() => _archivedLiveState = Map.unmodifiable(next));
+      _registerSidePanel();
       unawaited(
         ref
             .read(sessionLiveStateViewStoreProvider)
@@ -2699,7 +2704,6 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                       terminalFresh: _terminalFresh,
                       backgroundCommandCount: backgroundCommandCount,
                       reportView: _reportView,
-                      toolsExpanded: _toolsExpanded,
                       onSelectView: _selectView,
                       onReportViewChanged: (value) {
                         ref
@@ -2709,10 +2713,6 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                             .setHistoryReportView(reportView: value);
                         setState(() => _reportView = value);
                       },
-                      onToolsExpandedChanged: (value) => setState(() {
-                        _toolsExpanded = value;
-                        _toolExpansionRevision++;
-                      }),
                     ),
                   ),
                 if (state.activeTransientRetryStatus case final retry?)
@@ -2827,6 +2827,8 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                         showTerminalTab: showTerminalTab,
                         builder: () => _PageTabContent(
                           child: _StatusTabPanel(
+                            archivedIdentities: _archivedLiveState,
+                            onArchive: _archiveLiveStateItems,
                             key: const Key('session-detail-tab-panel-status'),
                             sessionKey: _key,
                             draftController: _promptController,
