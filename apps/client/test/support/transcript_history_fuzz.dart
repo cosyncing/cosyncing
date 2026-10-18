@@ -8,12 +8,16 @@
 // extended variants add prompts queued while a turn runs, cards answered
 // many rows later (some while the socket is down), run summaries rewritten
 // in place, readings the broker re-projects after its cursor, and live
-// restatements of replies saved far back. After every change to the window
+// restatements of replies saved far back. With tool calls hidden, commands
+// carry output the window holds only as shells, and the reader shows them
+// again at random, the page they read replaced whole once it is answered.
+// After every change to the window
 // the session checks that no row is held twice, the rows the window vouches
 // for read in saved order, every range reloads exactly its rows, the window
 // stays within its budget beyond the reader, no gap needs a reconnect, no
 // row never saved leaves unannounced, no answer reads before its request,
-// and no card waits that the broker no longer offers; at the end the reader
+// no card waits that the broker no longer offers, and no shell is held where
+// it does not belong; at the end the reader
 // reaches every saved row by scrolling up and then down.
 //
 // The seeds below each exposed a defect at some point, with a spread.
@@ -184,6 +188,10 @@ final class _Sim {
   }
 }
 
+/// Output a command carries in [_Variant.toolCallsHidden]: enough that the
+/// window holds the result as a shell while tool calls are hidden.
+final String _commandOutput = 'x' * kMaxHiddenTranscriptRowDecodedBytes;
+
 final class _Violation implements Exception {
   _Violation(this.message);
   final String message;
@@ -198,10 +206,19 @@ final class _Run {
     this.approvals = true,
     this.lag = true,
     this.ext = false,
+    this.report = false,
   }) : rng = Random(seed) {
     sim.volatileTail = ext;
   }
   final bool ext;
+
+  /// Whether commands carry output and the reader hides and shows tool calls.
+  final bool report;
+  bool reportView = false;
+
+  /// The page asked for to replace the reader's page of shells.
+  ({String cursor, int limit})? pendingShells;
+  int shellsReplaced = 0;
 
   /// Resolutions (and request updates) due after some agent steps.
   final scheduled = <({int due, AgentMessage message})>[];
@@ -378,7 +395,7 @@ final class _Run {
         'type': 'tool-result',
         'callId': 'c$n',
         'toolName': 'Bash',
-        'result': 'ok $n',
+        'result': report ? 'ok $n $_commandOutput' : 'ok $n',
       });
       persist(res);
       deliver(res);
@@ -514,7 +531,45 @@ final class _Run {
     connected = false;
     pendingAnswer = null;
     pendingFrom = null;
+    // Its answer never comes: what it was to replace reloads as released.
+    if (pendingShells != null) {
+      pendingShells = null;
+      if (!reportView) w = w.releaseHiddenRowShells().window;
+    }
     log('disconnect');
+  }
+
+  void toggleToolCalls() {
+    reportView = !reportView;
+    if (reportView) {
+      log('tool calls hidden');
+      return;
+    }
+    final shown = w.releaseHiddenRowShells(
+      keepKey: connected && pendingShells == null ? reading : null,
+    );
+    w = shown.window;
+    final cursor = shown.refreshCursor;
+    final limit = shown.refreshLimit;
+    if (cursor != null && limit != null) {
+      pendingShells = (cursor: cursor, limit: limit);
+    }
+    check('tool calls shown, replacing $cursor');
+  }
+
+  void answerShells() {
+    final asked = pendingShells!;
+    pendingShells = null;
+    final mut = w.replaceHiddenRowShells(
+      sim.pageBefore(asked.cursor, asked.limit),
+      requestedCursor: asked.cursor,
+      preserveMessageKey: reading,
+      reportView: reportView,
+    );
+    w = mut.window;
+    if (mut.accepted) shellsReplaced++;
+    if (!reportView) w = w.releaseHiddenRowShells().window;
+    check('shells at ${asked.cursor} answered: ${mut.rejection.name}');
   }
 
   void reconnect() {
@@ -594,6 +649,7 @@ final class _Run {
             requestedCursor: forward,
             until: reload,
             preserveMessageKey: reading,
+            reportView: reportView,
           );
           if (mut.rejection == TranscriptHistoryPageRejection.overBudget &&
               limit > 1) {
@@ -631,6 +687,7 @@ final class _Run {
           page,
           requestedCursor: reload,
           preserveMessageKey: reading,
+          reportView: reportView,
         );
         if (mut.rejection == TranscriptHistoryPageRejection.overBudget &&
             limit > 1) {
@@ -666,6 +723,7 @@ final class _Run {
         page,
         requestedCursor: leading,
         preserveMessageKey: reading,
+        reportView: reportView,
       );
       if (mut.rejection == TranscriptHistoryPageRejection.overBudget &&
           limit > 1) {
@@ -708,6 +766,17 @@ final class _Run {
 
   void check(String op) {
     log(op);
+    for (final p in w.pages) {
+      if ((p.isTail || p.isResidue) &&
+          p.messages.any(transcriptRowBodyElided)) {
+        throw _Violation(
+          'a shell in the ${p.isTail ? 'tail' : 'residue'} after $op',
+        );
+      }
+    }
+    if (!reportView && pendingShells == null && w.holdsHiddenRowShells) {
+      throw _Violation('a shell with tool calls shown after $op');
+    }
     final counts = <String, int>{};
     final order = <int>[];
     final orderKeys = <String>[];
@@ -937,6 +1006,7 @@ final class _Run {
         page,
         requestedCursor: leading,
         preserveMessageKey: reading,
+        reportView: reportView,
       );
       if (!mut.accepted) {
         if (mut.rejection == TranscriptHistoryPageRejection.overBudget &&
@@ -994,6 +1064,7 @@ final class _Run {
         requestedCursor: forward,
         until: reload,
         preserveMessageKey: reading,
+        reportView: reportView,
       );
       if (!mut.accepted) {
         if (mut.rejection == TranscriptHistoryPageRejection.overBudget &&
@@ -1055,13 +1126,20 @@ final class _Run {
   }
 
   void step() {
+    if (pendingShells != null && connected && rng.nextInt(3) == 0) {
+      answerShells();
+    }
     final r = rng.nextInt(100);
     if (r < 55) {
       agentStep();
     } else if (r < 75) {
       if (connected) pageOp(preferForward: rng.nextInt(3) == 0);
     } else if (r < 88) {
-      moveReader();
+      if (report && rng.nextInt(4) == 0) {
+        toggleToolCalls();
+      } else {
+        moveReader();
+      }
     } else if (r < 94) {
       if (connected) {
         disconnect();
@@ -1088,13 +1166,15 @@ enum _Variant {
   noApprovals(approvals: false),
   promptsSavedAsSent(lag: false),
   extended(ext: true),
-  extendedSavedAsSent(ext: true, lag: false);
+  extendedSavedAsSent(ext: true, lag: false),
+  toolCallsHidden(ext: true, report: true);
 
   const _Variant({
     this.stateRows = true,
     this.approvals = true,
     this.lag = true,
     this.ext = false,
+    this.report = false,
   });
 
   /// Whether the agent restates its plan under one key.
@@ -1109,6 +1189,9 @@ enum _Variant {
   /// Queued prompts, late answers, run summaries, re-projected readings,
   /// error cards and live restatements (see the file comment).
   final bool ext;
+
+  /// Command output, and tool calls hidden and shown (see the file comment).
+  final bool report;
 }
 
 /// Seeds that exposed a defect at some point, in some variant.
@@ -1138,6 +1221,7 @@ void expectFuzzSessionsHold(String variantName, List<int> seeds, int steps) {
   var olderPages = 0;
   var catchUps = 0;
   var stale = 0;
+  var shellsReplaced = 0;
   for (final seed in seeds) {
     final run = _Run(
       seed,
@@ -1145,6 +1229,7 @@ void expectFuzzSessionsHold(String variantName, List<int> seeds, int steps) {
       approvals: variant.approvals,
       lag: variant.lag,
       ext: variant.ext,
+      report: variant.report,
     );
     run.w = run.w.applyHistory(run.sim.attach());
     try {
@@ -1163,6 +1248,7 @@ void expectFuzzSessionsHold(String variantName, List<int> seeds, int steps) {
     olderPages += run.olderPages;
     catchUps += run.catchUps;
     stale += run.unexpectedStale;
+    shellsReplaced += run.shellsReplaced;
   }
   expect(
     failures,
@@ -1176,5 +1262,6 @@ void expectFuzzSessionsHold(String variantName, List<int> seeds, int steps) {
   expect(newerPages, greaterThan(seeds.length));
   expect(olderPages, greaterThan(seeds.length));
   expect(catchUps, greaterThan(0));
+  if (variant.report) expect(shellsReplaced, greaterThan(0));
   expect(stale, 0, reason: 'pages refused as stale');
 }

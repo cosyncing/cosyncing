@@ -112,16 +112,16 @@ Map<String, Object?> markedRow(int index) => switch (index % 10) {
   },
 };
 
-final String _commandOutput = 'x' * 12000;
+final Map<int, String> _commandOutputs = {};
 
 /// Durable row [index] of a session that mostly runs commands, built in turns
-/// of [turn] rows: a prompt, a reply, commands with 12 KB of output each, a
-/// thought and a closing line. With tool calls hidden a page draws a few short
-/// rows, or none, while all of its output still counts toward what the client
-/// keeps decoded. Every drawn row starts `Row N.`.
+/// of [turn] rows: a prompt, a reply, commands with [output] characters of
+/// output each, a thought and a closing line. With tool calls hidden a page
+/// draws a few short rows, or none. Every drawn row starts `Row N.`.
 Map<String, Object?> commandHeavyRow(
   int index, {
   int turn = 40,
+  int output = 12000,
 }) => switch (index % turn) {
   0 => {
     'type': 'user-message',
@@ -157,7 +157,7 @@ Map<String, Object?> commandHeavyRow(
     'callId': 'c${index - 1}',
     'name': 'bash',
     'toolClass': 'execute',
-    'output': _commandOutput,
+    'output': _commandOutputs[output] ??= 'x' * output,
   },
 };
 

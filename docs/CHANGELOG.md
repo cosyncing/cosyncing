@@ -64,11 +64,14 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - With tool calls hidden, scrolling back through a long session keeps loading
   earlier messages. Before, a page could stay stuck on "Loading earlier
   messages…", get fetched again and again, or show notices that messages were
-  released with little or nothing between them. When the next page cannot be
-  loaded yet without dropping what is on screen, it now waits until you scroll
-  on, and is not treated as an error. A stretch of nothing but tool calls that
-  was released to save memory shows no notice while tool calls are hidden; it
-  loads again once you show them.
+  released with little or nothing between them. While tool calls are hidden,
+  the client no longer keeps their output in memory. When you show them again,
+  the message you are reading stays in place while its tool calls load, and
+  the rest load as you scroll. What is on screen is never dropped to make room
+  for the next page. When that page cannot be loaded yet, it waits until you
+  scroll on, and this is not treated as an error. A stretch of nothing but tool
+  calls that was released to save memory shows no notice while tool calls are
+  hidden, and loads again once you show them.
 
 ## 0.6.6 — 2026-10-17
 
