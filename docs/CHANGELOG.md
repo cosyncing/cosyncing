@@ -11,20 +11,62 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+## 0.7.0 — 2026-10-18
+
 ### Added
 
-- Files panels preview PNG, JPEG, WebP and GIF images with zoom, PDFs with page navigation, and supported videos with playback controls. Preview ceilings are 32 MiB for images, 128 MiB for PDFs and 2 GiB for streamed videos, independent of text-preview limits. PDF and video decoders load only when their pane is visible; closing, hiding or backgrounding a preview releases it.
-- Native clients offer **Open with** for workspace and delivered files, including Word and PowerPoint documents. Android and iOS hand the cached file to an installed compatible application. Linux and Windows video playback uses this action; codec availability depends on the platform.
+- Files panels preview PNG, JPEG, WebP and GIF images with zoom, PDFs with page
+  navigation, and supported videos with playback controls. Preview ceilings are
+  32 MiB for images, 128 MiB for PDFs and 2 GiB for streamed videos, independent
+  of text-preview limits. PDF and video decoders load only when their pane is
+  visible; closing, hiding or backgrounding a preview releases it.
+- Native clients offer **Open with** for workspace and delivered files,
+  including Word and PowerPoint documents. Android and iOS hand the cached file
+  to an installed compatible application. Linux and Windows video playback uses
+  this action; codec availability depends on the platform.
 - Broker update APIs for reviewing and staging a pinned release, tracking update
   recovery, and granting or revoking a paired device's update permission.
   `cosy update --components broker` updates only the broker. The in-app update
   screen and automatic desktop client replacement are still in development.
 
+### Changed
+
+- npm distribution ends at 0.6.6; use the shell or PowerShell installer for
+  installation and migration.
+- The minimum Bun version rises from 1.3.8 to 1.3.14. On an installer-owned
+  server, `cosy update` installs Bun 1.3.14 itself before it switches to this
+  release. A Bun chosen with `COSYNCING_BUN_BIN` needs upgrading first. A
+  server on 0.6.5 or earlier with an older Bun refuses this update without
+  changing anything; update it by re-running the installer instead.
+- Large session-stream frames and JSON responses use negotiated compression
+  to reduce mobile data transfer.
+- Home reuses the session roster for active counts instead of downloading
+  every session again when the roster changes.
+- The session roster avoids repeated expiry scans and refreshes recent and
+  active sessions on a shared, bounded 15-second cadence while the app follows
+  the roster.
+- A question card that asks several questions now numbers them. Each header
+  starts with its number, in bold and aligned with its question, so it is clear
+  where one question ends and the next begins.
+
 ### Fixed
 
-- Windows service log following detects rotated files using their full file IDs
-  and keeps the read position attached to the file that was actually read.
-
+- File cards stay beside the messages that created them after reconnects and
+  history refreshes. Old cached files no longer reappear among recent messages;
+  their cards return when the matching earlier history is loaded. File cards
+  anchored to tool-only pages remain reachable with tool calls hidden, even
+  after those pages are released to save memory.
+- With tool calls hidden, scrolling back through a long session keeps loading
+  earlier messages. Before, a page could stay stuck on "Loading earlier
+  messages…", get fetched again and again, or show notices that messages were
+  released with little or nothing between them. While tool calls are hidden,
+  the client no longer keeps their output in memory. When you show them again,
+  the message you are reading stays in place while its tool calls load, and
+  the rest load as you scroll. What is on screen is never dropped to make room
+  for the next page. When that page cannot be loaded yet, it waits until you
+  scroll on, and this is not treated as an error. A stretch of nothing but tool
+  calls that was released to save memory shows no notice while tool calls are
+  hidden, and loads again once you show them.
 - The notification setup banner reserves space above the bottom edge, keeping
   phone playback and composer controls accessible, with readable actions in
   both light and dark themes.
@@ -50,49 +92,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - An observed Kilo Code session keeps showing new messages when a file-change
   notification is missed; it catches up within about two seconds instead of
   stopping until the next change.
-
-### Changed
-
-- npm distribution ends at 0.6.6; use the shell or PowerShell installer for installation and migration.
-
-- The minimum Bun version rises from 1.3.8 to 1.3.14. On an installer-owned
-  server, `cosy update` installs Bun 1.3.14 itself before it switches to this
-  release. A Bun chosen with `COSYNCING_BUN_BIN` needs upgrading first. A
-  server on 0.6.5 or earlier with an older Bun refuses this update without
-  changing anything; update it by re-running the installer instead.
-
-- Large session-stream frames and JSON responses use negotiated compression
-  to reduce mobile data transfer.
-
-- Home reuses the session roster for active counts instead of downloading
-  every session again when the roster changes.
-
-- The session roster avoids repeated expiry scans and refreshes recent and
-  active sessions on a shared, bounded 15-second cadence while the app follows
-  the roster.
-
-- A question card that asks several questions now numbers them. Each header
-  starts with its number, in bold and aligned with its question, so it is clear
-  where one question ends and the next begins.
-
-### Fixed
-
-- File cards stay beside the messages that created them after reconnects and
-  history refreshes. Old cached files no longer reappear among recent messages;
-  their cards return when the matching earlier history is loaded. File cards
-  anchored to tool-only pages remain reachable with tool calls hidden, even
-  after those pages are released to save memory.
-- With tool calls hidden, scrolling back through a long session keeps loading
-  earlier messages. Before, a page could stay stuck on "Loading earlier
-  messages…", get fetched again and again, or show notices that messages were
-  released with little or nothing between them. While tool calls are hidden,
-  the client no longer keeps their output in memory. When you show them again,
-  the message you are reading stays in place while its tool calls load, and
-  the rest load as you scroll. What is on screen is never dropped to make room
-  for the next page. When that page cannot be loaded yet, it waits until you
-  scroll on, and this is not treated as an error. A stretch of nothing but tool
-  calls that was released to save memory shows no notice while tool calls are
-  hidden, and loads again once you show them.
+- Windows service log following detects rotated files using their full file IDs
+  and keeps the read position attached to the file that was actually read.
 
 ## 0.6.6 — 2026-10-17
 

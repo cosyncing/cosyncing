@@ -5,107 +5,71 @@ then use `cosy pair` to authorize the client.
 
 ## Update your client with this release
 
-0.6.6 is a stability release. A long session stays responsive while a reply
-streams in: every streamed chunk used to rebuild every message on screen, and
-now only the message that changed is rebuilt. Long Claude sessions stay
-pageable past the old history limit. Most of the app fixes are about ownership:
-a session driven from the app now goes read-only the moment a terminal or
-another program writes its transcript, a refused approval or question answer
-reads as refused instead of delivered, and an agent that is not installed no
-longer makes its sessions disappear from the list.
+0.7.0 adds file previews. The files panel shows images, PDFs and videos in
+place, and native clients can hand a workspace or delivered file to another app
+with **Open with**. Scrolling back through a long session with tool calls
+hidden keeps loading earlier messages, and file cards stay beside the messages
+that created them after a reconnect.
 
-The broker now opens, forks or renames only sessions that the agent's own store
-or server lists, which closes a path where a crafted session id could read
-files outside that agent's session folder. It also stops reading a named pipe
-in a session folder, deletes a transcript export left behind by a broker that
-crashed, and keeps one unknown paired device from disconnecting the others.
-Update the Server to get those.
+Image, PDF and video previews need a 0.7.0 Server, which issues the
+short-lived link a preview loads from. The broker contract moves to revision
+32 and the minimum accepted client revision stays 17, so a 0.6.x native client
+still drives a 0.7.0 Server. The web client ships with the broker and always
+matches it. A 0.7.0 Server also uses negotiated compression for large session
+updates and responses, and refreshes the session list on one shared 15-second
+cadence instead of rescanning every session.
 
-The broker contract stays at revision 30 and the minimum accepted client
-revision stays 17, so a 0.6.4 or 0.6.5 native client still drives a 0.6.6
-Server. The web client ships with the broker and always matches it. Server-side
-fixes such as the Claude history index, the session id checks and readable file
-sizes need a 0.6.6 Server; the fixes listed below that are in the app need the
-app.
-
-This release is also a bridge for the Server's runtime. A new install gets Bun
-1.3.14 from the installer, which now places it in
-`~/.cosyncing/runtime/bun-<version>` instead of `~/.bun`, so re-running an
-installer no longer replaces the Bun a running broker is using. The minimum
-stays at Bun 1.3.8 in this release on purpose: a Server already running 1.3.8
-can `cosy update` onto 0.6.6 and so receive the updater that installs a later
-release's pinned Bun by itself, rolling the broker and the runtime back
+The Server now needs Bun 1.3.14, up from 1.3.8. A 0.6.6 Server installed with
+the signed installer gets it from `cosy update`, which installs Bun 1.3.14
+before switching to 0.7.0 and restores the previous broker and runtime
 together if the new broker fails its health check. A Bun you chose with
-`COSYNCING_BUN_BIN` is never replaced, and `cosyncing uninstall` without
-`--purge-data` now removes only the runtimes the installer and `cosy update`
-placed.
+`COSYNCING_BUN_BIN` is never replaced; upgrade it first. A Server on 0.6.5 or
+earlier with an older Bun refuses this update without changing anything:
+re-run the installer instead.
 
-On a Server installed with the signed one-line installer, `cosy update` now
-updates the desktop client too, after asking you to quit it. On Windows and
-macOS, a client installed by 0.6.4 or earlier needs the new all-in-one
-installer once before `cosy update` can take it over.
+npm distribution ended at 0.6.6. A Server installed from npm keeps running but
+gets no newer versions there. The shell and PowerShell installers recognize it,
+ask before replacing it, and offer to remove the npm package only after setup
+succeeds.
 
-## What's new in 0.6.6
+## What's new in 0.7.0
 
-- Stop works on a Grok session driven from the app: the turn ends as stopped and
-  the session stays drivable. So far this is checked against a stand-in Grok,
-  not a real Grok turn.
-- A long session stays smoother while a reply streams and while other sessions
-  change status. In a 300-message session a streamed chunk rebuilds less than
-  half as much as before.
-- A long Claude session stays pageable past the former 32 MiB and 50,000-row
-  history limit through a persisted disk index, and a history failure now says
-  whether it hit a server limit or a decoding limit.
-- Generated files, Chinese filenames included, are found beside the files the
-  session already used before the whole workspace is searched. Downloads keep
-  Unicode filenames, browser transfers show progress as chunks arrive, and file
-  sizes read as KB, MB and GB instead of raw bytes.
-- A question Claude asks in a synced terminal reaches the app at once and stays
-  answerable from either side, also when no device was watching when it was
-  asked. In auto mode the transcript no longer fills with read-only cards for
-  tool calls nobody is watching.
-- A session driven from the app turns read-only in every open view as soon as
-  another program rewrites or replaces its transcript, for Pi, OMP, Cline, Kilo
-  Code, Grok, Reasonix and Antigravity, and an open view reloads the new history
-  once.
-- An approval for a request the agent never made, or an answer to a question
-  already answered elsewhere, is refused instead of reported as delivered, for
-  Codex, Claude, Pi, OMP and Kilo Code.
-- A prompt you send keeps one row in every view of a Pi, OMP or Antigravity
-  session and leaves the queue as soon as the agent starts it; a Cline prompt
-  queued during a turn shows on every device at once.
-- Sessions whose agent is not installed stay listed and open read-only with a
-  reason instead of vanishing, and when an agent cannot resume a session the app
-  names that agent rather than always saying Codex.
-- Interrupted sessions recover: Kilo Code and Cline sessions are drivable again
-  after their background server crashed, Take over works again after a Codex
-  daemon crash left its control socket behind, and a reopened Codex session
-  restores Drive on Windows and when terminal sync is off.
-- Notifications and the inbox: Review and Reply open the session and switch
-  server, Mark read, Dismiss and Clear reach the server at once, ages keep
-  counting while the page is open, a phone's held alert no longer delays your
-  other devices, and a Dismiss the server never heard of says it will sync.
-- A `cosyncing://pair?brokerUrl=` link now pairs the server it carries.
-  Switching saved servers loads the new session list at once and keeps its open
-  tabs, a server that never answers times out with Retry, and a refused token
-  brings up the sign-in screen.
-- After Detach the header reads Detached with Attach back in view, F5 and
-  Ctrl+R (Cmd+R on macOS) refresh the session list again, and at twice the
-  default text size the session list, its drawer and the overview fit their
-  width.
-- On Windows, restoring Drive for a Codex session reads the process list
-  directly, about 20 ms instead of starting PowerShell and taking about 2 s.
-- OpenCode: a scheduled or newly created first prompt runs on the model you
-  chose, an Observe view is read-only, a failed turn shows its error once, and
-  Stop ends the turn as interrupted.
+- The files panel previews PNG, JPEG, WebP and GIF images with zoom, PDFs with
+  page navigation, and MP4, M4V, MOV and WebM videos with playback controls, up
+  to 32 MiB, 128 MiB and 2 GiB. Videos play in the app on Android, iOS, macOS
+  and the web; on Linux and Windows, **Open with** hands them to your player. A
+  preview loads only while its pane is visible and is released when you close,
+  hide or background it.
+- Native clients offer **Open with** for workspace and delivered files,
+  including Word and PowerPoint documents.
+- With tool calls hidden, scrolling back through a long session keeps loading
+  earlier messages instead of sticking on "Loading earlier messages…" or
+  fetching the same page again. When you show tool calls, the message you are
+  reading stays in place while they load.
+- File cards stay beside the messages that created them after reconnects and
+  history refreshes, and old cached files no longer reappear among recent
+  messages.
+- Subagents started by an open Claude Code or Kimi Code session stay nested
+  under it in the session list instead of briefly showing as separate sessions
+  each time the parent updates.
+- The context meter shows a 1M limit for Claude Code sessions on models with a
+  native 1M window, which Claude Code 2.1.300 and later no longer marks.
+- A question Claude asks in a session driven from the app becomes answerable
+  once Claude is waiting for the answer, so an early answer no longer leaves the
+  turn blocked. An answer to a question that is no longer open, for example
+  from a second device, is refused instead of sent.
+- A question card that asks several questions numbers them.
+- An observed Kilo Code session catches up within about two seconds when a
+  file-change notification is missed.
+- Long-pressing or right-clicking a session tab or roster row opens the rename
+  dialog directly. Composer attachments show readable file sizes. The
+  notification setup banner keeps phone playback and composer controls
+  reachable and its actions readable in light and dark themes.
+- Home reuses the session list for its active counts instead of downloading
+  every session again.
 
-- When the Server runs a Bun that a newer release needs and cannot install by
-  itself, the app's settings page says **Needs newer Bun** and explains what to
-  do instead of the old "Not checked".
-
-The 0.6.0 features that need both ends of the wire, notifications with every
-browser tab closed, per-type notification settings and cross-device read and
-clear, still need a 0.6.0 or newer Server. 0.6.6 is one.
+The subagent nesting, context meter, Claude question and Kilo Code fixes are in
+the Server; the others are in the app.
 
 ## Downloads
 
