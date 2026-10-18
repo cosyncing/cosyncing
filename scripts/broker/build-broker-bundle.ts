@@ -3,9 +3,8 @@
  * Build the JavaScript broker application: ONE self-contained bundle, executed by a separately installed
  * Bun runtime.
  *
- * This is the artifact BOTH JavaScript channels ship — the published npm package and the signed release the
- * curl installer places — from the same source with the same flags. `--distribution` is the only thing that
- * differs, and it records who owns the installed files rather than changing what is built. It is
+ * This is the JavaScript artifact the signed installers place. `bootstrap-js` records installer
+ * ownership; explicit `bun-js` builds remain available for legacy migration fixtures. It is
  * `bun build --target=bun` WITHOUT `--compile`,
  * so nothing of Bun, JavaScriptCore, or WebKit is copied into it — the operator installs Bun themselves and
  * the package carries only cosyncing's own code plus its JavaScript dependencies.
@@ -73,7 +72,7 @@ function usage(): never {
     `Usage: bun run scripts/broker/build-broker-bundle.ts [options]\n\n` +
       `  --outfile PATH                  output JavaScript application bundle\n` +
       `  --distribution ${BUNDLE_DISTRIBUTIONS.join('|')}\n` +
-      `                                  who owns the installed files (default: bun-js, the npm package)\n` +
+      `                                  who owns the installed files (default: bootstrap-js; bun-js is for legacy fixtures)\n` +
       `  --version X.Y.Z                 candidate/test builds only; defaults to the root package.json\n` +
       `  --build-date ISO-8601           immutable build time (or SOURCE_DATE_EPOCH)\n` +
       `  --commit HEX                    immutable source commit\n` +
@@ -96,7 +95,7 @@ function nextArg(argv: string[], index: number): string {
 
 function parseArgs(argv: string[]): BundleOptions {
   let outfile = resolve('output', PRODUCT_IDENTITY.productName, PRODUCT_IDENTITY.primaryBinary);
-  let distribution: BundleDistribution = 'bun-js';
+  let distribution: BundleDistribution = 'bootstrap-js';
   let version: string | undefined;
   let buildDate: string | undefined;
   let commit: string | undefined;
@@ -148,7 +147,7 @@ const result = await Bun.build({
   entrypoints: [resolve('packages/typescript/broker/src/cli/cli.ts')],
   target: 'bun',
   // No `compile:` key. Adding one would embed the Bun runtime and turn this into the native distribution,
-  // which is exactly what the npm lane must never publish; scripts/broker/tests/release/test-npm-package.ts
+  // which the signed JavaScript release must never publish; the release supply-chain suite
   // asserts the produced artifact is text with a Bun shebang and no ELF/Mach-O header.
   outdir: dirname(options.outfile),
   naming: { entry: '[dir]/[name].[ext]' },
@@ -172,7 +171,7 @@ if (!result.success) {
 }
 
 // Bun names the entry after its source file (`cli.js`). The product's command name is `cosyncing`, and the
-// extensionless name is intentional: the npm bin entry, the receipt-owned copy, the service ExecStart and
+// extensionless name is intentional: the receipt-owned copy, the service ExecStart and
 // the release artifact all address one filename, and Bun loads an extensionless file as JavaScript.
 const emitted = result.outputs.find((output) => output.kind === 'entry-point');
 if (!emitted) throw new Error('broker bundle build produced no entry point');

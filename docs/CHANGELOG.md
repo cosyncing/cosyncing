@@ -4,7 +4,7 @@ This file records notable product and contributor-facing changes. Internal
 implementation logs and physical evidence are maintained separately and are
 not copied here.
 
-The npm broker package and downloadable Flutter clients are separate release
+The signed JavaScript broker and downloadable Flutter clients are separate release
 channels. They can share a product version, but each channel retains its own
 publication and acceptance controls. Artifact-specific notes and downloads are
 available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases).
@@ -52,6 +52,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   stopping until the next change.
 
 ### Changed
+
+- npm distribution ends at 0.6.6; use the shell or PowerShell installer for installation and migration.
 
 - Large session-stream frames and JSON responses use negotiated compression
   to reduce mobile data transfer.

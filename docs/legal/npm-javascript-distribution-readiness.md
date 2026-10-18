@@ -5,10 +5,11 @@ package. It is not legal advice and it does not authorize anything that
 [Compiled broker distribution readiness](binary-distribution-readiness.md)
 governs.
 
-Status: **released**. The npm `latest` version is published only through the
-protected trusted-publisher and staged-approval path described below. Check the
-registry when an exact current version is required; this control record does
-not duplicate mutable release metadata.
+Status: **retired after 0.6.6**. The sections below are a historical record of
+that package and its former release controls; the publishing workflow, package
+builder and npm-only verification are removed. Existing versions remain
+available unchanged. For current installation and migration, use the
+[installer guide](../installation/script-install.md#npm-installations).
 
 ## What is distributed
 
@@ -167,7 +168,7 @@ This defense remains required: it stops a stray dispatch before the
 environment's reviewers are asked. Confirm the registry-side trusted publisher
 on npmjs.com before each release.
 
-## Ongoing release rule
+## Historical release rule
 
 Every new version must use the protected trusted-publisher workflow and staged
 approval path. Never publish manually, reuse a version, or add a compiled

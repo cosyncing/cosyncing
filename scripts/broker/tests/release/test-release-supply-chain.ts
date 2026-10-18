@@ -169,7 +169,11 @@ const identity = ${JSON.stringify({
   contract: PUBLISHED_BROKER_CONTRACT,
 })};
 if (command === 'version' && args[0] === '--json') console.log(JSON.stringify(identity, null, 2));
-else if (command === 'setup') console.log('fixture setup completed');
+else if (command === 'setup') {
+  if (process.env.FAKE_MIGRATION_LOG) require('node:fs').appendFileSync(process.env.FAKE_MIGRATION_LOG, 'setup\\n');
+  if (process.env.FAKE_SETUP_EXIT) process.exit(Number(process.env.FAKE_SETUP_EXIT));
+  console.log('fixture setup completed');
+}
 // The pairing gate asks readiness, not the full status report, and this fixture answers the question that
 // was actually asked. A fixture that only ever answered the old shape would let the gate regress to a
 // command this product no longer calls.
@@ -1057,6 +1061,17 @@ try {
   mkdirSync(fakeBin);
   writeFakeCurl(join(fakeBin, 'curl'));
   writeFakeBun(join(fakeBin, 'bun'));
+  // The cleanup command must never reach the operator's real npm prefix, even if npm is on PATH.
+  writeFileSync(join(fakeBin, 'npm'), `#!/usr/bin/env bash
+set -eu
+case "$*" in
+  'root -g') printf '%s\\n' "$HOME/npm-global" ;;
+  'uninstall -g cosyncing')
+    printf 'uninstall\\n' >> "$FAKE_MIGRATION_LOG"
+    rm -rf "$HOME/npm-global/cosyncing" ;;
+  *) exit 2 ;;
+esac
+`, { mode: 0o755 });
   const home = join(root, 'install-home');
   mkdirSync(home);
   writeFileSync(join(home, '.bashrc'), '# preserve\n');
@@ -1146,6 +1161,11 @@ try {
       readFileSync(join(directory, 'install-server.sh'), 'utf8').replaceAll('/dev/tty', answerPath),
       { mode: 0o755 },
     );
+    writeFileSync(
+      join(directory, 'install.sh'),
+      readFileSync(join(directory, 'install.sh'), 'utf8').replaceAll('/dev/tty', answerPath),
+      { mode: 0o755 },
+    );
     return directory;
   }
   async function installOver(home: string, from: string): Promise<{
@@ -1169,9 +1189,9 @@ try {
 
   const npmUnattendedHome = npmOwnedHome('npm-unattended-home', npmApplication);
   const npmUnattended = await installOver(npmUnattendedHome, releaseDirectory);
-  check('a run that cannot ask refuses the npm install and names the way to stay on npm',
+  check('a run that cannot ask preserves the npm install and directs interactive migration',
     npmUnattended.exitCode !== 0
-      && npmUnattended.stderr.includes('npm update -g cosyncing')
+      && npmUnattended.stderr.includes('Rerun this installer from a terminal')
       && !existsSync(join(npmUnattendedHome, '.cosyncing', 'bootstrap-receipt'))
       && readFileSync(join(npmUnattendedHome, '.cosyncing', 'bin', 'cosyncing'), 'utf8') === npmApplication
       && stateSurvived(npmUnattendedHome),
@@ -1201,6 +1221,31 @@ try {
       && adopted.stdout.includes(`Installed cosyncing ${version} at ${adoptedBinary}`)
       && stateSurvived(adoptedHome),
     `${adopted.exitCode} | ${adopted.stderr.trim().slice(0, 160)}`);
+
+  const migrationRelease = releaseAnswering('npm-migration-release', 'y\n');
+  for (const setupExit of [0, 1]) {
+    const home = npmOwnedHome(`npm-migration-${setupExit}`, npmApplication);
+    const oldPackage = join(home, 'npm-global', 'cosyncing');
+    mkdirSync(oldPackage, { recursive: true });
+    const log = join(home, 'migration.log');
+    const migration = await run(['bash', join(migrationRelease, 'install.sh')], {
+      cwd: root, stage: `npm migration setup=${setupExit}`,
+      env: {
+        PATH: `${fakeBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+        HOME: home, FAKE_RELEASE_ROOT: migrationRelease,
+        FAKE_MIGRATION_LOG: log, FAKE_SETUP_EXIT: String(setupExit),
+        DISPLAY: '', WAYLAND_DISPLAY: '', LANG: 'C.UTF-8', COSYNCING_SETUP_LANG: 'en',
+      },
+    });
+    const steps = existsSync(log) ? readFileSync(log, 'utf8') : '';
+    check(setupExit === 0
+      ? 'npm cleanup is offered only after replacement setup succeeds, preserving user state'
+      : 'failed replacement setup retains the npm package for recovery',
+      migration.exitCode === setupExit && stateSurvived(home)
+        && steps === (setupExit === 0 ? 'setup\nuninstall\n' : 'setup\n')
+        && existsSync(oldPackage) === (setupExit !== 0),
+      `${migration.exitCode} | ${JSON.stringify(steps)} | ${migration.stderr.trim().slice(0, 160)}`);
+  }
 
   // The prompt is not a general overwrite. A file that will not identify itself as a packaged npm
   // cosyncing is refused with the original message, whatever the operator would have answered.
@@ -2338,7 +2383,7 @@ exec /usr/bin/openssl "$@"
   check('release directory has no generated cache or unexpected publication payload',
     readdirSync(releaseDirectory).sort().join(',') === assembled.publishedFiles.join(','));
 
-  // npm acquisition and ownership have their own acceptance suite in test-npm-package.ts.
+  // JavaScript installation and service lifecycle have their own acceptance suite.
   // Native builds above are ephemeral reproducibility evidence, never assembled release assets.
 } finally {
   rmSync(root, { recursive: true, force: true });

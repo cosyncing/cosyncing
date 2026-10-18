@@ -1887,19 +1887,19 @@
   },
   "settingsBrokerStatusPackageManaged": "Managed by npm",
   "@settingsBrokerStatusPackageManaged": {
-    "description": "Status pill on the broker version row when the broker is an npm package that its package manager updates, not the app."
+    "description": "Status pill on the broker version row for a legacy npm-owned installation."
   },
-  "settingsBrokerPackageManagedBody": "This server was installed as an npm package, so it does not update itself. Run {updateCommand} (or the equivalent for the manager you installed it with), then {setupCommand}.",
+  "settingsBrokerPackageManagedBody": "On the server host, run the installer from {installerUrl} and confirm migration; after setup succeeds, use {updateCommand} for future updates.",
   "@settingsBrokerPackageManagedBody": {
-    "description": "Guidance shown under the broker version row when the broker is owned by a package manager.",
+    "description": "Migration guidance for an npm-owned server; run the installer on the server host.",
     "placeholders": {
+      "installerUrl": {
+        "type": "String",
+        "example": "https://cosyncing.com/#install"
+      },
       "updateCommand": {
         "type": "String",
-        "example": "npm update --global cosyncing"
-      },
-      "setupCommand": {
-        "type": "String",
-        "example": "cosyncing setup"
+        "example": "cosy update"
       }
     }
   },

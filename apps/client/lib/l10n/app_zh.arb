@@ -487,7 +487,7 @@
   "settingsBrokerStatusCurrent": "已是最新",
   "settingsBrokerStatusNotChecked": "未检查",
   "settingsBrokerStatusPackageManaged": "由 npm 管理",
-  "settingsBrokerPackageManagedBody": "该服务器以 npm 包的形式安装，不会自行更新。请运行 {updateCommand}（或你所用包管理器的对应命令），然后运行 {setupCommand}。",
+  "settingsBrokerPackageManagedBody": "请在服务器主机上运行 {installerUrl} 提供的安装脚本并确认迁移；setup 成功后，使用 {updateCommand} 进行后续更新。",
   "settingsBrokerStatusRuntimeUpgradeRequired": "需要更新 Bun",
   "settingsBrokerRuntimeUpgradeRequiredBody": "有新的 cosyncing 版本（{version}），但它需要更新的 Bun 运行时，而此安装无法自行安装。请在服务器上升级 Bun 或重新运行 cosyncing 安装脚本，然后运行 {updateCommand}。",
   "settingsDesktopBuildUpdateTitle": "有新的桌面版可用",

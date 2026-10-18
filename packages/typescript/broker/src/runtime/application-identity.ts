@@ -10,7 +10,7 @@ import { dirname, isAbsolute, resolve } from 'node:path';
  * first two and emphatically NOT the third, so the three had to stop sharing one boolean.
  *
  *   source       — a contributor checkout executed through Bun from repository sources.
- *   bun-js       — the published npm application: ONE self-contained JavaScript bundle, executed by a
+ *   bun-js       — the legacy npm application: ONE self-contained JavaScript bundle, executed by a
  *                  separately installed Bun runtime. Carries no interpreter of its own.
  *   bootstrap-js — the same bundle and the same external Bun, placed by cosyncing's own signed installer
  *                  into `$COSYNCING_HOME/bin` instead of by a package manager.
@@ -125,10 +125,9 @@ function assertExecutableFile(path: string, label: string, detailCode: string): 
 /**
  * The oldest Bun allowed to execute this application.
  *
- * Kept equal to the `engines.bun` floor the npm package publishes, and asserted equal by the application
- * identity suite. Publishing one number and enforcing another would make the manifest a suggestion: npm
- * warns and installs anyway, so this is the only place the floor is actually load-bearing. It is also the
- * `minimumBunVersion` every release manifest declares.
+ * Kept equal to the root package’s `engines.bun` floor, as checked by the application identity suite.
+ * Runtime enforcement remains necessary regardless of how the application was acquired. This is also
+ * the `minimumBunVersion` every release manifest declares.
  *
  * Held at 1.3.8 for one bridge release. A release's floor is judged by the PREVIOUS build's updater, and
  * updaters up to 0.6.5 cannot install a runtime: a release declaring a higher floor is declined on every

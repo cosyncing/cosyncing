@@ -2,8 +2,7 @@
 
 Install cosyncing with one command on Linux, Apple Silicon macOS, or Windows x64.
 The installers check the release signature and acquire Bun when needed; Node.js
-and npm are not required. If you prefer package-manager ownership, use the
-[npm installation](../../README.md#npm) instead.
+and npm are not required.
 
 Each release publishes four installers, rendered from two templates in one step:
 
@@ -129,8 +128,7 @@ GitHub also serves the originals at
 Broker promotion advances that pointer; client promotion preserves it.
 For a particular version, replace `<base>` below with
 `https://github.com/cosyncing/cosyncing/releases/download/broker-v<version>`.
-Installer-owned brokers use the signed update channel; npm installations use
-their package manager.
+Installer-owned brokers use the signed update channel.
 
 ## What the all-in-one does
 
@@ -459,7 +457,15 @@ and arrange a maintainer-assisted migration in a maintenance window.
 
 ### npm installations
 
-For npm-owned (`bun-js`) installations, keep using `npm update --global cosyncing`
-followed by `cosyncing setup`; do not use self-update as a migration mechanism.
-Rerunning the standalone installer is a change of ownership, for which its
-existing interactive takeover confirmation remains required.
+For an existing npm-owned (`bun-js`) installation, run the all-in-one installer
+above in a terminal and confirm the takeover. It preserves the state home,
+including settings, credentials and paired devices, and runs setup for the new
+broker. Only after setup succeeds does it offer to remove the old global npm
+package; if setup fails, keep that package and rerun the printed setup command.
+The broker-only installer leaves setup and npm cleanup to you.
+
+After successful setup, use `cosy update` for future updates. If your shell still
+selects the old npm command, open a new shell and check `type -a cosy cosyncing`
+(or `Get-Command cosy, cosyncing -All` in PowerShell); remove the old package
+with `npm uninstall --global cosyncing` once the migrated service is healthy.
+Do not delete the state home or edit ownership receipts to switch channels.

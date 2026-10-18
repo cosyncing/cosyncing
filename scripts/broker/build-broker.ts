@@ -5,7 +5,7 @@
  *
  * This is not the npm distribution. Publishing this artifact is governed by
  * `docs/legal/binary-distribution-readiness.md` and stays gated; the script remains because ephemeral CI and
- * a future approved standalone release both need it. The published npm package is built by
+ * a future approved standalone release both need it. The signed JavaScript release is built by
  * `scripts/broker/build-broker-bundle.ts`, which produces plain JavaScript and embeds no runtime.
  */
 import {

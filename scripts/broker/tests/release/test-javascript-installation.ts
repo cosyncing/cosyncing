@@ -1,18 +1,8 @@
 #!/usr/bin/env bun
-/**
- * The published npm distribution: ONE JavaScript package, no embedded runtime, no platform packages.
- *
- * Every assertion here fails on the previous design — four packages, per-platform `bun build --compile`
- * executables, an optionalDependency fan-out, and a postinstall that swapped a binary into place — and the
- * ones that matter most are the fences: point the builder back at `--compile`, add a platform
- * optionalDependency, or stamp a native distribution kind, and this suite goes red.
- *
- * The last word belongs to a real install. A staged directory only proves what was written; what an operator
- * gets is a tarball npm expands into a prefix, so both global command names are executed from one.
- */
-import { createHash } from 'node:crypto';
+/** Packaged JavaScript: platform verdicts, external runtime, web sidecar and service lifecycle. */
 import {
   existsSync,
+  symlinkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -33,7 +23,7 @@ import {
   windowsNativeMachineArchitecture,
   windowsPowerShellChildEnvironment,
 } from '../../../../packages/typescript/adapter-api/src/host-process.ts';
-import { validateWebBuildShape } from '../../release/package-web-sidecar.ts';
+import { stageWebSidecarDirectory, validateWebBuildShape } from '../../release/package-web-sidecar.ts';
 import { writeStampedWebBuild, STAMPED_WEB_FIXTURE_COMMIT } from '../../../../packages/typescript/broker/test/helpers/stamped-web-build.ts';
 import { reserveLoopbackFixturePort } from '../../../../packages/typescript/broker/test/helpers/isolated-broker-fixture.ts';
 import {
@@ -42,7 +32,7 @@ import {
 } from '../../../ci/lib/process.ts';
 
 const ROOT = resolve(import.meta.dir, '../../../..');
-/** Where the application lives inside the package; mirrors PACKAGED_APPLICATION in build-npm-package.ts. */
+/** The acquisition layout setup copies into its owned installation. */
 const PACKAGED_APPLICATION = `bin/${PRODUCT_IDENTITY.primaryBinary}`;
 const results: Array<{ name: string; ok: boolean; detail?: string }> = [];
 
@@ -59,7 +49,7 @@ function check(name: string, ok: boolean, detail?: string): void {
  */
 function hermeticEnvironment(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   const environment = { ...process.env, ...overrides };
-  for (const key of ['COSYNCING_WEB_DIR', 'COSYNCING_NPM_BROKER_APPLICATION', 'COSYNCING_NPM_OUTPUT_DIR']) {
+  for (const key of ['COSYNCING_WEB_DIR']) {
     if (!(key in overrides)) delete environment[key];
   }
   return environment;
@@ -68,7 +58,7 @@ function hermeticEnvironment(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessE
 /**
  * Every external command, with its own wall time reported.
  *
- * This suite builds packages, compiles a native artifact, and performs a real npm install, so when it runs
+ * This suite builds a JavaScript bundle and exercises its installed service, so when it runs
  * long the useful question is always WHICH step — a silent five-minute suite forces the next person to
  * bisect it by hand.
  */
@@ -92,7 +82,7 @@ async function run(command: string[], options: {
 
 const version = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version as string;
 const sidecar = `${PRODUCT_IDENTITY.releaseAssetPrefix}-web-${version}`;
-const root = mkdtempSync(join(tmpdir(), 'cosyncing-npm-package-'));
+const root = mkdtempSync(join(tmpdir(), 'cosyncing-javascript-installation-'));
 
 /**
  * Where the fixture service manager records the broker it started.
@@ -119,78 +109,23 @@ try {
   await writeStampedWebBuild(webFixture);
   const expectedWebPaths = [...validateWebBuildShape({ buildDirectory: webFixture }).paths].sort();
 
-  const outputDirectory = join(root, 'npm');
+  const prefix = join(root, 'install-prefix');
+  const installedPackage = join(prefix, 'application');
+  const stage = installedPackage;
+  const applicationPath = join(stage, PACKAGED_APPLICATION);
+  mkdirSync(join(prefix, 'bin'), { recursive: true });
   const staged = await run([
-    'bun', 'run', 'scripts/release/build-npm-package.ts',
-    '--web-dir', webFixture, '--commit', STAMPED_WEB_FIXTURE_COMMIT,
-    '--output-dir', outputDirectory, '--keep-stage',
-  ], { timeoutMs: 300_000 });
-  const stage = join(outputDirectory, 'package');
-  const manifest = staged.exitCode === 0
-    ? JSON.parse(readFileSync(join(stage, 'package.json'), 'utf8')) as Record<string, unknown>
-    : {};
-  if (staged.exitCode !== 0) {
-    console.error(staged.stderr.slice(-4_000));
+    'bun', 'run', 'scripts/broker/build-broker-bundle.ts',
+    '--outfile', applicationPath, '--commit', STAMPED_WEB_FIXTURE_COMMIT,
+  ], { timeoutMs: 120_000 });
+  if (staged.exitCode !== 0) throw new Error(staged.stderr);
+  stageWebSidecarDirectory({
+    buildDirectory: webFixture, targetDirectory: join(stage, 'bin', sidecar), paths: expectedWebPaths,
+  });
+  for (const command of [PRODUCT_IDENTITY.primaryBinary, PRODUCT_IDENTITY.aliasBinary]) {
+    symlinkSync(applicationPath, join(prefix, 'bin', command));
   }
 
-  // ---- One package, not four ----------------------------------------------------------------------------
-  //
-  // The old lane staged `platform-linux-x64`, `platform-linux-arm64`, `platform-darwin-arm64`, and `package`.
-  // A single universal JavaScript file needs exactly one, and any reappearance of a platform directory means
-  // a compiled artifact came back.
-  const stagedDirectories = existsSync(outputDirectory)
-    ? readdirSync(outputDirectory, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort()
-    : [];
-  const tarballs = existsSync(outputDirectory)
-    ? readdirSync(outputDirectory).filter((entry) => entry.endsWith('.tgz')).sort()
-    : [];
-  check('the release builder stages exactly one npm package and packs exactly one tarball',
-    staged.exitCode === 0
-      && JSON.stringify(stagedDirectories) === JSON.stringify(['package'])
-      && tarballs.length === 1 && tarballs[0] === `${PRODUCT_IDENTITY.productName}-${version}.tgz`,
-    `dirs=${stagedDirectories.join(',')} tarballs=${tarballs.join(',')}`);
-
-  // ---- The manifest ------------------------------------------------------------------------------------
-  const dependencyFields = ['dependencies', 'optionalDependencies', 'peerDependencies', 'bundleDependencies'];
-  const manifestText = JSON.stringify(manifest);
-  check('the published manifest declares no platform packages and no dependencies of any kind',
-    dependencyFields.every((field) => !(field in manifest))
-      && !manifestText.includes('@cosyncing/broker-')
-      && !manifestText.includes('broker-linux-') && !manifestText.includes('broker-darwin-'),
-    dependencyFields.filter((field) => field in manifest).join(',') || 'none');
-
-  // An install script is the exact mechanism that used to replace the command with a compiled binary. There
-  // is nothing left for one to do, and its absence is what makes `--ignore-scripts` uneventful.
-  check('the published manifest declares no install or postinstall script',
-    !('scripts' in manifest) && !existsSync(join(stage, 'install.cjs')));
-
-  check('the package keeps its name, licence, canonical version, and both command names',
-    manifest.name === PRODUCT_IDENTITY.productName
-      && manifest.version === version
-      && manifest.license === 'Apache-2.0'
-      && (manifest.bin as Record<string, string>)?.[PRODUCT_IDENTITY.primaryBinary] === PACKAGED_APPLICATION
-      && (manifest.bin as Record<string, string>)?.[PRODUCT_IDENTITY.aliasBinary] === PACKAGED_APPLICATION,
-    JSON.stringify(manifest.bin));
-
-  // The runtime is a REQUIREMENT, not a payload. Declaring it is how the package states what the operator
-  // must install, since it no longer carries one.
-  const engines = manifest.engines as Record<string, string> | undefined;
-  const rootEngines = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).engines as Record<string, string>;
-  check('the package requires a separately installed Bun and states the same floor as the repository',
-    !!engines?.bun && engines.bun === rootEngines.bun,
-    engines?.bun);
-
-  // Windows is excluded by the fields npm can enforce. Intel macOS cannot be excluded by `os`/`cpu` without
-  // also excluding Apple Silicon, so the product refuses it at diagnosis — asserted separately below.
-  check('the package declares the supported operating systems, Windows now among them',
-    Array.isArray(manifest.os) && (manifest.os as string[]).sort().join(',') === 'darwin,linux,win32'
-      && Array.isArray(manifest.cpu) && (manifest.cpu as string[]).sort().join(',') === 'arm64,x64',
-    `os=${JSON.stringify(manifest.os)} cpu=${JSON.stringify(manifest.cpu)}`);
-  // `os` and `cpu` are independent lists, so this manifest necessarily ADMITS win32-arm64 and darwin-x64
-  // at acquisition. Narrowing `cpu` cannot fix it without excluding linux-arm64 and darwin-arm64, which
-  // are supported. The metadata is a coarse pre-filter; the runtime verdict below is the contract, and it
-  // is what an operator actually meets — before setup mutates anything.
   check('the supported broker process tuples are exactly the qualified four',
     isSupportedBrokerProcessTuple('linux', 'x64') && isSupportedBrokerProcessTuple('linux', 'arm64')
       && isSupportedBrokerProcessTuple('darwin', 'arm64') && isSupportedBrokerProcessTuple('win32', 'x64')
@@ -285,7 +220,6 @@ try {
     armVerdict.status === 'refused' ? armVerdict.remediation : 'supported');
 
   // ---- The application is JavaScript --------------------------------------------------------------------
-  const applicationPath = join(stage, PACKAGED_APPLICATION);
   const applicationBytes = existsSync(applicationPath) ? readFileSync(applicationPath) : Buffer.alloc(0);
   const firstLine = applicationBytes.subarray(0, 64).toString('utf8').split('\n', 1)[0] ?? '';
   check('the executable entry is plain JavaScript beginning with a Bun shebang',
@@ -296,50 +230,6 @@ try {
   check('the staged package is executable after installation',
     existsSync(applicationPath) && (Bun.file(applicationPath).size ?? 0) > 0
       && ((readFileSync(applicationPath), true)));
-
-  // ---- No machine code anywhere in the tarball ----------------------------------------------------------
-  //
-  // This is the claim the whole migration rests on: the published package contains no Bun, no
-  // JavaScriptCore/WebKit, and no ELF or Mach-O broker executable. It is checked over every extracted member,
-  // not just the entry point, because a stray staged artifact would be just as much of a redistribution.
-  const tarball = tarballs[0] ? join(outputDirectory, tarballs[0]) : undefined;
-  const extracted = join(root, 'extracted');
-  mkdirSync(extracted, { recursive: true });
-  if (tarball) await run(['tar', '-xzf', tarball, '-C', extracted]);
-  const MAGIC: ReadonlyArray<{ label: string; hex: string }> = [
-    { label: 'ELF', hex: '7f454c46' },
-    { label: 'Mach-O', hex: 'cffaedfe' },
-    { label: 'Mach-O BE', hex: 'feedfacf' },
-    { label: 'Mach-O universal', hex: 'cafebabe' },
-    { label: 'PE', hex: '4d5a' },
-  ];
-  const machineCodeMembers: string[] = [];
-  const walk = (directory: string, prefix: string): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) { walk(path, relative); continue; }
-      const header = readFileSync(path).subarray(0, 4).toString('hex');
-      const hit = MAGIC.find((candidate) => header.startsWith(candidate.hex));
-      if (hit) machineCodeMembers.push(`${relative}:${hit.label}`);
-    }
-  };
-  if (existsSync(join(extracted, 'package'))) walk(join(extracted, 'package'), '');
-  check('no tarball member is an ELF, Mach-O, or PE executable',
-    !!tarball && machineCodeMembers.length === 0,
-    machineCodeMembers.join(',') || 'none');
-
-  // Bun's own licence is not reproduced, because Bun is not distributed here — but the bundled JavaScript
-  // dependencies' notices still are. Removing an embedded runtime is not a notice exemption.
-  const notices = existsSync(join(stage, 'THIRD_PARTY_NOTICES.txt'))
-    ? readFileSync(join(stage, 'THIRD_PARTY_NOTICES.txt'), 'utf8')
-    : '';
-  check('third-party notices cover the bundled JavaScript closure and claim no embedded runtime',
-    notices.includes('@clack/prompts') && notices.includes('qrcode')
-      && notices.includes('does not') && notices.includes('Bun runtime')
-      && !notices.includes('JavaScriptCore is')
-      && notices.length > 5_000,
-    `${notices.length}B`);
 
   // ---- The web sidecar ----------------------------------------------------------------------------------
   const shippedSidecar = join(stage, 'bin', sidecar);
@@ -357,41 +247,6 @@ try {
       && JSON.stringify(shippedWebPaths.sort()) === JSON.stringify(expectedWebPaths)
       && readFileSync(join(shippedSidecar, 'index.html'), 'utf8').includes('<base href="/cosy/">'),
     `${shippedWebPaths.length}/${expectedWebPaths.length} files`);
-
-  // `files` is a promise about the tarball, and npm silently drops a directory that is not enumerated. The
-  // sidecar sits beside `bin/cosyncing`, which is where the broker resolves it from — so if it were dropped,
-  // the package would install and serve no client at all.
-  const tarballMembers = tarball
-    ? (await run(['tar', '-tzf', tarball], { cwd: outputDirectory })).stdout.trim().split('\n')
-    : [];
-  const sidecarMembers = tarballMembers.filter((entry) => entry.startsWith(`package/bin/${sidecar}/`));
-  check('npm pack delivers the application, the sidecar, and every legal file the manifest promises',
-    tarballMembers.includes(`package/${PACKAGED_APPLICATION}`)
-      && ['README.md', 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.txt']
-        .every((name) => tarballMembers.includes(`package/${name}`))
-      && sidecarMembers.length === expectedWebPaths.length,
-    `members=${tarballMembers.length} sidecar=${sidecarMembers.length}`);
-
-  // ---- A real global install ----------------------------------------------------------------------------
-  const prefix = join(root, 'install-prefix');
-  mkdirSync(prefix, { recursive: true });
-  const installed = tarball
-    ? await run([
-      'npm', 'install', tarball,
-      '--prefix', prefix, '--global', '--no-audit', '--no-fund', '--offline',
-    ], {
-      cwd: outputDirectory,
-      timeoutMs: 300_000,
-      env: hermeticEnvironment({ HOME: prefix, npm_config_cache: join(prefix, '.npm-cache') }),
-    })
-    : { exitCode: 1, stdout: '', stderr: 'no tarball to install' };
-  const installedPackage = join(prefix, 'lib', 'node_modules', PRODUCT_IDENTITY.productName);
-  check('the tarball installs offline into a clean prefix and links both command names',
-    installed.exitCode === 0
-      && existsSync(join(installedPackage, PACKAGED_APPLICATION))
-      && existsSync(join(prefix, 'bin', PRODUCT_IDENTITY.primaryBinary))
-      && existsSync(join(prefix, 'bin', PRODUCT_IDENTITY.aliasBinary)),
-    `exit=${installed.exitCode} ${installed.stderr.trim().slice(0, 200)}`);
 
   const runHome = join(prefix, 'run-home');
   mkdirSync(runHome, { recursive: true });
@@ -425,8 +280,23 @@ try {
   // of the signed native replacement path. `universal` rather than a host triple, because one JavaScript
   // file has no machine-code binding and must not name a native release artifact.
   check('the installed build reports the JavaScript distribution kind and a universal artifact target',
-    reported.packaged === true && reported.distribution === 'bun-js' && reported.target === 'universal',
+    reported.packaged === true && reported.distribution === 'bootstrap-js' && reported.target === 'universal',
     `${reported.distribution}/${reported.target}/packaged=${reported.packaged}`);
+
+  // Legacy npm identity must remain readable and refuse signed replacement before touching an install.
+  const legacyApplication = join(root, 'legacy', 'cosyncing');
+  const legacyBuild = await run([
+    'bun', 'run', 'scripts/broker/build-broker-bundle.ts', '--outfile', legacyApplication,
+    '--distribution', 'bun-js', '--commit', STAMPED_WEB_FIXTURE_COMMIT,
+  ]);
+  if (legacyBuild.exitCode !== 0) throw new Error(legacyBuild.stderr);
+  const legacyUpgrade = await run([legacyApplication, 'upgrade', '--yes', '--json'], { env: commandEnvironment });
+  const legacyResult = JSON.parse(legacyUpgrade.stdout) as { detailCode?: string; summary?: string };
+  check('legacy npm ownership refuses replacement and directs explicit installer migration',
+    legacyUpgrade.exitCode !== 0 && legacyResult.detailCode === 'upgrade-package-manager-owned'
+      && legacyResult.summary?.includes('https://cosyncing.com/#install') === true
+      && !existsSync(join(commandEnvironment.COSYNCING_HOME!, 'install-state.json')),
+    legacyUpgrade.stderr.trim().slice(0, 160));
 
   // ---- The installed package serves /cosy/ --------------------------------------------------------------
   //
@@ -459,25 +329,6 @@ try {
     runtimeCheck?.status === 'pass' && runtimeCheck?.detailCode === 'runtime-available'
       && typeof (runtimeCheck?.evidence as Record<string, unknown> | undefined)?.runtime === 'string',
     `${runtimeCheck?.status}/${runtimeCheck?.detailCode}`);
-
-  // ---- The distribution fence ---------------------------------------------------------------------------
-  //
-  // The upgrade command must not download or swap a compiled artifact for this distribution, and must say
-  // what the operator should actually do instead. This runs the INSTALLED command, so it is the answer a
-  // real operator gets.
-  const upgrade = await run(
-    [join(prefix, 'bin', PRODUCT_IDENTITY.primaryBinary), 'upgrade', '--yes', '--json'],
-    { cwd: prefix, env: commandEnvironment },
-  );
-  const upgradeResult = (() => {
-    try { return JSON.parse(upgrade.stdout) as Record<string, unknown>; } catch { return {}; }
-  })();
-  check('upgrade refuses the native swap path and names the package-manager command plus setup',
-    upgradeResult.status === 'blocked'
-      && upgradeResult.detailCode === 'upgrade-package-manager-owned'
-      && String(upgradeResult.summary).includes(`npm update --global ${PRODUCT_IDENTITY.productName}`)
-      && String(upgradeResult.summary).includes(`${PRODUCT_IDENTITY.primaryBinary} setup`),
-    `${upgradeResult.status}/${upgradeResult.detailCode}`);
 
   // ---- The runtime an operator can get wrong -------------------------------------------------------------
   //
@@ -548,7 +399,7 @@ try {
       && !existsSync(join(refusedHome, '.config', 'systemd', 'user', 'cosyncing.service')),
     `exit=${refusedSetup.exitCode} ${`${refusedSetup.stdout}${refusedSetup.stderr}`.trim().slice(-200)}`);
 
-  // ---- The decisive lifecycle: tarball → setup → service → /cosy → repair → uninstall --------------------
+  // ---- The decisive lifecycle: JavaScript bundle → setup → service → /cosy → repair → uninstall --------------------
   //
   // Everything above proves one link. This walks the whole chain on the installed package, because the
   // failures this migration can produce — copying Bun instead of the bundle, a unit that omits the
@@ -636,7 +487,7 @@ try {
       schemaVersion: 2,
       broker: {
         port: lifecyclePort,
-        machineLabel: 'npm-package-lifecycle',
+        machineLabel: 'javascript-installation-lifecycle',
       },
       update: { channel: 'stable' },
     }, null, 2)}\n`, { mode: 0o600 });
@@ -772,7 +623,7 @@ try {
     }
     check('uninstall stops the service it installed rather than leaving the broker running',
       !stillServing && !existsSync(join(systemdState, 'pid')));
-    check('uninstall removes the copy and the unit while leaving the npm package and Bun alone',
+    check('uninstall removes the copy and the unit while leaving the acquisition bundle and Bun alone',
       uninstall.exitCode === 0
         && !existsSync(installedCopy)
         && !existsSync(unitPath)
@@ -784,101 +635,6 @@ try {
       true, `skipped on ${process.platform}; the durable-service lane is systemd`);
   }
 
-  // ---- Fences that must break loudly if the migration is reverted ---------------------------------------
-  //
-  // A prebuilt path is the one seam that could reintroduce a compiled artifact without touching the builder,
-  // so it is exercised with an actual ELF header rather than argued about.
-  const fakeNative = join(root, 'fake-native-application');
-  writeFileSync(fakeNative, Buffer.concat([
-    Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00]),
-    Buffer.alloc(4_096),
-  ]));
-  const compiledRefused = await run([
-    'bun', 'run', 'scripts/release/build-npm-package.ts',
-    '--application', fakeNative, '--no-web', '--commit', STAMPED_WEB_FIXTURE_COMMIT,
-    '--output-dir', join(root, 'npm-compiled-refused'), '--no-pack',
-  ], { timeoutMs: 120_000 });
-  check('packaging refuses a compiled executable as the application entry',
-    compiledRefused.exitCode !== 0
-      && /ELF executable, not JavaScript/.test(compiledRefused.stderr),
-    `exit=${compiledRefused.exitCode} ${compiledRefused.stderr.trim().slice(0, 160)}`);
-
-  // A JavaScript file with no Bun shebang would install as a command the kernel cannot exec.
-  const shebangless = join(root, 'shebangless-application');
-  writeFileSync(shebangless, 'console.log("cosyncing");\n');
-  const shebangRefused = await run([
-    'bun', 'run', 'scripts/release/build-npm-package.ts',
-    '--application', shebangless, '--no-web', '--commit', STAMPED_WEB_FIXTURE_COMMIT,
-    '--output-dir', join(root, 'npm-shebang-refused'), '--no-pack',
-  ], { timeoutMs: 120_000 });
-  check('packaging refuses an application entry without a Bun shebang',
-    shebangRefused.exitCode !== 0 && /shebang/.test(shebangRefused.stderr),
-    `exit=${shebangRefused.exitCode} ${shebangRefused.stderr.trim().slice(0, 160)}`);
-
-  // The distribution kind is the fence that keeps this package out of the signed native update path, so
-  // staging an artifact that does not claim `bun-js` must stop the run rather than publish a lie.
-  const nativeStamped = join(root, 'native-stamped');
-  mkdirSync(nativeStamped, { recursive: true });
-  const nativeApplication = join(nativeStamped, PRODUCT_IDENTITY.primaryBinary);
-  const nativeBuild = await run([
-    'bun', 'run', 'scripts/broker/build-broker.ts',
-    '--target', 'bun-linux-x64', '--outfile', nativeApplication, '--no-alias',
-    '--commit', STAMPED_WEB_FIXTURE_COMMIT,
-  ], { timeoutMs: 300_000 });
-  const nativeRefused = nativeBuild.exitCode === 0
-    ? await run([
-      'bun', 'run', 'scripts/release/build-npm-package.ts',
-      '--application', nativeApplication, '--no-web', '--commit', STAMPED_WEB_FIXTURE_COMMIT,
-      '--output-dir', join(root, 'npm-native-refused'), '--no-pack',
-    ], { timeoutMs: 120_000 })
-    : { exitCode: 1, stdout: '', stderr: 'native build unavailable' };
-  check('packaging refuses the compiled native artifact the release lane still builds',
-    nativeBuild.exitCode === 0 && nativeRefused.exitCode !== 0
-      && /not JavaScript|distribution/.test(nativeRefused.stderr),
-    `build=${nativeBuild.exitCode} package=${nativeRefused.exitCode}`);
-
-  // ---- README ------------------------------------------------------------------------------------------
-  const readme = existsSync(join(stage, 'README.md')) ? readFileSync(join(stage, 'README.md'), 'utf8') : '';
-  check('the README states the required Bun version and the install and update procedures',
-    !!rootEngines.bun && readme.includes(rootEngines.bun)
-      && readme.includes(`npm install --global ${PRODUCT_IDENTITY.productName}`)
-      && readme.includes(`npm update --global ${PRODUCT_IDENTITY.productName}`)
-      && readme.includes(`${PRODUCT_IDENTITY.primaryBinary} setup`)
-      && readme.includes('bun.sh')
-      && !readme.includes('optionalDependencies'),
-    `${readme.length}B`);
-  check('the README documents that uninstall preserves Bun and the acquisition package separately',
-    readme.includes(`npm uninstall --global ${PRODUCT_IDENTITY.productName}`)
-      && /Neither step touches Bun/.test(readme));
-
-  // ---- Determinism -------------------------------------------------------------------------------------
-  //
-  // The same inputs must produce the same package. A build date that defaults to "now" is stamped into the
-  // application, so the pinned inputs the release lane passes are exactly the ones that make this hold.
-  const repeatOne = join(root, 'npm-repeat-1');
-  const repeatTwo = join(root, 'npm-repeat-2');
-  const pinned = [
-    '--web-dir', webFixture, '--commit', STAMPED_WEB_FIXTURE_COMMIT,
-    '--build-date', '2026-01-01T00:00:00.000Z',
-  ];
-  const first = await run([
-    'bun', 'run', 'scripts/release/build-npm-package.ts', ...pinned,
-    '--output-dir', repeatOne, '--keep-stage',
-  ], { timeoutMs: 300_000 });
-  const second = await run([
-    'bun', 'run', 'scripts/release/build-npm-package.ts', ...pinned,
-    '--output-dir', repeatTwo, '--keep-stage',
-  ], { timeoutMs: 300_000 });
-  const digest = (path: string): string => (existsSync(path)
-    ? createHash('sha256').update(readFileSync(path)).digest('hex')
-    : 'missing');
-  check('two builds from identical pinned inputs stage an identical application and manifest',
-    first.exitCode === 0 && second.exitCode === 0
-      && digest(join(repeatOne, 'package', PACKAGED_APPLICATION))
-        === digest(join(repeatTwo, 'package', PACKAGED_APPLICATION))
-      && digest(join(repeatOne, 'package', 'package.json'))
-        === digest(join(repeatTwo, 'package', 'package.json')),
-    `${first.exitCode}/${second.exitCode}`);
 } finally {
   stopFixtureService();
   rmSync(root, { recursive: true, force: true });
@@ -886,7 +642,7 @@ try {
 
 const failed = results.filter((result) => !result.ok);
 if (failed.length > 0) {
-  console.error(`\nFAIL: ${failed.length}/${results.length} npm package checks failed.`);
+  console.error(`\nFAIL: ${failed.length}/${results.length} JavaScript installation checks failed.`);
   process.exit(1);
 }
-console.log(`\nPASS ${results.length}/${results.length} npm package checks`);
+console.log(`\nPASS ${results.length}/${results.length} JavaScript installation checks`);

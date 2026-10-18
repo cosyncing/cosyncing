@@ -77,8 +77,7 @@ whole agent list.
 ## Requirements
 
 - Complete the shared [installation prerequisites](../installation/prerequisites.md):
-  Bun 1.3.8 or newer for the broker host. Node.js/npm installs and updates
-  cosyncing. Cross-device connectivity is an independent operator choice;
+  Bun 1.3.8 or newer for the broker host, acquired by the cosyncing installer when needed. Cross-device connectivity is an independent operator choice;
   [compare the supported topologies](../connectivity/README.md). Tokdash is optional
   but strongly recommended for quota tracking and warnings.
 - Every agent you want cosyncing to manage must meet the version in the table
@@ -168,11 +167,7 @@ npm install --global --ignore-scripts @earendil-works/pi-coding-agent
 npm install --global @anthropic-ai/claude-code
 ```
 
-Install cosyncing with npm:
-
-```bash
-npm install --global cosyncing
-```
+Install cosyncing with the [one-command installer](../installation/script-install.md).
 
 The official native installers linked from the individual agent pages are also
 supported and are preferred where stated. In a typical Apple Silicon Homebrew

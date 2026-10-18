@@ -157,7 +157,7 @@ export const legacyTasks: Record<LegacyJob, Task[]> = {
   packaging: [
     { id: "cli-package-boundary", run: ["bun", "run", "packages/typescript/broker/test/broker/test-cli.ts"], timeoutMs: 300_000, estimateMs: 16898 },
     { id: "compiled-assets", run: ["bun", "run", "packages/typescript/broker/test/broker/test-runtime-assets.ts"], timeoutMs: 300_000, estimateMs: 16826 },
-    { id: "npm-package", run: ["bun", "run", "scripts/broker/tests/release/test-npm-package.ts"], timeoutMs: 300_000, estimateMs: 10743 },
+    { id: "javascript-installation", run: ["bun", "run", "scripts/broker/tests/release/test-javascript-installation.ts"], timeoutMs: 300_000, estimateMs: 10743 },
     { id: "real-evidence-schema", run: ["bun", "run", "scripts/broker/tests/host/test-real-host-evidence.ts"], serial: true, estimateMs: 111 },
     { id: "release-candidate-verifier", run: ["bun", "run", "scripts/broker/tests/release/test-release-candidate-verifier.ts"], timeoutMs: 300_000 },
     { id: "release-checkpoint-lifecycle", run: ["bun", "run", "scripts/release/tests/test-release-checkpoint-lifecycle.ts"], timeoutMs: 300_000 },

@@ -149,9 +149,9 @@ interface ValidatedWebBuild {
  * safe closed set, every listed byte still hashes to what the manifest says, the worker encodes exactly that
  * manifest, the build identity describes its own bytes, and the shell is mounted at `/cosy/`.
  *
- * Split out from `validateWebBuildForPackaging` so the npm packaging path can reuse the identical closed set
- * and the identical `/cosy/` protection without also asserting the release lane's provenance (an exact source
- * commit and a clean checkout), which a local `--local-single-tarball` build legitimately does not have.
+ * Shared by release packaging and local installation fixtures. Fixture validation enforces the same
+ * closed set and `/cosy/` protection without requiring release provenance (an exact source commit and
+ * a clean checkout).
  */
 export function validateWebBuildShape(
   options: Pick<Options, 'buildDirectory'>,
@@ -328,8 +328,8 @@ function copySidecarTree(
 /**
  * The sidecar as a plain directory rather than a signed tarball.
  *
- * The npm channel ships the web app inside the package instead of as a separately downloaded release asset,
- * so it needs the same closed set laid out on disk. Same validated `paths`, same `/cosy/` shell, same
+ * Installation fixtures need the validated web app laid out beside the bundle.
+ * Same validated `paths`, same `/cosy/` shell, same
  * refusal to copy anything the cache manifest does not name — only the container differs.
  */
 export function stageWebSidecarDirectory(options: {

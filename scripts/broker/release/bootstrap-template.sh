@@ -716,8 +716,7 @@ adopt_npm_application() {
 
   if [ ! -r /dev/tty ] || ! ( : < /dev/tty ) 2>/dev/null; then
     printf 'cosyncing install: replacing an npm install needs your answer and no terminal is attached.\n' >&2
-    printf 'Rerun this installer from a terminal, or stay on npm with:\n  npm update -g cosyncing\n' >&2
-    print_setup_command >&2
+    printf 'Rerun this installer from a terminal to confirm migration; the existing installation is unchanged.\n' >&2
     exit 1
   fi
 
@@ -861,30 +860,6 @@ case "$SIGNATURE_STATE" in
     printf 'This installer was itself delivered over TLS and carries the expected digests; the broker\n'
     printf 'still verifies every future upgrade with its own built-in Ed25519 check.\n' ;;
 esac
-
-# The npm package is preserved by design — `uninstall` says the same thing — but after a takeover it is a
-# loaded gun: its own `setup` copies itself back over the application just placed, and the next run of this
-# installer would then refuse again. Offer to remove it, and never fail the install over the answer.
-if [ -n "$ADOPTED_NPM_INSTALL" ]; then
-  NPM_ROOT=''
-  command -v npm >/dev/null 2>&1 && NPM_ROOT="$(npm root -g 2>/dev/null)" || NPM_ROOT=''
-  if [ -n "$NPM_ROOT" ] && [ -d "$NPM_ROOT/cosyncing" ]; then
-    printf '\nThe npm package it came from is still installed at %s/cosyncing.\n' "$NPM_ROOT"
-    printf 'Its own `setup` would copy itself back over the install just made.\n'
-    printf 'Remove it now? [y/N] '
-    REPLY=''
-    read -r REPLY < /dev/tty || REPLY=''
-    case "$REPLY" in
-      y|Y|yes|YES|Yes)
-        if npm uninstall -g cosyncing >/dev/null 2>&1; then
-          printf 'Removed the npm package.\n'
-        else
-          printf 'Could not remove the npm package; remove it by hand:\n  npm uninstall -g cosyncing\n' >&2
-        fi ;;
-      *) printf 'Left it in place. Remove it later with:\n  npm uninstall -g cosyncing\n' ;;
-    esac
-  fi
-fi
 
 if [ "$INSTALL_MODE" != all ]; then
   # Named, not removed. This installer does not run setup, so the service is still the previous broker
@@ -1132,6 +1107,29 @@ if [ "$SETUP_STATUS" -ne 0 ]; then
   printf 'cosyncing install: setup did not complete; the broker files are installed. Rerun:\n' >&2
   print_setup_command >&2
   exit 1
+fi
+
+# Setup succeeded with the replacement. Only now offer to remove the old acquisition package.
+# A declined or failed setup must leave it available for recovery.
+if [ -n "$ADOPTED_NPM_INSTALL" ]; then
+  NPM_ROOT=''
+  command -v npm >/dev/null 2>&1 && NPM_ROOT="$(npm root -g 2>/dev/null)" || NPM_ROOT=''
+  if [ -n "$NPM_ROOT" ] && [ -d "$NPM_ROOT/cosyncing" ]; then
+    printf '\nThe npm package it came from is still installed at %s/cosyncing.\n' "$NPM_ROOT"
+    printf 'Its own `setup` would copy itself back over the install just made.\n'
+    printf 'Remove it now? [y/N] '
+    REPLY=''
+    read -r REPLY < /dev/tty || REPLY=''
+    case "$REPLY" in
+      y|Y|yes|YES|Yes)
+        if npm uninstall -g cosyncing >/dev/null 2>&1; then
+          printf 'Removed the npm package.\n'
+        else
+          printf 'Could not remove the npm package; remove it by hand:\n  npm uninstall -g cosyncing\n' >&2
+        fi ;;
+      *) printf 'Left it in place. Remove it later with:\n  npm uninstall -g cosyncing\n' ;;
+    esac
+  fi
 fi
 
 # The web client is version-stamped, so an upgrade does not replace the previous root — it lands beside

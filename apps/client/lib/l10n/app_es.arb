@@ -494,7 +494,7 @@
   "settingsBrokerStatusCurrent": "Al día",
   "settingsBrokerStatusNotChecked": "Sin comprobar",
   "settingsBrokerStatusPackageManaged": "Gestionado por npm",
-  "settingsBrokerPackageManagedBody": "Este servidor se instaló como paquete npm, así que no se actualiza solo. Ejecuta {updateCommand} (o el equivalente del gestor con el que lo instalaste) y después {setupCommand}.",
+  "settingsBrokerPackageManagedBody": "En el servidor, ejecuta el instalador de {installerUrl} y confirma la migración; una vez completado setup, usa {updateCommand} para las próximas actualizaciones.",
   "settingsBrokerStatusRuntimeUpgradeRequired": "Requiere Bun nuevo",
   "settingsBrokerRuntimeUpgradeRequiredBody": "Hay una versión nueva de cosyncing ({version}), pero necesita un entorno de ejecución de Bun más reciente que esta instalación no puede instalar por sí sola. En el servidor, actualiza Bun o vuelve a ejecutar el instalador de cosyncing y después ejecuta {updateCommand}.",
   "settingsDesktopBuildUpdateTitle": "Hay una nueva versión de escritorio",

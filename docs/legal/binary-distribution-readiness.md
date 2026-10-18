@@ -63,10 +63,8 @@ permanent compiled-binary distribution of a native executable while the gate is
 closed.
 
 `scripts/broker/build-broker.ts` remains in the repository and remains buildable
-for ephemeral CI and for a future approved standalone release. Neither JavaScript
-publication lane calls it: `scripts/release/build-npm-package.ts` refuses any
-staged artifact carrying an ELF, Mach-O, or PE header, and
-`scripts/ci/audit-workflows.sh`
+for ephemeral CI and for a future approved standalone release. The signed JavaScript
+publication lane does not call it: `scripts/ci/audit-workflows.sh`
 refuses JavaScript publication workflows that reference the native builder or
 `--compile`. Signed GitHub staging, assembly and promotion additionally enforce
 flat exact asset inventories and parse the broker payload as JavaScript, so an

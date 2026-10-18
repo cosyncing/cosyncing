@@ -125,9 +125,9 @@ See [installer migration](../installation/script-install.md#migrating-older-inst
 New `bootstrap-js` builds retain the signed self-update path, recorded runtime,
 installation receipt, versioned web sidecar and health-checked rollback. The
 client uses authenticated `GET` and `POST /api/broker/update` for that path.
-`bun-js` npm installations, including published 0.5.1 and 0.5.2, remain package-
-manager owned: update the global npm package, then run `cosyncing setup`. They
-do not consume this signed self-update channel.
+Legacy `bun-js` installations remain package-manager owned until the operator
+confirms [installer migration](../installation/script-install.md#npm-installations);
+they cannot consume this channel before that takeover.
 
 No broker/client wire fields or compatibility rules change, so no wire contract
 revision or client minimum revision changes with this packaging work. Matching

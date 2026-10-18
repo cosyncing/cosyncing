@@ -250,12 +250,9 @@ class _DesktopBuildUpdateRow extends ConsumerWidget {
   }
 }
 
-/// Reported when the broker is an npm package rather than a self-replacing
-/// native build.
-///
-/// It arrives as a `status: unknown` snapshot because no release check ran at
-/// all: the signed manifest describes compiled artifacts this build must never
-/// install, so the broker declines to probe it.
+/// Legacy npm ownership requires explicit installer migration
+/// before signed updates.
+/// No release check ran, so this remains an unknown update status.
 const String _packageManagerOwnedDetail = 'upgrade-package-manager-owned';
 
 /// Reported when a newer release needs a newer Bun runtime than the broker
@@ -266,8 +263,7 @@ const String _packageManagerOwnedDetail = 'upgrade-package-manager-owned';
 const String _runtimeUpgradeRequiredDetail = 'release-runtime-upgrade-required';
 
 /// Update commands, worded as the broker's own guidance words them.
-const String _packageManagerUpdateCommand = 'npm update --global cosyncing';
-const String _packageManagerSetupCommand = 'cosyncing setup';
+const String _packageManagerInstallerUrl = 'https://cosyncing.com/#install';
 const String _brokerUpdateCommand = 'cosy update';
 
 class _BrokerVersionRow extends StatelessWidget {
@@ -366,8 +362,8 @@ class _BrokerVersionRow extends StatelessWidget {
             child: SelectableText(
               key: const Key('settings-broker-package-managed-body'),
               l10n.settingsBrokerPackageManagedBody(
-                _packageManagerUpdateCommand,
-                _packageManagerSetupCommand,
+                _packageManagerInstallerUrl,
+                _brokerUpdateCommand,
               ),
               style: Theme.of(
                 context,

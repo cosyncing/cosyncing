@@ -16,7 +16,7 @@ The optional compiled-notice generator retains the exact pinned Bun 1.3.14
 licence for ephemeral native tests and any future approved native distribution.
 It does not make that blocked distribution eligible for publication.
 
-The npm package is a separate artifact with a separate notice file. It ships one
+The retired npm package has its own notice file. It contains one
 JavaScript application bundle and no runtime, so its `THIRD_PARTY_NOTICES.txt`
 carries the licence text of every bundled external package and omits Bun's —
 Bun is not distributed in it. See

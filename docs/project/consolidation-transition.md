@@ -23,14 +23,14 @@ Compiled native broker distribution is a separate transition and is not
 complete. Before any compiled broker prerelease, resolve the binary-license
 gate, provision protected signing environments, and run the published-candidate
 upgrade/unhealthy-rollback acceptance described in the release documentation.
-The non-embedded npm package and signed GitHub JavaScript release do not
-distribute the Bun runtime or a compiled broker. Their release controls remain
+The signed GitHub JavaScript release does not distribute the Bun runtime or
+a compiled broker. Its release controls remain
 separate from the compiled-broker legal gate.
 
 ## D. Post-public validation — complete for source, npm, client, and JavaScript broker releases
 
 The contributor fork path and maintainer hosted checks are proven. The npm
-JavaScript package and advertised Android, Linux, macOS, and Windows clients use
+JavaScript package previously used, and advertised Android, Linux, macOS, and Windows clients use
 protected release workflows and physically accepted candidates. iOS remains a
 CI-built source target rather than a distributed client. The native-free signed
 GitHub broker path is published from 0.5.3, on a physically accepted candidate.

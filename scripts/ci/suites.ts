@@ -207,7 +207,7 @@ export const suites: Suite[] = [
   },
   {
     id: 'packaging',
-    title: 'Packaging and release: npm package, compiled assets, installers, supply chain',
+    title: 'Packaging and release: JavaScript installation, compiled assets, installers, supply chain',
     tasks: [...legacyTasks.packaging, ...e2eTasks('packaging')],
   },
   {
