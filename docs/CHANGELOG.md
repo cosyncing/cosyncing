@@ -17,6 +17,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- On phones, the composer stays just above the keyboard instead of leaving a
+  keyboard-sized blank gap. Tapping Send keeps the editor focused, and long
+  drafts use the available height without crowding out the conversation.
 - Session activity cards show compact summaries with scripts in expandable
   details, shared dismissal and clear-finished controls in Status and chat.
   Session information opens in a centered dialog with more room for its title;

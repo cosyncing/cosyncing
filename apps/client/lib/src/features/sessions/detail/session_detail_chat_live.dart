@@ -258,7 +258,7 @@ class _ChatPanel extends ConsumerWidget {
     // The chat tab is full-bleed so the transcript scrollbar can reach the
     // window edge; everything that is not the scroll view re-applies the
     // readable width (and, on phones, the 16px gutter) for itself.
-    final composer = _ReadableColumn(
+    Widget composer(double availableHeight) => _ReadableColumn(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -280,6 +280,11 @@ class _ChatPanel extends ConsumerWidget {
             commands: commands,
             controller: promptController,
             focusNode: promptFocusNode,
+            maxLines: availableHeight <= 240
+                ? 1
+                : availableHeight <= 520
+                ? 3
+                : 6,
             enabled: true,
             controlsEnabled: mutationEnabled,
             canSend: canSendPrompt,
@@ -330,44 +335,47 @@ class _ChatPanel extends ConsumerWidget {
     // The composer remains the second child of this Column for every viewport
     // height. Keyboard-driven geometry may reshape only the upper work surface;
     // it must never reparent EditableText between a ListView and a Column.
-    return Column(
-      children: [
-        Expanded(
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              // The expanded panel is the reading surface for a plan or task
-              // list, so its cap follows the viewport instead of a fixed 160:
-              // at that height an opened list showed two rows. The transcript
-              // still keeps the majority of the work surface.
-              final liveStateMaxHeight = (constraints.maxHeight * 0.45).clamp(
-                160.0,
-                420.0,
-              );
-              return Column(
-                children: [
-                  if (bootstrapStatus != null) bootstrapStatus,
-                  if (!state.liveState.isEmpty || state.commandProgress != null)
-                    ConstrainedBox(
-                      constraints: BoxConstraints(
-                        maxHeight: constraints.maxHeight < 360
-                            ? constraints.maxHeight * 0.3
-                            : liveStateMaxHeight,
+    return LayoutBuilder(
+      builder: (context, constraints) => Column(
+        children: [
+          Expanded(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                // The expanded panel is the reading surface for a plan or task
+                // list, so its cap follows the viewport instead of a fixed 160:
+                // at that height an opened list showed two rows. The transcript
+                // still keeps the majority of the work surface.
+                final liveStateMaxHeight = (constraints.maxHeight * 0.45).clamp(
+                  160.0,
+                  420.0,
+                );
+                return Column(
+                  children: [
+                    if (bootstrapStatus != null) bootstrapStatus,
+                    if (!state.liveState.isEmpty ||
+                        state.commandProgress != null)
+                      ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxHeight: constraints.maxHeight < 360
+                              ? constraints.maxHeight * 0.3
+                              : liveStateMaxHeight,
+                        ),
+                        child: SingleChildScrollView(
+                          child: _ReadableColumn(child: liveStateSurface),
+                        ),
                       ),
-                      child: SingleChildScrollView(
-                        child: _ReadableColumn(child: liveStateSurface),
-                      ),
-                    ),
-                  Expanded(child: transcript),
-                ],
-              );
-            },
+                    Expanded(child: transcript),
+                  ],
+                );
+              },
+            ),
           ),
-        ),
-        // No gap: the composer's own rounded container is the top edge of the
-        // composer region. There is no card or tab around it, so any spacer
-        // here would read as a second boundary.
-        composer,
-      ],
+          // No gap: the composer's own rounded container is the top edge of the
+          // composer region. There is no card or tab around it, so any spacer
+          // here would read as a second boundary.
+          composer(constraints.maxHeight),
+        ],
+      ),
     );
   }
 }

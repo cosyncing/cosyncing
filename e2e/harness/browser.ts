@@ -63,7 +63,19 @@ export async function waitForFlutter(page: Page): Promise<void> {
     { timeout: scaled(60_000) },
   );
   const placeholder = page.locator('flt-semantics-placeholder');
-  if (await placeholder.count()) await placeholder.dispatchEvent('click');
+  if (await placeholder.count()) {
+    // Mobile Flutter enables semantics only for a click at the placeholder's
+    // center (the gesture sent by TalkBack/VoiceOver). An event at (0, 0)
+    // leaves the app painted but inaccessible to role-based locators.
+    await placeholder.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      element.dispatchEvent(new MouseEvent('click', {
+        clientX: rect.x + rect.width / 2,
+        clientY: rect.y + rect.height / 2,
+        bubbles: true,
+      }));
+    });
+  }
 }
 
 /** The startup shell's state attribute, or null when the shell is gone. */
