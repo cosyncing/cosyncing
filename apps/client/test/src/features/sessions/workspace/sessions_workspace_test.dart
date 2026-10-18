@@ -106,7 +106,7 @@ void main() {
           ),
         ),
         workspaceOverviewRosterProvider.overrideWith(
-          (ref) async => ListSessionsResponse(sessions: sessions),
+          (ref) => ListSessionsResponse(sessions: sessions),
         ),
         usageReportProvider.overrideWith((ref, query) async => null),
         sessionListControllerProvider.overrideWith(

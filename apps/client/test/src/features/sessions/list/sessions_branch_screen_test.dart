@@ -261,7 +261,7 @@ List<Override> _sessionStoreOverrides() => <Override>[
     (ref) async => AttentionInboxSections.fromEntries([]),
   ),
   workspaceOverviewRosterProvider.overrideWith(
-    (ref) async => const ListSessionsResponse(sessions: []),
+    (ref) => const ListSessionsResponse(sessions: []),
   ),
   usageReportProvider.overrideWith((ref, query) async => null),
   sessionDisplayPreferencesStoreProvider.overrideWithValue(
