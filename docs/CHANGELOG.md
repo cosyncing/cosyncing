@@ -22,6 +22,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Windows service log following detects rotated files using their full file IDs
+  and keeps the read position attached to the file that was actually read.
+
 - The notification setup banner reserves space above the bottom edge, keeping
   phone playback and composer controls accessible, with readable actions in
   both light and dark themes.

@@ -377,14 +377,15 @@ async function withSourceBroker(
   // never releases the console, without depending on where the helper happens to be defined.
   const releaseCalls = windowsBootstrap.split('await releaseServiceConsole()').length - 1;
   const releaseInService = windowsBootstrap.indexOf('await releaseServiceConsole()');
-  check('the Windows service path releases its console and the log-following path keeps stdout',
+  // The service installation scenario verifies the actual bounded/followed
+  // stdout; this narrow assertion owns only which path releases the console.
+  check('only the Windows service path releases its console',
     windowsBootstrap.includes('async function releaseServiceConsole()')
       && windowsBootstrap.includes('GetConsoleWindow')
       && windowsBootstrap.includes('FreeConsole')
       && releaseCalls === 1
       && releaseInService > serviceEntry
-      && releaseInService < windowsBootstrap.indexOf('rotateLog()', serviceEntry)
-      && windowsBootstrap.includes("process.stdout.write(trailingLog("));
+      && releaseInService < windowsBootstrap.indexOf('rotateLog()', serviceEntry));
 
   // Neither service manager may be left holding a licence to kill our children.
   //

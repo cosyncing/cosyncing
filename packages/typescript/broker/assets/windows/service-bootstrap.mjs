@@ -1,6 +1,7 @@
 import {
   closeSync,
   existsSync,
+  fstatSync,
   openSync,
   readFileSync,
   readSync,
@@ -111,54 +112,49 @@ function logRequest(argv) {
   return { lines, follow };
 }
 
-function readRange(path, start, length) {
-  if (length <= 0) return '';
-  const descriptor = openSync(path, 'r');
-  try {
-    const buffer = Buffer.allocUnsafe(length);
-    const count = readSync(descriptor, buffer, 0, length, start);
-    return buffer.subarray(0, count).toString('utf8');
-  } finally {
-    closeSync(descriptor);
-  }
-}
-
-function trailingLog(lines) {
-  if (!existsSync(logPath)) return '';
-  const size = statSync(logPath).size;
-  const start = Math.max(0, size - MAX_LOG_READ_BYTES);
-  let text = readRange(logPath, start, size - start);
-  if (start > 0) text = text.slice(Math.max(0, text.indexOf('\n') + 1));
-  const rows = text.match(/[^\n]*\n|[^\n]+$/g) ?? [];
-  return rows.slice(-lines).join('');
-}
-
-function fileIdentity(stat) {
-  return `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;
+function readRange(descriptor, start, length) {
+  if (length <= 0) return { text: '', position: start };
+  const buffer = Buffer.allocUnsafe(length);
+  const count = readSync(descriptor, buffer, 0, length, start);
+  return { text: buffer.subarray(0, count).toString('utf8'), position: start + count };
 }
 
 async function readServiceLogs(request) {
-  process.stdout.write(trailingLog(request.lines));
-  if (!request.follow) return;
   let identity;
   let position = 0;
-  if (existsSync(logPath)) {
-    const stat = statSync(logPath);
-    identity = fileIdentity(stat);
-    position = stat.size;
-  }
+  let initial = true;
   for (;;) {
-    if (existsSync(logPath)) {
-      const stat = statSync(logPath);
-      const nextIdentity = fileIdentity(stat);
-      if (identity !== nextIdentity || stat.size < position) position = 0;
-      identity = nextIdentity;
-      if (stat.size > position) {
-        const start = Math.max(position, stat.size - MAX_LOG_READ_BYTES);
-        process.stdout.write(readRange(logPath, start, stat.size - start));
-        position = stat.size;
+    let descriptor;
+    try {
+      descriptor = openSync(logPath, 'r');
+      // Windows file IDs can exceed Number's exact integer range. Keep their
+      // full identity, and inspect/read the same open file even during rotation.
+      const stat = fstatSync(descriptor, { bigint: true });
+      const nextIdentity = `${stat.dev}:${stat.ino}:${stat.birthtimeNs}`;
+      const size = Number(stat.size);
+      if (identity !== nextIdentity || size < position) position = 0;
+      const start = Math.max(initial ? 0 : position, size - MAX_LOG_READ_BYTES);
+      const read = readRange(descriptor, start, size - start);
+      let text = read.text;
+      if (initial) {
+        if (start > 0) text = text.slice(Math.max(0, text.indexOf('\n') + 1));
+        const rows = text.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+        text = rows.slice(-request.lines).join('');
       }
+      // Publish the cursor before emitting output: a caller may rotate or
+      // append as soon as it receives the initial trailing lines.
+      identity = nextIdentity;
+      position = read.position;
+      process.stdout.write(text);
+    } catch (error) {
+      // The name can be absent between renaming the old log and opening its
+      // replacement. The next observation must still read that replacement.
+      if (error?.code !== 'ENOENT') throw error;
+    } finally {
+      if (descriptor !== undefined) closeSync(descriptor);
     }
+    initial = false;
+    if (!request.follow) return;
     await Bun.sleep(250);
   }
 }
