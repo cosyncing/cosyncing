@@ -36,6 +36,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 part '../artifacts/session_detail_artifact_coordinator.dart';
 part '../requests/session_detail_request_coordinator.dart';
 part '../transcript/session_detail_draft_coordinator.dart';
+part '../transcript/session_detail_hidden_row_restore.dart';
 part '../transcript/session_detail_history_navigation_coordinator.dart';
 part '../transcript/session_detail_tool_slot_recovery.dart';
 part '../transcript/session_detail_messaging_coordinator.dart';
@@ -177,6 +178,11 @@ class SessionDetailController
   final Set<String> _toolSlotsChecked = {};
   ({String id, String callId})? _toolSlotInFlight;
   Timer? _toolSlotTimer;
+  // The page asked for to replace the reader's page of shells (see
+  // [setHistoryReportView]), while it is asked for (with the request's id) or
+  // waits to be asked again.
+  ({String? id, String cursor, int limit, int attempts})? _hiddenRowRefresh;
+  Timer? _hiddenRowRefreshTimer;
   // When each of those stops holding back the next refresh from its cursor,
   // and those that no longer do (still answerable: the transport still takes
   // their answers).
@@ -353,6 +359,7 @@ class SessionDetailController
       _commandProgressTimer?.cancel();
       _historyPageTimeout?.cancel();
       _toolSlotTimer?.cancel();
+      _hiddenRowRefreshTimer?.cancel();
       for (final timer in _historyRefreshTimeouts.values) {
         timer.cancel();
       }
@@ -1639,6 +1646,7 @@ class SessionDetailController
         return;
       }
       if (_handleToolSlotReply(event)) return;
+      if (_handleHiddenRowRefreshReply(event)) return;
       // A timed-out or superseded page is no longer part of the active cursor
       // chain. Ignore it wholesale: merging its messages would advance the
       // projection behind a retry that is still using the prior cursor.
@@ -1854,6 +1862,13 @@ class SessionDetailController
           );
         case _:
           break;
+      }
+      // With tool calls shown, no row stays a shell beyond the page asked for
+      // to replace the reader's (see [setHistoryReportView]).
+      if (!historyReportView &&
+          _hiddenRowRefresh == null &&
+          transcriptWindow.holdsHiddenRowShells) {
+        transcriptWindow = transcriptWindow.releaseHiddenRowShells().window;
       }
       final acceptedHistoryPage =
           pageRejection == TranscriptHistoryPageRejection.none;
@@ -2553,8 +2568,23 @@ class SessionDetailController
 
   /// Whether the transcript shows only what was said (tool calls hidden): a
   /// page taken in then keeps no page it draws nothing of for the reader to
-  /// reach (see [transcriptReportDraws]). This is local memory policy only.
+  /// reach (see [transcriptReportDraws]), and the rows it does not draw are
+  /// held as shells (see [TranscriptHistoryWindow.prependPage]). This is local
+  /// memory policy only; [setHistoryReportView] changes it.
   bool historyReportView = false;
+
+  /// Hides or shows tool calls. Shown again, the rows held as shells reload
+  /// whole: the reader's page is replaced by one page asked for at once, and
+  /// every other page of shells is released, to reload as the reader reaches
+  /// it.
+  void setHistoryReportView({required bool reportView}) {
+    historyReportView = reportView;
+    if (reportView) {
+      _finishHiddenRowRefresh();
+    } else {
+      _restoreHiddenRows();
+    }
+  }
 
   Future<bool> sendCommand(
     String name, {

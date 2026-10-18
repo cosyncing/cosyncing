@@ -1,12 +1,18 @@
 // F03b: how far ahead a reader's page is asked for, and what moving toward a
 // range the window released does. A faster reader asks from farther away, a
 // page is asked for once while it is on its way, and a released range fills
-// from its older or its newer edge, or says it cannot load. Where a page draws
-// little (tool calls hidden), the pages being read stay while the next loads,
-// and a range of nothing but tool calls neither shows nor loads.
+// from its older or its newer edge, or says it cannot load. A page with no
+// room yet waits for the reader, and a timeout after it is still retried.
+// Where a page draws little (tool calls hidden), the pages being read stay
+// while the next loads, a range of nothing but tool calls neither shows nor
+// loads, and command output is not kept; shown again, the page being read is
+// replaced whole around the reader.
 //
 // Split from `transcript_history_paging_test.dart` to keep each file short.
 // real stream.
+import 'dart:math' as math;
+
+import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/features/sessions/sessions.dart';
 import 'package:flutter/material.dart';
@@ -179,6 +185,66 @@ void main() {
     });
   });
 
+  group('when the window has no room', () {
+    featureTest('a page that times out after one had no room is asked for '
+        'again on its own', (f) async {
+      // 40 KB of output per command: the pages on screen and the newest rows
+      // fill the window, so a page above waits for the reader to move on.
+      final (app, broker) = await openPaging(
+        f,
+        row: (index) => commandHeavyRow(index, output: 40000),
+      );
+      final controller = app.container.read(
+        sessionDetailControllerProvider(
+          const SessionDetailKey(tool: 'codex', sessionId: 's1'),
+        ).notifier,
+      );
+      for (
+        var tick = 0;
+        tick < 240 && !controller.lastHistoryPageAwaitsReader;
+        tick++
+      ) {
+        await app.wheel(-40);
+        await f.tester.pump(const Duration(milliseconds: 16));
+      }
+      expect(controller.lastHistoryPageAwaitsReader, isTrue);
+
+      // Moving on asks again, and the broker never answers.
+      broker.holding = true;
+      final waited = broker.requests.length;
+      for (
+        var tick = 0;
+        tick < 240 && broker.requests.length == waited;
+        tick++
+      ) {
+        await app.wheel(-40);
+        await f.tester.pump(const Duration(milliseconds: 16));
+      }
+      expect(broker.requests, hasLength(waited + 1));
+      for (
+        var tick = 0;
+        tick < 100 && app.distanceToStart > app.position.viewportDimension / 2;
+        tick++
+      ) {
+        await app.wheel(-40);
+        await f.tester.pump(const Duration(milliseconds: 16));
+      }
+      await f.tester.pump(const Duration(seconds: 20));
+      expect(controller.state.historyPageErrorCode, 'HISTORY_PAGE_TIMEOUT');
+
+      broker.holding = false;
+      final timedOut = broker.requests.length;
+      await app.pumpFor(const Duration(seconds: 2));
+      expect(
+        broker.requests.length,
+        greaterThan(timedOut),
+        reason:
+            'a timeout is retried after its backoff, whatever the page '
+            'before it was told',
+      );
+    });
+  });
+
   group('with tool calls hidden', () {
     featureTest('a delivered file in a tool-only page stays reachable after '
         'reading past the page and back', (f) async {
@@ -258,20 +324,24 @@ void main() {
 
     featureTest('pages of nothing but tool calls neither hold the reader back '
         'nor show until the tool calls do', (f) async {
-      // Turns of 400 rows: pages 1700 and 1800 hold only tool calls.
+      // Turns of 400 rows: most pages hold only tool calls.
       final (app, broker) = await openPaging(
         f,
         row: (index) => commandHeavyRow(index, turn: 400),
       );
       await app.hideToolCalls();
-      for (var tick = 0; tick < 100; tick++) {
+      for (
+        var tick = 0;
+        tick < 200 && !app.markedRows.any((row) => row.index == 0);
+        tick++
+      ) {
         await app.wheel(-40);
         await f.tester.pump(const Duration(milliseconds: 16));
       }
       expect(
         app.markedRows.map((row) => row.index),
-        containsAll([1601, 1999]),
-        reason: 'the reply before the tool calls is reached',
+        contains(0),
+        reason: 'the start of the session is reached',
       );
       expect(
         releasedRanges,
@@ -280,69 +350,153 @@ void main() {
       );
       expect(_askedOverAndOver(broker), isEmpty);
 
+      final before = app.reading;
       await app.showToolCalls();
-      expect(
-        releasedRanges,
-        findsWidgets,
-        reason: 'with the tool calls shown, their range is there to load',
-      );
+      await app.frames();
+      app.expectHeld(before, when: 'as the tool calls were shown');
+      // With the tool calls shown, their ranges are there to load.
+      await app.bringRangeToLowerHalf();
     });
 
-    featureTest('a page that times out after one had no room is asked for '
-        'again on its own', (f) async {
-      final (app, broker) = await openPaging(f, row: commandHeavyRow);
+    featureTest('reading back keeps no command output, and showing the tool '
+        'calls again loads it whole around the row being read', (f) async {
+      // 40 KB of output per command: a page of it alone is over a MiB.
+      final (app, broker) = await openPaging(
+        f,
+        row: (index) => commandHeavyRow(index, output: 40000),
+      );
       await app.hideToolCalls();
       final controller = app.container.read(
         sessionDetailControllerProvider(
           const SessionDetailKey(tool: 'codex', sessionId: 's1'),
         ).notifier,
       );
-      for (
-        var tick = 0;
-        tick < 240 && !controller.lastHistoryPageAwaitsReader;
-        tick++
-      ) {
+      var held = 0;
+      for (var tick = 0; tick < 240; tick++) {
         await app.wheel(-40);
         await f.tester.pump(const Duration(milliseconds: 16));
+        held = math.max(held, controller.state.transcriptWindow.estimatedBytes);
       }
-      expect(controller.lastHistoryPageAwaitsReader, isTrue);
-
-      // Moving on asks again, and the broker never answers.
-      broker.holding = true;
-      final waited = broker.requests.length;
-      for (
-        var tick = 0;
-        tick < 240 && broker.requests.length == waited;
-        tick++
-      ) {
-        await app.wheel(-40);
-        await f.tester.pump(const Duration(milliseconds: 16));
-      }
-      expect(broker.requests, hasLength(waited + 1));
-      for (
-        var tick = 0;
-        tick < 100 && app.distanceToStart > app.position.viewportDimension / 2;
-        tick++
-      ) {
-        await app.wheel(-40);
-        await f.tester.pump(const Duration(milliseconds: 16));
-      }
-      await f.tester.pump(const Duration(seconds: 20));
-      expect(controller.state.historyPageErrorCode, 'HISTORY_PAGE_TIMEOUT');
-
-      broker.holding = false;
-      final timedOut = broker.requests.length;
-      await app.pumpFor(const Duration(seconds: 2));
       expect(
-        broker.requests.length,
-        greaterThan(timedOut),
-        reason:
-            'a timeout is retried after its backoff, whatever the page '
-            'before it was told',
+        app.markedRows.first.index,
+        lessThan(1000),
+        reason: 'a page that lands does not release the rows being read',
       );
+      expect(
+        held,
+        lessThanOrEqualTo(kMaxActiveTranscriptDecodedBytes),
+        reason: 'the output of the hidden commands is not kept',
+      );
+      expect(_askedOverAndOver(broker), isEmpty);
+      expect(_toolCards, findsNothing);
+
+      final before = app.reading;
+      final asked = broker.older.length;
+      await app.showToolCalls();
+      await app.frames();
+      app.expectHeld(before, when: 'as the tool calls were shown');
+      expect(
+        broker.older.skip(asked).first.limit,
+        kTranscriptHistoryPageMessages,
+        reason: 'the page being read is asked for again, whole, at once',
+      );
+      expect(
+        _toolCards,
+        findsWidgets,
+        reason: 'the commands around the row being read are drawn',
+      );
+      expect(
+        controller.state.transcriptWindow.canonicalMessages.where(
+          transcriptRowBodyElided,
+        ),
+        isEmpty,
+        reason: 'no command is kept without its output once they show',
+      );
+    });
+
+    featureTest('the page being read is asked for again when refused in '
+        'passing, and released when it cannot come back whole or the '
+        'connection drops', (f) async {
+      final (app, broker) = await openPaging(f, row: commandHeavyRow);
+      final controller = app.container.read(
+        sessionDetailControllerProvider(
+          const SessionDetailKey(tool: 'codex', sessionId: 's1'),
+        ).notifier,
+      );
+      Iterable<AgentMessage> shells() => controller
+          .state
+          .transcriptWindow
+          .canonicalMessages
+          .where(transcriptRowBodyElided);
+      Future<void> readBackHidden() async {
+        await app.hideToolCalls();
+        for (var tick = 0; tick < 80; tick++) {
+          await app.wheel(-40);
+          await f.tester.pump(const Duration(milliseconds: 16));
+        }
+      }
+
+      await readBackHidden();
+      var before = app.reading;
+      var asked = broker.requests.length;
+      broker.failNext = 1;
+      await app.showToolCalls();
+      await app.pumpFor(const Duration(seconds: 1));
+      expect(
+        [for (final request in broker.requests.skip(asked)) request.failed],
+        [true, false],
+        reason: 'refused in passing, the page being read is asked again',
+      );
+      app.expectHeld(before, when: 'as the tool calls were shown');
+      expect(_toolCards, findsWidgets);
+      expect(shells(), isEmpty);
+
+      await readBackHidden();
+      before = app.reading;
+      asked = broker.requests.length;
+      broker
+        ..failNext = 1
+        ..failureCode = 'HISTORY_CURSOR_GONE';
+      await app.showToolCalls();
+      await app.frames();
+      expect(broker.requests.skip(asked).single.failed, isTrue);
+      expect(
+        shells(),
+        isEmpty,
+        reason: 'what cannot be replaced is released, not kept without output',
+      );
+      expect(
+        app.topOf(before.index),
+        isNull,
+        reason: 'the page being read was released with the rest',
+      );
+
+      // Asked for as the connection drops: the new one releases it too.
+      await readBackHidden();
+      broker.holding = true;
+      await app.showToolCalls();
+      expect(shells(), isNotEmpty, reason: 'the page being read is on its way');
+      final sockets = broker.broker.socketsFor('s1').length;
+      broker.broker.socketsFor('s1').last.drop();
+      broker.holding = false;
+      await app.pumpUntil(
+        () => broker.broker.socketsFor('s1').length > sockets,
+        reason: 'the app reconnects',
+        every: const Duration(milliseconds: 500),
+      );
+      await app.settle();
+      expect(shells(), isEmpty);
     });
   });
 }
+
+/// The tool cards drawn.
+final Finder _toolCards = find.byWidgetPredicate((widget) {
+  final key = widget.key;
+  return key is ValueKey<String> &&
+      key.value.startsWith('tool-') &&
+      key.value.endsWith('-details');
+});
 
 /// The ranges [broker] was asked for more than twice, with how often.
 List<String> _askedOverAndOver(FixturePagingBroker broker) {

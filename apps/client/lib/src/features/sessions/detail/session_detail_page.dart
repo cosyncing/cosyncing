@@ -2701,8 +2701,14 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                       reportView: _reportView,
                       toolsExpanded: _toolsExpanded,
                       onSelectView: _selectView,
-                      onReportViewChanged: (value) =>
-                          setState(() => _reportView = value),
+                      onReportViewChanged: (value) {
+                        ref
+                            .read(
+                              sessionDetailControllerProvider(_key).notifier,
+                            )
+                            .setHistoryReportView(reportView: value);
+                        setState(() => _reportView = value);
+                      },
                       onToolsExpandedChanged: (value) => setState(() {
                         _toolsExpanded = value;
                         _toolExpansionRevision++;

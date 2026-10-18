@@ -600,6 +600,18 @@ bool _reportVisibleEntry(SessionTranscriptDisplayEntry entry) =>
     entry is MessageTranscriptDisplayEntry &&
     transcriptReportDraws(entry.message);
 
+// A row loaded while tool calls were hidden, held without its body, draws once
+// the page that replaces it arrives (see [transcriptRowBodyElided]).
+bool _elidedEntry(SessionTranscriptDisplayEntry entry) => switch (entry) {
+  MessageTranscriptDisplayEntry(:final message) => transcriptRowBodyElided(
+    message,
+  ),
+  ToolTranscriptDisplayEntry(:final call, :final result) =>
+    (call != null && transcriptRowBodyElided(call)) ||
+        (result != null && transcriptRowBodyElided(result)),
+  LookupGroupTranscriptDisplayEntry(:final tools) => tools.any(_elidedEntry),
+};
+
 _ChatUserItem _chatUserRow(
   AgentMessage message, {
   TranscriptRowWorkCounter? work,
@@ -658,7 +670,9 @@ List<_ChatItem> _turnRows(
     }
   }
   for (final entry in turn.content) {
-    if (reportView && !_reportVisibleEntry(entry)) continue;
+    if (reportView ? !_reportVisibleEntry(entry) : _elidedEntry(entry)) {
+      continue;
+    }
     items.add(_chatEntryRow(entry, work: work));
   }
   if (turn.hasModelText || turn.runSummary != null) {

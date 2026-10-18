@@ -75,6 +75,9 @@ extension _SessionDetailHistoryNavigation on SessionDetailController {
   /// replaced (see [TranscriptHistoryWindow.applyHistory]).
   void _startHistoryNavigationEpoch() {
     _clearToolSlotReloads();
+    // No answer comes on this socket: the event that started it releases the
+    // reader's page of shells, if tool calls are shown.
+    _finishHiddenRowRefresh();
     _clearHistoryRefreshTracking();
     // The attach a cursor recovery started may not start another.
     _historyCursorRecoveryUsed = _historyCursorRecoveryPending;

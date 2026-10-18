@@ -755,9 +755,9 @@ void defineBudgetCases() {
 
   group('a page taken in', () {
     test('never releases a row the reader can see, the tail block included; '
-        'a page with no room waits', () {
-      // Pages of about 1.1 MB: three fit, and the reader page's exemption
-      // lets a fourth in while all of them are on screen.
+        'past twice the budget on screen, a page waits', () {
+      // Pages of about 1.1 MB, every one on screen: what the reader can see
+      // stays, beside a budget for the rest, until it holds twice the budget.
       List<AgentMessage> heavy(String prefix) => rows(prefix, 100, chars: 5500);
       Set<String> keys(TranscriptHistoryWindow window) => {
         for (final page in window.pages)
@@ -766,7 +766,7 @@ void defineBudgetCases() {
       };
       var window = TranscriptHistoryWindow.fromHistory(frame(heavy('t')));
       TranscriptHistoryPageRejection? refused;
-      for (var index = 1; index <= 4; index++) {
+      for (var index = 1; index <= 16; index++) {
         final onScreen = keys(window);
         final mutation = window.prependPage(
           page(heavy('p$index-'), cursor: 'older-$index'),
@@ -781,9 +781,20 @@ void defineBudgetCases() {
           break;
         }
         expect(onScreen.difference(keys(mutation.window)), isEmpty);
+        expect(
+          mutation.window.estimatedBytes,
+          lessThanOrEqualTo(
+            kMaxActiveTranscriptDecodedBytes + kMaxInViewTranscriptDecodedBytes,
+          ),
+        );
         window = mutation.window;
       }
       expect(refused, TranscriptHistoryPageRejection.noRoom);
+      expect(
+        window.estimatedBytes,
+        greaterThan(2 * kMaxActiveTranscriptDecodedBytes),
+        reason: 'more than one budget stayed on screen',
+      );
     });
   });
 

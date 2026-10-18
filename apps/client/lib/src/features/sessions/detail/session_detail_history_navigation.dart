@@ -155,7 +155,8 @@ extension TranscriptHistoryNavigation on TranscriptHistoryWindow {
   /// walk reached [until], the broker names it verbatim and the three runs
   /// join; otherwise the gap narrows to the page's own end cursor. Rows kept
   /// beside the gap's released range (a residue) return next to the rows they
-  /// followed once those rows are back (see [_settleResidues]).
+  /// followed once those rows are back (see [_settleResidues]). In the
+  /// [reportView], hidden rows are held as shells, as [prependPage] holds them.
   TranscriptHistoryPageMutation insertNewerPage(
     HistoryPageWireEvent event, {
     required String requestedCursor,
@@ -317,11 +318,14 @@ extension TranscriptHistoryNavigation on TranscriptHistoryWindow {
       releasedAfter: nextReleased,
       keptAfter: true,
     );
+    final held = reportView
+        ? _elideHiddenRowsAround(settled.pages, settled.inserted)
+        : (pages: settled.pages, pinned: settled.inserted);
     final fitted = _fitTranscriptBudget(
-      settled.pages,
+      held.pages,
       nextReleased,
       protectedKey: preserveMessageKey,
-      pinned: settled.inserted,
+      pinned: held.pinned,
       shedTail: false,
       inView: inView,
       reportView: reportView,
@@ -332,10 +336,10 @@ extension TranscriptHistoryNavigation on TranscriptHistoryWindow {
       return TranscriptHistoryPageMutation(
         window: this,
         rejection: _unfitPageRejection(
-          settled.pages,
+          held.pages,
           nextReleased,
           protectedKey: preserveMessageKey,
-          pinned: settled.inserted,
+          pinned: held.pinned,
           notWaiting: questionState.withdrawnRequestIds,
         ),
       );
