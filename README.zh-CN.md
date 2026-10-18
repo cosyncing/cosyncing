@@ -108,7 +108,7 @@ SQLite 快照，并在 7.4.23 及更高版本上通过 Broker 托管的专用回
 ## 前置要求
 
 服务器使用 [Bun](https://bun.sh) 1.3.8 或更高版本运行。一键安装脚本会按需安装 Bun；
-只有 npm 安装方式需要 Node.js/npm。Broker 默认只允许本机访问。跨设备使用需要由操作者单独
+无需预装 Node.js/npm。Broker 默认只允许本机访问。跨设备使用需要由操作者单独
 配置代理、隧道、VPN、Mesh 网络或
 其他[连接方式](docs/connectivity/README.md)（英文）。
 私有连接可先看 [Tailscale Serve](docs/connectivity/tailscale-serve.md)；自建 Mesh 可看
@@ -151,38 +151,7 @@ powershell -NoProfile -c "irm https://cosyncing.com/install.ps1 | iex"
 无图形界面的 Linux 和 Linux arm64 只安装服务端。脚本会按需安装 Bun，无需预装 Node.js/npm。
 仅安装服务端、无人值守安装和签名通道更新请见[安装指南](docs/installation/script-install.md)（英文）。
 
-### npm
-
-如果偏好 npm，请先安装 Bun 和 Node.js/npm，再运行：
-
-```bash
-npm install --global cosyncing
-```
-
-打开一个新的登录 shell，然后配置服务：
-
-```bash
-cosyncing setup
-
-# setup 完成后，使用 cosy 作为 cosyncing 的简写
-cosy restart
-cosy doctor
-cosy status
-cosy pair
-```
-
-`setup` 会检查这台机器，展示将要做的全部变更，然后要么整体应用、要么完全不动。它把 Broker
-复制到 `~/.cosyncing/bin/cosyncing`，安装用户服务（由你的 Bun 运行该副本），并打印你的 Broker
-地址。在 setup 提交之前，Broker 拒绝启动。
-
-更新时，先让 npm 更新全局包，再重新运行 setup；setup 会把新应用复制到托管服务并协调安装状态：
-
-```bash
-npm update --global cosyncing
-cosy setup
-```
-
-`cosy update` 会报告这条由包管理器负责的更新路径；它不会代替用户运行 npm，也不会修改全局包。
+npm 发行停留在 **0.6.6**；新安装或[迁移现有安装](docs/installation/script-install.md#npm-installations)请使用上方的一键安装脚本。
 
 ### setup 完成后
 
@@ -247,8 +216,7 @@ iOS 客户端将在后续通过 TestFlight 发布。
 Broker 由你运行，跑在你自己的机器和账号下。Broker 状态存储在那台机器上；会话内容只会通过
 你选择的网络发送给已认证的客户端。cosyncing 不在连接路径中运营托管服务，也不含分析或广告
 遥测。可选功能只会联系其明确说明的服务，例如本机 Tokdash 配额数据。cosyncing 不配置或联系连接
-服务提供方；代理、隧道、VPN 与 Mesh 网络均由操作者管理。通过 npm
-安装的 Broker 不会静默替换自身：npm 负责更新软件包，更新后由 `cosy setup` 协调托管服务。
+服务提供方；代理、隧道、VPN 与 Mesh 网络均由操作者管理。使用 `cosy update` 更新由安装脚本管理的 Broker 及其记录的桌面客户端。
 
 安全漏洞请通过 GitHub 私密漏洞报告提交，流程见 [SECURITY.md](SECURITY.md)。
 

@@ -180,7 +180,7 @@ function pinnedBunLicenseText(): string {
 }
 
 /**
- * Third-party notices for the JavaScript npm distribution.
+ * Third-party notices for the JavaScript distribution.
  *
  * Same per-package licence texts as the compiled notices, and deliberately WITHOUT the Bun runtime section:
  * that package ships no Bun, no JavaScriptCore, and no WebKit, so reproducing Bun's licence in it would

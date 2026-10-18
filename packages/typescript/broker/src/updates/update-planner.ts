@@ -139,7 +139,7 @@ const OWNERSHIP_BLOCKERS: Partial<Record<UpdateInstallOwnership, UpdateBlocker>>
   'package-manager': {
     code: 'package-manager-owned',
     detail: 'A package manager owns these files, so cosyncing does not replace them from inside itself.',
-    guidance: 'Update through the package manager that installed it, then run `cosyncing setup` to adopt the new version.',
+    guidance: 'Run the signed installer from https://cosyncing.com/#install to migrate this installation, then use `cosy update`.',
   },
   source: { code: 'source-build', detail: 'This build runs from a source checkout, which is updated by pulling it.' },
   'store-managed': { code: 'store-managed', detail: 'An app store owns this installation, so the store must deliver the update.' },

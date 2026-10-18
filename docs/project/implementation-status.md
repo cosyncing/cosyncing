@@ -66,13 +66,7 @@ binary releases of the compiled native broker remain blocked by
 the embedded Bun runtime's distribution obligations need a recorded resolution,
 independently of the JavaScript distribution path.
 
-The npm package is a different artifact and is no longer inside that gate. It
-ships one self-contained JavaScript application bundle executed by a Bun runtime
-the operator installs separately, with no embedded runtime and no compiled
-executable — see
-[npm JavaScript distribution readiness](../legal/npm-javascript-distribution-readiness.md).
-`.github/workflows/npm-publish.yml` builds, verifies, and submits releases
-through npm's protected staging and 2FA approval flow. Flutter-only Android,
+Flutter-only Android,
 Linux, Apple Silicon macOS, and Windows client downloads are published in the client
 release; iOS/TestFlight remains deferred.
 

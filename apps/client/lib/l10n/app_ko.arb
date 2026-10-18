@@ -494,7 +494,7 @@
   "settingsBrokerStatusCurrent": "최신",
   "settingsBrokerStatusNotChecked": "확인 안 함",
   "settingsBrokerStatusPackageManaged": "npm으로 관리",
-  "settingsBrokerPackageManagedBody": "이 서버는 npm 패키지로 설치되어 스스로 업데이트하지 않습니다. {updateCommand}(설치에 사용한 관리자에 해당하는 명령)를 실행한 다음 {setupCommand}를 실행하세요.",
+  "settingsBrokerPackageManagedBody": "서버 호스트에서 {installerUrl}의 설치 스크립트를 실행하고 이전을 확인한 뒤, setup이 성공하면 이후 업데이트에 {updateCommand}를 사용하세요.",
   "settingsBrokerStatusRuntimeUpgradeRequired": "새 Bun 필요",
   "settingsBrokerRuntimeUpgradeRequiredBody": "새 cosyncing 릴리스({version})에는 더 새로운 Bun 런타임이 필요하지만, 이 설치에서는 직접 설치할 수 없습니다. 서버에서 Bun을 업그레이드하거나 cosyncing 설치 프로그램을 다시 실행한 다음 {updateCommand}를 실행하세요.",
   "settingsDesktopBuildUpdateTitle": "새 데스크톱 빌드가 있습니다",

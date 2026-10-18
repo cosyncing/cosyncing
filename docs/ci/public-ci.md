@@ -44,10 +44,7 @@ workflows. Only jobs that create or edit a GitHub Release receive
 `contents: write`; signing secrets are scoped to protected environments.
 Actions artifacts are not a distribution channel or cross-workflow state store.
 
-The npm workflow rebuilds and verifies one exact JavaScript package, then may
-submit it to npm's staging queue through trusted publishing. Protected
-environment review and a separate interactive npm approval are both required
-before it becomes installable. The client workflows build Android, Linux,
+The client workflows build Android, Linux,
 macOS, and Windows assets into a matching prerelease; stable promotion verifies
 and publishes that exact accepted asset set without rebuilding it. The signed
 GitHub broker lane stages JavaScript, the web sidecar and matching desktop
@@ -61,8 +58,7 @@ local package tests do not satisfy that gate.
 
 CI job logs follow the repository's GitHub retention setting. The main,
 nightly, and client-release gates upload `output/check` verification evidence
-for seven days when it exists. The npm verification job uploads the exact
-candidate tarball for its staging job. These short-lived Actions artifacts are
+for seven days when it exists. These short-lived Actions artifacts are
 diagnostic or same-run handoff material, not a public distribution channel.
 Release assets follow GitHub Release retention and are cryptographically
 inventoried by the release workflow.

@@ -333,8 +333,15 @@ describe('creating a session while the managed OpenCode serve starts', () => {
   });
 
   test('a create during a serve restart waits through it and lands on the new serve, once', async () => {
+    // A create can reach the listener before the broker finishes its initial startup probe.
+    // This case restarts an established serve; wait for that readiness event before stopping it.
+    await eventually(() => broker.output().includes('managed opencode serve ready at'), {
+      what: 'the initial managed serve startup to finish',
+    });
     const [first] = opencode.serves();
-    opencode.configure({ installed: '1.18.0', holdServe: true });
+    // Version drift would also trigger the independent startup freshness check. This case
+    // exercises a confirmed restart; automatic upgrades are covered in runtime-updates.
+    opencode.configure({ holdServe: true });
     const restart = client.post('/api/agent-runtime-updates/opencode/restart', { confirmRestart: true });
     await eventually(() => opencode.ledger().filter((entry) => entry.kind === 'serve-waiting').length === 2, {
       what: 'the replacement serve to start booting',

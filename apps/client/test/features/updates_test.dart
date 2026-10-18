@@ -537,8 +537,8 @@ void main() {
       expect(find.text('已是最新'), findsNothing);
       // The honest state also says what to do next.
       expect(guidance, findsOneWidget);
-      expect(find.textContaining('npm update --global cosyncing'), findsOne);
-      expect(find.textContaining('cosyncing setup'), findsOneWidget);
+      expect(find.textContaining('https://cosyncing.com/#install'), findsOne);
+      expect(find.textContaining('cosy update'), findsOneWidget);
     }
     await app.container
         .read(localeControllerProvider.notifier)

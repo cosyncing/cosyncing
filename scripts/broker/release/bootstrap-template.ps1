@@ -1124,8 +1124,7 @@ function Approve-NpmApplicationTakeover {
 
   if ([Console]::IsInputRedirected) {
     Fail ('replacing an npm install needs your answer and no console input is attached. Rerun this ' +
-      'installer from a PowerShell window, or stay on npm with: npm update -g cosyncing; then ' +
-      "& '$BunBin' '$Application' setup")
+      'installer from a PowerShell window to confirm migration; the existing installation is unchanged.')
   }
 
   if ((Read-Host "Replace it with cosyncing $Version? [y/N]") -notmatch '^(y|yes)$') {
@@ -1542,32 +1541,6 @@ try {
     Write-Output "PATH: could not be updated. Run cosyncing with its full path, or add $installDir by hand."
   }
 
-  # The npm package is preserved by design - `uninstall` says the same thing - but after a takeover it is
-  # a loaded gun: its own `setup` copies itself back over the application just placed, and the next run of
-  # this installer would then refuse again. Offer to remove it, and never fail the install over the answer.
-  if ($AdoptedNpmInstall) {
-    $npmRoot = ''
-    if (Get-Command npm -CommandType Application -ErrorAction SilentlyContinue) {
-      $npmProbe = Invoke-Native -FilePath 'npm' -ArgumentList @('root', '-g')
-      if ($npmProbe.ExitCode -eq 0) { $npmRoot = $npmProbe.StdOut.Trim() }
-    }
-    if ($npmRoot -and (Test-Path -LiteralPath (Join-Path $npmRoot 'cosyncing') -PathType Container)) {
-      Write-Output ''
-      Write-Output "The npm package it came from is still installed at $npmRoot\cosyncing."
-      Write-Output 'Its own setup would copy itself back over the install just made.'
-      if ((Read-Host 'Remove it now? [y/N]') -match '^(y|yes)$') {
-        $removal = Invoke-Native -FilePath 'npm' -ArgumentList @('uninstall', '-g', 'cosyncing')
-        if ($removal.ExitCode -eq 0) {
-          Write-Output 'Removed the npm package.'
-        } else {
-          Write-Output 'Could not remove the npm package; remove it by hand: npm uninstall -g cosyncing'
-        }
-      } else {
-        Write-Output 'Left it in place. Remove it later with: npm uninstall -g cosyncing'
-      }
-    }
-  }
-
   if ($INSTALL_MODE -cne 'all') {
     # Named, not removed. This installer does not run setup, so the service is still the previous broker
     # and still serving out of one of these; setup is what moves it to the new root.
@@ -1774,6 +1747,30 @@ try {
   if ($setupExit -ne 0) {
     Fail ("setup did not complete; the broker files are installed. Rerun: " +
       "& '$bunBin' '$application' setup")
+  }
+
+  # Setup succeeded with the replacement. Keep the old package until this point for recovery.
+  if ($AdoptedNpmInstall) {
+    $npmRoot = ''
+    if (Get-Command npm -CommandType Application -ErrorAction SilentlyContinue) {
+      $npmProbe = Invoke-Native -FilePath 'npm' -ArgumentList @('root', '-g')
+      if ($npmProbe.ExitCode -eq 0) { $npmRoot = $npmProbe.StdOut.Trim() }
+    }
+    if ($npmRoot -and (Test-Path -LiteralPath (Join-Path $npmRoot 'cosyncing') -PathType Container)) {
+      Write-Output ''
+      Write-Output "The npm package it came from is still installed at $npmRoot\cosyncing."
+      Write-Output 'Its own setup would copy itself back over the install just made.'
+      if ((Read-Host 'Remove it now? [y/N]') -match '^(y|yes)$') {
+        $removal = Invoke-Native -FilePath 'npm' -ArgumentList @('uninstall', '-g', 'cosyncing')
+        if ($removal.ExitCode -eq 0) {
+          Write-Output 'Removed the npm package.'
+        } else {
+          Write-Output 'Could not remove the npm package; remove it by hand: npm uninstall -g cosyncing'
+        }
+      } else {
+        Write-Output 'Left it in place. Remove it later with: npm uninstall -g cosyncing'
+      }
+    }
   }
 
   # Setup has rewritten the service definition and restarted it against the new web root, so every other

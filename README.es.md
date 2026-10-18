@@ -122,7 +122,7 @@ Consulta la [configuración de agentes compatibles](docs/supported_agents/README
 ## Requisitos previos
 
 El servidor usa [Bun](https://bun.sh) 1.3.8 o posterior. Los instaladores de un solo comando lo
-instalan cuando hace falta; solo la instalación mediante npm requiere Node.js/npm.
+instalan cuando hace falta; no se requiere Node.js/npm.
 El broker es local por omisión. Para usarlo entre dispositivos hace
 falta un proxy, un túnel, una VPN, una red mallada u otro
 [método de conectividad gestionado por ti](docs/connectivity/README.md). Para una ruta privada
@@ -169,41 +169,7 @@ y Linux arm64 reciben solo el servidor. Bun se instala si hace falta; no se requ
 Consulta la [guía del instalador](docs/installation/script-install.md) para instalar solo el servidor,
 realizar una instalación desatendida o actualizar mediante el canal firmado.
 
-### npm
-
-Si prefieres npm, instala primero Bun y Node.js/npm y después ejecuta:
-
-```bash
-npm install --global cosyncing
-```
-
-Abre una nueva sesión de shell y configura el servicio:
-
-```bash
-cosyncing setup
-
-# Tras la configuración, usa cosy como abreviatura de cosyncing
-cosy restart
-cosy doctor
-cosy status
-cosy pair
-```
-
-`setup` inspecciona la máquina, muestra exactamente qué va a cambiar y aplica el plan entero o nada.
-Copia el broker en `~/.cosyncing/bin/cosyncing`, instala un servicio de usuario que ejecuta esa copia
-con tu Bun e imprime la URL de tu broker. El broker se niega a arrancar hasta que la configuración se
-haya confirmado.
-
-Para actualizar, deja que npm sustituya el paquete global y vuelve a ejecutar setup, para que
-cosyncing copie la nueva aplicación en su servicio gestionado y ponga la instalación al día:
-
-```bash
-npm update --global cosyncing
-cosy setup
-```
-
-`cosy update` informa de esta vía de actualización, que pertenece al gestor de paquetes; no ejecuta
-npm ni modifica el paquete global.
+La distribución por npm terminó en **0.6.6**; usa los instaladores anteriores para nuevas instalaciones o para [migrar](docs/installation/script-install.md#npm-installations).
 
 ### Después de configurar
 
@@ -275,9 +241,7 @@ sesiones se envía solo a clientes autenticados, por la red que tú elijas. cosy
 servicio alojado en esa ruta y no incluye telemetría de analítica ni de publicidad. Las funciones
 opcionales contactan únicamente con los servicios que nombran, como los datos de consumo locales de
 Tokdash. cosyncing no configura ni contacta con proveedores de conectividad: cualquier proxy, túnel,
-VPN o red mallada es cosa tuya. El broker instalado por npm no se sustituye a sí mismo en silencio:
-npm se encarga de actualizar el paquete y `cosy setup` pone al día el servicio instalado después de
-una actualización.
+VPN o red mallada es cosa tuya. Ejecuta `cosy update` para actualizar el broker y el cliente de escritorio registrados por el instalador.
 
 Informa de las vulnerabilidades por el canal privado de GitHub, según [SECURITY.md](SECURITY.md).
 

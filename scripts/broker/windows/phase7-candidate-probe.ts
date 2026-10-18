@@ -32,10 +32,11 @@
  * REPORT DISCIPLINE. Counts, booleans and durations only. Scheduler paths carry the user's SID, so they
  * are redacted to `<sid>`; no path outside the disposable root is emitted.
  */
-import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { connect } from 'node:net';
 import { win32 } from 'node:path';
 import { windowsNativeMachineArchitecture } from '../../../packages/typescript/adapter-api/src/host-process.ts';
+import { windowsLauncherText } from '../../../packages/typescript/broker/src/updates/bun-runtime-upgrade.ts';
 import { defaultBrokerConfig, writeBrokerConfig } from '../../../packages/typescript/broker/src/runtime/configuration.ts';
 
 function requiredEnvironment(name: string): string {
@@ -46,6 +47,7 @@ function requiredEnvironment(name: string): string {
 
 const root = requiredEnvironment('COSYNCING_WINDOWS_PHASE6_ROOT');
 const candidateRoot = requiredEnvironment('COSYNCING_WINDOWS_PHASE6_CANDIDATE_ROOT');
+const stagedBun = requiredEnvironment('COSYNCING_WINDOWS_PHASE6_BUN');
 const runId = requiredEnvironment('COSYNCING_WINDOWS_PHASE6_RUN_ID');
 const sourceCommit = requiredEnvironment('COSYNCING_WINDOWS_PHASE6_SOURCE_COMMIT');
 const sourceDirty = requiredEnvironment('COSYNCING_WINDOWS_PHASE6_SOURCE_DIRTY');
@@ -54,17 +56,14 @@ if (!win32.isAbsolute(candidateRoot) || candidateRoot.startsWith('\\\\')) {
   throw new Error('Phase 7 candidate probe requires a local-disk candidate root');
 }
 
-const artifactDir = win32.join(candidateRoot, '.staged-artifact');
-const tarball = existsSync(artifactDir)
-  ? readdirSync(artifactDir).filter((name) => name.endsWith('.tgz'))[0]
-  : undefined;
-const npmPrefix = win32.join(root, 'prefix');
+const prefix = win32.join(root, 'prefix');
+const application = win32.join(prefix, 'cosyncing');
 const stateHome = win32.join(root, 'state');
 const cacheHome = win32.join(root, 'cache');
 const isolatedHome = win32.join(root, 'home');
-for (const directory of [npmPrefix, stateHome, isolatedHome]) mkdirSync(directory, { recursive: true });
+for (const directory of [prefix, stateHome, isolatedHome]) mkdirSync(directory, { recursive: true });
 
-const shim = win32.join(npmPrefix, 'cosyncing.cmd');
+const shim = win32.join(prefix, 'cosyncing.cmd');
 // USERPROFILE and HOME too, not just the cosyncing state home: setup's agent-skill and shim targets are
 // derived from the USER home, and this machine's real home holds the operator's actual agent directories.
 const isolated = {
@@ -358,10 +357,14 @@ const schedulerBefore = schedulerObjects();
 const preflightClean = schedulerBefore.probed && schedulerBefore.value.length === 0;
 
 // ---------------------------------------------------------------- 1. acquire the exact candidate
-const install = preflightClean && tarball
-  ? await run(['npm.cmd', 'install', '--global', '--prefix', npmPrefix, '--no-audit', '--no-fund',
-    win32.join(artifactDir, tarball)], { timeoutMs: 600_000 })
+// Build from the frozen source staged by the runner. This probe covers broker lifecycle, not web packaging.
+const install = preflightClean
+  ? await run([stagedBun, 'run', 'scripts/broker/build-broker-bundle.ts',
+    '--outfile', application, '--commit', sourceCommit], { timeoutMs: 600_000 })
   : null;
+if (install?.exitCode === 0) {
+  writeFileSync(shim, windowsLauncherText(stagedBun));
+}
 const acquired = install?.exitCode === 0 && existsSync(shim);
 
 // ------------------------------------------------------------ 2. the two baselines, measured apart
@@ -612,7 +615,7 @@ process.stdout.write(`${JSON.stringify({
   source: { commit: sourceCommit, dirty: sourceDirty === 'true' },
   host: { platform: process.platform, arch: process.arch },
   runtime: { bun: Bun.version },
-  candidate: { tarballPresent: tarball !== undefined, installExitCode: install?.exitCode ?? null },
+  candidate: { distribution: 'bootstrap-js', buildExitCode: install?.exitCode ?? null },
   timings: {
     // Each measures one thing and stands in for nothing else.
     shimAndRuntimeBaselineMs: version?.durationMs ?? null,

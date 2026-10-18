@@ -21,7 +21,6 @@ archive. The table below describes the active coverage.
 | Broker JavaScript/web parity | `broker-release-gate.yml` | yes | Actual bundled candidate executes through explicit Bun against its web sidecar |
 | Broker candidate staging | `broker-release.yml` | tag only | Protected JavaScript/web and matching-client flow; requires a new candidate acceptance pass |
 | Broker stable promotion | `broker-release-promote.yml` | manual | Protected signed exact-asset verification; rejects native brokers and bundled runtimes |
-| npm JavaScript package | `npm-publish.yml` | release only | Exact candidate passes offline package verification, trusted staging, protected review, and interactive approval |
 | Flutter client candidate | `client-release.yml` | tag only | Exact tagged source passes the full gate and stages Android, Linux, macOS, and Windows assets |
 | Flutter client stable promotion | `client-release-promote.yml` | manual | Protected promotion verifies the physically accepted prerelease asset set without rebuilding |
 | Private-network/hardware evidence | optional maintainer validation | no | Never a merge or release dependency |

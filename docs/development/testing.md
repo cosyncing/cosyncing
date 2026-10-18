@@ -21,7 +21,7 @@ Each suite is one feature area and one CI job. The manifest is
 | `policy` | Types, the client contract, public-tree and source-boundary policy, workflow policy |
 | `broker` | Install, lifecycle, pairing, sessions, history, attention, artifacts |
 | `adapters` | Every agent adapter and the Claude Code mod |
-| `packaging` | npm package, compiled assets, installers, release supply chain |
+| `packaging` | JavaScript installation, compiled assets, installers, release supply chain |
 | `client` | Flutter client (format, analyze, tests, sharded three ways) and the Dart packages |
 | `web` | The built web client in a real browser against fixture brokers |
 | `windows` | The broker on Windows: host primitives, secure files, service, installer |

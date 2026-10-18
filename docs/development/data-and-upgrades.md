@@ -33,9 +33,9 @@ raises the minimum Bun version, the same transaction installs that release's
 pinned Bun beside the current one and switches the service, launchers and
 receipt to it; a rollback restores both
 ([details](../installation/script-install.md#when-a-release-needs-a-newer-bun)).
-npm-owned installations (`bun-js`) update through the global npm package,
-followed by `cosyncing setup`; they do not switch ownership to the signed
-installer channel.
+Legacy npm-owned installations (`bun-js`) require the installer’s explicit
+[takeover confirmation](../installation/script-install.md#npm-installations)
+before they can use the signed update channel.
 
 `cosy update` also reconciles an installer-recorded desktop client from the
 signed release manifest after the broker is healthy. Close the client before

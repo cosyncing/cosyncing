@@ -4,8 +4,8 @@
  *
  * Three questions, answered in one staged native run before any expensive work is committed to:
  *
- *  1. can the npm distribution be CONSTRUCTED on Windows at all;
- *  2. does the packaged command LAUNCH from a disposable npm prefix — which on Windows means through
+ *  1. can the JavaScript bundle be built on Windows;
+ *  2. does the packaged command launch from a disposable directory through
  *     the `.cmd` shim, the two-pid shape this whole effort is about;
  *  3. does the product state exactly the host verdict it is supposed to state.
  *
@@ -22,11 +22,12 @@
  * probe runs on one machine and can only report that machine, so the refusal cases are pinned as
  * verdicts in the release-policy suite instead.
  *
- * The web app is deliberately NOT built here (`--no-web`). This is the cheap smoke; the packaged
+ * The web app is deliberately not built here. This is the cheap smoke; the packaged
  * candidate that carries the physical acceptance pass is a different artifact and must be built whole.
  */
-import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { windowsNativeMachineArchitecture } from '../../../packages/typescript/adapter-api/src/host-process.ts';
+import { windowsLauncherText } from '../../../packages/typescript/broker/src/updates/bun-runtime-upgrade.ts';
 import { win32 } from 'node:path';
 
 function requiredEnvironment(name: string): string {
@@ -46,9 +47,10 @@ if (!win32.isAbsolute(candidateRoot) || candidateRoot.startsWith('\\\\')) {
   throw new Error('Phase 7 smoke requires a local-disk candidate root');
 }
 
-const npmOutputDir = win32.join(root, 'npm');
-const npmPrefix = win32.join(root, 'prefix');
-for (const dir of [npmOutputDir, npmPrefix]) mkdirSync(dir, { recursive: true });
+const prefix = win32.join(root, 'prefix');
+mkdirSync(prefix, { recursive: true });
+const application = win32.join(prefix, 'cosyncing');
+const shim = win32.join(prefix, 'cosyncing.cmd');
 
 interface Run { exitCode: number; stdout: string; stderr: string; durationMs: number; timedOut: boolean }
 
@@ -81,37 +83,15 @@ async function run(command: string[], options: { cwd?: string; timeoutMs?: numbe
   return { exitCode, stdout, stderr, durationMs: Date.now() - startedAt, timedOut };
 }
 
-// ------------------------------------------------------------- 1. build the npm tarball natively
+// Build the same JavaScript artifact as the signed release, then exercise a Windows command shim.
 const build = await run([
-  stagedBun, 'run', 'scripts/release/build-npm-package.ts',
-  '--no-web', '--output-dir', npmOutputDir, '--commit', sourceCommit, '--keep-stage',
+  stagedBun, 'run', 'scripts/broker/build-broker-bundle.ts',
+  '--outfile', application, '--commit', sourceCommit,
 ], { timeoutMs: 900_000 });
-const tarballs = existsSync(npmOutputDir)
-  ? readdirSync(npmOutputDir).filter((name) => name.endsWith('.tgz'))
-  : [];
-const tarball = tarballs[0];
-
-/** The staged manifest, read from the stage directory the builder keeps beside the tarball. */
-let stagedOs: string[] | null = null;
-let stagedCpu: string[] | null = null;
-const stagedManifest = win32.join(npmOutputDir, 'package', 'package.json');
-if (existsSync(stagedManifest)) {
-  const manifest = await Bun.file(stagedManifest).json() as { os?: string[]; cpu?: string[] };
-  stagedOs = manifest.os ?? null;
-  stagedCpu = manifest.cpu ?? null;
+if (build.exitCode === 0) {
+  writeFileSync(shim, windowsLauncherText(stagedBun));
 }
 
-// ------------------------------------------------ 2. acquisition, which this platform now permits
-const npmCommand = ['npm.cmd', 'install', '--global', '--prefix', npmPrefix, '--no-audit', '--no-fund'];
-const honest = tarball
-  ? await run([...npmCommand, win32.join(npmOutputDir, tarball)], { timeoutMs: 600_000 })
-  : null;
-const forced = tarball
-  ? await run([...npmCommand, '--force', win32.join(npmOutputDir, tarball)], { timeoutMs: 600_000 })
-  : null;
-
-// npm --prefix on Windows puts the shims directly in the prefix, not in a bin/ subdirectory.
-const shim = win32.join(npmPrefix, 'cosyncing.cmd');
 const version = existsSync(shim) ? await run([shim, 'version', '--json'], { timeoutMs: 120_000 }) : null;
 let reportedVersion: string | null = null;
 if (version?.exitCode === 0) {
@@ -145,7 +125,7 @@ if (doctor) {
 }
 
 // Observed BEFORE cleanup. Asserting `existsSync` after deleting the tree reported the shim as
-// missing and the forced install as failed, while the command it had just launched returned 0.5.0 —
+// missing while the command it had just launched returned a version —
 // the probe was measuring its own rmSync.
 const shimPresent = existsSync(shim);
 
@@ -153,13 +133,7 @@ let removed = false;
 try { rmSync(root, { recursive: true, force: true }); removed = !existsSync(root); } catch { removed = false; }
 
 const assertions = {
-  npmPackageBuilt: build.exitCode === 0 && tarball !== undefined,
-  // Enablement flipped this deliberately: the baseline above recorded the refusal, and this records the
-  // claim that replaced it. Both were taken with the same instrument, which is the point of having had a
-  // baseline at all.
-  stagedManifestClaimsWindows: stagedOs !== null && stagedOs.includes('win32'),
-  acquisitionSucceedsOnWindows: honest !== null && honest.exitCode === 0,
-  forcedInstallPlacedTheShim: forced !== null && forced.exitCode === 0 && shimPresent,
+  javascriptBundleBuilt: build.exitCode === 0 && shimPresent,
   // The command itself runs here, through the `.cmd` shim and its two-pid shape.
   packagedCommandLaunches: version !== null && version.exitCode === 0 && reportedVersion !== null,
   // This host is Windows x64. An ARM64 machine — native or emulating this very process — is refused, and
@@ -177,16 +151,9 @@ process.stdout.write(`${JSON.stringify({
   source: { commit: sourceCommit, dirty: sourceDirty === 'true' },
   host: { platform: process.platform, arch: process.arch },
   runtime: { bun: Bun.version },
-  npmPackage: {
+  bundle: {
     buildExitCode: build.exitCode,
     buildDurationMs: build.durationMs,
-    tarballCount: tarballs.length,
-    os: stagedOs,
-    cpu: stagedCpu,
-  },
-  acquisition: {
-    honestExitCode: honest?.exitCode ?? null,
-    forcedExitCode: forced?.exitCode ?? null,
     shimPresent,
   },
   packagedCommand: {

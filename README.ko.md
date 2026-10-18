@@ -118,7 +118,7 @@ sync와 파일 입력은 지원하지 않습니다. [Grok Build](docs/supported_
 ## 사전 요구 사항
 
 서버는 [Bun](https://bun.sh) 1.3.8 이상으로 실행됩니다. 한 줄 설치 스크립트가 필요할 때 Bun을
-설치합니다. Node.js/npm은 npm 설치 방식을 선택할 때만 필요합니다.
+설치합니다. Node.js/npm은 필요하지 않습니다.
 Broker는 기본적으로 로컬 전용입니다. 여러 기기에서 쓰려면 프록시, 터널, VPN, 메시
 네트워크 등 [운영자가 관리하는 연결 방법](docs/connectivity/README.md)이 필요합니다. 간단한 사설
 경로로는 [Tailscale Serve](docs/connectivity/tailscale-serve.md)를, 직접 운영하는 오버레이로는
@@ -164,41 +164,7 @@ Windows 11 x64를 지원합니다. Windows 10은 지원하지 않습니다. Micr
 설치합니다. 필요할 때 Bun을 설치하므로 Node.js/npm을 미리 설치할 필요가 없습니다.
 서버만 설치하기, 무인 설치, 서명된 업데이트는 [설치 안내](docs/installation/script-install.md)를 참고하세요.
 
-### npm
-
-npm을 선호한다면 Bun과 Node.js/npm을 먼저 설치한 다음 실행하세요:
-
-```bash
-npm install --global cosyncing
-```
-
-새 로그인 셸을 연 다음 서비스를 설정합니다:
-
-```bash
-cosyncing setup
-
-# 설정 후에는 cosy를 cosyncing의 축약형으로 사용합니다
-cosy restart
-cosy doctor
-cosy status
-cosy pair
-```
-
-`setup`은 컴퓨터를 점검하고, 무엇을 바꿀지 정확히 보여 준 뒤, 계획 전체를 적용하거나 아무것도
-적용하지 않습니다. Broker를 `~/.cosyncing/bin/cosyncing`으로 복사하고, 그 복사본을 사용자의 Bun으로
-실행하는 사용자 서비스를 설치한 다음, Broker URL을 출력합니다. 설정이 확정되기 전까지 Broker는
-시작을 거부합니다.
-
-업데이트하려면 npm이 전역 패키지를 교체하게 한 뒤 setup을 다시 실행해, 새 애플리케이션을 관리
-서비스로 옮기고 설치 상태를 정리하세요:
-
-```bash
-npm update --global cosyncing
-cosy setup
-```
-
-`cosy update`는 이 패키지 관리자 기반 업데이트 절차를 안내할 뿐, npm을 실행하거나 전역 패키지를
-바꾸지 않습니다.
+npm 배포는 **0.6.6**에서 종료되었으며, 새 설치나 [기존 설치 이전](docs/installation/script-install.md#npm-installations)에는 위의 설치 스크립트를 사용하세요.
 
 ### 설정 후
 
@@ -269,9 +235,7 @@ Broker는 여러분의 컴퓨터에서, 여러분의 계정 권한으로 실행�
 세션 내용은 여러분이 선택한 네트워크를 통해 인증된 클라이언트에만 전송됩니다. 그 연결 경로에
 저희가 운영하는 서비스는 없으며, 분석이나 광고 텔레메트리도 포함하지 않습니다. 선택 기능은 명시된
 서비스(예: 로컬 Tokdash 사용량 데이터)에만 접속합니다. cosyncing은 연결 사업자를 설정하거나
-접속하지 않습니다. 프록시, 터널, VPN, 메시는 모두 운영자가 관리합니다. npm으로 설치한 Broker는
-스스로를 조용히 교체하지 않습니다. 패키지 업데이트는 npm이 담당하고, 업데이트 후에는
-`cosy setup`이 설치된 서비스를 정리합니다.
+접속하지 않습니다. 프록시, 터널, VPN, 메시는 모두 운영자가 관리합니다. 설치 스크립트가 관리하는 Broker와 기록된 데스크톱 클라이언트는 `cosy update`로 업데이트합니다.
 
 취약점은 [SECURITY.md](SECURITY.md)의 절차에 따라 GitHub 비공개 취약점 보고로 알려 주세요.
 

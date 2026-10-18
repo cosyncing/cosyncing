@@ -78,8 +78,7 @@ jobs:
     permissions:
       contents: write
     # One bundle serves every host, so this job has no matrix and no runner/target correspondence to keep.
-    # It is not the npm artifact: the same builder stamps `bootstrap-js` here, which is what makes the
-    # installed files cosyncing's own to replace rather than a package manager's.
+    # The builder stamps `bootstrap-js`, recording installer ownership for signed updates.
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:

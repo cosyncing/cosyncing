@@ -121,7 +121,7 @@ version-checked. See [supported-agent setup](docs/supported_agents/README.md) fo
 ## Prerequisites
 
 The server runs with [Bun](https://bun.sh) 1.3.8 or newer. The one-command installers acquire it
-when needed; only the npm installation path requires Node.js/npm. The broker is local-only by
+when needed; Node.js/npm are not required. The broker is local-only by
 default. Cross-device use requires a proxy, tunnel, VPN,
 mesh network, or another [operator-owned connectivity method](docs/connectivity/README.md).
 For a simple private route, see [Tailscale Serve](docs/connectivity/tailscale-serve.md); for a
@@ -168,41 +168,7 @@ without a desktop client. Bun is acquired when needed; Node.js/npm are not requi
 [installer guide](docs/installation/script-install.md) for broker-only commands, unattended
 installation and signed-channel updates.
 
-### npm
-
-If you prefer npm, preinstall Bun and Node.js/npm, then install:
-
-```bash
-npm install --global cosyncing
-```
-
-Open a new login shell, then configure the service:
-
-```bash
-cosyncing setup
-
-# After setup, use cosy as the shorthand for cosyncing
-cosy restart
-cosy doctor
-cosy status
-cosy pair
-```
-
-`setup` inspects the machine, shows exactly what it will change, and applies the whole plan or none
-of it. It copies the broker to `~/.cosyncing/bin/cosyncing`, installs a user service that runs that
-copy with your Bun, and prints your broker URL. The broker refuses to start until setup has
-committed.
-
-To update, let npm replace the global package, then re-run setup so cosyncing copies the new
-application into its managed service and reconciles the installation:
-
-```bash
-npm update --global cosyncing
-cosy setup
-```
-
-`cosy update` reports this package-manager-owned update path; it does not run npm or modify the
-global package.
+npm distribution ended at **0.6.6**; use the installers above for new installations or [migration](docs/installation/script-install.md#npm-installations).
 
 ### After setup
 
@@ -274,8 +240,7 @@ is sent only to authenticated clients over the network you choose. cosyncing ope
 service in that connection path and includes no analytics or advertising telemetry. Optional
 features contact only the services they name, such as local Tokdash quota data. cosyncing does not
 configure or contact connectivity providers; any proxy, tunnel, VPN, or mesh is operator-owned.
-The npm-installed broker does not silently replace itself: npm owns package updates, and `cosy setup`
-reconciles the installed service after an update.
+Run `cosy update` to update an installer-owned broker and its recorded desktop client.
 
 Report vulnerabilities through GitHub private vulnerability reporting, per [SECURITY.md](SECURITY.md).
 

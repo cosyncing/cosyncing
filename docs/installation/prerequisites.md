@@ -1,7 +1,6 @@
 # Installation prerequisites
 
-cosyncing requires Bun to run the JavaScript broker. The npm installation path
-also requires npm to acquire and update the package. Tokdash is an optional but strongly recommended quota integration.
+cosyncing requires Bun to run the JavaScript broker; the installer acquires it when needed. Tokdash is an optional but strongly recommended quota integration.
 No VPN, proxy, tunnel, or mesh product is required for local operation.
 
 The broker listens only on `127.0.0.1`. Cross-device access is an independent
@@ -12,8 +11,7 @@ after completing the local installation.
 
 cosyncing requires Bun 1.3.8 or newer. Use 1.3.14 or newer where you can:
 1.3.8 can occasionally stall while starting, and the one-command installers
-place 1.3.14. The npm package contains JavaScript and the web client; it does
-not embed the Bun runtime.
+place 1.3.14. The broker contains JavaScript and does not embed the Bun runtime.
 
 The official installer works on Linux and macOS:
 
@@ -37,8 +35,7 @@ reuse a suitable Bun or download a digest-pinned runtime directly from upstream
 into `$COSYNCING_HOME/runtime/bun-<version>`. Bun is installed separately; its
 runtime is not a cosyncing release asset. When a later release needs a newer
 Bun, `cosy update` on such an installation installs it the same way; see
-[the Bun runtime](script-install.md#the-bun-runtime). With the npm installation
-path, upgrade Bun yourself before updating the package.
+[the Bun runtime](script-install.md#the-bun-runtime).
 
 Open a new login shell, then verify the selected executable:
 
@@ -46,33 +43,6 @@ Open a new login shell, then verify the selected executable:
 type -a bun
 bun --version
 ```
-
-## Required for the npm installation path: npm and Node.js
-
-Install a current Node.js release, which includes npm. npm owns the acquisition
-package and its updates; cosyncing itself still runs with Bun.
-
-Common package-manager commands are:
-
-```bash
-# Apple Silicon or Intel macOS with Homebrew
-brew install node
-
-# Ubuntu or Debian; distribution versions may lag the current Node.js LTS
-sudo apt update
-sudo apt install -y nodejs npm
-```
-
-For a current LTS release, follow the
-[official Node.js and npm installation guide](https://docs.npmjs.com/downloading-and-installing-node-js-and-npm/).
-Then install cosyncing:
-
-```bash
-npm install --global cosyncing
-```
-
-In a new shell, `type -a cosyncing` should show the npm-managed installation
-you intend to run.
 
 ## Optional: Tokdash quota tracking
 

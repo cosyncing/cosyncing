@@ -58,7 +58,6 @@
     "test:broker-assets": "bun run packages/typescript/broker/test/broker/test-runtime-assets.ts",
     "test:broker-application-identity": "bun run packages/typescript/broker/test/broker/test-application-identity.ts",
     "test:broker-invocation": "bun run packages/typescript/broker/test/broker/test-invocation.ts",
-    "test:broker-npm-package": "bun run scripts/broker/tests/release/test-npm-package.ts",
     "test:broker-state": "bun run packages/typescript/broker/test/broker/test-state-security.ts",
     "test:broker-install-ps1": "bun run scripts/broker/tests/release/test-install-ps1.ts",
     "test:broker-windows-dacl": "bun run packages/typescript/broker/test/broker/test-windows-dacl.ts",

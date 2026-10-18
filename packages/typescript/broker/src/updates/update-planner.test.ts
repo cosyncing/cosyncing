@@ -304,7 +304,7 @@ test('a package-manager-owned broker reports guidance instead of offering a comm
   });
   const [only] = plan.blockers;
   expect(only?.code).toBe('package-manager-owned');
-  expect(only?.guidance).toContain('package manager');
+  expect(only?.guidance).toContain('https://cosyncing.com/#install');
   expect(actionable(plan)).toEqual([]);
 });
 

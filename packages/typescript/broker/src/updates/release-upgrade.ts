@@ -967,44 +967,19 @@ function pruneReleaseWebRoots(applicationPath: string, keep: readonly string[], 
 
 export interface PackageManagerUpdateGuidance {
   detailCode: string;
-  /** The exact command that moves the acquisition package, and the setup that adopts it. */
-  updateCommand: string;
-  setupCommand: string;
   summary: string;
 }
 
-/**
- * What "update me" actually means for a distribution cosyncing does not own the acquisition of.
- *
- * The npm package is installed, moved, and removed by a package manager. cosyncing replacing that package
- * from inside itself would fight the tool that owns those files, leaving the manager's record of what is
- * installed permanently false. So the honest answer is instructions, and every surface that could otherwise
- * imply "an update was applied" returns this same text: the CLI's `upgrade`, the app-triggered handoff, and
- * the release-channel probe.
- *
- * This is keyed on `bun-js` EXACTLY, never on "is a JavaScript build". `bootstrap-js` is the same bytes,
- * placed by cosyncing's own signed installer into a directory nothing else claims, and there the honest
- * answer is the opposite one: cosyncing may replace what cosyncing installed. Two acquisition methods, two
- * answers, and the distribution kind is the only thing that separates them.
- *
- * `bun install --global` is not offered as an alternative here for the same reason npm is named exactly:
- * whichever manager placed the package is the one that must move it, and only the caller's own install
- * record knows which that was. Naming npm — the published channel — plus `setup` keeps the guidance true
- * for the documented path without inventing a claim about the operator's machine.
- */
+/** Old npm installations retain their ownership boundary until the operator migrates them. */
 export function packageManagerUpdateGuidance(
   buildInfo: Readonly<Pick<BuildInfo, 'distribution'>>,
 ): PackageManagerUpdateGuidance | undefined {
   if (buildInfo.distribution !== 'bun-js') return undefined;
-  const updateCommand = `npm update --global ${PRODUCT_IDENTITY.productName}`;
-  const setupCommand = `${PRODUCT_IDENTITY.primaryBinary} setup`;
   return {
     detailCode: 'upgrade-package-manager-owned',
-    updateCommand,
-    setupCommand,
-    summary: `This ${PRODUCT_IDENTITY.productName} build is a JavaScript package your package manager owns, `
-      + `so it is not replaced from inside the broker. Run \`${updateCommand}\` (or the equivalent for the `
-      + `manager you installed it with), then \`${setupCommand}\` to adopt the new version.`,
+    summary: `This ${PRODUCT_IDENTITY.productName} installation is owned by npm. `
+      + 'Run the signed installer from https://cosyncing.com/#install and confirm migration; '
+      + 'after setup succeeds, use `cosy update` for future updates.',
   };
 }
 
