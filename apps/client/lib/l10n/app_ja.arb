@@ -1718,5 +1718,18 @@
   "fileSizeMegabytes": "{value} MB",
   "fileSizeGigabytes": "{value} GB",
   "fileSizeTerabytes": "{value} TB",
-  "transferProgressSize": "{transferred} / {total}"
+  "transferProgressSize": "{transferred} / {total}",
+  "fileMediaLoading": "ファイルを読み込み中…",
+  "fileMediaFailed": "このファイルをプレビューできません。別のアプリで開いてください。",
+  "fileMediaFit": "画面に合わせる",
+  "fileMediaPlay": "再生",
+  "fileMediaPause": "一時停止",
+  "fileMediaMute": "消音",
+  "fileMediaUnmute": "消音を解除",
+  "fileOpenWith": "別のアプリで開く",
+  "fileOpenWithFailed": "ファイルを開けませんでした。対応するアプリをインストールして、もう一度お試しください。",
+  "fileMediaOpenExternally": "「他のアプリで開く」でこの動画を再生してください。",
+  "filePdfPreviousPage": "前のページ",
+  "filePdfNextPage": "次のページ",
+  "filePdfPage": "{count} ページ中 {page} ページ"
 }

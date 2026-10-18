@@ -1640,6 +1640,8 @@ export const BROKER_ROUTES = [
   '/api/transport/pairings/{id}/accept',
   '/api/transport/session-control',
   '/api/ws-auth-tickets',
+  '/api/media-preview-tickets',
+  '/api/media-previews/{id}',
 ] as const;
 
 /** Agent-owned local integration routes. These are not client API routes and must not appear in a
@@ -2140,9 +2142,9 @@ export type ClientMessageKind = (typeof BROKER_CLIENT_MESSAGE_KINDS)[number];
  * inside the window, so a revision-28-or-later client has to ship before a
  * revision-29 broker does.
  */
-/** Revision 30 adds bounded, on-demand workspace filename search. Existing
- * browsing permissions and minimum client revision are unchanged. */
-export const BROKER_CONTRACT_REVISION = 31 as const;
+/** Revision 32 adds revocable, media-only preview capabilities for native decoders.
+ * Workspace gates and the minimum client revision are unchanged. */
+export const BROKER_CONTRACT_REVISION = 32 as const;
 // Revision 17 removes public artifact bearer capabilities. The client-first
 // release sequence must complete before this broker ships; older clients do not
 // authenticate artifact downloads and therefore must fail closed as read-only.

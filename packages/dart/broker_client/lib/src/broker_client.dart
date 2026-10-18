@@ -8,6 +8,7 @@ import 'dart:convert';
 import 'package:broker_client/src/artifact_download.dart';
 import 'package:broker_client/src/artifact_too_large_exception.dart';
 import 'package:broker_client/src/endpoint_resolver.dart';
+import 'package:broker_client/src/media_preview_ticket.dart';
 import 'package:broker_client/src/upload_offset_mismatch_exception.dart';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:dio/dio.dart';
@@ -65,6 +66,61 @@ class BrokerClient {
 
   /// The endpoint resolver.
   EndpointResolver get resolver => _resolver;
+
+  /// Issues a revocable media capability after checking the resource and size.
+  Future<MediaPreviewTicket> createMediaPreview({
+    required String tool,
+    required String sessionId,
+    String? path,
+    String? artifactUrl,
+  }) async {
+    final identity = artifactUrl == null
+        ? null
+        : _canonicalArtifactIdentity(_resolveArtifactUrl(artifactUrl));
+    if ((path == null) == (identity == null)) {
+      throw const BrokerException(
+        message: 'This file cannot be streamed by the broker',
+      );
+    }
+    final response = await _post<Map<String, dynamic>>(
+      '${_resolver.baseUrl}/api/media-preview-tickets',
+      data: {
+        'tool': identity?.tool ?? tool,
+        'sessionId': identity?.sessionId ?? sessionId,
+        if (path != null) 'path': path,
+        if (identity != null) 'artifactId': identity.artifactId,
+      },
+    );
+    final raw = response['url'];
+    final size = response['size'];
+    final mime = response['mimeType'];
+    if (raw is! String ||
+        !RegExp(r'^/api/media-previews/[A-Za-z0-9_-]{43}$').hasMatch(raw) ||
+        size is! int ||
+        size < 0 ||
+        mime is! String) {
+      throw const BrokerException(message: 'Invalid media preview response');
+    }
+    return MediaPreviewTicket(
+      url: Uri.parse(_resolver.baseUrl).resolve(raw),
+      size: size,
+      mimeType: mime,
+    );
+  }
+
+  /// Revokes a preview without making session navigation wait for cleanup.
+  Future<void> releaseMediaPreview(MediaPreviewTicket ticket) async {
+    final base = Uri.parse(_resolver.baseUrl);
+    if (ticket.url.origin != base.origin ||
+        !ticket.url.path.startsWith('/api/media-previews/')) {
+      return;
+    }
+    try {
+      await _dio.delete<void>(ticket.url.toString());
+    } on DioException {
+      /* expires independently */
+    }
+  }
 
   /// Checks broker health.
   ///

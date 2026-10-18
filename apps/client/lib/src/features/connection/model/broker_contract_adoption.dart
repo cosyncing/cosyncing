@@ -102,6 +102,8 @@ const Map<String, BrokerContractAdoption> brokerRouteAdoption = {
   '/api/health': _adopted,
   '/api/machines': _adopted,
   '/api/machines/resolve': _adopted,
+  '/api/media-preview-tickets': _adopted,
+  '/api/media-previews/{id}': _adopted,
   '/api/projects/rename': _adopted,
   '/api/push/wake': BrokerContractAdoption(
     BrokerContractAdoptionDisposition.brokerInternal,

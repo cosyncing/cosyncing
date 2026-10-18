@@ -23,7 +23,7 @@
  *
  *  * RUNTIME — the large engine/runtime binaries whose URL set is fixed by the
  *    same manifest but which are only needed once the browser has chosen a
- *    variant (canvaskit/skwasm builds, sqlite3.wasm, drift_worker.js). These
+ *    variant or viewer (canvaskit/skwasm, SQLite, deferred Dart, PDFium). These
  *    are stored into the SAME version-scoped cache on first successful fetch,
  *    so a repeat/offline start after one successful visit works without
  *    downloading ~40 MB of unused variants at install time.

@@ -239,12 +239,15 @@ export const suites: Suite[] = [
         run: ['flutter', 'test', '--no-pub', ...files],
         cwd: 'apps/client',
         timeoutMs: 900_000,
+        // Flutter's native-assets manifest is shared by tests in this checkout.
+        // Separate hosted shards already have their own checkout.
+        serial: true,
         estimateMs: 150_000,
       })),
       // Nightly only: the transcript fuzz, matrix, motion and prefetch stress files (`nightly.yml` sets the
       // variable and a wider fuzz seed range).
       ...(process.env.COSYNCING_CLIENT_STRESS === '1'
-        ? [{ id: 'flutter-stress', run: ['flutter', 'test', '--no-pub', 'test/stress'], cwd: 'apps/client', timeoutMs: 1_800_000, estimateMs: 120_000 }]
+        ? [{ id: 'flutter-stress', run: ['flutter', 'test', '--no-pub', 'test/stress'], cwd: 'apps/client', serial: true, timeoutMs: 1_800_000, estimateMs: 120_000 }]
         : []),
       { id: 'desktop-build-command', run: ['bun', 'run', 'scripts/client/tests/test-desktop-build-command.ts'], estimateMs: 2_000 },
       { id: 'release-policy', run: ['bun', 'run', 'scripts/client/tests/test-client-release-policy.ts'], estimateMs: 2_000 },

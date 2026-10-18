@@ -18,6 +18,7 @@ import type { Browser, Download, Locator, Page } from 'playwright-core';
 import { type Broker, eventually } from '../harness/index.ts';
 import { collectBrowserErrors, launchBrowser, newScenarioContext, waitForFlutter } from '../harness/browser.ts';
 import { startWebBroker } from '../harness/web-scenario.ts';
+import { writeMediaFixtures } from '../harness/media-fixtures.ts';
 
 const REPORT_BYTES = Buffer.from('exact browser download bytes\n', 'utf8');
 
@@ -26,6 +27,7 @@ interface Fixture {
   b: Broker;
   ownerId: string;
   peerId: string;
+  workspace: string;
   /** Re-register both sessions on A (after a restart). */
   rehelloA(): Promise<void>;
   sameOwnerIdOnB: string;
@@ -64,7 +66,7 @@ async function startFixture(): Promise<Fixture> {
   const sent = await a.client().post('/pi/bridge/send-file', { id: ownerId, path: reportPath });
   expect(sent.status).toBe(200);
   return {
-    a, b, ownerId, peerId, sameOwnerIdOnB,
+    a, b, ownerId, peerId, workspace, sameOwnerIdOnB,
     async rehelloA() {
       await hello(a, files.owner, 'Artifact owner', 'owner session row');
       await hello(a, files.peer, 'Artifact peer', 'peer session row');
@@ -142,12 +144,118 @@ describe('delivered files in the web client', () => {
       const errors = collectBrowserErrors(page);
       const downloads: Download[] = [];
       page.on('download', (download) => downloads.push(download));
-      await run(fixture, page, errors, downloads);
+      try {
+        await run(fixture, page, errors, downloads);
+      } catch (error) {
+        if (process.env.FILE_PREVIEW_REVIEW === '1') {
+          mkdirSync('output/review/file-previews', { recursive: true });
+          await page.screenshot({ path: 'output/review/file-previews/failure.png' });
+          writeFileSync('output/review/file-previews/failure.txt', `${String(error)}\n${errors.join('\n')}\n${await page.locator('body').ariaSnapshot()}`);
+        }
+        throw error;
+      }
     } finally {
       await context.close().catch(() => undefined);
       await fixture.dispose();
     }
   }
+
+  test.concurrent('media stays lazy, images and PDFs render, videos play, and close revokes access', async () => {
+    await scenario(async (f, page) => {
+      writeMediaFixtures(f.workspace);
+      const review = async (name: string): Promise<void> => {
+        if (process.env.FILE_PREVIEW_REVIEW !== '1') return;
+        mkdirSync('output/review/file-previews', { recursive: true });
+        await page.screenshot({ path: `output/review/file-previews/${name}.png` });
+      };
+      const listed = await f.a.client().get(`/api/sessions/pi/${encodeURIComponent(f.ownerId)}/fs`);
+      expect(listed.status).toBe(200);
+      expect(listed.body.entries.map((entry: any) => entry.name)).toContain('picture.png');
+      const mediaRequests: string[] = [];
+      const engineRequests: string[] = [];
+      const released: string[] = [];
+      page.on('request', (request) => {
+        if (request.url().includes('/api/media-preview')) mediaRequests.push(request.url());
+        if (request.url().includes('/assets/packages/pdfrx/')) engineRequests.push(request.url());
+        if (request.method() === 'DELETE' && request.url().includes('/api/media-previews/')) released.push(request.url());
+      });
+      await openFromRoster(page, f.a.url, 'Artifact owner');
+      await openView(page, 'Files');
+      await review('files-before-preview');
+      if (process.env.FILE_PREVIEW_REVIEW === '1') writeFileSync('output/review/file-previews/files-semantics.txt', await page.locator('body').innerText());
+      await page.getByRole('button', { name: 'Preview file', exact: true }).nth(3).waitFor();
+      expect(mediaRequests).toHaveLength(0);
+      expect(engineRequests).toHaveLength(0);
+      const preview = async (name: string): Promise<void> => {
+        const index = ['clip.webm', 'document.pdf', 'picture.png', 'report.txt'].indexOf(name);
+        await page.getByRole('button', { name: 'Preview file', exact: true }).nth(index).click();
+      };
+      const close = async (count: number): Promise<void> => {
+        await page.getByRole('button', { name: 'Close', exact: true }).last().click();
+        await eventually(() => released.length === count, { what: 'closed preview capability to be revoked' });
+        await eventually(async () => (await fetch(released[count - 1]!)).status === 403, { what: 'closed preview access to stop' });
+      };
+      await preview('picture.png');
+      await page.getByRole('button', { name: 'Fit to view', exact: true }).waitFor();
+      await page.getByRole('img', { name: 'picture.png', exact: true }).waitFor();
+      expect(engineRequests).toHaveLength(0);
+      await review('image-light');
+      await close(1);
+      await review('after-image-close');
+
+      await preview('document.pdf');
+      await page.getByRole('group', { name: /Page 1 of 2$/ }).waitFor();
+      await review('pdf-light');
+      await page.emulateMedia({ colorScheme: 'dark' });
+      await page.getByRole('button', { name: 'Next page', exact: true }).click();
+      await page.getByRole('group', { name: /Page 2 of 2$/ }).waitFor();
+      expect(engineRequests.length).toBeGreaterThan(0);
+      await review('pdf-dark');
+      await close(2);
+
+      await preview('clip.webm');
+      await page.getByRole('button', { name: 'Play', exact: true }).waitFor();
+      expect(await page.locator('video').evaluate((node) => (node as HTMLVideoElement).paused)).toBe(true);
+      await page.getByRole('button', { name: 'Play', exact: true }).click();
+      await page.waitForFunction(() => {
+        const video = document.querySelector('video');
+        return video != null && video.currentTime > 0 && !video.paused;
+      });
+      // A hovered Flutter tooltip can append the same label to button semantics.
+      await page.getByRole('button', { name: /^Pause(?: Pause)?$/ }).click();
+      await page.waitForFunction(() => document.querySelector('video')?.paused === true);
+      await review('video-dark');
+      await close(3);
+      await page.waitForFunction(() => document.querySelector('video') === null);
+      // Delivered files use the same viewer without reading the workspace path.
+      const sent = await f.a.client().post('/pi/bridge/send-file', { id: f.ownerId, path: join(f.workspace, 'picture.png') });
+      expect(sent.status).toBe(200);
+      await openView(page, 'Chat');
+      await page.getByRole('group', { name: /^picture\.png\s+Sent to you\b/ })
+        .first().getByRole('button', { name: 'Open file', exact: true }).click();
+      await page.getByRole('button', { name: 'Fit to view', exact: true }).waitFor();
+      await page.getByRole('img', { name: 'picture.png', exact: true }).waitFor();
+      await close(4);
+
+      await page.setViewportSize({ width: 390, height: 844 });
+      await openView(page, 'Chat');
+      await page.getByRole('group', { name: /^picture\.png\s+Sent to you\b/ })
+        .first().getByRole('button', { name: 'Open file', exact: true }).click();
+      await page.getByRole('img', { name: 'picture.png', exact: true }).waitFor();
+      await review('image-phone-dark');
+      await close(5);
+      await openView(page, 'Files');
+      await preview('document.pdf');
+      await page.getByRole('group', { name: /Page 1 of 2$/ }).waitFor();
+      await review('pdf-phone-dark');
+      await page.emulateMedia({ colorScheme: 'light' });
+      await page.getByRole('button', { name: 'Next page', exact: true }).click();
+      await page.getByRole('group', { name: /Page 2 of 2$/ }).waitFor();
+      await review('pdf-phone-light');
+      await close(6);
+      expect(await page.getByText('This file could not be previewed.', { exact: false }).count()).toBe(0);
+    });
+  });
 
   test.concurrent('the owner session shows its file; a peer session in the same folder never does', async () => {
     await scenario(async (f, page) => {

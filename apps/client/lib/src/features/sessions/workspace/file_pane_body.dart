@@ -2,11 +2,13 @@ import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_html_handoff.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/file_open_with.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_viewer_pane.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_file_browser.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_view_memory.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_pane_key.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -44,6 +46,8 @@ filePaneReadProvider = FutureProvider.autoDispose
         );
       }
 
+      final media = sessionMediaPreview(repository, pane.session, pane.path, 0);
+      if (media != null) return FileViewerSource(preview: media);
       final FsReadResult read;
       try {
         read = await repository.readFile(pane.session, path: pane.path);
@@ -130,6 +134,7 @@ class WorkspaceFilePaneBody extends ConsumerWidget {
               limit: preview.limit,
               truncated: preview.truncated,
               text: preview.text,
+              media: preview.media,
               anchorLine: anchor,
             ),
           ),
@@ -149,6 +154,10 @@ class WorkspaceFilePaneBody extends ConsumerWidget {
     final memory = ref.read(filePaneViewMemoryProvider);
     return FileViewerPane(
       content: content,
+      onOpenWith: kIsWeb
+          ? null
+          : () =>
+                openWorkspaceFileWithApp(context, ref, pane.session, pane.path),
       initialView: memory.read(pane.key),
       onViewChanged: (view) => memory.write(pane.key, view),
       onOpenExternally: switch (content) {

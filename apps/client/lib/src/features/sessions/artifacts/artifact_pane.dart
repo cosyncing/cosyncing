@@ -1,9 +1,13 @@
+import 'dart:async';
 import 'dart:convert';
 
+import 'package:broker_client/broker_client.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_html_handoff.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/file_media_source.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/file_open_with.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_viewer_pane.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_descriptor.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_file_browser.dart';
@@ -16,6 +20,7 @@ import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_view_
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/side_pane_scope.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_pane_key.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -53,7 +58,9 @@ artifactPaneReadProvider = FutureProvider.autoDispose
                       url: descriptor.downloadSourceUrl,
                       mime: descriptor.mimeType,
                       size: descriptor.size,
-                      previewable: descriptor.isTextPreviewCandidate,
+                      previewable: descriptor.isPreviewCandidate,
+                      text: descriptor.isTextPreviewCandidate,
+                      kind: descriptor.mediaKind,
                     );
                   }
                 }
@@ -64,10 +71,71 @@ artifactPaneReadProvider = FutureProvider.autoDispose
               url: opened.downloadSourceUrl,
               mime: opened.mimeType,
               size: opened.size,
-              previewable: opened.isTextPreviewCandidate,
+              previewable: opened.isPreviewCandidate,
+              text: opened.isTextPreviewCandidate,
+              kind: opened.mediaKind,
             );
       if (artifact == null || artifact.url == null || !artifact.previewable) {
         throw _PreviewFailure.unavailable;
+      }
+      if (artifact.kind case final kind?) {
+        final limit = fileMediaByteLimit(kind);
+        if ((artifact.size ?? 0) > limit) throw _PreviewFailure.tooLarge;
+        final client = await ref.watch(brokerClientProvider.future);
+        return FileViewerSource(
+          preview: SessionFilePreview(
+            path: pane.name,
+            displayName: pane.name,
+            mimeType: artifact.mime,
+            size: artifact.size ?? 0,
+            limit: limit,
+            truncated: false,
+            media: FileMediaPreview(
+              kind: kind,
+              load: () async {
+                if (artifact.url!.startsWith('data:')) {
+                  final inlineLimit = limit < 32 * 1024 * 1024
+                      ? limit
+                      : 32 * 1024 * 1024;
+                  if (artifact.url!.length > inlineLimit * 3 + 1024) {
+                    throw ArtifactTooLargeException(limit: inlineLimit);
+                  }
+                  final bytes = await compute(
+                    _decodeInlineMedia,
+                    artifact.url!,
+                  );
+                  if (bytes.length > inlineLimit) {
+                    throw ArtifactTooLargeException(limit: inlineLimit);
+                  }
+                  return FileMediaSource(
+                    bytes: bytes,
+                    uri: kind == FileMediaKind.video && kIsWeb
+                        ? Uri.parse(artifact.url!)
+                        : null,
+                  );
+                }
+                if (client == null) throw _PreviewFailure.unavailable;
+                final ticket = await client.createMediaPreview(
+                  tool: pane.session.tool,
+                  sessionId: pane.session.sessionId,
+                  artifactUrl: artifact.url,
+                );
+                return FileMediaSource(
+                  uri: ticket.url,
+                  release: () => unawaited(client.releaseMediaPreview(ticket)),
+                );
+              },
+            ),
+          ),
+        );
+      }
+      if (!artifact.text) {
+        return FileViewerUnsupported(
+          path: pane.name,
+          displayName: pane.name,
+          typeLabel: artifact.mime ?? '',
+          size: artifact.size ?? 0,
+        );
       }
       if ((artifact.size ?? 0) > artifactPaneByteLimit) {
         throw _PreviewFailure.tooLarge;
@@ -188,6 +256,28 @@ class ArtifactPaneBody extends ConsumerWidget {
     final memory = ref.read(filePaneViewMemoryProvider);
     return FileViewerPane(
       content: content,
+      onOpenWith: kIsWeb
+          ? null
+          : () async {
+              var descriptor = ref.read(_openedArtifactsProvider)[pane.key];
+              if (descriptor == null) {
+                final source = RosterSource.of(
+                  ref.read(activeBrokerProfileProvider),
+                );
+                for (final candidate
+                    in ref
+                        .read(sessionDetailControllerProvider(pane.session))
+                        .forActiveSource(source)
+                        .fileArtifactDescriptors) {
+                  if (candidate.actionStateKey == pane.artifactId) {
+                    descriptor = candidate;
+                    break;
+                  }
+                }
+              }
+              return descriptor != null &&
+                  await openArtifactWithApp(context, ref, descriptor);
+            },
       sessionLabel: workspaceSessionLabel(
         session: pane.session,
         open: ref.watch(openSessionsControllerProvider).valueOrNull,
@@ -215,3 +305,6 @@ class ArtifactPaneBody extends ConsumerWidget {
     );
   }
 }
+
+Uint8List _decodeInlineMedia(String value) =>
+    UriData.parse(value).contentAsBytes();

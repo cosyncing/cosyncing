@@ -2668,5 +2668,18 @@
   "fileSizeMegabytes": "{value} MB",
   "fileSizeGigabytes": "{value} GB",
   "fileSizeTerabytes": "{value} TB",
-  "transferProgressSize": "{transferred} / {total}"
+  "transferProgressSize": "{transferred} / {total}",
+  "fileMediaLoading": "正在加载文件…",
+  "fileMediaFailed": "无法预览此文件。请尝试使用其他应用打开。",
+  "fileMediaFit": "适合窗口",
+  "fileMediaPlay": "播放",
+  "fileMediaPause": "暂停",
+  "fileMediaMute": "静音",
+  "fileMediaUnmute": "取消静音",
+  "fileOpenWith": "使用其他应用打开",
+  "fileOpenWithFailed": "无法打开文件。请安装支持此文件类型的应用后重试。",
+  "fileMediaOpenExternally": "使用“打开方式”在其他应用中播放此视频。",
+  "filePdfPreviousPage": "上一页",
+  "filePdfNextPage": "下一页",
+  "filePdfPage": "第 {page} 页，共 {count} 页"
 }

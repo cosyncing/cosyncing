@@ -751,7 +751,7 @@ class _ArtifactSurfaceMessage extends ConsumerWidget {
     final path = descriptor.path ?? '';
     final size = descriptor.size;
     final hasDownloadOrFetch = descriptor.isDownloadable;
-    final hasPreview = descriptor.isTextPreviewCandidate;
+    final hasPreview = descriptor.isPreviewCandidate;
     final isBusy = _artifactActionIsBusy(actionState.phase);
     final exportAttachmentMetadata = _artifactExportAttachmentMetadata(
       l10n,

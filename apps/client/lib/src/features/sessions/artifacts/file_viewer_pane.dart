@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/components.dart';
+import 'package:cosyncing_client/src/design/window_size_class.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/file_media_view.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_renderers.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_renderers_builtin.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_source_body.dart';
@@ -32,7 +34,7 @@ final class FileViewerReading extends FileViewerContent {
   const FileViewerReading({required super.path, required super.displayName});
 }
 
-/// Decoded text, ready to render.
+/// Decoded text or a lazy media source, ready to render.
 final class FileViewerSource extends FileViewerContent {
   /// Creates the source state from a resolved [preview].
   FileViewerSource({required this.preview})
@@ -94,10 +96,8 @@ final class FileViewerGateClosed extends FileViewerContent {
 ///
 /// Two rules shape the whole build and are worth stating before the code:
 ///
-/// * **Nothing here animates.** No `AnimationController`, no spinner, no
-///   pulse. A file is not an activity, and a widget test asserts this pane
-///   registers zero tickers. Loading is a gutter skeleton under a header that
-///   has already painted.
+/// * Loading and chrome stay static. Only explicitly opened media animates,
+///   and its decoder is released when hidden or closed.
 /// * **Selection covers the body and nothing else.** Chrome sits in
 ///   `SelectionContainer.disabled` so a drag copies source, not headers —
 ///   the `_MonospaceDetailSection` pattern.
@@ -113,6 +113,7 @@ class FileViewerPane extends StatefulWidget {
     this.initialView,
     this.onViewChanged,
     this.onOpenExternally,
+    this.onOpenWith,
     super.key,
   });
 
@@ -159,6 +160,9 @@ class FileViewerPane extends StatefulWidget {
   /// in place.
   final Future<bool> Function()? onOpenExternally;
 
+  /// Downloads on demand and asks the OS to choose a file handler.
+  final Future<bool> Function()? onOpenWith;
+
   @override
   State<FileViewerPane> createState() => _FileViewerPaneState();
 }
@@ -189,6 +193,7 @@ class _FileViewerPaneState extends State<FileViewerPane> {
   final ScrollController _horizontal = ScrollController();
 
   bool _wrap = false;
+  bool _opening = false;
   bool _revealScheduled = false;
   FileViewMode _mode = FileViewMode.source;
 
@@ -313,7 +318,8 @@ class _FileViewerPaneState extends State<FileViewerPane> {
     final tokens = context.tokens;
     final l10n = AppLocalizations.of(context);
     final content = widget.content;
-    final descriptor = content is FileViewerSource
+    final descriptor =
+        content is FileViewerSource && content.preview.media == null
         ? _resolve(context, tokens, content.preview)
         : null;
     return Column(
@@ -347,7 +353,10 @@ class _FileViewerPaneState extends State<FileViewerPane> {
     final preview = content is FileViewerSource ? content.preview : null;
     // Wrap is a source-view affordance only. A rendered view reflows on its
     // own, and a wrapped diff is a broken diff.
-    final wrappable = preview != null && _mode == FileViewMode.source;
+    final wrappable =
+        preview != null &&
+        preview.media == null &&
+        _mode == FileViewMode.source;
     return DecoratedBox(
       decoration: BoxDecoration(
         color: tokens.surface,
@@ -440,7 +449,7 @@ class _FileViewerPaneState extends State<FileViewerPane> {
                         tokens: tokens,
                         onPressed: () => setState(() => _wrap = !_wrap),
                       ),
-                    if (preview != null)
+                    if (preview != null && preview.media == null)
                       _HeaderButton(
                         iconKey: const Key('file-viewer-copy'),
                         icon: Icons.content_copy,
@@ -448,6 +457,21 @@ class _FileViewerPaneState extends State<FileViewerPane> {
                         tokens: tokens,
                         onPressed: () =>
                             unawaited(_copy(context, preview.text)),
+                      ),
+                    if (widget.onOpenWith != null)
+                      _HeaderButton(
+                        iconKey: const Key('file-viewer-open-with'),
+                        touchTarget: true,
+                        icon: _opening
+                            ? Icons.hourglass_top
+                            : Icons.open_in_new,
+                        tooltip: _opening
+                            ? l10n.fileMediaLoading
+                            : l10n.fileOpenWith,
+                        tokens: tokens,
+                        onPressed: () {
+                          if (!_opening) unawaited(_openWith());
+                        },
                       ),
                     if (widget.onClose case final close?)
                       _HeaderButton(
@@ -484,7 +508,7 @@ class _FileViewerPaneState extends State<FileViewerPane> {
                     label: _rendererLabel(l10n, descriptor, preview.path),
                   ),
                 ],
-                if (preview != null) ...[
+                if (preview != null && preview.size > 0) ...[
                   const SizedBox(width: 8),
                   MetadataChip(label: formatFileSize(l10n, preview.size)),
                 ],
@@ -512,7 +536,9 @@ class _FileViewerPaneState extends State<FileViewerPane> {
     AppLocalizations l10n,
     FileViewerContent content,
   ) {
-    if (content is! FileViewerSource) return const [];
+    if (content is! FileViewerSource || content.preview.media != null) {
+      return const [];
+    }
     final preview = content.preview;
     return [
       if (preview.truncated)
@@ -589,6 +615,23 @@ class _FileViewerPaneState extends State<FileViewerPane> {
     );
   }
 
+  Future<void> _openWith() async {
+    final l10n = AppLocalizations.of(context);
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    setState(() => _opening = true);
+    var opened = false;
+    try {
+      opened = await widget.onOpenWith!.call();
+    } on Object {
+      /* localized below */
+    }
+    if (!mounted) return;
+    setState(() => _opening = false);
+    if (!opened) {
+      messenger?.showSnackBar(SnackBar(content: Text(l10n.fileOpenWithFailed)));
+    }
+  }
+
   Widget _body(
     BuildContext context,
     AppTokens tokens,
@@ -600,6 +643,12 @@ class _FileViewerPaneState extends State<FileViewerPane> {
       color: tokens.surface2,
       child: switch (content) {
         FileViewerReading() => _skeleton(context, tokens),
+        FileViewerSource(:final preview) when preview.media != null =>
+          FileMediaView(
+            key: ValueKey(preview.path),
+            preview: preview.media!,
+            name: preview.displayName,
+          ),
         FileViewerSource(:final preview) => descriptor!.build(
           context,
           _request(
@@ -885,6 +934,7 @@ class _HeaderButton extends StatelessWidget {
     required this.tokens,
     required this.onPressed,
     this.selected = false,
+    this.touchTarget = false,
   });
 
   final Key iconKey;
@@ -893,9 +943,13 @@ class _HeaderButton extends StatelessWidget {
   final AppTokens tokens;
   final VoidCallback onPressed;
   final bool selected;
+  final bool touchTarget;
 
   @override
   Widget build(BuildContext context) {
+    final extent = touchTarget && !WindowSizeClass.of(context).showListDetail
+        ? 40.0
+        : 28.0;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 2),
       child: IconButton(
@@ -908,8 +962,8 @@ class _HeaderButton extends StatelessWidget {
           foregroundColor: selected ? tokens.accent : tokens.textSecondary,
           backgroundColor: selected ? tokens.accentSurface : null,
           padding: EdgeInsets.zero,
-          minimumSize: const Size.square(28),
-          maximumSize: const Size.square(28),
+          minimumSize: Size.square(extent),
+          maximumSize: Size.square(extent),
           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
         ),
       ),

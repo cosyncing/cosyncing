@@ -350,21 +350,26 @@ class _AppRootOverlayState extends State<_AppRootOverlay> {
         final offerNotifications = ref.watch(
           notificationOnboardingVisibleProvider,
         );
-        return Stack(
+        return Column(
           children: [
-            ForegroundAttentionHost(
-              onOpen: widget.onOpenAttention,
-              onOpenEntry: widget.onOpenAttentionEntry,
-              child: InstallerPairingStartupBarrier(
-                child: BrokerAuthBarrier(child: widget.child),
+            Expanded(
+              child: Stack(
+                children: [
+                  ForegroundAttentionHost(
+                    onOpen: widget.onOpenAttention,
+                    onOpenEntry: widget.onOpenAttentionEntry,
+                    child: InstallerPairingStartupBarrier(
+                      child: BrokerAuthBarrier(child: widget.child),
+                    ),
+                  ),
+                  // A failed update handoff remains a transient overlay.
+                  if (webUpdate?.handoffFailed ?? false)
+                    const _WebClientUpdateBanner(),
+                ],
               ),
             ),
-            // N3b: a waiting build is routine and shows nothing — the page's
-            // handoff coordinator moves this tab through the swap by itself.
-            // Only a handoff that was really attempted and never landed earns
-            // a surface, and even then a nonblocking one.
-            if (webUpdate?.handoffFailed ?? false)
-              const _WebClientUpdateBanner(),
+            // Reserve space so the offer cannot intercept composer or media
+            // controls.
             if (offerNotifications) const NotificationOnboardingBanner(),
           ],
         );

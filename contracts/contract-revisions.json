@@ -192,6 +192,13 @@
       "minimumClientRevision": 17,
       "clientMinimumBrokerRevision": 16,
       "change": "Add the in-app update-management surface: sanitized component inventory and channel check, reviewed plans, durable preparation jobs with apply and cancel, bounded sanitized history, and owner-managed revocable per-peer update grants, all under /api/broker/updates and /api/broker/update-grants. Reads are sanitized discovery for an observing peer; every mutation needs the owner credential or that peer's own broker:update grant, and the pre-existing owner-only /api/broker/update endpoint keeps its exact old contract. No frame kind, client message kind, message type, or broker error code is added, and the update DTOs are new types rather than edits to shipped ones, so an older client keeps its current connection behaviour: the surface hash moves because the route registry does, and the minimum client revision stays at 17."
+    },
+    {
+      "revision": 32,
+      "surfaceHash": "fnv1a32:aaab9b9c",
+      "minimumClientRevision": 17,
+      "clientMinimumBrokerRevision": 16,
+      "change": "Adds bounded, revocable media-preview capabilities for image, PDF and video decoders. Existing artifact downloads still require authentication; workspace previews retain the workspace gate."
     }
   ]
 }

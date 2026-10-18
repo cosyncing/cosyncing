@@ -3019,57 +3019,53 @@ for await (const chunk of Bun.stdin.stream()) {
 });
 
 await test('CR2 waiting-placeholder ids stay unique across a reconnect', async () => {
-  // Canonical history keeps the first connection's resolved placeholder id
-  // forever. If the second connection restarted its counter at 1, its fresh
-  // waiting request would collide with that already-resolved id and clients
-  // pairing by canonical id would render it as instantly settled.
-  return await withFakeCodex(`#!/usr/bin/env bun
-const enc = new TextDecoder();
-let buf = '';
-const send = (o) => console.log(JSON.stringify(o));
-for await (const chunk of Bun.stdin.stream()) {
-  buf += enc.decode(chunk, { stream: true });
-  let nl;
-  while ((nl = buf.indexOf(String.fromCharCode(10))) !== -1) {
-    const raw = buf.slice(0, nl);
-    buf = buf.slice(nl + 1);
-    if (!raw.trim()) continue;
-    const msg = JSON.parse(raw);
-    if (msg.method === 'initialize') send({ id: msg.id, result: {} });
-    else if (msg.method === 'thread/loaded/list') send({ id: msg.id, result: { data: [], nextCursor: null } });
-    else if (msg.method === 'thread/settings/update') send({ id: msg.id, result: {} });
-    else if (msg.method === 'thread/resume') {
-      send({ id: msg.id, result: { thread: { name: 'fake' }, model: 'fake-model', modelProvider: 'fake-provider' } });
-      setTimeout(() => send({ method: 'thread/status/changed', params: { threadId: 'fake-thread', status: { type: 'active', activeFlags: ['waitingOnApproval'] } } }), 30);
-      setTimeout(() => send({ method: 'thread/status/changed', params: { threadId: 'fake-thread', status: { type: 'idle' } } }), 90);
+  // The second connection must not reuse an id already settled in history.
+  // Drive notifications after subscription, so bootstrap speed cannot consume
+  // the waiting episode before this test starts observing it.
+  return withFakeCodex(`#!/usr/bin/env bun
+throw new Error('This scenario must use its fixture daemon');
+`, async (rollout, dir) => {
+    const socket = join(dir, 'waiting-reconnect.sock');
+    const daemon = new SharedAppDaemon(socket, { loadedThreadIds: ['fake-thread'] });
+    await daemon.start();
+    const oldSock = process.env.COSYNCING_CODEX_APP_SERVER_SOCK;
+    process.env.COSYNCING_CODEX_APP_SERVER_SOCK = socket;
+    try {
+      const attachEpisode = async () => {
+        const adapter = new CodexAdapter({ scanCodexTuiPresence: async () => fakeTuiScan() });
+        const conn = await adapter.attach(Buffer.from(rollout, 'utf8').toString('base64url'), 'resume');
+        const messages: any[] = [];
+        conn.subscribe((m: any) => messages.push(m));
+        try {
+          daemon.notify('thread/status/changed', {
+            threadId: 'fake-thread', status: { type: 'active', activeFlags: ['waitingOnApproval'] },
+          });
+          await waitFor(() => messages.some((m) => m.type === 'permission-request'), 5000);
+          daemon.notify('thread/status/changed', { threadId: 'fake-thread', status: { type: 'idle' } });
+          await waitFor(() => messages.some((m) => m.type === 'permission-resolved'), 5000);
+          return messages;
+        } finally {
+          await conn.close().catch(() => {});
+        }
+      };
+      const first = await attachEpisode();
+      const second = await attachEpisode();
+      const request = (ms: any[]) => ms.find((m) => m.type === 'permission-request') as any;
+      const resolution = (ms: any[]) => ms.find((m) => m.type === 'permission-resolved') as any;
+      const firstRequest = request(first);
+      const secondRequest = request(second);
+      return [
+        Boolean(firstRequest && secondRequest) &&
+          firstRequest.requestId !== secondRequest.requestId &&
+          resolution(first)?.requestId === firstRequest.requestId &&
+          resolution(second)?.requestId === secondRequest.requestId,
+        JSON.stringify({ first: firstRequest?.requestId, second: secondRequest?.requestId }),
+      ];
+    } finally {
+      if (oldSock === undefined) delete process.env.COSYNCING_CODEX_APP_SERVER_SOCK;
+      else process.env.COSYNCING_CODEX_APP_SERVER_SOCK = oldSock;
+      await daemon.stop();
     }
-  }
-}
-`, async (rollout) => {
-    const attachEpisode = async () => {
-      const conn = await new CodexAdapter().attach(Buffer.from(rollout, 'utf8').toString('base64url'), 'resume');
-      const messages: any[] = [];
-      conn.subscribe((m: any) => messages.push(m));
-      try {
-        await waitFor(() => messages.some((m) => m.type === 'permission-resolved'), 5000);
-      } finally {
-        await conn.close().catch(() => {});
-      }
-      return messages;
-    };
-    const first = await attachEpisode();
-    const second = await attachEpisode();
-    const request = (ms: any[]) => ms.find((m) => m.type === 'permission-request') as any;
-    const resolution = (ms: any[]) => ms.find((m) => m.type === 'permission-resolved') as any;
-    const firstRequest = request(first);
-    const secondRequest = request(second);
-    return [
-      Boolean(firstRequest && secondRequest) &&
-        firstRequest.requestId !== secondRequest.requestId &&
-        resolution(first)?.requestId === firstRequest.requestId &&
-        resolution(second)?.requestId === secondRequest.requestId,
-      JSON.stringify({ first: firstRequest?.requestId, second: secondRequest?.requestId }),
-    ];
   });
 });
 

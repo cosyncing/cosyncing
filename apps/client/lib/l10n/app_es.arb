@@ -1718,5 +1718,18 @@
   "fileSizeMegabytes": "{value} MB",
   "fileSizeGigabytes": "{value} GB",
   "fileSizeTerabytes": "{value} TB",
-  "transferProgressSize": "{transferred} / {total}"
+  "transferProgressSize": "{transferred} / {total}",
+  "fileMediaLoading": "Cargando archivo…",
+  "fileMediaFailed": "No se pudo mostrar este archivo. Intenta abrirlo en otra aplicación.",
+  "fileMediaFit": "Ajustar a la vista",
+  "fileMediaPlay": "Reproducir",
+  "fileMediaPause": "Pausar",
+  "fileMediaMute": "Silenciar",
+  "fileMediaUnmute": "Activar sonido",
+  "fileOpenWith": "Abrir con otra aplicación",
+  "fileOpenWithFailed": "No se pudo abrir el archivo. Instala una aplicación compatible e inténtalo de nuevo.",
+  "fileMediaOpenExternally": "Usa Abrir con para reproducir este vídeo en otra aplicación.",
+  "filePdfPreviousPage": "Página anterior",
+  "filePdfNextPage": "Página siguiente",
+  "filePdfPage": "Página {page} de {count}"
 }

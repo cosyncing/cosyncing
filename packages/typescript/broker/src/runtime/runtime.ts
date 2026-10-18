@@ -307,6 +307,7 @@ import {
 import { claudeTrueSyncKillSwitchFrom } from './claude-mod-kill-switch.ts';
 import { loadOrCreateBrokerInstance } from './broker-instance.ts';
 import { resolveRuntimeCredentials, safeCredentialEqual } from '../security/credentials.ts';
+import { MediaPreviewTickets, serveWorkspaceMedia, type MediaPreviewBinding } from '../artifacts/media-preview.ts';
 import {
   WsAuthTicketRegistry,
   type WsAuthTicketBinding,
@@ -1402,6 +1403,26 @@ const transportPairings = new TransportPairingRegistry({
 const wsAuthTickets = new WsAuthTicketRegistry(
   BUILD_INFO.packaged ? {} : { ttlMs: envNumber('COSYNCING_TEST_WS_TICKET_TTL_MS', 0) || undefined },
 );
+const mediaPreviewTickets = new MediaPreviewTickets();
+
+async function serveMediaPreview(binding: MediaPreviewBinding, req: Request): Promise<Response> {
+  const principal = principalFromWsTicket(binding.principal);
+  if (principal.kind === 'peer' && !transportPairings.isPeerGenerationActive(principal.peerId, principal.authGeneration)) {
+    return new Response('Preview expired', { status: 403 });
+  }
+  const resource = `/api/sessions/${encodeURIComponent(binding.tool)}/${encodeURIComponent(binding.sessionId)}`;
+  const denied = requestAuthorizationDenied(principal,
+    binding.path !== undefined ? `${resource}/fs/download` : `${resource}/artifact/${encodeURIComponent(binding.artifactId!)}`, 'GET');
+  if (denied) return denied;
+  if (binding.artifactId !== undefined) {
+    return artifactStore.serveMediaPreview(binding.tool, binding.sessionId, binding.artifactId, req);
+  }
+  const gate = fsTrustGate();
+  if (gate) return gate;
+  if (!binding.workspaceRoot) return new Response('Workspace not found', { status: 404 });
+  try { return serveWorkspaceMedia(binding.workspaceRoot, binding.path!, req); }
+  catch (error) { return sessionBrowseErrorResponse(error); }
+}
 // Test hooks (source runs only): journal retention follows the movable test clock, and a small
 // entry cap makes bounded eviction observable without ten thousand mutations.
 const protocolJournalTestMaxEntries = BUILD_INFO.packaged
@@ -5279,7 +5300,7 @@ function jsonRequestBodyLimit(path: string, method: string): number | undefined 
   if (path === '/api/transport/envelopes' || path === '/api/transport/session-control') return undefined;
   if (/^\/api\/sessions\/[^/]+\/[^/]+\/uploads\/[^/]+$/.test(path) && method === 'PATCH') return undefined;
   if (/^\/api\/transport\/pairings\/[^/]+\/accept$/.test(path)) return PAIRING_ACCEPT_MAX_BYTES;
-  if (path === '/api/ws-auth-tickets') return WS_TICKET_JSON_MAX_BYTES;
+  if (path === '/api/ws-auth-tickets' || path === '/api/media-preview-tickets') return WS_TICKET_JSON_MAX_BYTES;
   if (path.startsWith('/api/') || path.startsWith('/pi/bridge/') || path.startsWith('/omp/bridge/') || path.startsWith('/claude/hook/')) {
     return ORDINARY_JSON_MAX_BYTES;
   }
@@ -5881,6 +5902,23 @@ server = Bun.serve<WsData>({
     const path = url.pathname;
     const principal = authenticatedPrincipal(req, path);
 
+    // Native media elements cannot attach broker headers. The URL is a revocable,
+    // media-only capability, never a shared credential or an arbitrary URL proxy.
+    const mediaPreview = path.match(/^\/api\/media-previews\/([A-Za-z0-9_-]{43})$/);
+    if (mediaPreview && ['GET', 'HEAD', 'DELETE', 'OPTIONS'].includes(req.method)) {
+      const binding = mediaPreviewTickets.get(mediaPreview[1]!);
+      if (binding && req.method === 'DELETE') mediaPreviewTickets.revoke(mediaPreview[1]!);
+      const response = !binding ? new Response('Preview expired', { status: 403 })
+        : ['DELETE', 'OPTIONS'].includes(req.method) ? new Response(null, { status: 204 })
+        : await serveMediaPreview(binding, req);
+      response.headers.set('access-control-allow-origin', '*');
+      response.headers.set('access-control-allow-methods', 'GET, HEAD, DELETE, OPTIONS');
+      response.headers.set('access-control-allow-headers', 'Range, If-Range');
+      response.headers.set('access-control-expose-headers', 'Content-Length, Content-Range, Accept-Ranges, ETag');
+      response.headers.set('cross-origin-resource-policy', 'cross-origin');
+      return response;
+    }
+
     // Packaged v1 has no Claude hook surface. Return absence before authentication so an inherited shared
     // token cannot turn the intentionally missing routes into a misleading 401-discoverable feature.
     if (BUILD_INFO.packaged && (path === '/api/claude/hooks' || path.startsWith('/claude/hook/'))) {
@@ -5952,6 +5990,33 @@ server = Bun.serve<WsData>({
         }
         throw error;
       }
+    }
+
+    if (path === '/api/media-preview-tickets' && req.method === 'POST') {
+      const ticketPrincipal = principal && wsTicketPrincipal(principal);
+      if (!ticketPrincipal) return new Response('Unauthorized', { status: 401 });
+      const body = await req.json().catch(() => undefined) as any;
+      if (!body || typeof body.tool !== 'string' || !body.tool || body.tool.length > 1000
+        || typeof body.sessionId !== 'string' || !body.sessionId || body.sessionId.length > 1000
+        || (typeof body.path === 'string') === (typeof body.artifactId === 'string')
+        || (body.path ?? body.artifactId).length > 4096) {
+        return json({ ok: false, code: 'BAD_PARAM', error: 'One session file or artifact is required' }, 400);
+      }
+      let workspaceRoot: string | undefined;
+      if (typeof body.path === 'string') {
+        const gate = fsTrustGate();
+        if (gate) return gate;
+        workspaceRoot = (await discoverSession(body.tool, body.sessionId))?.cwd;
+        if (!workspaceRoot) return new Response('Workspace not found', { status: 404 });
+      }
+      const binding: MediaPreviewBinding = {
+        tool: body.tool, sessionId: body.sessionId, principal: ticketPrincipal,
+        ...(typeof body.path === 'string' ? { path: body.path, workspaceRoot } : { artifactId: body.artifactId }),
+      };
+      const metadata = await serveMediaPreview(binding, new Request(req.url, { method: 'HEAD' }));
+      if (!metadata.ok) return metadata;
+      return json({ ok: true, ...mediaPreviewTickets.issue(binding),
+        mimeType: metadata.headers.get('content-type'), size: Number(metadata.headers.get('content-length')) }, 201);
     }
 
     if (path === '/api/ws-auth-tickets' && req.method === 'POST') {

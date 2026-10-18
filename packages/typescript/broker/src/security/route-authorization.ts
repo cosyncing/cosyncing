@@ -150,6 +150,9 @@ export const BROKER_ROUTE_POLICIES: readonly RoutePolicyEntry<BrokerRoute>[] = [
   { route: '/api/transport/pairings/{id}/accept', methods: ['POST'], policy: PUBLIC },
   { route: '/api/transport/session-control', methods: ['POST'], policy: DRIVE },
   { route: '/api/ws-auth-tickets', methods: ['POST'], policy: OBSERVE },
+  { route: '/api/media-preview-tickets', methods: ['POST'], policy: FILES },
+  // The handler validates the scoped capability and its current principal.
+  { route: '/api/media-previews/{id}', methods: ['GET', 'HEAD', 'DELETE'], policy: PUBLIC },
 ];
 
 export const INTEGRATION_ROUTE_POLICIES: readonly RoutePolicyEntry<IntegrationRoute>[] = [

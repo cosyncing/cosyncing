@@ -88,6 +88,8 @@ const List<String> brokerRoutes = <String>[
   '/api/transport/pairings/{id}/accept',
   '/api/transport/session-control',
   '/api/ws-auth-tickets',
+  '/api/media-preview-tickets',
+  '/api/media-previews/{id}',
 ];
 
 /// Agent-owned local integration routes.

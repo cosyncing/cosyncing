@@ -25,6 +25,7 @@ import {
   readOwnerOnlyText,
 } from '../security/secure-files.ts';
 import { ClientMessagePolicyError } from '../sessions/client-message-policy.ts';
+import { mediaPreviewType } from './media-preview.ts';
 import {
   DownloadRangeError,
   ifRangeMatches,
@@ -397,6 +398,7 @@ export class ArtifactStore {
    *  which must never let key ordering evict the record a successful call is
    *  about to acknowledge. Seeded from disk so restart preserves ordering. */
   private lastRecency = 0;
+  private lastMediaAccessPersistedAt = 0;
 
   constructor(private readonly brokerUrl: string, root = artifactCacheRoot(), private readonly options: ArtifactStoreOptions = {}) {
     this.root = root;
@@ -925,6 +927,37 @@ export class ArtifactStore {
     });
     this.removeUnreferenced(removed);
     return n;
+  }
+
+  /** Media-only stream for a broker-issued capability. Export attachments stay download-only. */
+  serveMediaPreview(tool: string, sessionId: string, artifactKey: string, request: Request): Response {
+    const rec = this.lookupRecord(tool, sessionId, artifactKey);
+    if (!rec || !existsSync(rec.filePath)) return new Response('Not found', { status: 404 });
+    const type = mediaPreviewType(rec.name || rec.path);
+    if (!type || rec.deliveryClass === 'export-attachment') return new Response('Unsupported preview', { status: 415 });
+    if (rec.size > type.maxBytes) return new Response('Preview too large', { status: 413 });
+    const headers = new Headers({
+      'content-type': type.mimeType,
+      'cache-control': 'private, no-store',
+      'referrer-policy': 'no-referrer',
+      'x-content-type-options': 'nosniff',
+      'content-security-policy': "default-src 'none'; sandbox",
+    });
+    const response = this.rangedArtifactResponse(rec, headers, request.headers);
+    if (response.ok) {
+      // Range-heavy decoders must refresh the LRU without an index rewrite on
+      // every seek. Persist at most once a minute across the store; intervening
+      // accesses are also captured by the next ordinary index mutation.
+      const now = Date.now();
+      if (now - this.lastMediaAccessPersistedAt >= 60_000) {
+        this.commitMutation('access', () => { rec.lastAccessedAt = this.nextRecency(); }, rec.key);
+        this.lastMediaAccessPersistedAt = now;
+      } else {
+        rec.lastAccessedAt = this.nextRecency();
+      }
+    }
+    return request.method === 'HEAD'
+      ? new Response(null, { status: response.status, headers: response.headers }) : response;
   }
 
   /**
