@@ -1227,7 +1227,27 @@ void main() {
           await drainSessionDetailMicrotasks();
           final commitsAfterTail = fakeTranscriptRepository.upserts.length;
 
-          for (var page = 23; page >= 0; page--) {
+          SessionDetailState read() =>
+              container.read(sessionDetailControllerProvider(key));
+          void expectBounded() {
+            final messages = read().messageEvents;
+            expect(
+              messages.length,
+              lessThanOrEqualTo(kMaxActiveTranscriptMessages),
+            );
+            expect(
+              messages
+                  .map(estimatedAgentMessageDecodedBytes)
+                  .fold<int>(0, (sum, bytes) => sum + bytes),
+              lessThanOrEqualTo(kMaxActiveTranscriptDecodedBytes),
+            );
+          }
+
+          var anchoredAcrossReconnect = false;
+          var waited = 0;
+          var page = 23;
+          for (var answers = 0; page >= 0; answers++) {
+            expect(answers, lessThan(48));
             expect(await controller.loadEarlierHistory(), isTrue);
             final start = page * 100;
             fakeConnection.emitEvent(
@@ -1243,6 +1263,30 @@ void main() {
               ),
             );
             await drainSessionDetailMicrotasks();
+            expectBounded();
+            if (anchoredAcrossReconnect) {
+              expect(
+                read().messageEvents.any(
+                  (message) => message.raw['key'] == 'history-1200',
+                ),
+                isTrue,
+                reason:
+                    'a semantic viewport anchor must remain protected while '
+                    'its transcript widget is unmounted across reconnect',
+              );
+            }
+            if (controller.lastHistoryPageAwaitsReader) {
+              // The page fits only by releasing the rows between the reader
+              // and it. It waits, without an error, until the reader moves on
+              // toward it; then the same page is asked for again.
+              expect(read().historyPageError, isNull);
+              controller.protectHistoryViewportAnchor(
+                stableTranscriptMessageKey(read().messageEvents.first),
+              );
+              anchoredAcrossReconnect = false;
+              waited += 1;
+              continue;
+            }
             if (page == 12) {
               controller.protectHistoryViewportAnchor(
                 stableTranscriptMessageKey(message(1200)),
@@ -1251,31 +1295,16 @@ void main() {
                 ..emitState(SessionDetailConnectionStatus.reconnecting)
                 ..emitState(SessionDetailConnectionStatus.connected);
               await drainSessionDetailMicrotasks();
+              anchoredAcrossReconnect = true;
             }
+            page -= 1;
           }
+          expect(waited, greaterThan(0));
 
-          final state = container.read(sessionDetailControllerProvider(key));
-          expect(
-            state.messageEvents.length,
-            lessThanOrEqualTo(kMaxActiveTranscriptMessages),
-          );
-          expect(
-            state.messageEvents
-                .map(estimatedAgentMessageDecodedBytes)
-                .fold<int>(0, (sum, bytes) => sum + bytes),
-            lessThanOrEqualTo(kMaxActiveTranscriptDecodedBytes),
-          );
+          final state = read();
+          expectBounded();
           expect(state.messageEvents.first.raw['key'], 'history-0');
           expect(state.messageEvents.last.raw['key'], 'history-2499');
-          expect(
-            state.messageEvents.any(
-              (message) => message.raw['key'] == 'history-1200',
-            ),
-            isTrue,
-            reason:
-                'a semantic viewport anchor must remain protected while its '
-                'transcript widget is unmounted across reconnect',
-          );
           expect(state.transcriptHistoryGaps, isNotEmpty);
           expect(
             state.transcriptMessageSegments.length,

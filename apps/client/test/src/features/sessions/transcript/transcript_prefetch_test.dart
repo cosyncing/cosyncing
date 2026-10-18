@@ -24,6 +24,7 @@ TranscriptPrefetchDecision _decide(
   double distance = 0,
   double velocity = 0,
   Duration now = Duration.zero,
+  bool atEnd = false,
 }) => controller.decide(
   direction: direction,
   key: key,
@@ -31,6 +32,7 @@ TranscriptPrefetchDecision _decide(
   velocity: velocity,
   viewport: _viewport,
   now: now,
+  atEnd: atEnd,
 );
 
 /// Completes one request of [key] toward [direction] that took [latency].
@@ -413,6 +415,19 @@ void main() {
       controller.observeOffset(940);
       expect(
         _decide(controller, key: 'older:b'),
+        TranscriptPrefetchDecision.request,
+      );
+    });
+
+    test('a list that ends nearer than that is as far back as the reader '
+        'can go', () {
+      final controller = _moving(_older)..observeOffset(1000);
+      _roundTrip(controller, start: Duration.zero, latency: _ms(50));
+      controller
+        ..recordMovement(direction: _newer, physical: true)
+        ..observeOffset(1200);
+      expect(
+        _decide(controller, direction: _newer, key: 'gap:below', atEnd: true),
         TranscriptPrefetchDecision.request,
       );
     });

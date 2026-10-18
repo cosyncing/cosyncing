@@ -598,9 +598,7 @@ final class _TurnRowCache {
 // Delivered files are report content, including download-only attachments.
 bool _reportVisibleEntry(SessionTranscriptDisplayEntry entry) =>
     entry is MessageTranscriptDisplayEntry &&
-    (entry.message.type == AgentMessageType.modelOutput ||
-        entry.message.type == AgentMessageType.userMessage ||
-        entry.message.type == AgentMessageType.fileArtifact);
+    transcriptReportDraws(entry.message);
 
 _ChatUserItem _chatUserRow(
   AgentMessage message, {
@@ -944,6 +942,11 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
   /// Fires when a failed page may be asked for again.
   Timer? _prefetchRetryTimer;
   bool _prefetchEvaluationScheduled = false;
+
+  /// The boundary of the last page the window refused for want of room, and
+  /// the row the reader was reading when it was answered (see
+  /// [_awaitsReader]).
+  ({String key, String readerKey})? _roomAwaited;
 
   /// Advances each time the transport connects again: a page asked for on
   /// an earlier connection answers nothing on this one.
@@ -1435,6 +1438,7 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     if (_prefetch.generation == generation) return;
     _prefetch.startGeneration(generation);
     _movingToward = null;
+    _roomAwaited = null;
     _movementSamples.clear();
     _prefetchSettleTimer?.cancel();
     _prefetchRetryTimer?.cancel();
@@ -1466,9 +1470,36 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
       velocity: _readerVelocity(position),
       viewport: position.viewportDimension,
       now: _prefetchNow(),
+      // Where little is drawn (tool calls hidden), the list can end before
+      // the reader is half a viewport back from where they turned.
+      atEnd: direction == TranscriptPrefetchDirection.older
+          ? position.pixels <= position.minScrollExtent + 0.5
+          : position.pixels >= position.maxScrollExtent - 0.5,
     );
     if (decision == TranscriptPrefetchDecision.request) target.request();
     _armPrefetchRetry();
+  }
+
+  /// Whether the window refused the page behind [key] for want of room while
+  /// the reader was in the page they are still in.
+  ///
+  /// The window never releases the rows the reader can see, or reaches
+  /// before, a page it takes in (see [TranscriptHistoryPageRejection.noRoom]),
+  /// so asking again from the same page gets the same answer; once the reader
+  /// reaches another page, the rows behind them can make room.
+  bool _awaitsReader(String key) {
+    final awaited = _roomAwaited;
+    if (awaited == null || awaited.key != key) return false;
+    final reading = _firstUsefulVisibleMessage()?.stableMessageKey;
+    if (reading != null &&
+        widget.state.activeTranscriptWindow.holdsInOnePage(
+          awaited.readerKey,
+          reading,
+        )) {
+      return true;
+    }
+    _roomAwaited = null;
+    return false;
   }
 
   /// Evaluates after this frame lays out, when a page landed or the list
@@ -1514,6 +1545,7 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     final viewport = position.viewportDimension;
     ({String key, double distance, VoidCallback request})? nearest;
     void consider(String key, double distance, VoidCallback request) {
+      if (_awaitsReader(key)) return;
       final value = distance < 0 ? 0.0 : distance;
       if (nearest == null || value < nearest!.distance) {
         nearest = (key: key, distance: value, request: request);
@@ -1628,6 +1660,12 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
   void _completePrefetchRequest() {
     if (_prefetch.inFlightKey == null) return;
     final now = _prefetchNow();
+    final reading = widget.controller.lastHistoryPageAwaitsReader
+        ? _firstUsefulVisibleMessage()?.stableMessageKey
+        : null;
+    _roomAwaited = reading == null
+        ? null
+        : (key: _prefetch.inFlightKey!, readerKey: reading);
     if (widget.state.historyPageError == null) {
       _prefetch.finish(now, applied: true);
     } else {
@@ -2002,6 +2040,13 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
       final stableKey = _messageStableKeyByItemKey[reader.key];
       if (stableKey != null) {
         widget.controller.protectHistoryViewportAnchor(stableKey);
+      }
+      // What the page on its way must not release is what is on screen when
+      // it lands, not when it was asked for.
+      if (widget.state.historyPageLoading) {
+        widget.controller
+          ..historyViewportRowKeys = _visibleMessageKeys()
+          ..historyReportView = widget.reportView;
       }
     }
   }
@@ -2468,9 +2513,32 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
   /// capture here: the reader anchor is re-taken from every layout, so the
   /// page lands against where the reader is when it arrives.
   void _protectVisibleHistoryRow() {
+    widget.controller
+      ..historyViewportRowKeys = _visibleMessageKeys()
+      ..historyReportView = widget.reportView;
     final visible = _firstUsefulVisibleMessage();
     if (visible == null) return;
     widget.controller.protectHistoryViewportAnchor(visible.stableMessageKey);
+  }
+
+  /// The canonical keys of the message rows on screen.
+  Set<String> _visibleMessageKeys() {
+    final position = _positionOrNull();
+    if (position == null || position.viewportDimension <= 0) return const {};
+    final keys = <String>{};
+    for (final entry in _mountedRowContexts.entries) {
+      final stableKey = _messageStableKeyByItemKey[entry.key];
+      final element = entry.value;
+      if (stableKey == null || element is! Element || !element.mounted) {
+        continue;
+      }
+      final row = _laidOutRowGeometry(element);
+      if (row == null) continue;
+      final top = row.top - position.pixels;
+      if (top + row.height <= 0 || top >= position.viewportDimension) continue;
+      keys.add(stableKey);
+    }
+    return keys;
   }
 
   void _initializeSemanticViewport() {
@@ -2835,7 +2903,10 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
       chatItems.add(_ChatHistoryGapItem(leadingTranscriptGap));
     }
     for (final segment in conversationPageSegments) {
-      if (segment.gapBefore case final gap?) {
+      // With tool calls hidden, a range of nothing but tool calls draws
+      // nothing: no notice, and no page is asked for to fill it.
+      if (segment.gapBefore case final gap?
+          when !widget.reportView || gap.holdsReportRows) {
         chatItems.add(_ChatHistoryGapItem(gap));
       }
       chatItems.addAll(

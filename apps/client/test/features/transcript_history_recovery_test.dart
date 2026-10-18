@@ -134,6 +134,192 @@ void main() {
   }
 
   group('every road to the same transcript', () {
+    for (final mode in ['tier-1-only', 'final-messages-only']) {
+      featureTest('file cards stay with their creating messages after replay '
+          'and reset with $mode', (f) async {
+        final studio = f.network.add('http://studio.test:7734');
+        final history = [
+          userRow('Create the first report', key: 'old-prompt'),
+          toolResultRow(
+            'old-write',
+            toolName: 'Write',
+            extra: {
+              'path': '/work/studio/report.md',
+            },
+          ),
+          answerRow('First report finished', key: 'old-answer'),
+          userRow('Continue the conversation', key: 'new-prompt'),
+          answerRow('Latest answer', key: 'latest-answer'),
+        ];
+        final file = row('file-artifact', {
+          'artifactKey': 'original-report',
+          'path': 'report.md',
+          'name': 'original-report.md',
+          'mimeType': 'text/markdown',
+          'transcriptAnchor': {'type': 'tool-result', 'key': 'old-write'},
+        });
+        final sent = row('file-artifact', {
+          'artifactKey': 'sent-report',
+          'path': 'sent.md',
+          'name': 'sent-report.md',
+          'mimeType': 'text/markdown',
+          'proactive': true,
+          'transcriptAnchor': {'type': 'model-output', 'key': 'old-answer'},
+        });
+        final app = await openTranscript(
+          f,
+          history,
+          broker: studio,
+          toolDisplay: mode,
+          setup: (studio) => scriptAttaches(studio, 's1', [
+            (_) => [historyFrame(history, reset: true, cursor: 'reports')],
+            (_) => [
+              historyFrame(const [], cursor: 'reports'),
+              messageFrame(file, 0),
+              messageFrame(sent, 0),
+            ],
+          ]),
+        );
+        await app.liveAll(studio, [file, sent]);
+        void expectPosition() => expectOnScreenInOrder(app, [
+          find.text('Create the first report'),
+          find.text('original-report.md'),
+          find.textContaining('First report finished'),
+          find.text('sent-report.md'),
+          find.text('Continue the conversation'),
+          find.textContaining('Latest answer'),
+        ]);
+        expectPosition();
+        await reconnect(app, studio, 's1');
+        expectPosition();
+        app.socket(studio).emit(historyFrame(history, reset: true));
+        await app.liveAll(studio, [file, sent]);
+        expectPosition();
+      });
+    }
+
+    featureTest('old cached file cards wait for their creating history page '
+        'and later rewrites never steal them', (f) async {
+      final (app, paging) = await openPaging(
+        f,
+        total: 200,
+        row: (index) => switch (index) {
+          91 => userRow(
+            'Ambiguous file request',
+            key: 'ambiguous-request',
+            extra: {'sentAt': 1000},
+          ),
+          92 || 93 => toolResultRow(
+            'ambiguous-$index',
+            toolName: 'Write',
+            extra: {'path': '/work/studio/reports/ambiguous.md'},
+          ),
+          94 => userRow(
+            'Next request',
+            key: 'after-ambiguous',
+            extra: {'sentAt': 3000},
+          ),
+          95 => userRow(
+            'Original file request',
+            key: 'original-request',
+            extra: {'sentAt': 4000},
+          ),
+          96 => toolResultRow(
+            'legacy-write',
+            toolName: 'Write',
+            extra: {
+              'path': '/work/studio/reports/legacy.md',
+            },
+          ),
+          97 => answerRow('Original file completed', key: 'original-completed'),
+          98 => userRow(
+            'Following request',
+            key: 'following-request',
+            extra: {'sentAt': 6000},
+          ),
+          189 => userRow(
+            'Rewrite the same file',
+            key: 'rewrite-request',
+            extra: {'sentAt': 10000},
+          ),
+          190 => toolResultRow(
+            'newer-write',
+            toolName: 'Write',
+            extra: {'path': '/work/studio/reports/legacy.md'},
+          ),
+          191 => userRow(
+            'Continue after rewriting',
+            key: 'after-rewrite',
+            extra: {'sentAt': 11000},
+          ),
+          _ => userRow('Row $index.', key: 'row-$index'),
+        },
+      );
+      final legacy = row('file-artifact', {
+        'artifactKey': 'legacy-report',
+        'path': 'reports/legacy.md',
+        'name': 'legacy-report.md',
+        'mimeType': 'text/markdown',
+        'transcriptAnchor': {
+          'type': 'workspace-write',
+          'path': 'reports/legacy.md',
+          'createdAt': 5000,
+        },
+      });
+      final exact = row('file-artifact', {
+        ...legacy,
+        'artifactKey': 'exact-report',
+        'name': 'exact-report.md',
+        'transcriptAnchor': {'type': 'tool-result', 'key': 'legacy-write'},
+      });
+      final ambiguous = row('file-artifact', {
+        ...legacy,
+        'artifactKey': 'ambiguous-report',
+        'path': 'reports/ambiguous.md',
+        'name': 'ambiguous-report.md',
+        'transcriptAnchor': {
+          'type': 'workspace-write',
+          'path': 'reports/ambiguous.md',
+          'createdAt': 2000,
+        },
+      });
+      await app.liveAll(paging.broker, [legacy, exact, ambiguous]);
+      expect(find.text('legacy-report.md'), findsNothing);
+      expect(find.text('exact-report.md'), findsNothing);
+      expect(find.text('ambiguous-report.md'), findsNothing);
+      await app.askForEarlier();
+      await app.frames();
+      final source = find.text('Original file request');
+      for (
+        var gesture = 0;
+        gesture < 20 && source.evaluate().isEmpty;
+        gesture++
+      ) {
+        await app.drag(320);
+        await app.frames(3);
+      }
+      expectOnScreenInOrder(app, [
+        find.text('Original file request'),
+        find.text('legacy-report.md'),
+        find.text('exact-report.md'),
+        find.textContaining('Original file completed'),
+      ]);
+
+      // A later write in another turn cannot steal the pre-upgrade card,
+      // and multiple writes inside its original turn stay ambiguous.
+      await app.live(
+        paging.broker,
+        toolResultRow(
+          'another-write',
+          toolName: 'Write',
+          extra: {'path': '/work/studio/reports/legacy.md'},
+        ),
+      );
+      expect(find.text('legacy-report.md'), findsOneWidget);
+      expect(find.text('exact-report.md'), findsOneWidget);
+      expect(find.text('ambiguous-report.md'), findsNothing);
+    });
+
     featureTest('a reconnect that replays only the newest rows shows what a '
         'fresh attach shows', (f) async {
       final (app, studio, expected) = await open(f, [

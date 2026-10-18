@@ -168,6 +168,7 @@ class SessionDetailController
   String? _historyPageUntilInFlight;
   bool _newerHistoryOffered = false;
   bool _newerPagingRefused = false;
+  bool _lastHistoryPageAwaitsReader = false;
   // Every refresh still answerable on this socket, with the cursor it was
   // asked from: never more than one per cursor, and settled once a frame
   // moves the window off that cursor.
@@ -1821,6 +1822,8 @@ class SessionDetailController
               event,
               requestedCursor: requestedHistoryCursor,
               preserveMessageKey: _historyViewportAnchorKey,
+              inView: historyViewportRowKeys,
+              reportView: historyReportView,
             );
           } else if (!event.isNewer || requestedHistoryUntil == null) {
             // A broker that ignores the direction answers with an older page,
@@ -1837,6 +1840,8 @@ class SessionDetailController
               requestedCursor: requestedHistoryCursor,
               until: requestedHistoryUntil,
               preserveMessageKey: _historyViewportAnchorKey,
+              inView: historyViewportRowKeys,
+              reportView: historyReportView,
             );
           }
           transcriptWindow = mutation.window;
@@ -1875,12 +1880,17 @@ class SessionDetailController
               event.clientMessageId == _historyPageRequestId)) {
         historyPageLoading = false;
         _clearHistoryPageTracking();
+        _lastHistoryPageAwaitsReader =
+            pageRejection == TranscriptHistoryPageRejection.noRoom;
         if (acceptedHistoryPage ||
             pageRejection == TranscriptHistoryPageRejection.stale ||
+            pageRejection == TranscriptHistoryPageRejection.noRoom ||
             retryHistoryPageLimit != null) {
           // A stale page answers a boundary a replacement or release already
           // moved past: nothing failed, and the reader's next scroll asks for
-          // the boundary the window holds now.
+          // the boundary the window holds now. A page refused for want of
+          // room is no failure either: the window takes it once the reader
+          // reaches another page (see [lastHistoryPageAwaitsReader]).
           clearHistoryPageError = true;
         } else if (pageRejection == TranscriptHistoryPageRejection.noProgress) {
           // The same boundary asked for again at once would get the same
@@ -2510,6 +2520,13 @@ class SessionDetailController
   /// broker offered it on the last history frame and has not refused it.
   bool get canLoadNewerHistory => _canLoadNewerHistory;
 
+  /// Whether the answer to the latest history page request refused the page
+  /// for want of room (see [TranscriptHistoryPageRejection.noRoom]): asking
+  /// again from the same page of the transcript gets the same answer. False
+  /// from the moment the next request is sent, so a request that fails or
+  /// times out never inherits it.
+  bool get lastHistoryPageAwaitsReader => _lastHistoryPageAwaitsReader;
+
   /// Loads one page newer than [cursor] into the gap ending at [until]; see
   /// [TranscriptHistoryNavigation.insertNewerPage].
   Future<bool> loadNewerHistory({
@@ -2528,6 +2545,16 @@ class SessionDetailController
     if (_historyViewportAnchorKey == stableMessageKey) return;
     _historyViewportAnchorKey = stableMessageKey;
   }
+
+  /// The canonical rows on screen: a page taken in never releases one of them
+  /// (see [TranscriptHistoryPageRejection.noRoom]). This is local memory
+  /// policy only.
+  Set<String> historyViewportRowKeys = const {};
+
+  /// Whether the transcript shows only what was said (tool calls hidden): a
+  /// page taken in then keeps no page it draws nothing of for the reader to
+  /// reach (see [transcriptReportDraws]). This is local memory policy only.
+  bool historyReportView = false;
 
   Future<bool> sendCommand(
     String name, {

@@ -92,6 +92,7 @@ interface ArtifactRecord {
    *  did; records written before this field existed are absent, which is the
    *  correct answer for every one of them. */
   proactive?: boolean;
+  transcriptAnchor?: ArtifactMessage['transcriptAnchor'];
 }
 
 /** Metadata for an R2 `export-attachment` ingestion (bytes come from a verified broker temp file). */
@@ -629,6 +630,7 @@ export class ArtifactStore {
         lastAccessedAt: 0,
         ...(options.sessionQualified ? { qualifiedSource: 'managed-connection-v1' as const } : {}),
         ...(message.proactive === true ? { proactive: true as const } : {}),
+        ...(message.transcriptAnchor ? { transcriptAnchor: message.transcriptAnchor } : {}),
       },
     };
   }
@@ -758,6 +760,7 @@ export class ArtifactStore {
       lastAccessedAt: now,
       ...(options.sessionQualified ? { qualifiedSource: 'managed-connection-v1' as const } : {}),
       ...(message.proactive === true ? { proactive: true as const } : {}),
+      ...(message.transcriptAnchor ? { transcriptAnchor: message.transcriptAnchor } : {}),
     };
     this.commitRecord(rec, createdBlob);
     return this.asMessage(session, message, rec, brokerUrl);
@@ -807,6 +810,9 @@ export class ArtifactStore {
           // The STORED value, not an assertion. Re-asserting `true` here made
           // a restart claim the agent had sent every file it ever wrote.
           ...(record.proactive === true ? { proactive: true } : {}),
+          transcriptAnchor: record.transcriptAnchor ?? (record.proactive === true
+            ? { type: 'unavailable' }
+            : { type: 'workspace-write', path: record.path, createdAt: record.createdAt }),
           ...(record.deliveryClass ? { deliveryClass: record.deliveryClass } : {}),
           ...(record.expiresAt ? { expiresAt: record.expiresAt } : {}),
           ...(record.format ? { format: record.format } : {}),

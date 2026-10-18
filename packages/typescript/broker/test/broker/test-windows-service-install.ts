@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, win32 } from 'node:path';
 import {
@@ -834,16 +834,27 @@ function check(name: string, ok: boolean, detail?: string): void {
     };
     try {
       await waitForOutput('three\n');
-      renameSync(log, `${log}.1`);
-      writeFileSync(log, 'after-rotation\n');
-      await waitForOutput('after-rotation\n');
+      // React to the first output immediately: the follower must already
+      // have captured the cursor for the file whose tail it just printed.
+      appendFileSync(log, 'before-rotation\n');
+      await waitForOutput('before-rotation\n');
+      for (let generation = 1; generation <= 4; generation += 1) {
+        renameSync(log, `${log}.${generation}`);
+        const replacement = `after-rotation-${generation}\n`;
+        writeFileSync(log, replacement);
+        await waitForOutput(replacement);
+        appendFileSync(log, `appended-${generation}\n`);
+        await waitForOutput(`appended-${generation}\n`);
+      }
     } finally {
       follower.kill('SIGTERM');
       await follower.exited;
       await output;
     }
     check('Windows bootstrap log follow reopens after rotation',
-      followed.includes('three\n') && followed.includes('after-rotation\n'), JSON.stringify(followed));
+      followed === 'three\nbefore-rotation\n'
+        + [1, 2, 3, 4].map((generation) => `after-rotation-${generation}\nappended-${generation}\n`).join(''),
+      JSON.stringify(followed));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

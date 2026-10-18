@@ -322,6 +322,7 @@ final class TranscriptHistoryGapSegment {
     required this.kind,
     this.reloadCursor,
     this.forwardCursor,
+    this.holdsReportRows = true,
   });
 
   /// Stable row identity.
@@ -337,6 +338,11 @@ final class TranscriptHistoryGapSegment {
   /// revision 28), stopping at [reloadCursor]: the boundary after the run
   /// before the gap. Null when that run ends with no broker boundary.
   final String? forwardCursor;
+
+  /// Whether the gap holds a row the report view draws: false only when every
+  /// released range in it is known to hold none. With tool calls hidden such
+  /// a gap draws nothing, so it shows nothing and loads nothing.
+  final bool holdsReportRows;
 }
 
 /// One cached cursor-contiguous conversation run plus any omitted range before
@@ -372,6 +378,11 @@ enum TranscriptHistoryPageRejection {
   /// The page cannot fit beside the rows the window must keep. A smaller
   /// page may.
   overBudget,
+
+  /// The page fits only by releasing rows the reader can see, or reaches
+  /// before it, which would release it again once reloaded. Nothing is wrong:
+  /// once the reader reaches another page, the rows behind them can make room.
+  noRoom,
 
   /// The page brought no rows and ends where it was asked from, with more
   /// said to follow: it moves nothing, so taking it would only add an empty
@@ -419,6 +430,7 @@ final class TranscriptReleasedRange {
   const TranscriptReleasedRange({
     required this.olderCursor,
     required this.pageableRows,
+    this.holdsReportRows = true,
   });
 
   /// The boundary before the released rows (null at the session start).
@@ -426,7 +438,18 @@ final class TranscriptReleasedRange {
 
   /// Backward-pageable rows in the range; null when unknown.
   final int? pageableRows;
+
+  /// Whether the range holds a row the report view draws (see
+  /// [transcriptReportDraws]); true when unknown.
+  final bool holdsReportRows;
 }
+
+/// Whether the report view (tool calls hidden) draws [message]: what the
+/// agent and the user said, and the files delivered.
+bool transcriptReportDraws(AgentMessage message) =>
+    message.type == AgentMessageType.modelOutput ||
+    message.type == AgentMessageType.userMessage ||
+    message.type == AgentMessageType.fileArtifact;
 
 /// Explicit bounded transcript page table.
 ///
@@ -603,6 +626,17 @@ final class TranscriptHistoryWindow {
   /// Rows a reload from [cursor] should request to restore exactly the range
   /// released behind it, or null when no such range is known.
   int? reloadLimitFor(String cursor) => releasedRanges[cursor]?.pageableRows;
+
+  /// Whether the rows with stable keys [first] and [second] are held in the
+  /// same retained page.
+  bool holdsInOnePage(String first, String second) {
+    for (final page in pages) {
+      final hasFirst = page.containsStableKey(first);
+      final hasSecond = page.containsStableKey(second);
+      if (hasFirst || hasSecond) return hasFirst && hasSecond;
+    }
+    return false;
+  }
 
   _TranscriptHistoryDerived get _derived {
     final cached = _transcriptHistoryDerivedCache[this];
@@ -792,7 +826,11 @@ final class TranscriptHistoryWindow {
         gapsBeforeRuns.add(null);
         continue;
       }
-      final gap = _historyGapBetween(pageRuns.last.last, page);
+      final gap = _historyGapBetween(
+        pageRuns.last.last,
+        page,
+        releasedRanges,
+      );
       // The recent tail is a presentation checkpoint even when its cursor is
       // adjacent. Only that page changes under streaming; keeping the older
       // run separate lets it retain canonical/turn identity. A partial first
@@ -844,13 +882,23 @@ final class TranscriptHistoryWindow {
       (promptBuckets[resolved] ??= <SessionOptimisticPrompt>[]).add(prompt);
     }
 
+    final presentedRuns = positionTranscriptArtifacts(
+      [
+        for (var index = 0; index < pageRuns.length; index++)
+          derivedRuns[index].present(
+            optimisticPrompts: promptBuckets[index] ?? const [],
+            clientKeys: clientKeys,
+            work: work,
+          ),
+      ],
+      contiguousBefore: [
+        for (var index = 0; index < pageRuns.length; index++)
+          index > 0 && gapsBeforeRuns[index] == null,
+      ],
+    );
     final result = <TranscriptConversationSegment>[];
     for (var index = 0; index < pageRuns.length; index++) {
-      final messages = derivedRuns[index].present(
-        optimisticPrompts: promptBuckets[index] ?? const [],
-        clientKeys: clientKeys,
-        work: work,
-      );
+      final messages = presentedRuns[index];
       final turns = _conversationTurnsForRun(
         messages,
         mode: mode,
@@ -1636,6 +1684,8 @@ final class TranscriptHistoryWindow {
     HistoryPageWireEvent event, {
     required String requestedCursor,
     String? preserveMessageKey,
+    Set<String> inView = const {},
+    bool reportView = false,
     TranscriptHistoryWorkCounter? work,
   }) {
     if (!initialized || requestedCursor.isEmpty || event.isNewer) {
@@ -1810,6 +1860,7 @@ final class TranscriptHistoryWindow {
       nextReleased[pageStart] = TranscriptReleasedRange(
         olderCursor: released!.olderCursor,
         pageableRows: releasedRows - pagePageable,
+        holdsReportRows: released.holdsReportRows,
       );
     } else if (openRange && !closesOpenRange) {
       remainderStart = _consumeBackwardOpenRange(
@@ -1851,13 +1902,21 @@ final class TranscriptHistoryWindow {
       protectedKey: preserveMessageKey,
       pinned: insertedPage,
       shedTail: false,
+      inView: inView,
+      reportView: reportView,
       notWaiting: questionState.withdrawnRequestIds,
       work: work,
     );
     if (!fitted.fits) {
       return TranscriptHistoryPageMutation(
         window: this,
-        rejection: TranscriptHistoryPageRejection.overBudget,
+        rejection: _unfitPageRejection(
+          nextPages,
+          nextReleased,
+          protectedKey: preserveMessageKey,
+          pinned: insertedPage,
+          notWaiting: questionState.withdrawnRequestIds,
+        ),
       );
     }
     return TranscriptHistoryPageMutation(
@@ -1873,6 +1932,28 @@ final class TranscriptHistoryWindow {
   }
 }
 
+/// Why [pages], holding a page [pinned] that did not fit, was refused: no room
+/// when releasing the pages the reader can see or reaches before [pinned]
+/// would have made room (see [_fitTranscriptBudget]), else over budget.
+TranscriptHistoryPageRejection _unfitPageRejection(
+  List<TranscriptHistoryPage> pages,
+  Map<String, TranscriptReleasedRange> releasedRanges, {
+  required String? protectedKey,
+  required TranscriptHistoryPage pinned,
+  required Set<String> notWaiting,
+}) =>
+    _fitTranscriptBudget(
+      pages,
+      releasedRanges,
+      protectedKey: protectedKey,
+      pinned: pinned,
+      shedTail: false,
+      keepReaderRows: false,
+      notWaiting: notWaiting,
+    ).fits
+    ? TranscriptHistoryPageRejection.noRoom
+    : TranscriptHistoryPageRejection.overBudget;
+
 /// Fits [input] into the active count and decoded-byte budget, and the open
 /// tail into its own allowance ([kMaxOpenTranscriptTailMessages],
 /// [kMaxOpenTranscriptTailDecodedBytes]).
@@ -1882,14 +1963,22 @@ final class TranscriptHistoryWindow {
 /// 1. Whole non-tail pages, farthest from the focus first. The focus is the
 ///    page holding [protectedKey] (the reader's row), else [pinned] (a page
 ///    being inserted), else the open tail. Neither the focus, [pinned], nor
-///    the page holding [protectedKey] is ever released. Each release is
-///    remembered as a [TranscriptReleasedRange] so the reload is exact.
+///    the page holding [protectedKey] is ever released. While [pinned] is
+///    taken in, with [keepReaderRows], neither is a page holding a row of
+///    [inView] (what the reader can see) nor one between the reader and
+///    [pinned] (what they reach first): the range either would leave is one
+///    they would fill again, and its reload would release [pinned] in turn.
+///    In the [reportView], a page it draws nothing of is not reached first.
+///    Each release is remembered as a [TranscriptReleasedRange] so the reload
+///    is exact.
 ///    Rows of such a page that no reload can return (live-only rows sealed
 ///    with a block) stay behind as a residue beside the reloadable gap, and an
 ///    exact reload weaves them back into place.
 /// 2. The open tail's broker block, when [releaseTailBlock]: released whole,
 ///    leaving the tail's live rows behind the block's end boundary — or, when
 ///    the block holds the reader's row, split off as its own page instead.
+///    While [pinned] is taken in, with [keepReaderRows], a block holding a row
+///    of [inView] stays.
 ///    Then, when [shedTail] and still over the budget, residues, farthest
 ///    first: their rows go, and a marker notes that never-saved rows were
 ///    released there.
@@ -1914,7 +2003,10 @@ final class TranscriptHistoryWindow {
 /// it, so other older pages give way to it first (they reload exactly), but
 /// phases 2 and 3 and the refusal below measure everything EXCEPT a non-tail
 /// reader page: however large that page is, the open tail keeps its whole
-/// allowance and no live row is released on its account.
+/// allowance and no live row is released on its account. Pages phase 1 kept
+/// on screen are covered by that exception too, as the reader may have nowhere
+/// left to move; one kept off screen, between the reader and [pinned], is not:
+/// while the whole budget is still exceeded, [pinned] is refused.
 ///
 /// Without [shedTail] a window that still does not fit is refused (`fits`
 /// false) and [input] is returned unchanged. With it, the result can exceed
@@ -1938,6 +2030,9 @@ _fitTranscriptBudget(
   TranscriptHistoryPage? pinned,
   bool releaseTailBlock = true,
   bool shedTail = true,
+  bool keepReaderRows = true,
+  Set<String> inView = const {},
+  bool reportView = false,
   Set<String> notWaiting = const {},
   TranscriptHistoryWorkCounter? work,
 }) {
@@ -1998,6 +2093,35 @@ _fitTranscriptBudget(
 
   final pages = List<TranscriptHistoryPage>.of(input);
   final released = Map<String, TranscriptReleasedRange>.of(releasedRanges);
+  // A replayed file is stored at the tail but drawn beside its source. Budget
+  // retention and gap visibility must include that source dependency. Resolve
+  // it once against the complete input, before any source pages are released.
+  final filesAtSource = <String, Set<String>>{};
+  final sourceForFile = <String, String>{};
+  positionTranscriptArtifacts(
+    [for (final page in input) page.messages],
+    contiguousBefore: [
+      for (var i = 0; i < input.length; i++)
+        i > 0 && _historyGapBetween(input[i - 1], input[i]) == null,
+    ],
+    onPlacement: (source, artifact) {
+      final sourceKey = stableTranscriptMessageKey(source);
+      final fileKey = stableTranscriptMessageKey(artifact);
+      if (sourceKey == null || fileKey == null) return;
+      (filesAtSource[sourceKey] ??= {}).add(fileKey);
+      sourceForFile[fileKey] = sourceKey;
+    },
+  );
+  bool drawsReportRow(AgentMessage message) =>
+      transcriptReportDraws(message) ||
+      filesAtSource.containsKey(stableTranscriptMessageKey(message));
+  bool visibleRow(AgentMessage message) {
+    final key = stableTranscriptMessageKey(message);
+    return inView.contains(key) ||
+        (filesAtSource[key]?.any(inView.contains) ?? false);
+  }
+
+  final readerKey = sourceForFile[protectedKey] ?? protectedKey;
   void remember(String? newerCursor, TranscriptReleasedRange range) {
     if (newerCursor == null) return;
     released
@@ -2008,10 +2132,10 @@ _fitTranscriptBudget(
     }
   }
 
-  int protectedIndex() => protectedKey == null
+  int protectedIndex() => readerKey == null
       ? -1
       : pages.indexWhere(
-          (page) => page.containsStableKey(protectedKey, work: work),
+          (page) => page.containsStableKey(readerKey, work: work),
         );
   TranscriptHistoryPage? readerPage() {
     final at = protectedIndex();
@@ -2051,6 +2175,7 @@ _fitTranscriptBudget(
   }
 
   // 1. Whole non-tail pages, farthest from the focus first.
+  var keptAhead = false;
   while (true) {
     measureExempt();
     if (!over()) break;
@@ -2066,6 +2191,20 @@ _fitTranscriptBudget(
         : tailAt >= 0
         ? tailAt
         : pages.length - 1;
+    final keeps = keepReaderRows && pinnedAt >= 0;
+    // The pages the reader can see.
+    bool inSight(int index) =>
+        keeps && inView.isNotEmpty && pages[index].messages.any(visibleRow);
+    // The pages the reader reaches before [pinned]. One the report view
+    // draws nothing of is never reached: its range draws nothing there either.
+    bool ahead(int index) =>
+        keeps &&
+        protectedAt >= 0 &&
+        (protectedAt < pinnedAt
+            ? index > protectedAt && index < pinnedAt
+            : index > pinnedAt && index < protectedAt) &&
+        (!reportView || pages[index].messages.any(drawsReportRow));
+
     // A residue holds only rows no reload can return (see step 2b), and a
     // marker holds nothing.
     var victim = -1;
@@ -2077,6 +2216,11 @@ _fitTranscriptBudget(
           index == pinnedAt ||
           candidate.isResidue ||
           candidate.isReleasedResidueMarker) {
+        continue;
+      }
+      if (inSight(index)) continue;
+      if (ahead(index)) {
+        keptAhead = true;
         continue;
       }
       final distance = (index - focus).abs();
@@ -2115,6 +2259,7 @@ _fitTranscriptBudget(
         TranscriptReleasedRange(
           olderCursor: page.olderCursor,
           pageableRows: page.reloadLimit,
+          holdsReportRows: page.messages.any(drawsReportRow),
         ),
       );
       continue;
@@ -2137,6 +2282,7 @@ _fitTranscriptBudget(
       TranscriptReleasedRange(
         olderCursor: page.olderCursor,
         pageableRows: page.reloadLimit,
+        holdsReportRows: page.messages.any(drawsReportRow),
       ),
     );
   }
@@ -2152,7 +2298,13 @@ _fitTranscriptBudget(
         blockRows != null &&
         blockRows > 0 &&
         blockEnd != null &&
-        !tail.headReleased) {
+        !tail.headReleased &&
+        // While [pinned] is taken in, a block the reader can see stays, as
+        // the pages they can see do in phase 1.
+        !(keepReaderRows &&
+            pinned != null &&
+            inView.isNotEmpty &&
+            tail.messages.take(blockRows).any(visibleRow))) {
       final block = tail.messages.sublist(0, blockRows);
       final blockBytes = _estimatedMessagesBytes(block);
       // Rows the block's reload cannot return stay, in order, at the head of
@@ -2172,9 +2324,9 @@ _fitTranscriptBudget(
       // reload.
       final nothingPageable = tail.blockPageableRows == 0;
       final holdsReader =
-          protectedKey != null &&
+          readerKey != null &&
           members.any(
-            (message) => stableTranscriptMessageKey(message) == protectedKey,
+            (message) => stableTranscriptMessageKey(message) == readerKey,
           );
       // A block kept whole as the reader's page takes its live-only rows with
       // it, in place, and stays joined to the tail at its end boundary.
@@ -2257,6 +2409,7 @@ _fitTranscriptBudget(
           TranscriptReleasedRange(
             olderCursor: tail.olderCursor,
             pageableRows: tail.blockPageableRows,
+            holdsReportRows: members.any(drawsReportRow),
           ),
         );
       }
@@ -2330,6 +2483,17 @@ _fitTranscriptBudget(
           _markReleasedResidue(pages, victim, releasedRows, focus: focusAt) ||
           unsavedOverflow;
     }
+  }
+  // The reader's page excuses no page kept off screen for the reader to reach:
+  // they can still move on, and the pages behind them then make room. Until
+  // then, while the whole budget is exceeded, the page being taken in waits.
+  if (keptAhead && over()) {
+    return (
+      pages: input,
+      released: releasedRanges,
+      fits: false,
+      unsavedOverflow: false,
+    );
   }
   if (!overBeyond(reader) && !tailOver(pages)) {
     return (
@@ -2983,8 +3147,9 @@ List<TranscriptHistoryPage> _mapQuestionPages(
 
 TranscriptHistoryGapSegment? _historyGapBetween(
   TranscriptHistoryPage previous,
-  TranscriptHistoryPage page,
-) {
+  TranscriptHistoryPage page, [
+  Map<String, TranscriptReleasedRange> released = const {},
+]) {
   final connected =
       previous.newerCursor != null && previous.newerCursor == page.olderCursor;
   if (page.isReleasedResidueMarker) {
@@ -3018,5 +3183,30 @@ TranscriptHistoryGapSegment? _historyGapBetween(
         : TranscriptHistoryGapKind.reloadable,
     reloadCursor: reloadCursor,
     forwardCursor: reloadCursor == null ? null : previous.newerCursor,
+    holdsReportRows: _rangesHoldReportRows(
+      released,
+      from: reloadCursor,
+      to: previous.newerCursor,
+    ),
   );
+}
+
+/// Whether the released ranges tiling a gap back from [from] to [to] may hold
+/// a row the report view draws: true unless every one is known not to.
+bool _rangesHoldReportRows(
+  Map<String, TranscriptReleasedRange> released, {
+  required String? from,
+  required String? to,
+}) {
+  if (from == null || to == null) return true;
+  var cursor = from;
+  for (var ranges = 0; ranges <= released.length; ranges++) {
+    final range = released[cursor];
+    if (range == null || range.holdsReportRows) return true;
+    final older = range.olderCursor;
+    if (older == to) return false;
+    if (older == null) return true;
+    cursor = older;
+  }
+  return true;
 }

@@ -112,6 +112,55 @@ Map<String, Object?> markedRow(int index) => switch (index % 10) {
   },
 };
 
+final String _commandOutput = 'x' * 12000;
+
+/// Durable row [index] of a session that mostly runs commands, built in turns
+/// of [turn] rows: a prompt, a reply, commands with 12 KB of output each, a
+/// thought and a closing line. With tool calls hidden a page draws a few short
+/// rows, or none, while all of its output still counts toward what the client
+/// keeps decoded. Every drawn row starts `Row N.`.
+Map<String, Object?> commandHeavyRow(
+  int index, {
+  int turn = 40,
+}) => switch (index % turn) {
+  0 => {
+    'type': 'user-message',
+    'key': 'u$index',
+    'text': 'Row $index. Please run part ${index ~/ turn}.',
+  },
+  1 => {
+    'type': 'model-output',
+    'key': 'm$index',
+    'text': 'Row $index. ${markedProse(index, 2)}',
+    'final': true,
+  },
+  final slot when slot == turn - 2 => {
+    'type': 'thinking',
+    'key': 't$index',
+    'text': 'Thinking $index.',
+  },
+  final slot when slot == turn - 1 => {
+    'type': 'model-output',
+    'key': 'm$index',
+    'text': 'Row $index. Part ${index ~/ turn} ran.',
+    'final': true,
+  },
+  final slot when slot.isEven => {
+    'type': 'tool-call',
+    'callId': 'c$index',
+    'name': 'bash',
+    'toolClass': 'execute',
+    'arguments': {'command': 'make part-$index'},
+  },
+  _ => {
+    'type': 'tool-result',
+    'callId': 'c${index - 1}',
+    'name': 'bash',
+    'toolClass': 'execute',
+    'output': _commandOutput,
+  },
+};
+
 /// `Row N.` as the first text of a row.
 final RegExp rowMarker = RegExp(r'Row (\d+)\.');
 
@@ -467,6 +516,15 @@ extension TranscriptReader on AppDriver {
     }
     if (alt) await tester.sendKeyUpEvent(LogicalKeyboardKey.altLeft);
   }
+
+  /// Hides tool calls from the View menu: only what was said is drawn.
+  Future<void> hideToolCalls() async {
+    await tapKey('session-detail-view-menu');
+    await tapKey('session-detail-view-item-report');
+  }
+
+  /// Shows the tool calls [hideToolCalls] hid.
+  Future<void> showToolCalls() => hideToolCalls();
 }
 
 /// A session of [total] durable rows, opened in the real App on its newest
