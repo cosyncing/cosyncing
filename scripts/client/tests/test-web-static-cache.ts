@@ -20,11 +20,12 @@
  *   bun run scripts/client/tests/test-web-static-cache.ts
  */
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import packageJson from '../../../package.json';
-import { assertNoRuntimeRoutes, stampWorkerSource } from '../build-web-cache.ts';
+import { assertNoRuntimeRoutes, buildCacheManifest, stampWorkerSource } from '../build-web-cache.ts';
 import { WEB_BASE_HREF, WEB_BUILD_COMMAND } from '../build-web.ts';
 import { CLIENT_ROOT, REPOSITORY_ROOT } from '../run-client-command.ts';
 
@@ -1070,6 +1071,25 @@ async function caseFailedInstallLeavesTheOldVersionIntact(): Promise<void> {
   );
 }
 
+async function casePreviewAssetsDoNotDelayInstall(): Promise<void> {
+  const root = await mkdtemp(join(tmpdir(), 'cosyncing-preview-cache-'));
+  try {
+    for (const file of ['index.html', 'main.dart.js', 'main.dart.js_1.part.js',
+      'assets/packages/pdfrx/assets/pdfium.wasm', 'assets/fonts/Lato.ttf']) {
+      await mkdir(join(root, file, '..'), { recursive: true });
+      await writeFile(join(root, file), `fixture ${file}`);
+    }
+    const manifest = await buildCacheManifest(root);
+    check(manifest.runtime.includes('main.dart.js_1.part.js'), 'deferred viewer code loads on demand');
+    check(manifest.runtime.includes('assets/packages/pdfrx/assets/pdfium.wasm'), 'PDF engine loads on demand');
+    check(!manifest.precache.some((file) => file.includes('pdfrx') || file.endsWith('.part.js')),
+      'preview assets never join the atomic installation download');
+    check(manifest.precache.includes('assets/fonts/Lato.ttf'), 'ordinary UI assets still install atomically');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
 function caseManifestGeneratorRejectsRuntimeRoutes(): void {
   console.log('the manifest generator refuses runtime routes');
   let threw = false;
@@ -1109,6 +1129,7 @@ async function main(): Promise<number> {
 
   caseWorkerSourceKeepsItsPlaceholders();
   caseManifestGeneratorRejectsRuntimeRoutes();
+  await casePreviewAssetsDoNotDelayInstall();
   await caseReleaseBuildShapeIsShared();
   await caseInstallPrecachesExactlyTheManifest();
   await caseBrokerRoutesAreNeverTouched();

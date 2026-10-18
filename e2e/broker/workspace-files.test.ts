@@ -8,11 +8,12 @@
  * with the owner's credential exactly as the app makes them.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { type Broker, type BrokerClient, startBroker } from '../harness/index.ts';
 import { type InstalledBroker, startInstalledBroker } from '../harness/installed.ts';
 import { PiBridgeSession } from '../harness/fakes/pi-bridge-driver.ts';
+import { pairDevice } from '../harness/pairing.ts';
 
 const POSIX = process.platform !== 'win32';
 // Windows strips a trailing space from a file name and refuses a double quote in one.
@@ -153,6 +154,64 @@ describe('with workspace browsing enabled in the broker configuration', () => {
     }
   });
 
+  test('media previews stream larger files, seek, revoke and preserve file access boundaries', async () => {
+    const image = Buffer.from('image bytes larger than the tiny download cap');
+    writeFileSync(join(cwd, 'preview.png'), image);
+    writeFileSync(join(cwd, 'movie.mp4'), 'video');
+    truncateSync(join(cwd, 'movie.mp4'), 256 * 1024 * 1024);
+    const request = (path: string) => ({ tool: 'pi', sessionId: pi.id, path });
+    const anonymous = owner.as({ kind: 'none' });
+    expect((await anonymous.post('/api/media-preview-tickets', request('preview.png'))).status).toBe(401);
+    for (const path of ['hello.txt', 'document.html', 'image.svg', 'file.constructor', 'file.__proto__']) {
+      expect((await owner.post('/api/media-preview-tickets', request(path))).status).toBe(415);
+    }
+    expect((await owner.post('/api/media-preview-tickets', request('../outside/secret.png'))).status).toBe(400);
+    if (POSIX) {
+      symlinkSync(join(cwd, 'preview.png'), join(cwd, 'linked.png'));
+      expect((await owner.post('/api/media-preview-tickets', request('linked.png'))).body.code).toBe('PATH_SYMLINK');
+    }
+    const created = await owner.post('/api/media-preview-tickets', request('preview.png'));
+    expect(created.status).toBe(201);
+    expect(created.body).toMatchObject({ size: image.length, mimeType: 'image/png' });
+    const url = created.body.url;
+    const preflight = await anonymous.request('OPTIONS', url, undefined, {
+      origin: 'https://client.example', 'access-control-request-method': 'DELETE',
+    });
+    expect(preflight.headers.get('access-control-allow-methods')).toContain('DELETE');
+    const head = await anonymous.request('HEAD', url);
+    expect([head.status, head.headers.get('content-length'), head.text]).toEqual([200, String(image.length), '']);
+    const ranged = await anonymous.get(`${url}?path=../outside/secret.txt`, { range: 'bytes=0-4' });
+    expect([ranged.status, ranged.text, ranged.headers.get('content-range')]).toEqual([206, 'image', `bytes 0-4/${image.length}`]);
+    const changedWorkspace = mkdtempSync(join(installed.paths.home, 'changed-workspace-'));
+    writeFileSync(join(changedWorkspace, 'preview.png'), 'different workspace');
+    await pi.rehello({ cwd: changedWorkspace });
+    try {
+      expect((await anonymous.get(url, { range: 'bytes=0-4' })).text).toBe('image');
+    } finally {
+      await pi.rehello({ cwd });
+    }
+    expect((await anonymous.get(url, { range: 'bytes=999-' })).status).toBe(416);
+    expect((await anonymous.delete(url)).status).toBe(204);
+    expect((await anonymous.get(url)).status).toBe(403);
+    const movie = await owner.post('/api/media-preview-tickets', request('movie.mp4'));
+    expect(movie.status).toBe(201);
+    const end = await anonymous.get(movie.body.url, { range: `bytes=${256 * 1024 * 1024 - 4}-` });
+    expect([end.status, end.text.length]).toEqual([206, 4]);
+    await anonymous.delete(movie.body.url);
+    for (const [name, limit] of [['large.png', 32], ['large.pdf', 128], ['large.mp4', 2048]] as const) {
+      writeFileSync(join(cwd, name), '');
+      truncateSync(join(cwd, name), limit * 1024 * 1024 + 1);
+      expect((await owner.post('/api/media-preview-tickets', request(name))).status).toBe(413);
+    }
+    const device = await pairDevice(owner);
+    const peer = owner.as({ kind: 'peer', peerToken: device.peerToken });
+    const delegated = await peer.post('/api/media-preview-tickets', request('preview.png'));
+    expect(delegated.status).toBe(201);
+    expect((await anonymous.get(delegated.body.url)).status).toBe(200);
+    await owner.delete(`/api/transport/peers/${device.peerId}`);
+    expect((await anonymous.get(delegated.body.url)).status).toBe(403);
+  });
+
   test('Chinese filenames round-trip through lookup and whole or ranged downloads', async () => {
     const name = 'report_长图_2160px.jpg';
     const bytes = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
@@ -282,6 +341,8 @@ describe('with workspace browsing left at its default', () => {
     writeFileSync(join(cwd, 'secret.env'), 'TOKEN=do-not-read-remotely');
     const pi = await PiBridgeSession.open(owner, { cwd });
     expect((await owner.get('/api/broker/health')).body.features.httpWorkspaceBrowsing).toBe(false);
+    const preview = await owner.post('/api/media-preview-tickets', { tool: 'pi', sessionId: pi.id, path: 'secret.pdf' });
+    expect([preview.status, preview.body.code]).toEqual([403, 'FS_REMOTE_DISABLED']);
     for (const path of ['/fs', '/fs/read?path=secret.env', '/fs/search?query=secret.env', '/fs/download?path=secret.env']) {
       const denied = await owner.get(`/api/sessions/pi/${encodeURIComponent(pi.id)}${path}`);
       expect([path, denied.status, denied.body.code]).toEqual([path, 403, 'FS_REMOTE_DISABLED']);

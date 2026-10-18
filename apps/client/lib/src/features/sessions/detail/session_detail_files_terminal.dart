@@ -168,6 +168,30 @@ class _FilesPanel extends ConsumerStatefulWidget {
 }
 
 class _FilesPanelState extends ConsumerState<_FilesPanel> {
+  final Set<String> _openingFiles = {};
+
+  Future<void> _openWith(FsDirEntry entry) async {
+    if (!_openingFiles.add(entry.path)) return;
+    final l10n = AppLocalizations.of(context);
+    var opened = false;
+    try {
+      opened = await openWorkspaceFileWithApp(
+        context,
+        ref,
+        widget.sessionKey,
+        entry.path,
+      );
+    } on Object {
+      /* localized outcome below */
+    }
+    _openingFiles.remove(entry.path);
+    if (mounted && !opened) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(l10n.fileOpenWithFailed)));
+    }
+  }
+
   bool _started = false;
 
   @override
@@ -219,6 +243,14 @@ class _FilesPanelState extends ConsumerState<_FilesPanel> {
       return FileViewerPane(
         key: const Key('session-detail-files-viewer'),
         content: FileViewerSource(preview: preview),
+        onOpenWith: kIsWeb
+            ? null
+            : () => openWorkspaceFileWithApp(
+                context,
+                ref,
+                widget.sessionKey,
+                preview.path,
+              ),
         sessionLabel: widget.sessionLabel,
         toolColor: context.tokens.toolColor(widget.sessionKey.tool),
         onClose: () => ref
@@ -318,6 +350,7 @@ class _FilesPanelState extends ConsumerState<_FilesPanel> {
             },
             onPreviewFile: widget.onPreviewFile,
             onDownloadFile: widget.onDownloadFile,
+            onOpenWithFile: kIsWeb ? null : _openWith,
           ),
       ],
     );
@@ -347,6 +380,7 @@ class _SessionFilesSurface extends StatelessWidget {
     required this.onOpenEntry,
     required this.onPreviewFile,
     required this.onDownloadFile,
+    this.onOpenWithFile,
   });
 
   final SessionFileBrowserState state;
@@ -355,6 +389,7 @@ class _SessionFilesSurface extends StatelessWidget {
   final void Function(FsDirEntry entry) onOpenEntry;
   final Future<void> Function(FsDirEntry entry) onPreviewFile;
   final Future<void> Function(FsDirEntry entry) onDownloadFile;
+  final Future<void> Function(FsDirEntry entry)? onOpenWithFile;
 
   @override
   Widget build(BuildContext context) {
@@ -425,6 +460,7 @@ class _SessionFilesSurface extends StatelessWidget {
                 onOpenEntry: onOpenEntry,
                 onPreviewFile: onPreviewFile,
                 onDownloadFile: onDownloadFile,
+                onOpenWithFile: onOpenWithFile,
               ),
             },
           ],
@@ -557,12 +593,14 @@ class _SessionFilesEntries extends StatelessWidget {
     required this.onOpenEntry,
     required this.onPreviewFile,
     required this.onDownloadFile,
+    this.onOpenWithFile,
   });
 
   final List<FsDirEntry> entries;
   final void Function(FsDirEntry entry) onOpenEntry;
   final Future<void> Function(FsDirEntry entry) onPreviewFile;
   final Future<void> Function(FsDirEntry entry) onDownloadFile;
+  final Future<void> Function(FsDirEntry entry)? onOpenWithFile;
 
   @override
   Widget build(BuildContext context) {
@@ -585,6 +623,7 @@ class _SessionFilesEntries extends StatelessWidget {
             onOpenEntry: onOpenEntry,
             onPreviewFile: onPreviewFile,
             onDownloadFile: onDownloadFile,
+            onOpenWithFile: onOpenWithFile,
           ),
       ],
     );
@@ -597,6 +636,7 @@ class _SessionFileEntryRow extends StatelessWidget {
     required this.onOpenEntry,
     required this.onPreviewFile,
     required this.onDownloadFile,
+    this.onOpenWithFile,
     super.key,
   });
 
@@ -604,6 +644,7 @@ class _SessionFileEntryRow extends StatelessWidget {
   final void Function(FsDirEntry entry) onOpenEntry;
   final Future<void> Function(FsDirEntry entry) onPreviewFile;
   final Future<void> Function(FsDirEntry entry) onDownloadFile;
+  final Future<void> Function(FsDirEntry entry)? onOpenWithFile;
 
   @override
   Widget build(BuildContext context) {
@@ -625,6 +666,15 @@ class _SessionFileEntryRow extends StatelessWidget {
           ? Wrap(
               spacing: 4,
               children: [
+                if (onOpenWithFile != null)
+                  IconButton(
+                    key: ValueKey(
+                      'session-detail-files-open-with-${entry.path}',
+                    ),
+                    tooltip: l10n.fileOpenWith,
+                    icon: const Icon(Icons.open_in_new),
+                    onPressed: () => onOpenWithFile!(entry),
+                  ),
                 IconButton(
                   key: ValueKey('session-detail-files-preview-${entry.path}'),
                   tooltip: l10n.sessionFilesPreviewFile,

@@ -1,4 +1,5 @@
 import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/file_media_source.dart';
 
 /// Typed extraction of file-artifact metadata for UI affordance decisions.
 class SessionArtifactDescriptor {
@@ -206,6 +207,14 @@ class SessionArtifactDescriptor {
       'makefile',
     }.contains(extension);
   }
+
+  /// Any interactive delivery can open a pane with an external-app fallback.
+  bool get isPreviewCandidate =>
+      deliveryClass == SessionArtifactDeliveryClass.interactive &&
+      isDownloadable;
+
+  /// Raster, video or PDF presentation, selected without fetching bytes.
+  FileMediaKind? get mediaKind => fileMediaKind(name ?? path ?? '', mimeType);
 
   /// Primary action label for available artifact download.
   String get downloadActionLabel =>

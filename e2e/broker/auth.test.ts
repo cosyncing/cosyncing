@@ -88,6 +88,9 @@ const AUTHORIZATION: Record<string, Partial<Record<Method, Rule>>> = {
   '/api/broker/update-grants/request': { POST: 'observe' },
   '/api/machines': { GET: 'observe' },
   '/api/machines/resolve': { GET: 'observe' },
+  '/api/media-preview-tickets': { POST: 'files' },
+  // These handlers require a live file capability instead of broker headers.
+  '/api/media-previews/{id}': { GET: 'public', HEAD: 'public', DELETE: 'public' },
   '/api/projects/rename': { PATCH: 'drive', POST: 'drive' },
   '/api/push/wake': { POST: 'owner' },
   '/api/push/wake-tokens': { GET: 'observe', POST: 'observe' },
@@ -314,9 +317,13 @@ describe('the authorization table', () => {
       for (const method of methods) probes.push({ route, method });
     }
     await pool(probes, 16, async ({ route, method }) => {
-      const path = route.replaceAll('{id}', 'route-id');
+      const path = route.replaceAll('{id}', route === '/api/media-previews/{id}' ? 'x'.repeat(43) : 'route-id');
       const query = route.endsWith('/commands') ? '?id=route-id' : '';
       const response = await call(method, `${path}${query}`, headers);
+      if (route === '/api/media-previews/{id}' && (method === 'GET' || method === 'DELETE')) {
+        // Even an owner credential cannot substitute for an issued capability.
+        expect(response.status, `${principal} ${method} unissued preview`).toBe(403);
+      }
       const expected = expectedVerdict(AUTHORIZATION[route]![method], principal, path);
       const observed = method === 'HEAD'
         ? { verdict: (response.status === 401 ? 'unauthenticated' : response.status === 403 ? 'forbidden' : 'allowed') as Verdict, detail: String(response.status) }

@@ -51,7 +51,7 @@ const PRECACHE_DIRECTORIES: readonly string[] = ['icons/', 'assets/'];
  * and Skwasm variant would mean ~40 MB per install, almost all of it for
  * renderers this browser will never select.
  */
-const RUNTIME_DIRECTORIES: readonly string[] = ['canvaskit/'];
+const RUNTIME_DIRECTORIES: readonly string[] = ['canvaskit/', 'assets/packages/pdfrx/'];
 const RUNTIME_FILES: readonly string[] = ['sqlite3.wasm', 'drift_worker.js'];
 
 /**
@@ -176,9 +176,12 @@ function inAnyDirectory(path: string, directories: readonly string[]): boolean {
 function classify(path: string): 'precache' | 'runtime' | 'skip' {
   if (isExcluded(path)) return 'skip';
   if (PRECACHE_FILES.includes(path)) return 'precache';
-  if (inAnyDirectory(path, PRECACHE_DIRECTORIES)) return 'precache';
+  // PDF engines and deferred Dart code must not compete with session startup.
+  // They retain the same version validation as every other runtime asset.
+  if (/^main\.dart\.js_\d+\.part\.js$/.test(path)) return 'runtime';
   if (RUNTIME_FILES.includes(path)) return 'runtime';
   if (inAnyDirectory(path, RUNTIME_DIRECTORIES)) return 'runtime';
+  if (inAnyDirectory(path, PRECACHE_DIRECTORIES)) return 'precache';
   return 'skip';
 }
 

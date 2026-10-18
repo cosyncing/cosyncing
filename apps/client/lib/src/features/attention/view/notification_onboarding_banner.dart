@@ -40,7 +40,6 @@ class NotificationOnboardingBanner extends ConsumerWidget {
     final l10n = AppLocalizations.of(context);
     final tokens = context.tokens;
     final theme = Theme.of(context);
-    final colors = theme.colorScheme;
     final controller = ref.read(
       sessionNotificationSettingsControllerProvider.notifier,
     );
@@ -52,7 +51,7 @@ class NotificationOnboardingBanner extends ConsumerWidget {
           padding: const EdgeInsets.all(16),
           child: Material(
             key: const Key('notification-onboarding-banner'),
-            color: colors.secondaryContainer,
+            color: tokens.surface2,
             elevation: 2,
             borderRadius: BorderRadius.circular(tokens.radiusMd),
             child: ConstrainedBox(
@@ -68,14 +67,14 @@ class NotificationOnboardingBanner extends ConsumerWidget {
                         Icon(
                           Icons.notifications_active_outlined,
                           size: 18,
-                          color: colors.onSecondaryContainer,
+                          color: tokens.textPrimary,
                         ),
                         const SizedBox(width: 8),
                         Flexible(
                           child: Text(
                             l10n.notificationOnboardingTitle,
                             style: theme.textTheme.labelLarge?.copyWith(
-                              color: colors.onSecondaryContainer,
+                              color: tokens.textPrimary,
                             ),
                           ),
                         ),
@@ -85,7 +84,7 @@ class NotificationOnboardingBanner extends ConsumerWidget {
                     Text(
                       l10n.notificationOnboardingBody,
                       style: theme.textTheme.bodySmall?.copyWith(
-                        color: colors.onSecondaryContainer,
+                        color: tokens.textPrimary,
                       ),
                     ),
                     const SizedBox(height: 4),
@@ -94,6 +93,9 @@ class NotificationOnboardingBanner extends ConsumerWidget {
                       children: [
                         TextButton(
                           key: const Key('notification-onboarding-dismiss'),
+                          style: TextButton.styleFrom(
+                            foregroundColor: tokens.textPrimary,
+                          ),
                           onPressed: () =>
                               unawaited(controller.setEnabled(enabled: false)),
                           child: Text(l10n.notificationOnboardingDismiss),

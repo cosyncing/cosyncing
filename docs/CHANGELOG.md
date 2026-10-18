@@ -13,6 +13,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Added
 
+- Files panels preview PNG, JPEG, WebP and GIF images with zoom, PDFs with page navigation, and supported videos with playback controls. Preview ceilings are 32 MiB for images, 128 MiB for PDFs and 2 GiB for streamed videos, independent of text-preview limits. PDF and video decoders load only when their pane is visible; closing, hiding or backgrounding a preview releases it.
+- Native clients offer **Open with** for workspace and delivered files, including Word and PowerPoint documents. Android and iOS hand the cached file to an installed compatible application. Linux and Windows video playback uses this action; codec availability depends on the platform.
 - Broker update APIs for reviewing and staging a pinned release, tracking update
   recovery, and granting or revoking a paired device's update permission.
   `cosy update --components broker` updates only the broker. The in-app update
@@ -20,6 +22,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- The notification setup banner reserves space above the bottom edge, keeping
+  phone playback and composer controls accessible, with readable actions in
+  both light and dark themes.
 - Long-pressing or right-clicking a session tab or roster row opens the rename
   dialog directly, removing the offset one-item menu.
 - Composer attachments show readable file sizes, matching file lists and

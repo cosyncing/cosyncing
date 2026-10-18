@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:broker_client/broker_client.dart';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/file_media_source.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_detail_state.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/file_reference.dart';
@@ -45,13 +47,48 @@ abstract interface class SessionFileSearchRepository {
   });
 }
 
+/// Optional media capability; ordinary text/browser repositories stay usable.
+// The optional host capability keeps text-only repositories usable.
+// ignore: one_member_abstracts
+abstract interface class SessionMediaPreviewRepository {
+  /// Creates a lazy loader without downloading or initializing a decoder.
+  FileMediaPreview mediaPreview(
+    SessionDetailKey session,
+    String path,
+    FileMediaKind kind,
+  );
+}
+
 /// Broker-backed file browser repository.
 class BrokerSessionFileBrowserRepository
-    implements SessionFileBrowserRepository, SessionFileSearchRepository {
+    implements
+        SessionFileBrowserRepository,
+        SessionFileSearchRepository,
+        SessionMediaPreviewRepository {
   /// Creates a broker-backed repository.
   const BrokerSessionFileBrowserRepository(this._client);
 
   final BrokerClient _client;
+
+  @override
+  FileMediaPreview mediaPreview(
+    SessionDetailKey session,
+    String path,
+    FileMediaKind kind,
+  ) => FileMediaPreview(
+    kind: kind,
+    load: () async {
+      final ticket = await _client.createMediaPreview(
+        tool: session.tool,
+        sessionId: session.sessionId,
+        path: path,
+      );
+      return FileMediaSource(
+        uri: ticket.url,
+        release: () => unawaited(_client.releaseMediaPreview(ticket)),
+      );
+    },
+  );
 
   @override
   Future<FsSearchResult> searchFiles(
@@ -189,7 +226,8 @@ class SessionFilePreview {
     required this.size,
     required this.limit,
     required this.truncated,
-    required this.text,
+    this.text = '',
+    this.media,
     this.anchorLine,
     this.anchorColumn,
   });
@@ -214,6 +252,9 @@ class SessionFilePreview {
 
   /// Decoded preview text.
   final String text;
+
+  /// Lazy media request; bytes and decoders belong only to the visible view.
+  final FileMediaPreview? media;
 
   /// 1-based line the viewer should scroll to, when the mention carried one.
   final int? anchorLine;
@@ -589,6 +630,22 @@ class SessionFileBrowserController
       noticeArgument: _basename(resolvedPath),
     );
 
+    final media = sessionMediaPreview(
+      repository,
+      arg.session,
+      resolvedPath,
+      stat.stat.size,
+    );
+    if (media != null) {
+      state = state.copyWith(
+        phase: SessionFileBrowserPhase.ready,
+        preview: media,
+        clearNotice: true,
+      );
+      await _listContaining(repository, resolvedPath);
+      return media;
+    }
+
     final FsReadResult read;
     try {
       read = await repository.readFile(arg.session, path: resolvedPath);
@@ -705,6 +762,20 @@ class SessionFileBrowserController
     }
 
     try {
+      final media = sessionMediaPreview(
+        repository,
+        arg.session,
+        entry.path,
+        entry.size,
+      );
+      if (media != null) {
+        state = state.copyWith(
+          phase: SessionFileBrowserPhase.ready,
+          preview: media,
+          clearNotice: true,
+        );
+        return media;
+      }
       final read = await repository.readFile(arg.session, path: entry.path);
       if (!isPreviewableRead(read)) {
         state = state.copyWith(
@@ -878,6 +949,30 @@ String decodeSessionFileReadText(FsReadResult result) {
     return utf8.decode(base64.decode(result.data), allowMalformed: true);
   }
   return result.data;
+}
+
+/// Shared by compact browsing and independent workspace tabs.
+SessionFilePreview? sessionMediaPreview(
+  SessionFileBrowserRepository repository,
+  SessionDetailKey session,
+  String path,
+  int size,
+) {
+  final kind = fileMediaKind(path);
+  if (kind == null || repository is! SessionMediaPreviewRepository) return null;
+  return SessionFilePreview(
+    path: path,
+    displayName: path.split('/').last,
+    mimeType: null,
+    size: size,
+    limit: fileMediaByteLimit(kind),
+    truncated: false,
+    media: (repository as SessionMediaPreviewRepository).mediaPreview(
+      session,
+      path,
+      kind,
+    ),
+  );
 }
 
 /// MIME-driven preview eligibility.

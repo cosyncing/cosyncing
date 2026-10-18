@@ -24,7 +24,9 @@ export async function testCodexAppDaemon(): Promise<void> {
   symlinkSync(socket,alias);
   const sessions = join(home, 'sessions', '2026', '10', '10');
   mkdirSync(sessions, { recursive: true });
-  const rollout = join(sessions, 'rollout-app-thread.jsonl');
+  let threadId = '';
+  let rollout = '';
+  let nextThread = 0;
   const marker = join(root, 'stdio-started');
   const bin = join(root, 'codex-bin');
   const keys = ['CODEX_HOME', 'COSYNCING_CODEX_BIN', 'COSYNCING_CODEX_SYNC_SERVER', 'COSYNCING_CODEX_APP_SERVER_SOCK'];
@@ -52,8 +54,10 @@ for await (const chunk of Bun.stdin.stream()) {
   let result = {};
   if (request.method === 'thread/loaded/list') result = {data: []};
   if (request.method === 'thread/start') {
-   fs.writeFileSync(${JSON.stringify(rollout)}, JSON.stringify({type:'session_meta',payload:{id:'app-thread',cwd:params.cwd,model_provider:params.modelProvider ?? 'openai'}})+'\\n');
-   result = {thread:{id:'app-thread',path:${JSON.stringify(rollout)},cwd:params.cwd},model:params.model,modelProvider:params.modelProvider};
+   const threadId = 'private-' + require('node:crypto').randomUUID();
+   const rollout = require('node:path').join(${JSON.stringify(sessions)}, 'rollout-' + threadId + '.jsonl');
+   fs.writeFileSync(rollout, JSON.stringify({type:'session_meta',payload:{id:threadId,cwd:params.cwd,model_provider:params.modelProvider ?? 'openai'}})+'\\n', {flag:'wx'});
+   result = {thread:{id:threadId,path:rollout,cwd:params.cwd},model:params.model,modelProvider:params.modelProvider};
   }
   if (request.method === 'thread/resume') result = {thread:{id:params.threadId,status:{type:'idle'},turns:[]}};
   console.log(JSON.stringify({id:request.id,result}));
@@ -63,12 +67,14 @@ for await (const chunk of Bun.stdin.stream()) {
   const daemon = new FakeCodexDaemon(socket, {
     loadedThreadIds: [],
     startResult: (params) => {
-      writeFileSync(rollout, JSON.stringify({type:'session_meta',payload:{id:'app-thread',cwd:params.cwd,model_provider:params.modelProvider ?? 'openai'}})+'\n');
-      daemon.configure({loadedThreadIds: ['app-thread']});
-      return {thread:{id:'app-thread',path:rollout,cwd:params.cwd},model:params.model,modelProvider:params.modelProvider};
+      threadId = `app-thread-${++nextThread}`;
+      rollout = join(sessions, `rollout-${threadId}.jsonl`);
+      writeFileSync(rollout, JSON.stringify({type:'session_meta',payload:{id:threadId,cwd:params.cwd,model_provider:params.modelProvider ?? 'openai'}})+'\n', {flag:'wx'});
+      daemon.configure({loadedThreadIds: [threadId]});
+      return {thread:{id:threadId,path:rollout,cwd:params.cwd},model:params.model,modelProvider:params.modelProvider};
     },
-    resumeResult: () => ({thread:{id:'app-thread',path:rollout,status:{type:'idle'},turns:[]}}),
-    readResult: () => ({thread:{id:'app-thread',status:{type:'idle'},turns:[]}}),
+    resumeResult: () => ({thread:{id:threadId,path:rollout,status:{type:'idle'},turns:[]}}),
+    readResult: () => ({thread:{id:threadId,status:{type:'idle'},turns:[]}}),
   });
   const diagnostics: any[] = [];
   const emptyPresence = () => ({attributed:new Set<string>(),unattributed:[],privateThreadIds:new Set<string>(),privateUnattributed:[],unknownUnattributed:[],unknownThreadIds:new Set<string>(),candidates:[],socketDiagAvailable:true,processScanAvailable:true});
@@ -79,8 +85,10 @@ for await (const chunk of Bun.stdin.stream()) {
     await daemon.start();
     writeFileSync(join(home, 'config.toml'), '[model_providers.fixture]\nname="Fixture"\nbase_url="http://fixture.invalid/v1"\nwire_api="responses"\n');
     writeFileSync(join(home, 'test.config.toml'), 'model_provider="fixture"\nmodel="selected"\n');
+    const created: {id:string; nativeId:string; path:string; content:string}[] = [];
     for (const model of [undefined, {providerID:'fixture',modelID:'selected',variant:'test',reasoningEffort:'high'}, {providerID:'fixture',modelID:'no-profile-match',reasoningEffort:'high'}]) {
       const info = await adapter.createSession({directory:cwd,model});
+      created.push({id:info.id,nativeId:threadId,path:rollout,content:readFileSync(rollout,'utf8')});
       assert.equal(existsSync(marker), false, 'managed app creation must not spawn stdio');
       assert.equal(info.cwd,cwd);
       assert.equal(info.control?.terminalSync.action,'join');
@@ -92,10 +100,14 @@ for await (const chunk of Bun.stdin.stream()) {
         assert.equal(request.params.modelProvider,'fixture'); assert.equal(request.params.model,model.modelID);
         assert.equal(request.params.allowProviderModelFallback,false);
         assert(daemon.requests.some((r)=>r.method==='thread/settings/update' && r.params.effort==='high'));
-        if (model.variant) assert.match(info.terminalSyncHint!.command, /-p test resume --remote .* -m selected app-thread/);
-        else assert.match(info.terminalSyncHint!.command, /-c 'model_provider="fixture"' resume --remote .* -m no-profile-match app-thread/);
+        if (model.variant) assert.match(info.terminalSyncHint!.command, /-p test resume --remote .* -m selected /);
+        else assert.match(info.terminalSyncHint!.command, /-c 'model_provider="fixture"' resume --remote .* -m no-profile-match /);
+        assert(info.terminalSyncHint!.command.endsWith(` ${threadId}`));
       }
     }
+    assert.equal(new Set(created.map((info)=>info.id)).size,created.length,'each create returns a distinct stored session');
+    assert.equal(new Set(created.map((info)=>info.nativeId)).size,created.length,'each create allocates a distinct native thread');
+    for (const info of created) assert.equal(readFileSync(info.path,'utf8'),info.content,'later creates preserve historical rollouts');
     const id = Buffer.from(rollout).toString('base64url');
     // Cold Drive must load the same thread on the daemon.
     daemon.configure({loadedThreadIds:[]});
@@ -105,7 +117,7 @@ for await (const chunk of Bun.stdin.stream()) {
     assert(diagnostics.some((e)=>e.event==='transport-selected' && e.transport==='daemon-proxy'));
     await conn.close();
     // Explicit Drive joins a loaded thread through the Hub rather than refusing ownership.
-    daemon.configure({loadedThreadIds:['app-thread']});
+    daemon.configure({loadedThreadIds:[threadId]});
     const managed = await hub.ensure('codex',id,'resume','takeover');
     assert.equal(await hub.ensure('codex',id,'live'),managed,'explicit Drive joins the existing broker owner');
     assert.equal(await hub.ensure('codex',id),managed,'mode-less attach joins the existing broker owner');
@@ -160,7 +172,7 @@ for await (const chunk of Bun.stdin.stream()) {
     assert.equal(daemon.calls.filter((method)=>method==='turn/start').length,2);
     // Replacing the control alias also invalidates a still-open old transport.
     const replacementSocket = join(root,'replacement.sock');
-    const replacement = new FakeCodexDaemon(replacementSocket,{loadedThreadIds:[],resumeResult:()=>({thread:{id:'app-thread',status:{type:'idle'},turns:[]}})});
+    const replacement = new FakeCodexDaemon(replacementSocket,{loadedThreadIds:[],resumeResult:()=>({thread:{id:threadId,status:{type:'idle'},turns:[]}})});
     await replacement.start();
     try {
       unlinkSync(alias); symlinkSync(replacementSocket,alias);
@@ -208,6 +220,8 @@ for await (const chunk of Bun.stdin.stream()) {
     rmSync(marker,{force:true});
     writeFileSync(join(home,'private.config.toml'),'model_provider="private"\n[model_providers.private]\nname="Private"\nbase_url="http://fixture.invalid"\nwire_api="responses"\n');
     const privateInfo = await adapter.createSession({directory:cwd,model:{providerID:'private',modelID:'selected',variant:'private'}});
+    const privatePath = Buffer.from(privateInfo.id,'base64url').toString('utf8');
+    const privateContent = readFileSync(privatePath,'utf8');
     assert(existsSync(marker));
     assert.equal(privateInfo.control?.terminalSync.syncAvailable,false);
     assert.match(privateInfo.control!.terminalSync.reason!,/base config.toml/);
@@ -283,6 +297,11 @@ for await (const chunk of Bun.stdin.stream()) {
     } finally { clearTimeout(watchDeadline); unwatch(); }
     process.env.COSYNCING_CODEX_SYNC_SERVER='0';
     const disabled = await new CodexAdapter().createSession({directory:cwd});
+    assert.notEqual(disabled.id,privateInfo.id,'a restarted private fake creates a distinct session');
+    const disabledPath = Buffer.from(disabled.id,'base64url').toString('utf8');
+    assert.notEqual(JSON.parse(readFileSync(disabledPath,'utf8')).payload.id,JSON.parse(privateContent).payload.id,'private creates allocate distinct native threads across process restarts');
+    assert.equal(readFileSync(privatePath,'utf8'),privateContent,'a restarted private fake preserves the previous rollout');
+    for (const info of created) assert.equal(readFileSync(info.path,'utf8'),info.content,'private creates preserve shared historical rollouts');
     assert(existsSync(marker));
     assert.equal(disabled.control?.terminalSync.syncAvailable,false);
     assert.match(disabled.control!.terminalSync.reason!,/disabled/);

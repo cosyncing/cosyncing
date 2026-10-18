@@ -203,7 +203,7 @@ class _TranscriptArtifactDownloadAction extends ConsumerWidget {
           Wrap(
             spacing: 4,
             children: [
-              if (descriptor.isTextPreviewCandidate &&
+              if (descriptor.isPreviewCandidate &&
                   SessionFileLinkScope.maybeOf(context) != null)
                 TextButton.icon(
                   key: ValueKey('session-detail-chat-artifact-open-$sourceId'),

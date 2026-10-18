@@ -63,6 +63,52 @@ async function download(base: string, fetchUrl: string, headers: Record<string, 
   return { response, bytes: Buffer.from(await response.arrayBuffer()) };
 }
 
+test('an actively previewed artifact survives cache pressure and resumes after a broker restart', async () => {
+  const broker = await startBroker({
+    name: 'artifact-preview-retention',
+    env: { COSYNCING_ARTIFACT_CACHE_MAX_RECORDS: '2' },
+  });
+  const client = broker.client();
+  try {
+    const cwd = join(broker.paths.root, 'workspace');
+    mkdirSync(cwd);
+    const pi = await PiBridgeSession.open(client, { cwd });
+    const stream = await attachSettled(client, pi.id);
+    const deliver = async (name: string) => {
+      writeFileSync(join(cwd, name), `%PDF-1.7\n${name}\n%%EOF`);
+      expect((await pi.sendFile(join(cwd, name))).status).toBe(200);
+      return artifactNamed(stream, name);
+    };
+    const preview = async (artifact: any) => {
+      const ticket = await client.post('/api/media-preview-tickets', {
+        tool: 'pi', sessionId: pi.id, artifactId: artifact.artifactKey,
+      });
+      expect(ticket.status).toBe(201);
+      return ticket.body.url as string;
+    };
+    const first = await deliver('first.pdf');
+    const second = await deliver('second.pdf');
+    const firstUrl = await preview(first);
+    const secondUrl = await preview(second);
+    // The first read persists access; later ranges must also move recency even
+    // while persistence is coalesced. Only the most recently read file survives.
+    expect((await download(broker.url, secondUrl, { range: 'bytes=0-3' })).response.status).toBe(206);
+    expect((await download(broker.url, firstUrl, { range: 'bytes=0-3' })).response.status).toBe(206);
+    await deliver('third.pdf');
+    const resumed = await download(broker.url, firstUrl, { range: 'bytes=4-7' });
+    expect([resumed.response.status, resumed.bytes.toString()]).toEqual([206, '-1.7']);
+    expect((await download(broker.url, secondUrl)).response.status).toBe(404);
+    stream.close();
+    await broker.restart();
+    await pi.rehello();
+    const refreshed = await preview(first);
+    expect((await download(broker.url, refreshed, { range: 'bytes=4-7' })).response.status).toBe(206);
+  } finally {
+    client.closeAll();
+    await broker.stop();
+  }
+});
+
 /** A TCP pass-through on another port, as a reverse proxy would sit in front of the broker. */
 interface Forwarder {
   origin: string;
@@ -308,6 +354,27 @@ describe('artifact delivery is scoped to the session that sent it', () => {
     });
     expect(refused.kind).toBe('nack');
     expect(refused.code).toBe('ARTIFACT_INTERACTION_UNSUPPORTED');
+    stream.close();
+  });
+
+  test('delivered media gets a ranged preview without enabling HTML or another session', async () => {
+    const stream = await attachSettled(viaProxy, owner.id);
+    writeFileSync(join(cwd, 'media.pdf'), '%PDF-1.7\npreview-test\n%%EOF');
+    expect((await owner.sendFile(join(cwd, 'media.pdf'))).status).toBe(200);
+    const pdf = await artifactNamed(stream, 'media.pdf');
+    const input = { tool: 'pi', sessionId: owner.id, artifactId: pdf.artifactKey };
+    const created = await viaProxy.post('/api/media-preview-tickets', input);
+    expect(created.status).toBe(201);
+    const served = await download(broker.url, created.body.url, { range: 'bytes=0-3' });
+    expect([served.response.status, served.response.headers.get('content-type'), served.bytes.toString()])
+      .toEqual([206, 'application/pdf', '%PDF']);
+    expect((await viaProxy.post('/api/media-preview-tickets', { ...input, sessionId: peer.id })).status).toBe(404);
+    writeFileSync(join(cwd, 'untrusted.html'), '<script>test</script>');
+    expect((await owner.sendFile(join(cwd, 'untrusted.html'))).status).toBe(200);
+    const html = await artifactNamed(stream, 'untrusted.html');
+    expect((await viaProxy.post('/api/media-preview-tickets', { ...input, artifactId: html.artifactKey })).status).toBe(415);
+    expect((await fetch(new URL(created.body.url, broker.url), { method: 'DELETE' })).status).toBe(204);
+    expect((await download(broker.url, created.body.url)).response.status).toBe(403);
     stream.close();
   });
 

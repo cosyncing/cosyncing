@@ -6367,5 +6367,28 @@
         "type": "String"
       }
     }
+  },
+  "fileMediaLoading": "Loading file…",
+  "fileMediaFailed": "This file could not be previewed. Try opening it in another app.",
+  "fileMediaFit": "Fit to view",
+  "fileMediaPlay": "Play",
+  "fileMediaPause": "Pause",
+  "fileMediaMute": "Mute",
+  "fileMediaUnmute": "Unmute",
+  "fileOpenWith": "Open with another app",
+  "fileOpenWithFailed": "Could not open the file. Install an app that supports this file type and try again.",
+  "fileMediaOpenExternally": "Use Open with to play this video in another app.",
+  "filePdfPreviousPage": "Previous page",
+  "filePdfNextPage": "Next page",
+  "filePdfPage": "Page {page} of {count}",
+  "@filePdfPage": {
+    "placeholders": {
+      "page": {
+        "type": "int"
+      },
+      "count": {
+        "type": "int"
+      }
+    }
   }
 }

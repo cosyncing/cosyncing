@@ -28,6 +28,12 @@
 	<string>$(PRODUCT_COPYRIGHT)</string>
 	<key>NSMainNibFile</key>
 	<string>MainMenu</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<!-- Media follows the user's configured broker, including private HTTP endpoints. -->
+		<key>NSAllowsArbitraryLoadsForMedia</key>
+		<true/>
+	</dict>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Capture speech for the platform speech recognizer.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>

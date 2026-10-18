@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:cosyncing_client/src/features/transfers/data/local_transfer_file_opener_types.dart';
+import 'package:open_filex/open_filex.dart';
 
 /// Creates an [LocalTransferFileOpener] for desktop/mobile environments.
 LocalTransferFileOpener createLocalTransferFileOpener() {
@@ -13,6 +14,18 @@ final class _LocalTransferFileOpener implements LocalTransferFileOpener {
 
   @override
   Future<LocalTransferFileActionResult> openFile(String localPath) async {
+    if (Platform.isAndroid || Platform.isIOS) {
+      try {
+        final result = await OpenFilex.open(localPath);
+        return result.type == ResultType.done
+            ? const LocalTransferFileActionResult.success()
+            : LocalTransferFileActionResult.failed(result.message);
+      } on Object catch (error) {
+        return LocalTransferFileActionResult.failed(
+          'Could not open file: $error',
+        );
+      }
+    }
     if (Platform.isMacOS) {
       return _runCommand(
         executable: 'open',

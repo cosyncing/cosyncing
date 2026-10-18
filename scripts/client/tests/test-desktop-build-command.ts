@@ -99,13 +99,20 @@ for (const entitlementsFile of [
   );
 }
 
-const macosInfoPlist = await readFile(
-  join(REPOSITORY_ROOT, 'apps/client/macos/Runner/Info.plist'),
-  'utf8',
-);
-check(
-  !macosInfoPlist.includes('NSAllowsArbitraryLoads'),
-  'macOS client does not add broad arbitrary-load permission',
-);
+for (const target of ['ios', 'macos']) {
+  const infoPlist = await readFile(
+    join(REPOSITORY_ROOT, `apps/client/${target}/Runner/Info.plist`),
+    'utf8',
+  );
+  // Match complete keys: the AVFoundation-only exception is intentionally narrower.
+  check(
+    !/<key>\s*NSAllowsArbitraryLoads(?:InWebContent)?\s*<\/key>/.test(infoPlist),
+    `${target} client does not add broad arbitrary-load permission`,
+  );
+  check(
+    /<key>NSAllowsArbitraryLoadsForMedia<\/key>\s*<true\/>/.test(infoPlist),
+    `${target} media can use the user's configured HTTP broker`,
+  );
+}
 
 if (failures > 0) process.exit(1);
