@@ -47,6 +47,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   question while the card had already closed. An answer or dismissal for a
   question that is no longer open, for example from a second device, is
   refused instead of being sent to Claude.
+- An observed Kilo Code session keeps showing new messages when a file-change
+  notification is missed; it catches up within about two seconds instead of
+  stopping until the next change.
 
 ### Changed
 

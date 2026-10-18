@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 export {};
 import { Database } from 'bun:sqlite';
-import { mkdtempSync, renameSync, rmSync } from 'node:fs';
+import { EventEmitter } from 'node:events';
+import { mkdtempSync, renameSync, rmSync, type FSWatcher, type watch } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentMessage, HistorySnapshotSink, SessionInfo } from '@cosyncing/adapter-api';
@@ -119,6 +120,33 @@ try {
     unsubscribe();
     await connection.close();
   } finally { recoveryTree.cleanup(); }
+}
+
+{
+  // The watcher is only the fast path. Conformance C05 captured a live watcher, a subscriber and no
+  // read pending while an append sat unread; a store change no event reports must still tail.
+  const silentTree = buildKiloFixtureTree();
+  try {
+    const session = (await discoverKiloStore({ env: { KILO_DATA_DIR: silentTree.dataRoot } }))[0]!;
+    const connection = new KiloObserveConnection({
+      session,
+      info: {
+        id: session.id, nativeId: session.nativeId, tool: 'kilo', title: session.title,
+        cwd: session.cwd, status: session.status, attachMode: 'observe',
+      },
+      watchFactory: (() => Object.assign(new EventEmitter(), { close() {} }) as unknown as FSWatcher) as unknown as typeof watch,
+      safetyCheckMs: 20,
+    });
+    await connection.getHistory();
+    const tail: AgentMessage[] = [];
+    const unsubscribe = connection.subscribe((message) => tail.push(message));
+    appendKiloTurn(silentTree.databasePath).close();
+    const tailed = () => tail.filter((message) => message.type === 'user-message' && message.text === 'tail prompt');
+    await until('the append no watcher event reported', () => tailed().length > 0);
+    check('an append the watcher never reports still tails, exactly once', tailed().length === 1, JSON.stringify(tail));
+    unsubscribe();
+    await connection.close();
+  } finally { silentTree.cleanup(); }
 }
 
 {
