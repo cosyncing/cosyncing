@@ -29,6 +29,9 @@ Future<(AppDriver, FakeBroker, ComposerDesk)> openComposer(
   setup?.call(studio, desk);
   await f.storage.seedServer(studio);
   final app = await f.launch(viewport: viewport);
+  if (find.byKey(const Key('workspace-open-drawer')).evaluate().isNotEmpty) {
+    await app.tapKey('workspace-open-drawer');
+  }
   await app.openFromRoster('s1', tool: tool, cwd: '/work/studio');
   return (app, studio, desk);
 }

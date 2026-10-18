@@ -44,6 +44,128 @@ const opus = ModelOption(
 );
 
 void main() {
+  group('phone keyboard', () {
+    for (final scenario in [
+      (platform: TargetPlatform.android, viewport: FeatureViewport.phone),
+      (platform: TargetPlatform.iOS, viewport: FeatureViewport.narrowPhone),
+      // Desktop outside-tap handling also unfocuses on pointer-down, as
+      // mobile web does. Native mobile touch deliberately does not.
+      (platform: TargetPlatform.linux, viewport: FeatureViewport.phone),
+    ]) {
+      featureTest(
+        'keeps the composer above the keyboard and sends on the first tap '
+        '(${scenario.platform.name})',
+        (f) async {
+          await f.storage.preferences.setThemeMode(
+            scenario.platform == TargetPlatform.android ? 'dark' : 'light',
+          );
+          final (app, _, desk) = await openComposer(
+            f,
+            viewport: scenario.viewport,
+            setup: (_, desk) => desk.answer = PromptAnswer.hold,
+          );
+          final composer = find.byKey(const Key('session-detail-composer'));
+          f.tester.view
+            ..viewPadding = const FakeViewPadding(bottom: 24)
+            ..padding = const FakeViewPadding(bottom: 24);
+          await app.type('First phone prompt');
+
+          // Intermediate keyboard metrics must consume only the newly
+          // obscured space, including after dismissal and reopening.
+          for (final inset in [0.0, 96.0, 300.0, 320.0, 0.0, 300.0]) {
+            f.tester.view
+              ..viewInsets = FakeViewPadding(bottom: inset)
+              ..padding = FakeViewPadding(bottom: inset == 0 ? 24 : 0);
+            await app.settle();
+            expect(
+              f.tester.getRect(composer).bottom,
+              closeTo(
+                scenario.viewport.size.height - (inset == 0 ? 24 : inset) - 8,
+                1,
+              ),
+              reason: 'the composer sits 8 dp above the keyboard or safe area',
+            );
+            expect(app.composerText, 'First phone prompt');
+            expect(f.tester.takeException(), isNull);
+          }
+
+          final field = f.tester.widget<TextField>(promptField);
+          final sendRect = f.tester.getRect(sendButton);
+          expect(field.focusNode!.hasFocus, isTrue);
+          final gesture = await f.tester.startGesture(sendRect.center);
+          await f.tester.pump();
+          expect(
+            field.focusNode!.hasFocus,
+            isTrue,
+            reason: 'pressing Send must not dismiss the keyboard',
+          );
+          expect(f.tester.getRect(sendButton), sendRect);
+          expect(desk.prompts, isEmpty);
+          await gesture.up();
+          await app.settle();
+          expect(desk.promptTexts, ['First phone prompt']);
+          expect(app.composerText, isEmpty);
+          expect(field.focusNode!.hasFocus, isTrue);
+
+          // Another tap while delivery is pending cannot duplicate the send.
+          await f.tester.tap(sendButton);
+          await app.settle();
+          expect(desk.prompts, hasLength(1));
+          desk.release(desk.prompts.single);
+          await app.settle();
+
+          await app.type('Keep this if refused');
+          desk.answer = PromptAnswer.refuse;
+          await app.pressSend();
+          await app.settle();
+          expect(app.composerText, 'Keep this if refused');
+          expect(app.canSend, isTrue);
+          expect(field.focusNode!.hasFocus, isTrue);
+        },
+        platform: scenario.platform,
+      );
+    }
+
+    featureTest(
+      'long drafts shrink to leave reading space without losing text',
+      (f) async {
+        final (app, _, desk) = await openComposer(
+          f,
+          viewport: FeatureViewport.phone,
+        );
+        final draft = List.generate(
+          12,
+          (index) => 'Draft line $index',
+        ).join('\n');
+        await app.type(draft);
+        final roomyHeight = f.tester.getSize(promptField).height;
+        final field = f.tester.widget<TextField>(promptField);
+        final selection = field.controller!.selection;
+        f.tester.view.viewInsets = const FakeViewPadding(bottom: 320);
+        await app.settle();
+        expect(f.tester.getSize(promptField).height, lessThan(roomyHeight));
+        expect(
+          f.tester
+              .getSize(find.byKey(const Key('session-detail-chat-scroll')))
+              .height,
+          greaterThan(100),
+        );
+        expect(app.composerText, draft);
+        expect(field.controller!.selection, selection);
+        expect(field.focusNode!.hasFocus, isTrue);
+        expect(sendButton.hitTestable(), findsOneWidget);
+        expect(f.tester.takeException(), isNull);
+        await app.pressSend();
+        expect(desk.promptTexts, [draft]);
+        f.tester.view.viewInsets = FakeViewPadding.zero;
+        await app.settle();
+        expect(app.composerText, isEmpty);
+        expect(f.tester.takeException(), isNull);
+      },
+      platform: TargetPlatform.android,
+    );
+  });
+
   group('a prompt and its echo', () {
     featureTest(
       'a sent prompt is a bubble at once, the composer empties, and the '

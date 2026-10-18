@@ -739,6 +739,7 @@ class _PromptComposer extends ConsumerStatefulWidget {
     required this.sessionLabel,
     required this.controller,
     required this.focusNode,
+    required this.maxLines,
     required this.enabled,
     required this.controlsEnabled,
     required this.canSend,
@@ -788,6 +789,9 @@ class _PromptComposer extends ConsumerStatefulWidget {
 
   final TextEditingController controller;
   final FocusNode focusNode;
+
+  /// Limited by the chat panel's available height after keyboard avoidance.
+  final int maxLines;
   final bool enabled;
 
   /// Whether broker-bound composer controls may mutate the session.
@@ -1375,66 +1379,62 @@ class _PromptComposerState extends ConsumerState<_PromptComposer>
           )
         : const Icon(Icons.arrow_upward, size: 16);
 
-    final sendButton = Tooltip(
-      message: l10n.sessionComposerSendTooltip,
-      child: IconButton(
-        key: const Key('session-detail-send-button'),
-        onPressed: effectiveCanSend ? widget.onSend : null,
-        icon: sendIcon,
+    final sendButton = IconButton(
+      tooltip: l10n.sessionComposerSendTooltip,
+      key: const Key('session-detail-send-button'),
+      onPressed: effectiveCanSend ? widget.onSend : null,
+      icon: sendIcon,
+      padding: EdgeInsets.zero,
+      visualDensity: touch ? VisualDensity.standard : VisualDensity.compact,
+      constraints: BoxConstraints(
+        minWidth: touch ? 40 : 32,
+        minHeight: touch ? 40 : 32,
+      ),
+      style: IconButton.styleFrom(
+        backgroundColor: scheme.primary,
+        foregroundColor: scheme.onPrimary,
+        disabledBackgroundColor: scheme.surfaceContainerHighest,
+        disabledForegroundColor: scheme.onSurfaceVariant.withValues(
+          alpha: 0.5,
+        ),
+        minimumSize: Size(touch ? 40 : 32, touch ? 40 : 32),
+        fixedSize: Size(touch ? 40 : 32, touch ? 40 : 32),
         padding: EdgeInsets.zero,
-        visualDensity: touch ? VisualDensity.standard : VisualDensity.compact,
-        constraints: BoxConstraints(
-          minWidth: touch ? 40 : 32,
-          minHeight: touch ? 40 : 32,
-        ),
-        style: IconButton.styleFrom(
-          backgroundColor: scheme.primary,
-          foregroundColor: scheme.onPrimary,
-          disabledBackgroundColor: scheme.surfaceContainerHighest,
-          disabledForegroundColor: scheme.onSurfaceVariant.withValues(
-            alpha: 0.5,
-          ),
-          minimumSize: Size(touch ? 40 : 32, touch ? 40 : 32),
-          fixedSize: Size(touch ? 40 : 32, touch ? 40 : 32),
-          padding: EdgeInsets.zero,
-          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          shape: const CircleBorder(),
-        ),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        shape: const CircleBorder(),
       ),
     );
     final interruptBusy =
         widget.interruptPhase == SessionInterruptPhase.sending;
-    final interruptButton = Tooltip(
-      message: l10n.sessionComposerInterruptTooltip,
-      child: IconButton(
-        key: const Key('session-detail-interrupt-button'),
-        onPressed: widget.interruptPhase == SessionInterruptPhase.idle
-            ? widget.onInterrupt
-            : null,
-        icon: interruptBusy
-            ? const SizedBox(
-                width: 16,
-                height: 16,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )
-            : const Icon(Icons.stop, size: 16),
+    final interruptButton = IconButton(
+      tooltip: l10n.sessionComposerInterruptTooltip,
+      key: const Key('session-detail-interrupt-button'),
+      onPressed: widget.interruptPhase == SessionInterruptPhase.idle
+          ? widget.onInterrupt
+          : null,
+      icon: interruptBusy
+          ? const SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : const Icon(Icons.stop, size: 16),
+      padding: EdgeInsets.zero,
+      visualDensity: touch ? VisualDensity.standard : VisualDensity.compact,
+      constraints: BoxConstraints(
+        minWidth: touch ? 40 : 32,
+        minHeight: touch ? 40 : 32,
+      ),
+      style: IconButton.styleFrom(
+        backgroundColor: tokens.statusError,
+        foregroundColor: scheme.onError,
+        disabledBackgroundColor: tokens.surface2,
+        disabledForegroundColor: tokens.textTertiary,
+        minimumSize: Size(touch ? 40 : 32, touch ? 40 : 32),
+        fixedSize: Size(touch ? 40 : 32, touch ? 40 : 32),
         padding: EdgeInsets.zero,
-        visualDensity: touch ? VisualDensity.standard : VisualDensity.compact,
-        constraints: BoxConstraints(
-          minWidth: touch ? 40 : 32,
-          minHeight: touch ? 40 : 32,
-        ),
-        style: IconButton.styleFrom(
-          backgroundColor: tokens.statusError,
-          foregroundColor: scheme.onError,
-          disabledBackgroundColor: tokens.surface2,
-          disabledForegroundColor: tokens.textTertiary,
-          minimumSize: Size(touch ? 40 : 32, touch ? 40 : 32),
-          fixedSize: Size(touch ? 40 : 32, touch ? 40 : 32),
-          padding: EdgeInsets.zero,
-          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          shape: const CircleBorder(),
-        ),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        shape: const CircleBorder(),
       ),
     );
 
@@ -1610,12 +1610,11 @@ class _PromptComposerState extends ConsumerState<_PromptComposer>
                           onKeyEvent: _onComposerKey,
                           child: TextField(
                             key: const Key('session-detail-prompt-input'),
+                            groupId: widget.focusNode,
                             controller: widget.controller,
                             focusNode: widget.focusNode,
                             minLines: 1,
-                            maxLines: MediaQuery.sizeOf(context).height <= 520
-                                ? 3
-                                : 6,
+                            maxLines: widget.maxLines,
                             // Keep drafting the next turn while the submitted
                             // snapshot
                             // waits for its terminal receipt. Send/attachment
@@ -1751,7 +1750,14 @@ class _PromptComposerState extends ConsumerState<_PromptComposer>
         ),
       ),
     );
-    return _wrapAttachmentDropTarget(composer);
+    // Send and the other inline controls belong to this editor. In particular,
+    // mobile web must not dismiss the keyboard on Send's pointer-down before
+    // the button receives pointer-up. Use a per-composer group so unrelated
+    // editors retain their normal outside-tap behavior.
+    return TextFieldTapRegion(
+      groupId: widget.focusNode,
+      child: _wrapAttachmentDropTarget(composer),
+    );
   }
 }
 

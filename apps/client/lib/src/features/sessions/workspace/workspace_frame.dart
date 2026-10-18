@@ -612,11 +612,17 @@ class _WorkspaceFrameState extends ConsumerState<WorkspaceFrame>
                           // technology entirely.
                           child: Semantics(
                             container: true,
-                            // The sidebar already consumed the leading inset.
-                            child: MediaQuery.removePadding(
-                              context: context,
-                              removeLeft: !drawerLayout,
-                              child: widget.child,
+                            child: Builder(
+                              // Read below Scaffold: it has already consumed
+                              // the keyboard inset. Restoring the outer media
+                              // data makes nested pages subtract it twice.
+                              builder: (bodyContext) =>
+                                  MediaQuery.removePadding(
+                                    context: bodyContext,
+                                    // The sidebar consumed the leading inset.
+                                    removeLeft: !drawerLayout,
+                                    child: widget.child,
+                                  ),
                             ),
                           ),
                         ),
