@@ -10,7 +10,7 @@ import { inspectInstallState, type InstallStateInspection } from '../installatio
 // copy had already fallen behind: it could not see the pairing-report fields, which meant a test double for
 // `pair` could not cover the installer's acceptance call at all. The implementation stays lazily imported.
 import type { PairCommandOptions } from './operator-commands.ts';
-import { PRODUCT_IDENTITY } from '@cosyncing/protocol';
+import { PRODUCT_IDENTITY, UPDATE_COMPONENTS, type UpdateComponent } from '@cosyncing/protocol';
 import {
   cliMessages,
   persistedCliLanguage,
@@ -144,6 +144,8 @@ export interface CliDependencies {
     yes: boolean;
     json: boolean;
     manifestUrl?: string;
+    components?: readonly UpdateComponent[];
+    pinnedReleaseId?: string;
     interactive: boolean;
     invocation: string;
     stdout: CliWriter;
@@ -563,10 +565,34 @@ async function defaultRunClaudeModRefresh(options: {
   return { exitCode: ok ? 0 : 1 };
 }
 
+/** Parse `--components`, refusing anything that is not a component this product has. */
+function parseUpgradeComponents(value: string | undefined): readonly UpdateComponent[] | undefined {
+  if (value === undefined) return undefined;
+  const parts = value.split(',').map((part) => part.trim()).filter((part) => part.length > 0);
+  if (parts.length === 0 || parts.length > UPDATE_COMPONENTS.length) return undefined;
+  if (parts.some((part) => !(UPDATE_COMPONENTS as readonly string[]).includes(part))) return undefined;
+  return [...new Set(parts as UpdateComponent[])];
+}
+
+/**
+ * The `--release` argument: bounded, printable, and never something a flag parser would
+ * mistake for an option of its own.
+ *
+ * Deliberately a shape check rather than a lookup. Whether this identity is the release the
+ * channel actually serves is decided once the signed manifest is in hand, by the installer
+ * that has to honour it; a pin that does not match is a refusal there and never a substitution.
+ */
+function parseUpgradeReleaseId(value: string | undefined): string | undefined {
+  if (value === undefined || !/^[A-Za-z0-9][A-Za-z0-9._:+@-]{0,127}$/.test(value)) return undefined;
+  return value;
+}
+
 async function defaultRunUpgrade(options: {
   yes: boolean;
   json: boolean;
   manifestUrl?: string;
+  components?: readonly UpdateComponent[];
+  pinnedReleaseId?: string;
   interactive: boolean;
   invocation: string;
   stdout: CliWriter;
@@ -624,6 +650,8 @@ async function defaultRunUpgrade(options: {
     ...applicationLaunchInputs(options.buildInfo),
     ...upgradeRuntimeVersion(options.buildInfo),
     ...(options.manifestUrl ? { manifestUrl: options.manifestUrl } : {}),
+    ...(options.components ? { components: options.components } : {}),
+    ...(options.pinnedReleaseId ? { pinnedReleaseId: options.pinnedReleaseId } : {}),
     ...(service ? { service } : {}),
   });
   writeCommandResult(result, options.json, options.stdout, options.stderr);
@@ -1121,10 +1149,38 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     let yes = false;
     let json = false;
     let manifestUrl: string | undefined;
+    let components: readonly UpdateComponent[] | undefined;
+    let pinnedReleaseId: string | undefined;
     for (let index = 0; index < args.length; index += 1) {
       const arg = args[index]!;
       if (arg === '--yes' && !yes) { yes = true; continue; }
       if (arg === '--json' && !json) { json = true; continue; }
+      // Accepted, validated, and never inferred: an automated caller that names no
+      // scope gets the historical implicit desktop reconciliation, so the flag has to
+      // be spelled out by anything acting on a user's behalf.
+      if (arg === '--components' && components === undefined) {
+        const value = args[index + 1];
+        const parsed = parseUpgradeComponents(value);
+        if (!parsed) {
+          stderr.write(`${command} upgrade: --components accepts broker, client, or broker,client\n`);
+          return 2;
+        }
+        components = parsed;
+        index += 1;
+        continue;
+      }
+      // A caller acting on a person's reviewed consent names the release it was given. The
+      // installer honours it exactly or refuses; it never resolves the mutable pointer instead.
+      if (arg === '--release' && pinnedReleaseId === undefined) {
+        const parsed = parseUpgradeReleaseId(args[index + 1]);
+        if (!parsed) {
+          stderr.write(`${command} upgrade: --release requires a release identity like rel-1.2.3+abcdefa\n`);
+          return 2;
+        }
+        pinnedReleaseId = parsed;
+        index += 1;
+        continue;
+      }
       if (arg === '--manifest' && manifestUrl === undefined) {
         const value = args[index + 1];
         try {
@@ -1150,7 +1206,17 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
       return 2;
     }
     return (await (dependencies.runUpgrade ?? ((options) => defaultRunUpgrade({ ...options, buildInfo })))(
-      { yes, json, ...(manifestUrl ? { manifestUrl } : {}), interactive: process.stdin.isTTY, invocation: command, stdout, stderr },
+      {
+        yes,
+        json,
+        ...(manifestUrl ? { manifestUrl } : {}),
+        ...(components ? { components } : {}),
+        ...(pinnedReleaseId ? { pinnedReleaseId } : {}),
+        interactive: process.stdin.isTTY,
+        invocation: command,
+        stdout,
+        stderr,
+      },
     )).exitCode;
   }
 

@@ -417,6 +417,9 @@ function manifestFor(options: {
   minimumBunVersion?: string;
   bunRuntime?: ReleaseBunRuntime | null;
   webApp?: ReleaseWebSidecar;
+  /** Defaults to the release one above this build; pass this build's own pair for an answer about the release it is on. */
+  version?: string;
+  sourceCommit?: string;
 }): ReleaseManifest {
   const jsApp: ReleaseJavaScriptApp = {
     name: 'cosyncing-app.js',
@@ -429,7 +432,7 @@ function manifestFor(options: {
     ...(options.bunRuntime === null ? {} : { bunRuntime: options.bunRuntime ?? releaseRuntimeFixture() }),
   };
   return releaseManifestForTests({
-    version: '2.0.0', sourceCommit: '2222222', publishedAt: '2026-07-17T12:00:00.000Z', keyId,
+    version: options.version ?? '2.0.0', sourceCommit: options.sourceCommit ?? '2222222', publishedAt: '2026-07-17T12:00:00.000Z', keyId,
     contract: { revision: 1, minimumClientRevision: 1, surfaceHash: 'fnv1a32:00000000' },
     webApp: options.webApp ?? {
       name: 'cosyncing-web-app.tar.gz', mount: '/cosy/', size: 1, sha256: '1'.repeat(64),
@@ -692,10 +695,14 @@ async function upgradeChecks(check: Check, roots: string[]): Promise<void> {
 
   // ---- The update that moves the runtime, from the old unversioned layout and from the versioned one.
   for (const [backend, layout] of [['systemd', 'legacy'], ['launchd', 'legacy'], ['systemd', 'owned']] as const) {
-    const label = `${backend}, ${layout === 'legacy' ? 'old ~/.bun layout' : 'versioned layout'}`;
+    // The versioned-layout run is also the run told which release to install, so the pin is honoured
+    // by a real transaction rather than by a fixture of its own. The two runs above keep the
+    // historical meaning of `cosy upgrade`: install whatever the channel serves.
+    const pinnedReleaseId = layout === 'owned' ? 'rel-2.0.0+2222222' : undefined;
+    const label = `${backend}, ${layout === 'legacy' ? 'old ~/.bun layout' : 'versioned layout'}${pinnedReleaseId ? ', pinned' : ''}`;
     const f = fixture({ backend, layout });
     const before = f.snapshot();
-    const options = dependencies(f, manifest);
+    const options = { ...dependencies(f, manifest), ...(pinnedReleaseId ? { pinnedReleaseId } : {}) };
     const upgraded = await runUpgrade(options);
     const [definition, environment] = f.rendered(f.newRuntime, f.newWeb);
     const definitionId = backend === 'systemd' ? 'service-systemd' : 'service-launchd';
@@ -756,6 +763,37 @@ async function upgradeChecks(check: Check, roots: string[]): Promise<void> {
         && !existsSync(join(f.home, 'bin', 'cosyncing.staging-2.0.0'))
         && !existsSync(f.newWeb) && !existsSync(join(f.home, 'upgrade-journal.json')),
       `${refused.status}/${refused.detailCode} calls=${f.calls.join(',')} entries=${JSON.stringify(runtimeEntries(f))}`);
+  }
+
+  // ---- A run pinned to an immutable release installs that release or nothing.
+  // The app's update button delegates to this command in a transient unit that starts seconds
+  // later, so the only thing keeping "install the release I reviewed" from quietly becoming
+  // "install whatever is latest by then" is the pin being honoured here.
+  {
+    const f = fixture({ backend: 'systemd', layout: 'legacy' });
+    const before = f.snapshot();
+    const entriesBefore = runtimeEntries(f);
+    const moved = await runUpgrade({ ...dependencies(f, manifest), pinnedReleaseId: 'rel-1.9.0+1111111' });
+    check('runtime upgrade: a pinned release the channel no longer serves is refused before anything moves',
+      moved.status === 'blocked' && moved.exitCode === 1 && moved.detailCode === 'release-target-moved'
+        && JSON.stringify(f.snapshot()) === JSON.stringify(before)
+        && JSON.stringify(runtimeEntries(f)) === JSON.stringify(entriesBefore)
+        && f.calls.length === 0 && f.active() && f.launches.length === 0
+        && !existsSync(join(f.home, 'upgrade-journal.json')),
+      `${moved.status}/${moved.detailCode} calls=${f.calls.join(',')} entries=${JSON.stringify(runtimeEntries(f))}`);
+
+    // The other direction, and it is deliberately cheap to prove: a pin the verified manifest
+    // agrees with is accepted. The two sides compute that identity together, so a disagreement
+    // would refuse everything, which the refusal above cannot show. Answering about the release
+    // the pin names -- and not installing anything, because it is the release already running --
+    // is that acceptance. The install itself is what the unpinned runs above already prove.
+    const running = manifestFor({ version: jsBuild.version, sourceCommit: jsBuild.commit });
+    const matched = await runUpgrade({ ...dependencies(f, running), pinnedReleaseId: 'rel-1.0.0+1111111' });
+    check('runtime upgrade: a pin the verified manifest agrees with is honoured, not refused',
+      matched.status === 'already-current' && matched.exitCode === 0 && matched.detailCode === 'release-already-current'
+        && JSON.stringify(f.snapshot()) === JSON.stringify(before)
+        && f.calls.length === 0 && f.active(),
+      `${matched.status}/${matched.detailCode}: ${matched.summary}`);
   }
 
   // ---- The candidate fails its health check after the switch: broker AND runtime go back.

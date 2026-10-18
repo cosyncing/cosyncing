@@ -330,10 +330,12 @@ const sourceBlocked = await triggerBrokerUpdate({
   buildInfo: { ...buildInfo, packaged: false },
   run: async () => ({ ok: true }),
 }, '1.1.0');
-check('app update handoff is argv-only, delayed, and invokes the existing confirmed CLI upgrader',
+// The handoff is server-scoped on purpose: an app button that says "update this server"
+// must not also replace the installer-owned desktop on the machine it happens to reach.
+check('app update handoff is argv-only, delayed, server-scoped, and invokes the confirmed CLI upgrader',
   accepted.status === 'accepted'
     && handoffCommand?.includes('--on-active=2s') === true
-    && handedOff.slice(-3).join(' ') === 'upgrade --yes --json');
+    && handedOff.slice(-5).join(' ') === 'upgrade --yes --json --components broker');
 check('candidate acceptance can hand a pinned signed manifest to the same upgrader',
   candidateHandoff?.slice(-2).join(' ') === `--manifest ${candidateManifestUrl}`
     && brokerUpdateHandoffCommand({ ...systemdDependencies, manifestUrl: 'http://127.0.0.1/manifest.json' }) === undefined);

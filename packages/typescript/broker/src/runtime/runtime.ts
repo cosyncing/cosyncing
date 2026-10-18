@@ -178,6 +178,26 @@ import {
 } from '@cosyncing/adapter-opencode';
 import './managed-runtime-state.ts';
 import { RuntimeUpdateCoordinator } from '../updates/runtime-update.ts';
+import {
+  applyUpdateJob,
+  cancelUpdateJob,
+  channelObservation,
+  createUpdateJob,
+  createUpdatePlan,
+  parseUpdateApplyRequestBody,
+  parseUpdateJobSubmissionBody,
+  parseUpdatePlanRequestBody,
+  readUpdateJob,
+  reconcileInterruptedUpdates,
+  updateCheck,
+  updateGrantView,
+  updateHistory,
+  updateInventory,
+  updateManagementStatus,
+  type UpdateManagementCaller,
+  type UpdateManagementResult,
+} from '../updates/update-management.ts';
+import { openUpdateManagementHost } from '../updates/update-management-host.ts';
 import { createCodexRuntimeUpdateProvider, createOpencodeRuntimeUpdateProvider } from '../updates/runtime-update-providers.ts';
 import {
   assertPairingId,
@@ -206,7 +226,11 @@ import {
   WebPushVapidKeyStore,
   webPushAlertsStartAt,
 } from '../transport/web-push.ts';
-import { authorizeBrokerRoute } from '../security/route-authorization.ts';
+import {
+  authorizeBrokerRoute,
+  brokerRoutePolicy,
+  type RouteAuthorizationPrincipal,
+} from '../security/route-authorization.ts';
 import { completeAuthorizationProvenanceMigration } from '../security/authorization-provenance-migration.ts';
 import {
   aggregatedMachines,
@@ -717,10 +741,57 @@ function requestAuthorizationDenied(
   path: string,
   method: string,
 ): Response | undefined {
-  const decision = authorizeBrokerRoute(principal, path, method);
+  const decision = authorizeBrokerRoute(principalForAuthorization(principal, path, method), path, method);
   return decision.allowed
     ? undefined
     : json({ ok: false, error: decision.error }, decision.status);
+}
+
+/**
+ * Peer update authority, read from the grant store only for the routes that ask for it.
+ *
+ * The grant lives in an owner-only file and a peer cannot write it, so a request can never
+ * approve itself; and the read is gated on the route policy because this function sits on the
+ * path of every peer request the broker serves.
+ */
+function principalForAuthorization(
+  principal: AuthenticatedPrincipal,
+  path: string,
+  method: string,
+): RouteAuthorizationPrincipal {
+  if (principal.kind !== 'peer') return principal;
+  if (brokerRoutePolicy(path, method)?.kind !== 'update') return principal;
+  return { ...principal, updateGranted: updateManagement.grants.mayUpdate(principal.peerId) };
+}
+
+/**
+ * The caller, as the update surface reads it.
+ *
+ * An owner credential arriving over HTTP is still a network caller: it may drive this server, and
+ * it may not name the desktop app installed on the machine behind it. That half belongs to this
+ * machine's own updater, which asks locally. A socket address is not evidence of locality here --
+ * WSL port forwarding and reverse proxies both make a remote caller look local.
+ */
+function updateManagementCaller(principal: AuthenticatedPrincipal | undefined): UpdateManagementCaller | undefined {
+  if (!principal || principal.kind === 'integration') return undefined;
+  if (principal.kind === 'owner') return { kind: 'remote-owner', id: 'owner', updateGranted: true };
+  return { kind: 'remote-peer', id: principal.peerId, updateGranted: updateManagement.grants.mayUpdate(principal.peerId) };
+}
+
+/** Typed failure in, honest status and code out. The code is the contract; the status is a shortcut. */
+function updateManagementResponse<T>(
+  result: UpdateManagementResult<T>,
+  wrap: (value: T) => Record<string, unknown>,
+): Response {
+  if (!result.ok) {
+    return json({
+      ok: false,
+      code: result.code,
+      error: result.detail,
+      ...(result.jobId === undefined ? {} : { jobId: result.jobId }),
+    }, updateManagementStatus(result.code));
+  }
+  return json({ ok: true, ...wrap(result.value) });
 }
 
 /** Stable durable-journal namespace.
@@ -1302,6 +1373,26 @@ const brokerUpdateChecker = new BrokerUpdateChecker({
   ...(APPLICATION_IDENTITY.runtimeVersion ? { runtimeVersion: APPLICATION_IDENTITY.runtimeVersion } : {}),
   ...(APPLICATION_IDENTITY.runtimePath ? { runtimePath: APPLICATION_IDENTITY.runtimePath } : {}),
   ...(process.env[BUN_RUNTIME_OVERRIDE_VARIABLE]?.trim() ? { runtimeOverridden: true } : {}),
+});
+// The in-app update surface: durable plans and jobs for THIS installation, plus the narrow,
+// revocable per-peer grant that lets one of them be committed from somewhere else. The handoff
+// deliberately reuses the same confirmed CLI upgrader the owner-only trigger uses, scoped to the
+// broker, so a phone-driven update and a terminal-driven one are the same engine and cannot drift.
+// What is described here is how this host's upgrader is reached; what it does with a commit --
+// re-read the channel, honour the job's pin, and ask for authority at the moment it schedules --
+// is `handoffBrokerUpdate`, which runs under test rather than living in a wiring callback where a
+// revocation could race its own network wait unnoticed.
+const updateManagement = openUpdateManagementHost({
+  home: setupStateHome(),
+  buildInfo: BUILD_INFO,
+  updater: {
+    checker: brokerUpdateChecker,
+    service: SERVICE_BOUNDARY,
+    executablePath: APPLICATION_IDENTITY.applicationPath,
+    ...(APPLICATION_IDENTITY.runtimePath ? { runtimePath: APPLICATION_IDENTITY.runtimePath } : {}),
+    cacheRoot: artifactCacheRoot(),
+    userHome: os.homedir(),
+  },
 });
 const transportPairings = new TransportPairingRegistry({
   broker: BROKER_DESCRIPTOR,
@@ -7747,6 +7838,107 @@ server = Bun.serve<WsData>({
       );
     }
 
+    // --- In-app update management ---------------------------------------------------------
+    // Reads are sanitized discovery for anyone who may already watch this machine. Committing
+    // something is a durable job that re-checks the grant, the pinned release, and the reviewed
+    // effects inside the mutation window. Nothing here accepts a URL, a filesystem path, or a
+    // command line: a request names components and an immutable release identity, and the
+    // broker resolves everything else from the signed channel it already trusts.
+    if (path === '/api/broker/updates' && req.method === 'GET') {
+      // A delegated commit that this process never saw finish has no other witness, so the
+      // read that renders the Updates screen is where an expired handoff gets settled. The
+      // alternative is a screen that keeps saying "updating" about an update that failed.
+      reconcileInterruptedUpdates(updateManagement.dependencies);
+      const cached = await brokerUpdateChecker.inspect({ refresh: url.searchParams.get('refresh') === '1' });
+      return json({
+        ok: true,
+        inventory: updateInventory(updateManagement.dependencies, channelObservation(cached)),
+      });
+    }
+    if (path === '/api/broker/updates/check' && req.method === 'GET') {
+      return json({ ok: true, check: await updateCheck(updateManagement.dependencies) });
+    }
+    if (path === '/api/broker/updates/history' && req.method === 'GET') {
+      return json({ ok: true, history: updateHistory(updateManagement.dependencies) });
+    }
+    if (path === '/api/broker/updates/plans' && req.method === 'POST') {
+      const caller = updateManagementCaller(principal);
+      const parsed = parseUpdatePlanRequestBody(await req.json().catch(() => undefined));
+      if (!caller) return json({ ok: false, code: 'BAD_PARAM', error: 'authenticated principal required' }, 401);
+      if (!parsed) {
+        return json({
+          ok: false,
+          code: 'BAD_PARAM',
+          error: 'releaseId and components are required; components accepts broker and/or client',
+        }, 400);
+      }
+      return updateManagementResponse(await createUpdatePlan(updateManagement.dependencies, caller, parsed),
+        (plan) => ({ plan }));
+    }
+    if (path === '/api/broker/updates/jobs' && req.method === 'POST') {
+      const caller = updateManagementCaller(principal);
+      const parsed = parseUpdateJobSubmissionBody(await req.json().catch(() => undefined));
+      if (!caller) return json({ ok: false, code: 'BAD_PARAM', error: 'authenticated principal required' }, 401);
+      if (!parsed) {
+        return json({ ok: false, code: 'BAD_PARAM', error: 'planId and idempotencyKey are required' }, 400);
+      }
+      return updateManagementResponse(await createUpdateJob(updateManagement.dependencies, caller, parsed),
+        (job) => ({ job }));
+    }
+    if (path === '/api/broker/update-grants' && req.method === 'GET') {
+      return json({ ok: true, ...updateGrantView(updateManagement.dependencies) });
+    }
+    if (path === '/api/broker/update-grants' && req.method === 'POST') {
+      const body = await req.json().catch(() => undefined) as { peerId?: unknown } | undefined;
+      const peerId = typeof body?.peerId === 'string' ? body.peerId.trim() : '';
+      if (!/^[A-Za-z0-9._:-]{1,128}$/.test(peerId)) {
+        return json({ ok: false, code: 'BAD_PARAM', error: 'peerId is required' }, 400);
+      }
+      const record = updateManagement.grants.grant({ peerId, grantedBy: 'owner' });
+      updateManagement.grants.withdrawRequest(peerId);
+      return json({ ok: true, grant: record }, 201);
+    }
+    if (path === '/api/broker/update-grants/request' && req.method === 'POST') {
+      const caller = updateManagementCaller(principal);
+      if (caller?.kind !== 'remote-peer') {
+        return json({ ok: true, requested: false, message: 'The owner credential already carries update authority.' });
+      }
+      // Recording a wish. Approving it is the owner's, on the owner-only route above.
+      const request = updateManagement.grants.request(caller.id);
+      return json({ ok: true, requested: true, duplicate: request.duplicate }, 202);
+    }
+    const updateGrantRevocation = path.match(/^\/api\/broker\/update-grants\/([^/]+)$/);
+    if (updateGrantRevocation && req.method === 'DELETE') {
+      const peerId = decodeURIComponent(updateGrantRevocation[1]!);
+      const revoked = updateManagement.grants.revoke(peerId);
+      return revoked.ok
+        ? json({ ok: true, revoked: true })
+        : json({ ok: false, code: 'BAD_PARAM', error: revoked.reason ?? 'no active grant for that peer' }, revoked.reason === 'not-found' ? 404 : 400);
+    }
+    const updateJobPath = path.match(/^\/api\/broker\/updates\/jobs\/([^/]+)$/);
+    if (updateJobPath && req.method === 'GET') {
+      const caller = updateManagementCaller(principal);
+      if (!caller) return json({ ok: false, code: 'BAD_PARAM', error: 'authenticated principal required' }, 401);
+      return updateManagementResponse(readUpdateJob(updateManagement.dependencies, caller, decodeURIComponent(updateJobPath[1]!)),
+        (job) => ({ job }));
+    }
+    const updateJobApply = path.match(/^\/api\/broker\/updates\/jobs\/([^/]+)\/apply$/);
+    if (updateJobApply && req.method === 'POST') {
+      const caller = updateManagementCaller(principal);
+      const parsed = parseUpdateApplyRequestBody(await req.json().catch(() => undefined));
+      if (!caller) return json({ ok: false, code: 'BAD_PARAM', error: 'authenticated principal required' }, 401);
+      if (!parsed) return json({ ok: false, code: 'BAD_PARAM', error: 'idempotencyKey is required' }, 400);
+      return updateManagementResponse(await applyUpdateJob(updateManagement.dependencies, caller,
+        decodeURIComponent(updateJobApply[1]!), parsed), (job) => ({ job }));
+    }
+    const updateJobCancel = path.match(/^\/api\/broker\/updates\/jobs\/([^/]+)\/cancel$/);
+    if (updateJobCancel && req.method === 'POST') {
+      const caller = updateManagementCaller(principal);
+      if (!caller) return json({ ok: false, code: 'BAD_PARAM', error: 'authenticated principal required' }, 401);
+      return updateManagementResponse(cancelUpdateJob(updateManagement.dependencies, caller,
+        decodeURIComponent(updateJobCancel[1]!)), (job) => ({ job }));
+    }
+
     if (path === '/api/health') {
       const publicHealth = {
         ok: true,
@@ -8806,6 +8998,17 @@ const brokerUpdateTimer = setInterval(() => {
   void brokerUpdateChecker.inspect({ refresh: true }).catch(() => undefined);
 }, BROKER_UPDATE_CHECK_INTERVAL_MS);
 brokerUpdateTimer.unref?.();
+
+// A broker that came back up in the middle of an update reports what actually happened: the
+// journal says what was pinned, and the version this process answers with says whether the
+// replacement landed. It is not asked to remember its own replacement, and a job it cannot settle
+// stays on the record for the Updates screen to show rather than being tidied away here.
+try {
+  reconcileInterruptedUpdates(updateManagement.dependencies);
+} catch {
+  // A journal this build cannot interpret is surfaced by the update routes as needs-attention.
+  // Silently repairing it is how a rollback turns a recoverable record into a corrupted one.
+}
 
 // Test hook (source runs only): a sub-10 s poll lets e2e watch the automatic restart gate open.
 const runtimeUpdateTestPollMs = BUILD_INFO.packaged ? 0 : envNumber('COSYNCING_TEST_RUNTIME_UPDATE_POLL_MS', 0);
