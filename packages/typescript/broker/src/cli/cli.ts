@@ -10,9 +10,11 @@ import { inspectInstallState, type InstallStateInspection } from '../installatio
 // copy had already fallen behind: it could not see the pairing-report fields, which meant a test double for
 // `pair` could not cover the installer's acceptance call at all. The implementation stays lazily imported.
 import type { PairCommandOptions } from './operator-commands.ts';
+import type { UpgradeCommandResult, UpgradeDependencies } from '../updates/release-upgrade.ts';
 import { PRODUCT_IDENTITY, UPDATE_COMPONENTS, type UpdateComponent } from '@cosyncing/protocol';
 import {
   cliMessages,
+  cliPaint,
   persistedCliLanguage,
   renderUninstallPlan,
   renderUninstallResult,
@@ -66,7 +68,7 @@ export interface CliDependencies {
    * the only route that proves a flag reaches the plan.
    */
   setupOverrides?: Partial<SetupDependencies>;
-  /** Force human doctor colour on or off; unset lets the TTY, NO_COLOR, and TERM policy decide. */
+  /** Force human doctor, status and update colour on or off; unset lets the TTY, NO_COLOR, and TERM policy decide. */
   colorize?: boolean;
   runSetup?: (options: {
     yes: boolean;
@@ -151,6 +153,11 @@ export interface CliDependencies {
     stdout: CliWriter;
     stderr: CliWriter;
   }) => Promise<{ exitCode: number }>;
+  /**
+   * The signed-release transaction behind the real `upgrade` presenter. Substituting it drives that
+   * presenter -- its progress lines, closing checks and JSON document -- without a release channel.
+   */
+  upgradeTransaction?: (dependencies: UpgradeDependencies) => Promise<UpgradeCommandResult>;
   runUninstall?: (options: {
     yes: boolean;
     allowLegacyIntegrations: boolean;
@@ -431,6 +438,7 @@ async function defaultRunStatus(options: {
   stdout: CliWriter;
   stderr: CliWriter;
   buildInfo: Readonly<BuildInfo>;
+  color: boolean;
 }): Promise<{ exitCode: number }> {
   const lifecycle = await import('../installation/broker-lifecycle.ts');
   if (options.readiness) {
@@ -452,7 +460,7 @@ async function defaultRunStatus(options: {
     ...applicationLaunchInputs(options.buildInfo),
   });
   if (options.json) options.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-  else options.stdout.write(lifecycle.renderLifecycleStatus(report, persistedCliLanguage()));
+  else options.stdout.write(lifecycle.renderLifecycleStatus(report, persistedCliLanguage(), { color: options.color }));
   return { exitCode: report.ok ? 0 : 1 };
 }
 
@@ -598,6 +606,8 @@ async function defaultRunUpgrade(options: {
   stdout: CliWriter;
   stderr: CliWriter;
   buildInfo: Readonly<BuildInfo>;
+  color: boolean;
+  transaction?: CliDependencies['upgradeTransaction'];
 }): Promise<{ exitCode: number }> {
   const confirmed = options.yes || (options.interactive && await confirmAction(
     'Download, verify, switch, and health-check the next signed cosyncing release?',
@@ -608,9 +618,10 @@ async function defaultRunUpgrade(options: {
     writeCommandResult(result, options.json, options.stdout, options.stderr);
     return result;
   }
-  const [{ runUpgrade }, lifecycle] = await Promise.all([
+  const [{ runUpgrade }, lifecycle, postUpgrade] = await Promise.all([
     import('../updates/release-upgrade.ts'),
     import('../installation/broker-lifecycle.ts'),
+    import('../updates/post-upgrade-check.ts'),
   ]);
   const home = (await import('../installation/setup-state.ts')).setupStateHome();
   const setupState = (await import('../installation/setup-state.ts')).readSetupState(home);
@@ -622,7 +633,10 @@ async function defaultRunUpgrade(options: {
         // There, replacing that file IS the version change; here the pointer has to move with it.
         const versions = lifecycle.createLifecycleServiceVersions(inputs);
         return {
-          inspect: async () => ({ active: (await provider.inspect()).active === 'active' }),
+          inspect: async () => {
+            const status = await provider.inspect();
+            return { active: status.active === 'active', ...(status.enabled === 'disabled' ? { enabled: false } : {}) };
+          },
           stop: () => provider.stop(),
           start: () => provider.start(),
           // systemd re-reads a rewritten unit only after daemon-reload; an upgrade that moves the runtime
@@ -644,7 +658,7 @@ async function defaultRunUpgrade(options: {
         };
       })()
     : undefined;
-  const result = await runUpgrade({
+  const result = await (options.transaction ?? runUpgrade)({
     home,
     buildInfo: options.buildInfo,
     ...applicationLaunchInputs(options.buildInfo),
@@ -653,8 +667,17 @@ async function defaultRunUpgrade(options: {
     ...(options.components ? { components: options.components } : {}),
     ...(options.pinnedReleaseId ? { pinnedReleaseId: options.pinnedReleaseId } : {}),
     ...(service ? { service } : {}),
+    // The whole run used to be silent until its last line. JSON output stays one document.
+    ...(options.json ? {} : { progress: (event: Parameters<typeof postUpgrade.upgradeProgressText>[0]) => {
+      options.stdout.write(`${postUpgrade.upgradeProgressText(event)}\n`);
+    } }),
   });
   writeCommandResult(result, options.json, options.stdout, options.stderr);
+  if (!options.json) {
+    for (const line of postUpgrade.renderPostUpgradeChecks(result, cliPaint(options.color))) {
+      options.stdout.write(`${line}\n`);
+    }
+  }
   return result;
 }
 
@@ -710,6 +733,20 @@ async function defaultRunUninstall(options: {
   return result;
 }
 
+/**
+ * Whether a human render (doctor, status, update) may colour its state words.
+ *
+ * Colour is a property of the real terminal, so it is decided only when this process owns the stream. An
+ * injected writer is a buffer whose destination this file knows nothing about, and process.stdout.isTTY
+ * would say nothing true about it.
+ */
+async function humanColor(dependencies: CliDependencies): Promise<boolean> {
+  if (dependencies.colorize !== undefined) return dependencies.colorize;
+  if (dependencies.stdout) return false;
+  const { doctorColorEnabled } = await import('../installation/doctor.ts');
+  return doctorColorEnabled({ env: process.env, tty: process.stdout.isTTY === true });
+}
+
 export async function runCli(argv: string[], dependencies: CliDependencies = {}): Promise<number> {
   const stdout = dependencies.stdout ?? terminalWriter(process.stdout);
   const stderr = dependencies.stderr ?? terminalWriter(process.stderr);
@@ -755,14 +792,9 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
         if (dependencies.renderDoctorReport) {
           stdout.write(dependencies.renderDoctorReport(report));
         } else {
-          const { doctorColorEnabled, renderDoctorReport } = await import('../installation/doctor.ts');
-          // Colour is a property of the real terminal, so it is decided only when this process owns the
-          // stream. An injected writer is a buffer whose destination this file knows nothing about, and
-          // process.stdout.isTTY would say nothing true about it.
-          const color = dependencies.colorize
-            ?? (!dependencies.stdout && doctorColorEnabled({ env: process.env, tty: process.stdout.isTTY === true }));
+          const { renderDoctorReport } = await import('../installation/doctor.ts');
           stdout.write(renderDoctorReport(report as Parameters<typeof renderDoctorReport>[0], {
-            color,
+            color: await humanColor(dependencies),
             language: persistedCliLanguage(),
           }));
         }
@@ -1025,7 +1057,8 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
       stderr.write(`${command} status: --readiness is a machine-readable readiness document; add --json\n`);
       return 2;
     }
-    return (await (dependencies.runStatus ?? ((options) => defaultRunStatus({ ...options, buildInfo })))(
+    const color = json ? false : await humanColor(dependencies);
+    return (await (dependencies.runStatus ?? ((options) => defaultRunStatus({ ...options, buildInfo, color })))(
       {
         json,
         ...(readiness ? { readiness: true } : {}),
@@ -1205,7 +1238,10 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
       stderr.write(`${command} upgrade: --json requires --yes so prompts cannot corrupt JSON output\n`);
       return 2;
     }
-    return (await (dependencies.runUpgrade ?? ((options) => defaultRunUpgrade({ ...options, buildInfo })))(
+    const color = json ? false : await humanColor(dependencies);
+    return (await (dependencies.runUpgrade ?? ((options) => defaultRunUpgrade({
+      ...options, buildInfo, color, ...(dependencies.upgradeTransaction ? { transaction: dependencies.upgradeTransaction } : {}),
+    })))(
       {
         yes,
         json,

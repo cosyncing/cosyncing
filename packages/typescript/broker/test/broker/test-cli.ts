@@ -128,6 +128,46 @@ process.env.COSYNCING_HOME = pureCliHome;
     aliasedUpgrade.code === 0 && aliasedUpgradeCalls === 1
       && help.stdout.includes('(alias: update)'));
 
+  // `cosy update` is a long command people sit and watch: each step is said as it starts, and the run closes
+  // with the broker in green or red and any setup notice. `--json` is what the app's update button parses, so
+  // it stays one document with neither progress nor colour in it.
+  {
+    const transaction: NonNullable<CliDependencies['upgradeTransaction']> = async (options) => {
+      options.progress?.({ step: 'downloading', version: '2.0.0' });
+      options.progress?.({ step: 'checking-service' });
+      options.progress?.({ step: 'starting-service' });
+      return {
+        schemaVersion: 1, status: 'complete', exitCode: 0, detailCode: 'upgrade-complete',
+        summary: 'Upgraded cosyncing from 1.0.0 to 2.0.0.', fromVersion: '1.0.0', toVersion: '2.0.0',
+        recoveredInterruptedUpgrade: false,
+        brokerCheck: { status: 'started', detailCode: 'broker-check-started',
+          summary: 'The broker service was stopped, so it was started: cosyncing 2.0.0 is answering at http://127.0.0.1:7734.' },
+        setupCheck: { status: 'recommended', detailCode: 'setup-refresh-recommended', items: [{ id: 'pi.bridge',
+          detailCode: 'bridge-owned-stale', summary: 'The installed Pi bridge is a receipt-proven older packaged version.',
+          command: 'cosyncing setup' }] },
+      };
+    };
+    const human = await callCli(['update', '--yes'], { upgradeTransaction: transaction, colorize: true });
+    check('a human update says each step as it starts, then its summary, the broker in green, and the setup notice',
+      human.code === 0 && human.stdout === [
+        'Downloading and verifying cosyncing 2.0.0…',
+        'Checking the broker service…',
+        'The broker service is stopped; starting it…',
+        'Upgraded cosyncing from 1.0.0 to 2.0.0.',
+        '\u001b[32mThe broker service was stopped, so it was started: cosyncing 2.0.0 is answering at http://127.0.0.1:7734.\u001b[0m',
+        '\u001b[33mSetup recommended: this update left these out of date.\u001b[0m',
+        '  - The installed Pi bridge is a receipt-proven older packaged version. Run \u001b[33mcosyncing setup\u001b[0m.',
+        '',
+      ].join('\n'),
+      JSON.stringify(human.stdout));
+    const machine = await callCli(['update', '--yes', '--json'], { upgradeTransaction: transaction, colorize: true });
+    const parsed = (() => { try { return JSON.parse(machine.stdout); } catch { return undefined; } })();
+    check('update --json stays one parseable document that carries both checks, with no progress or colour',
+      machine.code === 0 && parsed?.brokerCheck?.status === 'started' && parsed?.setupCheck?.status === 'recommended'
+        && !machine.stdout.includes('\u001b[') && !machine.stdout.includes('Downloading'),
+      machine.stdout);
+  }
+
   // `cosyncing claude-mod refresh` is the verb the self-upgrade runs on the binary it just installed,
   // so its argument surface is part of that handoff: --json for the caller to read, and --home because
   // the child is spawned with a minimal environment and cannot inherit COSYNCING_HOME.

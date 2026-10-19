@@ -70,7 +70,7 @@ import {
   type CodexTuiReadinessReport,
 } from '@cosyncing/adapter-codex/tui-presence';
 import { readSetupFailureDiagnostic, setupFailureDiagnosticPath } from './setup-transaction.ts';
-import { cliMessages } from '../cli/cli-i18n.ts';
+import { cliMessages, cliPaint } from '../cli/cli-i18n.ts';
 import type { SetupLanguage } from './setup-i18n.ts';
 import { diagnoseManagedRuntimeFailure } from '../runtime/managed-runtime-state.ts';
 import { PI_DIALECT, resolvePiDialectPaths } from '@cosyncing/adapter-pi';
@@ -2065,14 +2065,6 @@ export async function collectDoctorReport(dependencies: DoctorDependencies): Pro
   };
 }
 
-/** SGR foreground per status: ok green, warning yellow, error red, info blue. */
-const STATUS_SGR: Readonly<Record<SetupCheckStatus, string>> = Object.freeze({
-  pass: '32',
-  warn: '33',
-  fail: '31',
-  skip: '34',
-});
-
 /**
  * Whether the human doctor render may emit colour. A pipe, a redirect, `NO_COLOR`, or a dumb terminal all
  * mean plain text — the escapes would end up in whatever file or bug report the output was captured into.
@@ -2094,8 +2086,7 @@ export function renderDoctorReport(
 ): string {
   const text = cliMessages(options.language);
   const lines = [text.doctor.title(report.product), ''];
-  const paint = (status: SetupCheckStatus, text: string): string =>
-    options.color ? `\u001b[${STATUS_SGR[status]}m${text}\u001b[0m` : text;
+  const paint = cliPaint(options.color === true);
   for (const section of report.sections) {
     lines.push(text.doctor.sectionTitle(section));
     for (const check of section.checks) {

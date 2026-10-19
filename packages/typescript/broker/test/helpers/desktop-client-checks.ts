@@ -90,7 +90,9 @@ export async function runDesktopClientChecks(check: Check): Promise<void> {
         events.push('broker-download'); return new Response(candidateBroker);
       }) as typeof fetch,
       runBinary: async (_executable, args) => {
-        events.push(args.includes('claude-mod') ? 'mod' : 'self-check');
+        // The closing checks are the installed build's read-only `status --readiness` and `doctor`.
+        events.push(args.includes('claude-mod') ? 'mod' : args.includes('doctor') ? 'doctor'
+          : args.includes('--readiness') ? 'readiness' : 'self-check');
         return { status: 'ok', exitCode: 0, stderr: '', stdout: JSON.stringify({ version: '2.0.0',
           target: 'linux-x64', distribution: 'native', packaged: true }) };
       },
@@ -335,7 +337,8 @@ export async function runDesktopClientChecks(check: Check): Promise<void> {
       check('PR6B current broker updates older recorded client only, without service, mod or broker acquisition',
         upgraded.detailCode === 'desktop-client-only-updated' && upgraded.desktopClient?.status === 'updated'
           && readFileSync(f.binary).equals(before) && readFileSync(f.executable, 'utf8') === newClient
-          && f.events.join(',') === 'manifest,client-download');
+          && f.events.join(',') === 'manifest,client-download,readiness,doctor',
+        f.events.join(','));
     }
     {
       const f = fixture(); const rolledBack = await runUpgrade({ ...f.options,

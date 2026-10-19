@@ -56,7 +56,7 @@ import {
   type ManagedHostOwnership,
 } from '../../src/runtime/managed-host.ts';
 const BOOT = 'boot-aaaa';
-import { cliMessages } from '../../src/cli/cli-i18n.ts';
+import { cliMessages, cliPaint } from '../../src/cli/cli-i18n.ts';
 import { PRODUCT_IDENTITY } from '../../../adapter-api/src/index.ts';
 import { BUILD_INFO, buildFingerprint } from '../../src/runtime/build-info.ts';
 import { ArtifactStore } from '../../src/artifacts/artifact-store.ts';
@@ -90,6 +90,7 @@ import {
   type ReleaseWebSidecar,
   type UpgradeServiceController,
 } from '../../src/updates/release-upgrade.ts';
+import { renderPostUpgradeChecks } from '../../src/updates/post-upgrade-check.ts';
 import {
   atomicWriteOwnerOnly,
   ensureOwnerOnlyDirectory,
@@ -811,6 +812,48 @@ try {
         && !chineseStatus.includes('Installation:')
         && JSON.stringify(status) === serialized,
       chineseStatus.trim());
+    // `cosy status` colours only its state words, so a plain render is the same text with no escapes, and a
+    // coloured one reads green for a working broker and red for a stopped one, in either language.
+    {
+      const sgr = (code: string, text: string) => `\u001b[${code}m${text}\u001b[0m`;
+      const englishPlain = renderLifecycleStatus(status, 'en');
+      const englishColour = renderLifecycleStatus(status, 'en', { color: true });
+      const stopped: LifecycleStatusReport = {
+        ...status,
+        ok: false,
+        service: { ...status.service, active: 'inactive' },
+        listener: { ...status.listener, ready: false },
+        agentsRead: null,
+        agents: [],
+        sessions: null,
+        updates: null,
+        detailCodes: ['service-inactive', 'internal-endpoint-unreachable'],
+      };
+      const stoppedEnglish = renderLifecycleStatus(stopped, 'en', { color: true });
+      const stoppedChinese = renderLifecycleStatus(stopped, 'zh-Hans', { color: true });
+      check('status colour is opt-in: without it the render carries no escapes at all',
+        !englishPlain.includes('\u001b[') && !chineseStatus.includes('\u001b[')
+          && englishColour.replace(/\u001b\[\d+m/g, '') === englishPlain,
+        JSON.stringify(englishColour));
+      check('a working broker reads green: ready, active, enabled, the listener and creatable agents',
+        englishColour.includes(`cosyncing 1.0.0: ${sgr('32', 'ready')}`)
+          && englishColour.includes(`Service: systemd / ${sgr('32', 'active')} / ${sgr('32', 'enabled')}`)
+          && englishColour.includes(`loopback only / ${sgr('32', 'ready')}`)
+          && englishColour.includes(`OpenCode [${sgr('32', 'create ready')}]`)
+          && englishColour.includes(`Codex [${sgr('33', 'create unavailable')}; sync enabled]`)
+          && englishColour.includes(`Updates: ${sgr('33', '1 pending')}`),
+        JSON.stringify(englishColour));
+      check('a stopped broker reads red in both languages, and its roster lines are only warnings',
+        stoppedEnglish.includes(`cosyncing 1.0.0: ${sgr('31', 'attention required')}`)
+          && stoppedEnglish.includes(`Service: systemd / ${sgr('31', 'inactive')} / ${sgr('32', 'enabled')}`)
+          && stoppedEnglish.includes(`loopback only / ${sgr('31', 'unreachable')}`)
+          && stoppedEnglish.includes(`Sessions: ${sgr('33', 'broker unavailable')}`)
+          && stoppedEnglish.includes(`Fix: ${sgr('31', 'service-inactive, internal-endpoint-unreachable')}`)
+          && stoppedChinese.includes(`cosyncing 1.0.0：${sgr('31', '需要处理')}`)
+          && stoppedChinese.includes(`服务：systemd / ${sgr('31', '未运行')} / ${sgr('32', '已启用')}`)
+          && stoppedChinese.includes(`仅限回环 / ${sgr('31', '无法连接')}`),
+        JSON.stringify(stoppedEnglish));
+    }
     const expectedZhStatusValues = {
       ready: '就绪',
       foreground: '前台',
@@ -2948,6 +2991,153 @@ try {
         && upgraded.summary.includes('Claude mod was installed') && !upgraded.summary.includes('claude-mod-installed'));
   }
 
+  // `cosy update` closes by asking the INSTALLED build whether its broker is up and whether setup has anything
+  // to refresh. The fake below answers as that build would: its own `doctor`, `start` and `status --readiness`.
+  const installedChild = (answers: { start?: Record<string, unknown>; ready?: boolean; doctor?: object[] } = {}) => {
+    const launches: Array<{ verb: string | undefined; env: Readonly<Record<string, string>> | undefined }> = [];
+    const reply = (value: unknown, exitCode = 0) => ({
+      status: exitCode === 0 ? 'ok' as const : 'error' as const, exitCode, stdout: JSON.stringify(value), stderr: '',
+    });
+    const runBinary = async (_executable: string, args: readonly string[], _timeoutMs?: number,
+      env?: Readonly<Record<string, string>>) => {
+      const verb = args.find((arg) => ['version', 'claude-mod', 'doctor', 'start', 'status'].includes(arg));
+      launches.push({ verb, env });
+      if (verb === 'doctor') {
+        // Doctor exits 1 whenever any check fails, so a real report arrives with a failing exit status.
+        return reply({ schemaVersion: 1, product: 'cosyncing', version: '2.0.0', effects: 'forbidden', ok: false,
+          sections: [{ id: 'state', title: 'State', checks: answers.doctor ?? [] }] }, 1);
+      }
+      if (verb === 'start') {
+        const start = answers.start ?? { schemaVersion: 1, status: 'complete', exitCode: 0,
+          detailCode: 'service-start-complete', summary: 'cosyncing service is active.' };
+        return reply(start, typeof start.exitCode === 'number' ? start.exitCode : 0);
+      }
+      if (verb === 'status') {
+        const ready = answers.ready ?? true;
+        return reply({ schemaVersion: 1, product: 'cosyncing', ok: ready, detailCodes: ready ? [] : ['internal-endpoint-unreachable'] },
+          ready ? 0 : 1);
+      }
+      return reply(CANDIDATE_SELF_CHECK);
+    };
+    return { runBinary, launches, verbs: () => launches.map((launch) => launch.verb) };
+  };
+  const childEnv = { HOME: '/fixture/home', PATH: '/fixture/agents/bin:/usr/bin', XDG_RUNTIME_DIR: '/run/user/1000' };
+  {
+    const fixture = upgradeMachine();
+    await fixture.service.stop();
+    const child = installedChild();
+    const steps: string[] = [];
+    const upgraded = await runUpgrade({
+      ...upgradeOptions(fixture), runBinary: child.runBinary, env: childEnv,
+      progress: (event) => steps.push(event.step),
+    });
+    check('an update that finds the service stopped starts it through the installed build and confirms it answers',
+      upgraded.status === 'complete' && upgraded.exitCode === 0 && upgraded.brokerCheck?.status === 'started'
+        && JSON.stringify(child.verbs()) === JSON.stringify(['version', 'claude-mod', 'start', 'status', 'doctor'])
+        // The raw controller has no drift gate; the installed build's own `start` does.
+        && !fixture.active(),
+      `${upgraded.brokerCheck?.status}/${JSON.stringify(child.verbs())}`);
+    // `start` refuses an environment that differs from the calling shell's, so the child must see the
+    // operator's environment rather than the self-check's HOME and PATH.
+    check('the start and readiness children run with the operator\'s own environment',
+      child.launches.filter((launch) => launch.verb === 'start' || launch.verb === 'status')
+        .every((launch) => JSON.stringify(launch.env) === JSON.stringify(childEnv)),
+      JSON.stringify(child.launches));
+    check('the update says what it is waiting on at each long step, in order',
+      JSON.stringify(steps) === JSON.stringify(['downloading', 'checking-service', 'starting-service', 'waiting-for-broker', 'checking-setup']),
+      JSON.stringify(steps));
+    check('a broker the update started is reported in green',
+      renderPostUpgradeChecks(upgraded, cliPaint(true))[0]
+        === '\u001b[32mThe broker service was stopped, so it was started: cosyncing 2.0.0 is answering at http://127.0.0.1:7734.\u001b[0m',
+      JSON.stringify(renderPostUpgradeChecks(upgraded, cliPaint(true))));
+  }
+  {
+    const fixture = upgradeMachine();
+    const child = installedChild();
+    const steps: string[] = [];
+    const upgraded = await runUpgrade({ ...upgradeOptions(fixture), runBinary: child.runBinary, progress: (event) => steps.push(event.step) });
+    check('after a restart the transaction health-checked, the update reports ready without starting or polling again',
+      upgraded.brokerCheck?.status === 'ready' && fixture.active()
+        && JSON.stringify(child.verbs()) === JSON.stringify(['version', 'claude-mod', 'doctor'])
+        && JSON.stringify(steps) === JSON.stringify(['downloading', 'restarting', 'verifying', 'checking-setup']),
+      `${upgraded.brokerCheck?.status}/${JSON.stringify(child.verbs())}/${JSON.stringify(steps)}`);
+  }
+  {
+    // Rerunning update is what an operator does when the broker is down, and "already current" used to
+    // return before looking at the service at all.
+    const fixture = upgradeMachine();
+    await fixture.service.stop();
+    const child = installedChild();
+    const current = releaseManifestForTests({
+      version: BUILD.version, sourceCommit: BUILD.commit, publishedAt: '2026-07-17T00:00:00.000Z', artifact, keyId,
+      sign: (payload) => sign(null, payload, privateKey),
+    });
+    const rerun = await runUpgrade({ ...upgradeOptions(fixture, current), runBinary: child.runBinary });
+    check('an already-current update still starts a stopped broker instead of returning before looking',
+      rerun.status === 'already-current' && rerun.exitCode === 0 && rerun.brokerCheck?.status === 'started'
+        && JSON.stringify(child.verbs()) === JSON.stringify(['start', 'status', 'doctor']),
+      `${rerun.status}/${rerun.detailCode}/${rerun.brokerCheck?.status}/${JSON.stringify(child.verbs())}`);
+  }
+  {
+    const fixture = upgradeMachine();
+    await fixture.service.stop();
+    const child = installedChild({ start: { schemaVersion: 1, status: 'blocked', exitCode: 1, detailCode: 'service-repair-required',
+      summary: 'The owned service cannot be used because its definition is drifted; run cosyncing repair.' } });
+    const upgraded = await runUpgrade({ ...upgradeOptions(fixture), runBinary: child.runBinary });
+    check('a start the installed build refuses is passed on in red with its own remedy, and nothing waits on it',
+      upgraded.status === 'complete' && upgraded.exitCode === 0
+        && upgraded.brokerCheck?.status === 'start-refused' && upgraded.brokerCheck.detailCode === 'service-repair-required'
+        && renderPostUpgradeChecks(upgraded, cliPaint(true))[0]
+          === '\u001b[31mThe broker service is stopped and was not started. The owned service cannot be used because its definition is drifted; run cosyncing repair.\u001b[0m'
+        && !child.verbs().includes('status'),
+      `${upgraded.brokerCheck?.status}/${JSON.stringify(renderPostUpgradeChecks(upgraded, cliPaint(true)))}`);
+    const silent = installedChild({ ready: false });
+    const unanswered = await runUpgrade({ ...upgradeOptions(upgradeMachine()), runBinary: silent.runBinary,
+      service: { inspect: async () => ({ active: false }), stop: async () => undefined, start: async () => undefined } });
+    check('a broker that starts but never answers is a red start failure on a committed upgrade',
+      unanswered.status === 'complete' && unanswered.brokerCheck?.status === 'start-failed'
+        && unanswered.brokerCheck.detailCode === 'broker-check-not-answering',
+      `${unanswered.brokerCheck?.status}/${unanswered.brokerCheck?.detailCode}`);
+  }
+  {
+    const fixture = upgradeMachine();
+    await fixture.service.stop();
+    const child = installedChild();
+    const upgraded = await runUpgrade({ ...upgradeOptions(fixture), runBinary: child.runBinary,
+      service: { ...fixture.service, inspect: async () => ({ active: false, enabled: false }) } });
+    check('a disabled service is the operator\'s choice: the update reports it and leaves it stopped',
+      upgraded.brokerCheck?.status === 'disabled' && !child.verbs().includes('start') && !fixture.active()
+        && renderPostUpgradeChecks(upgraded, cliPaint(true))[0]?.startsWith('\u001b[33m') === true,
+      `${upgraded.brokerCheck?.status}/${JSON.stringify(child.verbs())}`);
+  }
+  {
+    // The notice is not keyed on how big the version jump was: it lists what the installed build's own
+    // doctor finds behind, and nothing doctor reports for other reasons.
+    const stale = { id: 'pi.bridge', status: 'warn', detailCode: 'bridge-owned-stale',
+      summary: 'The installed Pi bridge is a receipt-proven older packaged version.',
+      remediation: { command: 'cosyncing setup', message: 'Run setup or repair to refresh the package-owned Pi bridge.' } };
+    const unrelated = { id: 'opencode.server', status: 'warn', detailCode: 'server-not-running',
+      summary: 'No OpenCode server is running.', remediation: { command: 'cosyncing setup', message: 'Start it.' } };
+    const passing = { id: 'state.agent-skill.agents', status: 'pass', detailCode: 'agent-skill-current', summary: 'Current.' };
+    const child = installedChild({ doctor: [stale, unrelated, passing] });
+    const upgraded = await runUpgrade({ ...upgradeOptions(upgradeMachine()), runBinary: child.runBinary });
+    const lines = renderPostUpgradeChecks(upgraded, cliPaint(true));
+    check('the setup notice comes from the installed build\'s doctor and names only what the update left behind',
+      upgraded.setupCheck?.status === 'recommended'
+        && JSON.stringify(upgraded.setupCheck.items.map((item) => item.detailCode)) === JSON.stringify(['bridge-owned-stale'])
+        && lines[1] === '\u001b[33mSetup recommended: this update left these out of date.\u001b[0m'
+        && lines[2] === '  - The installed Pi bridge is a receipt-proven older packaged version. Run \u001b[33mcosyncing setup\u001b[0m.'
+        && lines.length === 3,
+      JSON.stringify(lines));
+    const clean = installedChild({ doctor: [unrelated, passing] });
+    const quiet = await runUpgrade({ ...upgradeOptions(upgradeMachine()), runBinary: clean.runBinary });
+    check('no setup notice when nothing setup installed is out of date, whatever else doctor reports',
+      quiet.setupCheck?.status === 'current'
+        && JSON.stringify(renderPostUpgradeChecks(quiet, cliPaint(false)))
+          === JSON.stringify(['cosyncing 2.0.0 is running and answering at http://127.0.0.1:7734.']),
+      JSON.stringify(renderPostUpgradeChecks(quiet, cliPaint(false))));
+  }
+
   if (process.platform === 'linux' || process.platform === 'darwin') {
     // SU1, SU2, SU4 through the REAL upgrade and a REAL child: the built CLI runs `claude-mod refresh` as a
     // separate process, takes the real installation lock the upgrade must already have released, and runs
@@ -3318,10 +3508,15 @@ try {
       // A bundle cannot identify itself: exec'ing it would resolve `bun` through PATH, which may not be the
       // runtime this install recorded. The candidate is handed to that exact runtime instead.
       check('the JavaScript candidate self-checks through the recorded runtime, not through its own shebang',
-        launches.length === 2 && launches[0]?.executable === runtimePath
+        launches.length === 3 && launches[0]?.executable === runtimePath
           && launches[0]?.args[0]?.includes('cosyncing.staging-2.0.0') === true
           && launches[0]?.args[1] === 'version',
         JSON.stringify(launches));
+      // The closing doctor is the installed bundle's, so it needs the same runtime as everything else.
+      check('the post-update doctor runs the installed bundle through the recorded runtime',
+        launches[2]?.executable === runtimePath && launches[2]?.args[0] === fixture.m.binary
+          && launches[2]?.args.slice(1).join(' ') === 'doctor --json',
+        JSON.stringify(launches[2]));
       // The web client is versioned with the application, so a swap that moved only the application would
       // leave the new version resolving a directory nothing ever created.
       check('the paired web client is installed at the new version\'s web root',
@@ -4005,6 +4200,7 @@ try {
     for (const language of ['en', 'zh-Hans'] as const) {
       const line = cliMessages(language).status.sessions(
         { sessions: 'unreadable' } as unknown as LifecycleStatusReport,
+        cliPaint(false),
       );
       const named = line.match(new RegExp(`${PRODUCT_IDENTITY.primaryBinary} ([a-z-]+)`))?.[1];
       calls.length = 0;
