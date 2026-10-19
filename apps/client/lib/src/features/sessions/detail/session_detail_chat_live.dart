@@ -359,8 +359,9 @@ class _ChatPanel extends ConsumerWidget {
                 );
                 return Column(
                   children: [
-                    // Refusal details must not push the composer below a phone's
-                    // keyboard. Keep them scrollable inside the reading region.
+                    // Refusal details must not push the composer below
+                    // a phone's keyboard. Keep them scrollable inside
+                    // the reading region.
                     if (showPageError &&
                         state.error != null &&
                         !state.bootstrapState.hasFailed)
