@@ -3,6 +3,7 @@ part of 'session_detail_page.dart';
 class _ChatPanel extends ConsumerWidget {
   const _ChatPanel({
     required this.sessionKey,
+    required this.showPageError,
     required this.sessionLabel,
     required this.state,
     required this.controller,
@@ -47,6 +48,7 @@ class _ChatPanel extends ConsumerWidget {
   });
 
   final SessionDetailKey sessionKey;
+  final bool showPageError;
 
   /// How this session is named on surfaces that show it from outside — the
   /// prompt-target note. Resolved by the page, which owns the title fallback.
@@ -357,6 +359,21 @@ class _ChatPanel extends ConsumerWidget {
                 );
                 return Column(
                   children: [
+                    // Refusal details must not push the composer below a phone's
+                    // keyboard. Keep them scrollable inside the reading region.
+                    if (showPageError &&
+                        state.error != null &&
+                        !state.bootstrapState.hasFailed)
+                      ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxHeight: constraints.maxHeight * 0.5,
+                        ),
+                        child: SingleChildScrollView(
+                          child: _ReadableColumn(
+                            child: _ErrorBanner(failure: state.error!),
+                          ),
+                        ),
+                      ),
                     if (bootstrapStatus != null) bootstrapStatus,
                     if (!state.liveState.isEmpty ||
                         state.commandProgress != null)

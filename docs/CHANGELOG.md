@@ -40,6 +40,11 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - Narrow session navigation uses tighter spacing around the menu, Overview
   and session tabs while retaining usable touch targets.
 
+### Fixed
+
+- Refused-send details scroll within the narrow chat reading area, keeping the
+  draft and Send button accessible in short phone windows.
+
 ## 0.7.1 — 2026-10-19
 
 ### Added

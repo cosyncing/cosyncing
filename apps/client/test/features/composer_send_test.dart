@@ -122,6 +122,18 @@ void main() {
           expect(app.composerText, 'Keep this if refused');
           expect(app.canSend, isTrue);
           expect(field.focusNode!.hasFocus, isTrue);
+          expect(f.tester.takeException(), isNull);
+          expect(sendButton.hitTestable(), findsOneWidget);
+          expect(
+            f.tester.getRect(composer).bottom,
+            closeTo(scenario.viewport.size.height - 300 - 8, 1),
+          );
+          final details = find.text('Technical details');
+          await f.tester.ensureVisible(details);
+          await app.tap(details);
+          expect(f.tester.takeException(), isNull);
+          expect(sendButton.hitTestable(), findsOneWidget);
+          expect(app.composerText, 'Keep this if refused');
         },
         platform: scenario.platform,
       );
@@ -198,6 +210,10 @@ void main() {
       'composer, without leaking the broker code',
       (f) async {
         final (app, _, desk) = await openComposer(f);
+        // A short phone window leaves the same reading space as an open
+        // keyboard, without depending on platform-specific inset handling.
+        f.tester.view.physicalSize = const Size(320, 400);
+        await app.settle();
         desk.answer = PromptAnswer.refuse;
         await app.send('ship it');
         await app.settle();
@@ -206,6 +222,15 @@ void main() {
         expect(app.composerText, 'ship it');
         expect(app.visibleText, isNot(contains('PROMPT_REFUSED')));
         expect(app.canSend, isTrue);
+        expect(f.tester.takeException(), isNull);
+        expect(sendButton.hitTestable(), findsOneWidget);
+        expect(f.tester.getRect(sendButton).bottom, lessThan(400));
+        final details = find.text('Technical details');
+        await f.tester.ensureVisible(details);
+        await app.tap(details);
+        expect(f.tester.takeException(), isNull);
+        expect(sendButton.hitTestable(), findsOneWidget);
+        expect(app.composerText, 'ship it');
 
         // The refusal is final for that id: a second try is a new prompt.
         desk.answer = PromptAnswer.accept;

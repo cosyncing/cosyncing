@@ -2808,7 +2808,9 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                   ),
                 if (state.activeTransientRetryStatus case final retry?)
                   _OpenCodeRetryStatusBand(retry: retry),
-                if (state.error != null && !state.bootstrapState.hasFailed)
+                if (state.error != null &&
+                    !state.bootstrapState.hasFailed &&
+                    (!narrowFiles || isSubView))
                   _PageTabContent(
                     bottomPadding: 0,
                     child: _ErrorBanner(failure: state.error!),
@@ -2857,6 +2859,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                             onProbeNeeded: _probeFileLinkGate,
                             child: _ChatPanel(
                               key: const Key('session-detail-tab-panel-chat'),
+                              showPageError: narrowFiles && !isSubView,
                               sessionKey: _key,
                               sessionLabel: '${_key.tool} · $visibleTitle',
                               state: state,
