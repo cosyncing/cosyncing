@@ -4,6 +4,7 @@
 // bubble and its echo, a refused prompt, the send chords, the model and
 // permission chips, Stop, and the slash palette.
 import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/src/design/components/adaptive_picker.dart';
 import 'package:cosyncing_client/src/platform/speech/speech_input_state.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -779,7 +780,7 @@ void main() {
         Future<void> expectInert() async {
           await app.tapKey('session-detail-composer-menu');
           await app.tapKey('session-detail-command-picker-button');
-          final dropdown = app.tester.widget<DropdownButtonFormField<String>>(
+          final dropdown = app.tester.widget<AdaptivePickerFormField<String>>(
             find.byKey(picker),
           );
           expect(dropdown.onChanged, isNull);

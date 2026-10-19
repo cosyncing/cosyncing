@@ -211,7 +211,8 @@ void main() {
       await _openMention(tester, 'PLAN.md');
       expect(client.queries, isEmpty);
       expect(client.fsReadPaths, ['transfer/PLAN.md']);
-      expect(find.text('file route transfer/PLAN.md#null'), findsOneWidget);
+      expect(find.byKey(const Key('file-viewer-pane')), findsOneWidget);
+      expect(find.byKey(const Key('compact-manage-files')), findsOneWidget);
     },
   );
 

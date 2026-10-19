@@ -1954,7 +1954,12 @@
   "settingsAndroidAppUpdateTitle": "Cosyncing {version}",
   "@settingsAndroidAppUpdateTitle": {
     "description": "Installed Android client version shown in Settings.",
-    "placeholders": { "version": { "type": "String", "example": "1.4.0" } }
+    "placeholders": {
+      "version": {
+        "type": "String",
+        "example": "1.4.0"
+      }
+    }
   },
   "settingsAndroidAppUpdateChecking": "Checking for updates…",
   "@settingsAndroidAppUpdateChecking": {
@@ -1987,12 +1992,22 @@
   "androidUpdateAvailableBody": "Version {version} is ready to download.",
   "@androidUpdateAvailableBody": {
     "description": "Android update banner body before download.",
-    "placeholders": { "version": { "type": "String", "example": "1.4.0" } }
+    "placeholders": {
+      "version": {
+        "type": "String",
+        "example": "1.4.0"
+      }
+    }
   },
   "androidUpdateDownloadingBody": "Downloading version {version}…",
   "@androidUpdateDownloadingBody": {
     "description": "Android update banner body while downloading.",
-    "placeholders": { "version": { "type": "String", "example": "1.4.0" } }
+    "placeholders": {
+      "version": {
+        "type": "String",
+        "example": "1.4.0"
+      }
+    }
   },
   "androidUpdateOpeningBody": "Opening Android’s installer…",
   "@androidUpdateOpeningBody": {
@@ -2025,12 +2040,22 @@
   "androidUpdateNotificationDownloadingTitle": "Downloading Cosyncing {version}",
   "@androidUpdateNotificationDownloadingTitle": {
     "description": "Android notification title while the update APK downloads.",
-    "placeholders": { "version": { "type": "String", "example": "1.4.0" } }
+    "placeholders": {
+      "version": {
+        "type": "String",
+        "example": "1.4.0"
+      }
+    }
   },
   "androidUpdateNotificationReadyTitle": "Cosyncing {version} is ready to install",
   "@androidUpdateNotificationReadyTitle": {
     "description": "Android notification title when the update finished downloading while the app was in the background.",
-    "placeholders": { "version": { "type": "String", "example": "1.4.0" } }
+    "placeholders": {
+      "version": {
+        "type": "String",
+        "example": "1.4.0"
+      }
+    }
   },
   "androidUpdateNotificationReadyText": "Tap to install the update.",
   "@androidUpdateNotificationReadyText": {
@@ -2039,7 +2064,12 @@
   "androidUpdateReadyBody": "Version {version} is downloaded and ready to install.",
   "@androidUpdateReadyBody": {
     "description": "Android update body once the download is verified and waits for the app to return to the front.",
-    "placeholders": { "version": { "type": "String", "example": "1.4.0" } }
+    "placeholders": {
+      "version": {
+        "type": "String",
+        "example": "1.4.0"
+      }
+    }
   },
   "settingsQuotaPanelTitle": "Usage limits",
   "@settingsQuotaPanelTitle": {
@@ -2700,7 +2730,9 @@
   "@sessionTokenCount": {
     "description": "Compact token count in session status, including the unit.",
     "placeholders": {
-      "count": { "type": "String" }
+      "count": {
+        "type": "String"
+      }
     }
   },
   "tokensCount": "↓{count} tokens",
@@ -4695,8 +4727,7 @@
   "connectionConnectedTitle": "Connected",
   "connectionConnectedMachine": "Connected to {machine}.",
   "@connectionConnectedMachine": {
-    "placeholders": {
-    }
+    "placeholders": {}
   },
   "connectionConnectedAt": "The server at {brokerUrl} is reachable.",
   "@connectionConnectedAt": {
@@ -4956,7 +4987,13 @@
   },
   "sessionPermissionModeFallback": "Permission",
   "sessionPermissionModeTooltip": "Permission mode: {mode}. Applies to prompts and slash commands sent from this composer.",
-  "@sessionPermissionModeTooltip": {"placeholders": {"mode": {"type": "String"}}},
+  "@sessionPermissionModeTooltip": {
+    "placeholders": {
+      "mode": {
+        "type": "String"
+      }
+    }
+  },
   "sessionPermissionModeSheetTitle": "Permission mode",
   "sessionPermissionModeSheetBody": "Applies to prompts and slash commands sent from this composer. If the Server publishes a different mode, that one takes over.",
   "sessionPermissionModeAsk": "Ask permission",
@@ -5054,55 +5091,138 @@
     }
   },
   "sessionFilePreviewAnchorLine": "Line {line}",
-  "@sessionFilePreviewAnchorLine": {"description": "Label for the line a file preview was opened at.", "placeholders": {"line": {"type": "int"}}},
+  "@sessionFilePreviewAnchorLine": {
+    "description": "Label for the line a file preview was opened at.",
+    "placeholders": {
+      "line": {
+        "type": "int"
+      }
+    }
+  },
   "fileViewerReading": "Reading file…",
-  "@fileViewerReading": {"description": "Header state while the bounded read is in flight. The body shows a gutter skeleton; the file surface never shows a spinner."},
+  "@fileViewerReading": {
+    "description": "Header state while the bounded read is in flight. The body shows a gutter skeleton; the file surface never shows a spinner."
+  },
   "fileViewerTruncated": "Showing the first {lines} lines — the file is larger than the read cap, so this is a prefix.",
-  "@fileViewerTruncated": {"description": "Host notice above the renderer when the broker returned a bounded prefix. States only the lines delivered: the file's line count is unknowable from a byte-capped read.", "placeholders": {"lines": {"type": "int"}}},
+  "@fileViewerTruncated": {
+    "description": "Host notice above the renderer when the broker returned a bounded prefix. States only the lines delivered: the file's line count is unknowable from a byte-capped read.",
+    "placeholders": {
+      "lines": {
+        "type": "int"
+      }
+    }
+  },
   "fileViewerWrap": "Wrap lines",
-  "@fileViewerWrap": {"description": "Header toggle, offered on source views only — never on a rendered view, which reflows on its own."},
+  "@fileViewerWrap": {
+    "description": "Header toggle, offered on source views only — never on a rendered view, which reflows on its own."
+  },
   "fileViewerReadOnly": "Read-only",
-  "@fileViewerReadOnly": {"description": "Trailing marker stating the file surface never edits."},
+  "@fileViewerReadOnly": {
+    "description": "Trailing marker stating the file surface never edits."
+  },
   "fileViewerFromSession": "from {session}",
-  "@fileViewerFromSession": {"description": "Header owner meta naming the session whose workspace the file belongs to.", "placeholders": {"session": {"type": "String"}}},
+  "@fileViewerFromSession": {
+    "description": "Header owner meta naming the session whose workspace the file belongs to.",
+    "placeholders": {
+      "session": {
+        "type": "String"
+      }
+    }
+  },
   "fileViewerGoneTitle": "This file is gone",
-  "@fileViewerGoneTitle": {"description": "State panel title when a path stops resolving after the file was opened."},
+  "@fileViewerGoneTitle": {
+    "description": "State panel title when a path stops resolving after the file was opened."
+  },
   "fileViewerGoneBody": "It was moved or deleted in the workspace after this tab was opened. The tab is kept so the path is not lost.",
-  "@fileViewerGoneBody": {"description": "State panel body for a path that no longer resolves."},
+  "@fileViewerGoneBody": {
+    "description": "State panel body for a path that no longer resolves."
+  },
   "fileViewerBrowseFiles": "Browse files",
-  "@fileViewerBrowseFiles": {"description": "Action re-browsing the workspace from a state panel."},
+  "@fileViewerBrowseFiles": {
+    "description": "Action re-browsing the workspace from a state panel."
+  },
   "fileViewerTryAgain": "Try again",
-  "@fileViewerTryAgain": {"description": "Action re-issuing the read from a state panel."},
+  "@fileViewerTryAgain": {
+    "description": "Action re-issuing the read from a state panel."
+  },
   "fileViewerNoPreview": "No preview for this type yet.",
-  "@fileViewerNoPreview": {"description": "State panel title for content the viewer will not guess at."},
+  "@fileViewerNoPreview": {
+    "description": "State panel title for content the viewer will not guess at."
+  },
   "fileViewerBinaryBody": "{type} · {size} · binary content. The viewer will not guess at it.",
-  "@fileViewerBinaryBody": {"description": "State panel body naming what the bytes are instead of rendering mojibake.", "placeholders": {"type": {"type": "String"}, "size": {"type": "String"}}},
+  "@fileViewerBinaryBody": {
+    "description": "State panel body naming what the bytes are instead of rendering mojibake.",
+    "placeholders": {
+      "type": {
+        "type": "String"
+      },
+      "size": {
+        "type": "String"
+      }
+    }
+  },
   "fileViewerModeSource": "Source",
-  "@fileViewerModeSource": {"description": "Segmented control: show the file's bytes as they are."},
+  "@fileViewerModeSource": {
+    "description": "Segmented control: show the file's bytes as they are."
+  },
   "fileViewerModeRendered": "Rendered",
-  "@fileViewerModeRendered": {"description": "Segmented control: show the renderer's presentation of the file."},
+  "@fileViewerModeRendered": {
+    "description": "Segmented control: show the renderer's presentation of the file."
+  },
   "fileViewerRendererPlain": "Plain text",
-  "@fileViewerRendererPlain": {"description": "Header chip naming the active renderer when the file has no source language."},
-  "fileViewerHighlightingOff": "Syntax highlighting is off \u2014 at {size} this file exceeds the highlighting budget. The text is complete, not truncated.",
-  "@fileViewerHighlightingOff": {"description": "Host notice above the renderer when the highlighter declined. Says the text is complete so a grey body does not read as a truncated one.", "placeholders": {"size": {"type": "String"}}},
+  "@fileViewerRendererPlain": {
+    "description": "Header chip naming the active renderer when the file has no source language."
+  },
+  "fileViewerHighlightingOff": "Syntax highlighting is off — at {size} this file exceeds the highlighting budget. The text is complete, not truncated.",
+  "@fileViewerHighlightingOff": {
+    "description": "Host notice above the renderer when the highlighter declined. Says the text is complete so a grey body does not read as a truncated one.",
+    "placeholders": {
+      "size": {
+        "type": "String"
+      }
+    }
+  },
   "fileViewerNoFilesTitle": "No files open",
-  "@fileViewerNoFilesTitle": {"description": "Resting state of the file pane when the session showing has opened no files. The pane stays rather than collapsing the layout the reader arranged."},
+  "@fileViewerNoFilesTitle": {
+    "description": "Resting state of the file pane when the session showing has opened no files. The pane stays rather than collapsing the layout the reader arranged."
+  },
   "fileViewerNoFilesBody": "Open a file from the transcript or the Files tab.",
-  "@fileViewerNoFilesBody": {"description": "How to fill the empty file pane."},
+  "@fileViewerNoFilesBody": {
+    "description": "How to fill the empty file pane."
+  },
   "fileViewerPassivePreview": "Passive preview — scripts disabled",
-  "@fileViewerPassivePreview": {"description": "Badge on the rendered face of an HTML file. States what the frame will not do; on web the browser enforces it through the sandbox attribute, natively the WebView has JavaScript disabled."},
+  "@fileViewerPassivePreview": {
+    "description": "Badge on the rendered face of an HTML file. States what the frame will not do; on web the browser enforces it through the sandbox attribute, natively the WebView has JavaScript disabled."
+  },
   "fileViewerHtmlSourceOnly": "Rendered preview is unavailable on this platform — no embeddable browser view exists. Showing source.",
-  "@fileViewerHtmlSourceOnly": {"description": "Why an HTML file has no Rendered face on Linux and Windows. The limit is that the available WebView opens a detached OS window, which cannot be composited into a pane."},
+  "@fileViewerHtmlSourceOnly": {
+    "description": "Why an HTML file has no Rendered face on Linux and Windows. The limit is that the available WebView opens a detached OS window, which cannot be composited into a pane."
+  },
   "fileViewerOpenInBrowser": "Open in browser",
-  "@fileViewerOpenInBrowser": {"description": "The labelled hand-off out of the source-only limit."},
+  "@fileViewerOpenInBrowser": {
+    "description": "The labelled hand-off out of the source-only limit."
+  },
   "fileViewerOpenInBrowserHint": "Opens a local copy in your default browser, outside cosyncing.",
-  "@fileViewerOpenInBrowserHint": {"description": "Tooltip on the hand-off. Says local copy because the workspace path names a file on the broker's machine, which may not be this one."},
+  "@fileViewerOpenInBrowserHint": {
+    "description": "Tooltip on the hand-off. Says local copy because the workspace path names a file on the broker's machine, which may not be this one."
+  },
   "fileViewerOpenInBrowserFailed": "That file could not be opened in a browser.",
-  "@fileViewerOpenInBrowserFailed": {"description": "Shown when staging or launching the local copy failed."},
+  "@fileViewerOpenInBrowserFailed": {
+    "description": "Shown when staging or launching the local copy failed."
+  },
   "workspacePromptTargetNote": "Prompts go to {session}",
-  "@workspacePromptTargetNote": {"description": "Quiet trailing note on the composer while a file pane holds focus, naming the session that still receives typing. {session} is already tool-qualified, e.g. codex \u00b7 refactor auth.", "placeholders": {"session": {"type": "String"}}},
+  "@workspacePromptTargetNote": {
+    "description": "Quiet trailing note on the composer while a file pane holds focus, naming the session that still receives typing. {session} is already tool-qualified, e.g. codex · refactor auth.",
+    "placeholders": {
+      "session": {
+        "type": "String"
+      }
+    }
+  },
   "workspacePromptTargetTooltip": "Typing and shortcuts target this session even while a file pane has focus",
-  "@workspacePromptTargetTooltip": {"description": "Tooltip on the session tab carrying the prompt-target tick."},
+  "@workspacePromptTargetTooltip": {
+    "description": "Tooltip on the session tab carrying the prompt-target tick."
+  },
   "usageHubTileTitle": "Usage overview",
   "@usageHubTileTitle": {
     "description": "Settings hub row leading to the usage report."
@@ -5647,9 +5767,18 @@
   "@usageCardHeroSubDay": {
     "description": "The activity line under a day card's hero figure. Leaves out days active, which a single day cannot fill.",
     "placeholders": {
-      "sessions": { "type": "String", "example": "12" },
-      "requests": { "type": "String", "example": "1,204" },
-      "agent": { "type": "String", "example": "3 hours" }
+      "sessions": {
+        "type": "String",
+        "example": "12"
+      },
+      "requests": {
+        "type": "String",
+        "example": "1,204"
+      },
+      "agent": {
+        "type": "String",
+        "example": "3 hours"
+      }
     }
   },
   "usageCardBusiestLabel": "Busiest day",
@@ -5804,15 +5933,24 @@
   "@usageTokdashOutdated": {
     "description": "Shown instead of the figures when the broker's tokdash predates the report API. Names both versions and the command, because 'too old' without either is not actionable.",
     "placeholders": {
-      "installed": {"type": "String", "example": "2.0.0"},
-      "required": {"type": "String", "example": "2.5.0"}
+      "installed": {
+        "type": "String",
+        "example": "2.0.0"
+      },
+      "required": {
+        "type": "String",
+        "example": "2.5.0"
+      }
     }
   },
   "usageTokdashVersionUnknown": "The server's tokdash does not report its version, so it is older than the {required} this report needs. Update it on the server — pipx upgrade tokdash — then reopen this page.",
   "@usageTokdashVersionUnknown": {
     "description": "The same fact when the installed version could not be read at all. Never prints a placeholder version.",
     "placeholders": {
-      "required": {"type": "String", "example": "2.5.0"}
+      "required": {
+        "type": "String",
+        "example": "2.5.0"
+      }
     }
   },
   "sessionsEmptyWindowTitle": "No recent sessions",
@@ -6220,8 +6358,13 @@
   "@inboxEnhancementPendingHeader": {
     "description": "Heading over the pending notifications: the selected filter's name and how many items it holds, as the Overview queue heading does.",
     "placeholders": {
-      "filter": { "type": "String", "example": "Waiting for you" },
-      "count": { "type": "int" }
+      "filter": {
+        "type": "String",
+        "example": "Waiting for you"
+      },
+      "count": {
+        "type": "int"
+      }
     }
   },
   "inboxEnhancementAllPending": "All",
@@ -6430,5 +6573,57 @@
         "type": "int"
       }
     }
-  }
+  },
+  "pickerSearchChoices": "Search choices",
+  "pickerNoChoices": "No matching choices",
+  "workspaceTimeShort": "Time",
+  "workspaceCostUsd": "Cost · USD",
+  "filePin": "Pin file",
+  "fileUnpin": "Unpin file",
+  "fileManage": "Manage files",
+  "fileLimitReached": "File limit reached. Close an unneeded file to open another.",
+  "toolsHideDefault": "Hide tool calls by default",
+  "toolsHideDefaultHint": "Applies to sessions using the default on this device. Individual sessions can override it.",
+  "toolsUseDefault": "Use default ({value})",
+  "toolsHidden": "Hidden",
+  "toolsShown": "Shown",
+  "toolsShow": "Show tool calls",
+  "toolsHide": "Hide tool calls",
+  "toolsSaveRetry": "Could not save tool visibility. Retry",
+  "toolsOverridesCount": "{count} sessions use a custom setting",
+  "toolsOverridesReset": "Session overrides reset",
+  "toolsResetOverrides": "Reset session overrides",
+  "toolsAssistantMessages": "Assistant messages",
+  "toolsAssistantAll": "All messages",
+  "toolsDetails": "Tool details",
+  "@toolsUseDefault": {
+    "placeholders": {
+      "value": {
+        "type": "String"
+      }
+    }
+  },
+  "@toolsOverridesCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "fileClosed": "Closed {name}",
+  "toolsVisibility": "Tool calls",
+  "@fileClosed": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "filePinned": "Pinned",
+  "fileOtherOpen": "Other open files",
+  "fileCloseOthers": "Close other unpinned files",
+  "fileCloseUnpinned": "Close all unpinned files",
+  "fileMoveEarlier": "Move earlier",
+  "fileMoveLater": "Move later",
+  "fileViewerRenderedFailed": "Preview unavailable. Showing source."
 }

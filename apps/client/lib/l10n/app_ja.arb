@@ -1771,5 +1771,57 @@
         "type": "int"
       }
     }
-  }
+  },
+  "pickerSearchChoices": "選択肢を検索",
+  "pickerNoChoices": "一致する選択肢がありません",
+  "workspaceTimeShort": "時間",
+  "workspaceCostUsd": "費用 · USD",
+  "filePin": "ファイルを固定",
+  "fileUnpin": "固定を解除",
+  "fileManage": "ファイル管理",
+  "fileLimitReached": "ファイル数の上限です。不要なファイルを閉じてください。",
+  "toolsHideDefault": "ツール呼び出しを既定で非表示",
+  "toolsHideDefaultHint": "この端末の既定設定を使うセッションに適用。個別に変更できます。",
+  "toolsUseDefault": "既定を使用（{value}）",
+  "toolsHidden": "非表示",
+  "toolsShown": "表示",
+  "toolsShow": "ツール呼び出しを表示",
+  "toolsHide": "ツール呼び出しを非表示",
+  "toolsSaveRetry": "設定を保存できませんでした。再試行",
+  "toolsOverridesCount": "{count} セッションが個別設定を使用",
+  "toolsOverridesReset": "個別設定をリセットしました",
+  "toolsResetOverrides": "個別設定をリセット",
+  "toolsAssistantMessages": "アシスタントのメッセージ",
+  "toolsAssistantAll": "すべてのメッセージ",
+  "toolsDetails": "ツールの詳細",
+  "@toolsUseDefault": {
+    "placeholders": {
+      "value": {
+        "type": "String"
+      }
+    }
+  },
+  "@toolsOverridesCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "fileClosed": "{name} を閉じました",
+  "toolsVisibility": "ツール呼び出し",
+  "@fileClosed": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "filePinned": "ピン留め",
+  "fileOtherOpen": "その他の開いているファイル",
+  "fileCloseOthers": "他の未固定ファイルを閉じる",
+  "fileCloseUnpinned": "未固定のファイルをすべて閉じる",
+  "fileMoveEarlier": "前へ移動",
+  "fileMoveLater": "後ろへ移動",
+  "fileViewerRenderedFailed": "プレビューを表示できません。ソースを表示しています。"
 }

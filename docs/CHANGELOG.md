@@ -29,6 +29,17 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   running, red for stopped, failed or unreachable, yellow for warnings. Output
   stays plain when piped, under `NO_COLOR`, and on a dumb terminal.
 
+- Overview shows Time, Tokens, Cost and Messages in a two-column mobile grid.
+- Compact sessions retain open and pinned files in a slim chat/file strip;
+  file links and browser selections share the same reader. Supported documents
+  open rendered by default and remember explicit reader choices.
+- Selection controls use anchored popups on phones and desktop, with quieter
+  settings rows and borderless dark surfaces.
+- Display settings provide a default tool-call visibility with persistent
+  per-session overrides, separate from assistant-message filtering.
+- Narrow session navigation uses tighter spacing around the menu, Overview
+  and session tabs while retaining usable touch targets.
+
 ## 0.7.1 — 2026-10-19
 
 ### Added

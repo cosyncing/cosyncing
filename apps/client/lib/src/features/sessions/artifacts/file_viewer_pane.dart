@@ -111,6 +111,9 @@ class FileViewerPane extends StatefulWidget {
     this.onBrowseFiles,
     this.onRetry,
     this.initialView,
+    this.onModeChanged,
+    this.onAnchorHandled,
+    this.offsetForMode,
     this.onViewChanged,
     this.onOpenExternally,
     this.onOpenWith,
@@ -147,6 +150,15 @@ class FileViewerPane extends StatefulWidget {
   /// of the file are correct. Set when the same file is being handed between
   /// the split's second pane and the compact route across a resize.
   final FilePaneView? initialView;
+
+  /// Explicit reader choice, separate from the default and line navigation.
+  final ValueChanged<FileViewMode>? onModeChanged;
+
+  /// Consumes a transient line-navigation request once the source is ready.
+  final VoidCallback? onAnchorHandled;
+
+  /// Restores the reading position of the other face.
+  final double Function(FileViewMode)? offsetForMode;
 
   /// Reports the face and offset, so a crossing can resume where this left off.
   final ValueChanged<FilePaneView>? onViewChanged;
@@ -196,6 +208,11 @@ class _FileViewerPaneState extends State<FileViewerPane> {
   bool _opening = false;
   bool _revealScheduled = false;
   FileViewMode _mode = FileViewMode.source;
+  bool _explicitMode = false;
+  bool _anchorHandled = false;
+  int? _displayAnchor;
+  bool _renderFailed = false;
+  final Map<FileViewMode, double> _modeOffsets = {};
 
   /// Whether [FileViewerPane.initialView]'s offset has been applied.
   ///
@@ -226,8 +243,24 @@ class _FileViewerPaneState extends State<FileViewerPane> {
   @override
   void didUpdateWidget(covariant FileViewerPane oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.content is FileViewerSource &&
+        widget.content is FileViewerSource &&
+        (widget.content as FileViewerSource).preview.anchorLine != null &&
+        (oldWidget.content as FileViewerSource).preview.anchorLine !=
+            (widget.content as FileViewerSource).preview.anchorLine) {
+      _anchorHandled = false;
+      _preparedKey = null;
+      _explicitMode = false;
+      _restoredOffset = false;
+      _scheduleAnchorReveal();
+      _scheduleOffsetRestore();
+    }
     if (oldWidget.content.path != widget.content.path) {
+      _anchorHandled = false;
+      _displayAnchor = null;
       _wrap = false;
+      _explicitMode = false;
+      _modeOffsets.clear();
       _restoredOffset = false;
       // _mode is not reset here: the next _resolve sets it from the incoming
       // file's own renderer, which is not always source.
@@ -235,7 +268,12 @@ class _FileViewerPaneState extends State<FileViewerPane> {
       _scheduleOffsetRestore();
     } else if (oldWidget.content is! FileViewerSource &&
         widget.content is FileViewerSource) {
+      if ((widget.content as FileViewerSource).preview.anchorLine != null) {
+        _anchorHandled = false;
+        _preparedKey = null;
+      }
       _scheduleAnchorReveal();
+      _scheduleOffsetRestore();
     }
   }
 
@@ -252,21 +290,34 @@ class _FileViewerPaneState extends State<FileViewerPane> {
 
   /// Records the current face and offset for a possible width crossing.
   void _reportView() {
-    if (!_vertical.hasClients) return;
+    if (!_vertical.hasClients || _renderFailed) return;
+    _modeOffsets[_mode] = _vertical.offset;
+    if (!_explicitMode &&
+        !_anchorHandled &&
+        widget.content is FileViewerSource &&
+        (widget.content as FileViewerSource).preview.anchorLine != null) {
+      return;
+    }
     widget.onViewChanged?.call((mode: _mode, offset: _vertical.offset));
   }
 
   /// Restores a handed-over offset once the body has a viewport.
   ///
-  /// Runs after the anchor reveal is scheduled and wins over it only when
-  /// there is something to restore, because a resume is a continuation of a
-  /// read the anchor already served.
+  /// Explicit line navigation takes priority over remembered reading position.
   void _scheduleOffsetRestore() {
+    if (widget.content is FileViewerSource &&
+        (widget.content as FileViewerSource).preview.anchorLine != null) {
+      return;
+    }
     final view = widget.initialView;
     if (view == null || _restoredOffset) return;
-    _restoredOffset = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_vertical.hasClients) return;
+      if (!mounted || !_vertical.hasClients || _restoredOffset) return;
+      if (widget.content is FileViewerSource &&
+          (widget.content as FileViewerSource).preview.anchorLine != null) {
+        return;
+      }
+      _restoredOffset = true;
       _vertical.jumpTo(
         view.offset.clamp(
           _vertical.position.minScrollExtent,
@@ -299,7 +350,13 @@ class _FileViewerPaneState extends State<FileViewerPane> {
       final content = widget.content;
       if (content is! FileViewerSource) return;
       final anchor = content.preview.anchorLine;
-      if (anchor == null || content.preview.anchorBeyondPreview) return;
+      if (anchor == null || _anchorHandled) return;
+      if (content.preview.anchorBeyondPreview) {
+        _anchorHandled = true;
+        _restoredOffset = true;
+        widget.onAnchorHandled?.call();
+        return;
+      }
       if (!_vertical.hasClients) return;
       final extent = fileSourceLineExtent(context);
       final viewport = _vertical.position.viewportDimension;
@@ -310,6 +367,10 @@ class _FileViewerPaneState extends State<FileViewerPane> {
           _vertical.position.maxScrollExtent,
         ),
       );
+      _anchorHandled = true;
+      _restoredOffset = true;
+      _reportView();
+      widget.onAnchorHandled?.call();
     });
   }
 
@@ -432,8 +493,27 @@ class _FileViewerPaneState extends State<FileViewerPane> {
                         tokens: tokens,
                         mode: _mode,
                         onChanged: (mode) {
-                          setState(() => _mode = mode);
                           _reportView();
+                          final offset =
+                              _modeOffsets[mode] ??
+                              widget.offsetForMode?.call(mode) ??
+                              0;
+                          setState(() {
+                            _mode = mode;
+                            _explicitMode = true;
+                            _renderFailed = false;
+                          });
+                          widget.onModeChanged?.call(mode);
+                          WidgetsBinding.instance.addPostFrameCallback((_) {
+                            if (!mounted || !_vertical.hasClients) return;
+                            _vertical.jumpTo(
+                              offset.clamp(
+                                0,
+                                _vertical.position.maxScrollExtent,
+                              ),
+                            );
+                            _reportView();
+                          });
                         },
                         sourceLabel: l10n.fileViewerModeSource,
                         renderedLabel: l10n.fileViewerModeRendered,
@@ -550,6 +630,12 @@ class _FileViewerPaneState extends State<FileViewerPane> {
           // bytes that were withheld — so there is no honest "of N" to state.
           message: l10n.fileViewerTruncated(preview.previewedLineCount),
         ),
+      if (_renderFailed)
+        _Notice(
+          noticeKey: const Key('file-viewer-render-failed'),
+          tokens: tokens,
+          message: l10n.fileViewerRenderedFailed,
+        ),
       if (_preparedNotice == FileRenderNotice.highlightingOff)
         _Notice(
           noticeKey: const Key('file-viewer-highlighting-off'),
@@ -587,12 +673,13 @@ class _FileViewerPaneState extends State<FileViewerPane> {
         ),
       // The existing honest note, preserved: silently landing on line 1 would
       // read as "the mention was wrong" rather than "the read was bounded".
-      if (preview.anchorBeyondPreview)
+      if (_displayAnchor != null &&
+          _displayAnchor! > preview.previewedLineCount)
         _Notice(
           noticeKey: const Key('file-viewer-anchor-beyond'),
           tokens: tokens,
           message: l10n.sessionFilePreviewAnchorBeyond(
-            preview.anchorLine!,
+            _displayAnchor!,
             preview.previewedLineCount,
           ),
         ),
@@ -765,11 +852,18 @@ class _FileViewerPaneState extends State<FileViewerPane> {
         '${preview.path}\u0000${preview.text.length}'
         '\u0000${preview.text.hashCode}\u0000${descriptor.id}';
     if (_preparedKey != key) {
+      _displayAnchor = preview.anchorLine;
+      _renderFailed = false;
       _lines = preview.text.isEmpty ? const [] : preview.text.split('\n');
-      // Each renderer opens on its own default face. Source for everything
-      // except a patch, where the presentation is the point of the file — but
-      // a handed-over face wins, since a resume is the same read continuing.
-      _mode = widget.initialView?.mode ?? descriptor.defaultMode;
+      // Explicit source-line navigation wins over a remembered reader mode.
+      // Fresh documents prefer their rendered capability when one exists.
+      _mode = preview.anchorLine != null
+          ? FileViewMode.source
+          : widget.initialView?.mode ??
+                (descriptor.modes.contains(FileViewMode.rendered)
+                    ? FileViewMode.rendered
+                    : descriptor.defaultMode);
+      if (!descriptor.modes.contains(_mode)) _mode = descriptor.defaultMode;
       final prepared = descriptor.prepare?.call(
         _request(context, tokens, descriptor, preview, prepared: null),
       );
@@ -810,9 +904,23 @@ class _FileViewerPaneState extends State<FileViewerPane> {
         wrap: _wrap && _mode == FileViewMode.source,
       ),
       prepared: prepared,
-      anchorLine: preview.anchorBeyondPreview ? null : preview.anchorLine,
+      anchorLine:
+          _displayAnchor != null &&
+              _displayAnchor! <= preview.previewedLineCount
+          ? _displayAnchor
+          : null,
       anchorColumn: preview.anchorColumn,
       onCopy: (text) => unawaited(_copy(context, text)),
+      onRenderFailed: () {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || widget.content.path != preview.path) return;
+          setState(() {
+            _renderFailed = true;
+            _mode = FileViewMode.source;
+          });
+        });
+        WidgetsBinding.instance.ensureVisualUpdate();
+      },
     );
   }
 

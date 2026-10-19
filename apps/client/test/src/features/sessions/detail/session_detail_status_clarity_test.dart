@@ -537,6 +537,14 @@ void main() {
                 ),
               ),
             );
+            // Image decoding runs outside the fake test clock; await the asset
+            // before comparing the complete session surface.
+            await tester.runAsync(
+              () => precacheImage(
+                const AssetImage('assets/agents/claude.png'),
+                tester.element(find.byType(Scaffold).first),
+              ),
+            );
             await tester.pumpAndSettle();
             await openStatus(tester);
 

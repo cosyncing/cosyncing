@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_detail_state.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_view_memory.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_store.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_focus.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_pane_key.dart';
@@ -96,9 +97,40 @@ class FilePanesController extends AsyncNotifier<FilePanesState> {
 
   /// Closes one file pane.
   Future<void> close(SidePaneKey pane) async {
+    final source = _sourceKey;
     await _mutate((current) => current.closed(pane));
+    ref.read(filePaneViewMemoryProvider).forget('$source\u0000${pane.key}');
     _releaseFocus(pane.key);
   }
+
+  /// Restores a deliberately closed document without replacing newer tabs.
+  Future<void> reopen(SidePaneKey pane, {required bool pinned, String? mode}) =>
+      _mutate((current) {
+        final next = current.openedPane(pane);
+        if (!next.panes.any((p) => p.key == pane.key)) return current;
+        return next.copyWith(
+          pinned: pinned ? {...next.pinned, pane.key} : next.pinned,
+          modes: mode == null ? next.modes : {...next.modes, pane.key: mode},
+        );
+      });
+
+  /// Persists an explicit Source/Rendered choice.
+  Future<void> setMode(SidePaneKey pane, String mode) => _mutate(
+    (current) => current.panes.any((p) => p.key == pane.key)
+        ? current.copyWith(modes: {...current.modes, pane.key: mode})
+        : current,
+  );
+
+  /// Retains a document as a shortcut without changing desktop tab order.
+  Future<void> togglePin(SidePaneKey pane) => _mutate(
+    (current) => !current.panes.any((p) => p.key == pane.key)
+        ? current
+        : current.copyWith(
+            pinned: current.pinned.contains(pane.key)
+                ? current.pinned.difference({pane.key})
+                : {...current.pinned, pane.key},
+          ),
+  );
 
   /// Makes [pane] the active file within its session.
   Future<void> activate(SidePaneKey pane) async {

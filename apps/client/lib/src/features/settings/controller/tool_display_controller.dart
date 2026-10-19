@@ -15,7 +15,10 @@ final class ToolDisplayController extends AsyncNotifier<ToolDisplayMode> {
 
   @override
   Future<ToolDisplayMode> build() async {
-    return ToolDisplayMode.fromToken(await _store.getToolDisplayMode());
+    final mode = ToolDisplayMode.fromToken(await _store.getToolDisplayMode());
+    return mode == ToolDisplayMode.finalMessagesOnly
+        ? ToolDisplayMode.responsive
+        : mode;
   }
 
   /// Selects [mode] immediately and persists it for this device.

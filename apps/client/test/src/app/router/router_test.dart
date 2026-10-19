@@ -479,10 +479,10 @@ void main() {
         ],
       );
 
-      expect(find.byKey(const Key('session-file-page')), findsOneWidget);
+      expect(find.byKey(const Key('session-file-page')), findsNothing);
       // The route is self-sufficient: a link naming a file the working set
       // has never heard of still opens it, strip and all.
-      expect(find.byKey(const Key('file-tabs-strip')), findsOneWidget);
+      expect(find.byKey(const Key('compact-manage-files')), findsOneWidget);
       expect(find.text('one.dart'), findsWidgets);
       // A drilled-in view owns the viewport, exactly like session detail.
       expect(find.byType(NavigationBar), findsNothing);

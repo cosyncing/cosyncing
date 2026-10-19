@@ -525,12 +525,22 @@
   "androidUpdateNotificationDownloadingTitle": "正在下载 Cosyncing {version}",
   "@androidUpdateNotificationDownloadingTitle": {
     "description": "Android notification title while the update APK downloads.",
-    "placeholders": { "version": { "type": "String", "example": "1.4.0" } }
+    "placeholders": {
+      "version": {
+        "type": "String",
+        "example": "1.4.0"
+      }
+    }
   },
   "androidUpdateNotificationReadyTitle": "Cosyncing {version} 已可安装",
   "@androidUpdateNotificationReadyTitle": {
     "description": "Android notification title when the update finished downloading while the app was in the background.",
-    "placeholders": { "version": { "type": "String", "example": "1.4.0" } }
+    "placeholders": {
+      "version": {
+        "type": "String",
+        "example": "1.4.0"
+      }
+    }
   },
   "androidUpdateNotificationReadyText": "点按以安装更新。",
   "@androidUpdateNotificationReadyText": {
@@ -539,7 +549,12 @@
   "androidUpdateReadyBody": "版本 {version} 已下载，可以安装。",
   "@androidUpdateReadyBody": {
     "description": "Android update body once the download is verified and waits for the app to return to the front.",
-    "placeholders": { "version": { "type": "String", "example": "1.4.0" } }
+    "placeholders": {
+      "version": {
+        "type": "String",
+        "example": "1.4.0"
+      }
+    }
   },
   "settingsQuotaPanelTitle": "额度用量",
   "settingsQuotaAntigravityGeminiModels": "Gemini 模型",
@@ -2288,9 +2303,18 @@
   "@usageCardHeroSubDay": {
     "description": "The activity line under a day card's hero figure. Leaves out days active, which a single day cannot fill.",
     "placeholders": {
-      "sessions": { "type": "String", "example": "12" },
-      "requests": { "type": "String", "example": "1,204" },
-      "agent": { "type": "String", "example": "3 hours" }
+      "sessions": {
+        "type": "String",
+        "example": "12"
+      },
+      "requests": {
+        "type": "String",
+        "example": "1,204"
+      },
+      "agent": {
+        "type": "String",
+        "example": "3 hours"
+      }
     }
   },
   "usageCardBusiestLabel": "最忙的一天",
@@ -2569,8 +2593,13 @@
   "@inboxEnhancementPendingHeader": {
     "description": "Heading over the pending notifications: the selected filter's name and how many items it holds, as the Overview queue heading does.",
     "placeholders": {
-      "filter": { "type": "String", "example": "Waiting for you" },
-      "count": { "type": "int" }
+      "filter": {
+        "type": "String",
+        "example": "Waiting for you"
+      },
+      "count": {
+        "type": "int"
+      }
     }
   },
   "inboxEnhancementAllPending": "全部",
@@ -2721,5 +2750,57 @@
         "type": "int"
       }
     }
-  }
+  },
+  "pickerSearchChoices": "搜索选项",
+  "pickerNoChoices": "没有匹配选项",
+  "workspaceTimeShort": "时间",
+  "workspaceCostUsd": "费用 · USD",
+  "filePin": "固定文件",
+  "fileUnpin": "取消固定文件",
+  "fileManage": "管理文件",
+  "fileLimitReached": "已达到文件上限。请先关闭不需要的文件。",
+  "toolsHideDefault": "默认隐藏工具调用",
+  "toolsHideDefaultHint": "适用于此设备上使用默认设置的会话。每个会话可单独覆盖。",
+  "toolsUseDefault": "使用默认值（{value}）",
+  "toolsHidden": "已隐藏",
+  "toolsShown": "已显示",
+  "toolsShow": "显示工具调用",
+  "toolsHide": "隐藏工具调用",
+  "toolsSaveRetry": "无法保存工具显示设置。重试",
+  "toolsOverridesCount": "{count} 个会话使用自定义设置",
+  "toolsOverridesReset": "已重置会话覆盖设置",
+  "toolsResetOverrides": "重置会话覆盖设置",
+  "toolsAssistantMessages": "助手消息",
+  "toolsAssistantAll": "所有消息",
+  "toolsDetails": "工具详情",
+  "@toolsUseDefault": {
+    "placeholders": {
+      "value": {
+        "type": "String"
+      }
+    }
+  },
+  "@toolsOverridesCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "fileClosed": "已关闭 {name}",
+  "toolsVisibility": "工具调用",
+  "@fileClosed": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "filePinned": "已固定",
+  "fileOtherOpen": "其他已打开文件",
+  "fileCloseOthers": "关闭其他未固定文件",
+  "fileCloseUnpinned": "关闭所有未固定文件",
+  "fileMoveEarlier": "向前移动",
+  "fileMoveLater": "向后移动",
+  "fileViewerRenderedFailed": "预览不可用，已显示源文件。"
 }

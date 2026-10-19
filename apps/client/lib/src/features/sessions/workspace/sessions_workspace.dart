@@ -13,6 +13,7 @@ import 'package:cosyncing_client/src/features/sessions/list/session_list_control
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
 import 'package:cosyncing_client/src/features/sessions/list/sessions_empty_state.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/compact_file_strip.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_surface.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_store.dart';
@@ -302,12 +303,21 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace> {
     final overviewVisible = ref.watch(workspaceOverviewVisibleProvider);
     final active = overviewVisible ? null : open.active;
     final buildDetail = widget.detailBuilder ?? _defaultDetail;
+    // Capture before dispatch: nested PopScopes all receive a prevented pop,
+    // even if the detail callback has already cleared its selected file.
+    final fileSelected =
+        active != null &&
+        ref.watch(
+          compactFileSelectedProvider(
+            SessionDetailKey(tool: active.tool, sessionId: active.id),
+          ),
+        );
 
     return PopScope<Object?>(
       canPop: !drawerLayout || active == null,
       onPopInvokedWithResult: (didPop, result) {
         // An open drawer is the frame's first Back step.
-        if (didPop || (frame?.drawerOpen ?? false)) return;
+        if (didPop || (frame?.drawerOpen ?? false) || fileSelected) return;
         _showOverview();
       },
       child: AppCallbackShortcuts(

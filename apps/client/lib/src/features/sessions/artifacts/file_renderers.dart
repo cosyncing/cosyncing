@@ -119,7 +119,11 @@ final class FileRenderRequest {
     this.onOpenPath,
     this.onCopy,
     this.onExternalLink,
+    this.onRenderFailed,
   });
+
+  /// Reports an unavailable rendered preview so the host can show source.
+  final VoidCallback? onRenderFailed;
 
   /// Workspace-relative path.
   final String path;

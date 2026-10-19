@@ -520,11 +520,16 @@ extension TranscriptReader on AppDriver {
   /// Hides tool calls from the View menu: only what was said is drawn.
   Future<void> hideToolCalls() async {
     await tapKey('session-detail-view-menu');
-    await tapKey('session-detail-view-item-report');
+    await tapKey('session-tool-visibility');
+    await tap(find.text('Hide tool calls').last);
   }
 
   /// Shows the tool calls [hideToolCalls] hid.
-  Future<void> showToolCalls() => hideToolCalls();
+  Future<void> showToolCalls() async {
+    await tapKey('session-detail-view-menu');
+    await tapKey('session-tool-visibility');
+    await tap(find.text('Show tool calls').last);
+  }
 }
 
 /// A session of [total] durable rows, opened in the real App on its newest

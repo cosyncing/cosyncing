@@ -10,35 +10,50 @@ import '../../../../support/session_detail_page_test_harness.dart';
 
 void main() {
   group('transcript file links, end to end', () {
-    // These two mount the page without a router, which is the case where the
-    // Files slot is the only surface there is. The drill-in half — where a
-    // route exists to push — is the test below them.
+    // Both standalone and routed sessions use the shared narrow reader.
     testWidgets(
       'with no route to push, a read path opens the Files view, anchored',
       (tester) async {
         final brokerClient = _client()
-          ..fsListingsByPath[''] = _directory('')
-          ..fsListingsByPath['/repo/lib/a.dart'] = _file('lib/a.dart')
-          ..fsListingsByPath['lib'] = _directory(
-            'lib',
+          ..fsListingsByPath[''] = _directory(
+            '',
             entries: const [
               FsDirEntry(
-                name: 'a.dart',
-                path: 'lib/a.dart',
+                name: 'a.md',
+                path: 'lib/a.md',
                 type: 'file',
                 size: 40,
                 mtimeMs: 0,
               ),
             ],
           )
-          ..fsReadResult = const FsReadResult(
-            path: 'lib/a.dart',
+          ..fsListingsByPath['/repo/lib/a.md'] = _file('lib/a.md')
+          ..fsListingsByPath['lib'] = _directory(
+            'lib',
+            entries: const [
+              FsDirEntry(
+                name: 'a.md',
+                path: 'lib/a.md',
+                type: 'file',
+                size: 40,
+                mtimeMs: 0,
+              ),
+            ],
+          )
+          ..fsReadResult = FsReadResult(
+            path: 'lib/a.md',
             size: 40,
             limit: 1024 * 1024,
             truncated: false,
             encoding: 'utf8',
-            data: 'alpha\nbeta\ngamma\ndelta',
-            mimeType: 'text/plain',
+            data: [
+              'alpha',
+              'beta',
+              'gamma',
+              'delta',
+              for (var i = 0; i < 100; i++) '# Review section $i',
+            ].join('\n'),
+            mimeType: 'text/markdown',
           );
 
         await tester.pumpWidget(
@@ -58,13 +73,13 @@ void main() {
 
         // The absolute path went to the broker verbatim; the read used the
         // workspace-relative spelling the broker resolved it to.
-        expect(brokerClient.fsListedPaths, contains('/repo/lib/a.dart'));
-        expect(brokerClient.fsReadPaths, ['lib/a.dart']);
+        expect(brokerClient.fsListedPaths, contains('/repo/lib/a.md'));
+        expect(brokerClient.fsReadPaths, ['lib/a.md']);
 
         // The view switched, and the viewer opened on the anchored line with a
         // numbered gutter rather than one undifferentiated blob of text.
         expect(
-          find.byKey(const Key('session-detail-tab-panel-files')),
+          find.byKey(const Key('compact-manage-files')),
           findsOneWidget,
         );
         // A pane, not a popup. The dialog is gone and must not come back.
@@ -82,17 +97,76 @@ void main() {
         );
         expect(find.text('gamma'), findsOneWidget);
         expect(find.text('3'), findsOneWidget);
+
+        final source = find.byKey(const Key('file-viewer-lines'));
+        final anchoredOffset = tester
+            .widget<ListView>(source)
+            .controller!
+            .offset;
+        await tester.drag(source, const Offset(0, -300));
+        await tester.pumpAndSettle();
+        final sourceOffset = tester.widget<ListView>(source).controller!.offset;
+        expect(sourceOffset, greaterThan(anchoredOffset));
+        await tester.tap(find.text('Chat').first);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('a.md').first);
+        await tester.pumpAndSettle();
+        expect(
+          tester.widget<ListView>(source).controller!.offset,
+          closeTo(sourceOffset, 2),
+        );
+        await tester.tap(find.byKey(const Key('file-viewer-mode-rendered')));
+        await tester.pumpAndSettle();
+        final rendered = find.byKey(const Key('file-viewer-rendered'));
+        await tester.drag(rendered, const Offset(0, -200));
+        await tester.pumpAndSettle();
+        final renderedOffset = tester
+            .widget<ListView>(rendered)
+            .controller!
+            .offset;
+        await tester.tap(find.text('Chat').first);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('a.md').first);
+        await tester.pumpAndSettle();
+        expect(
+          tester.widget<ListView>(rendered).controller!.offset,
+          closeTo(renderedOffset, 2),
+        );
+
+        // A new click on the same line is a fresh navigation request.
+        await tester.tap(find.text('Chat').first);
+        await tester.pumpAndSettle();
+        if (find.byKey(const Key('tool-read-path')).evaluate().isEmpty) {
+          await tester.tap(find.byKey(const Key('tool-r1-details')));
+          await tester.pumpAndSettle();
+        }
+        await tester.tap(find.byKey(const Key('tool-read-path')));
+        await tester.pumpAndSettle();
+        expect(
+          tester.widget<ListView>(source).controller!.offset,
+          closeTo(anchoredOffset, 2),
+        );
+        // Ordinary browser opening restores the explicit rendered preference.
+        await openSessionDetailTestTab(tester, 'session-detail-tab-files');
+        await tester.tap(
+          find.byKey(const Key('session-detail-files-preview-lib/a.md')),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          tester.widget<ListView>(rendered).controller!.offset,
+          closeTo(renderedOffset, 2),
+        );
       },
     );
 
-    testWidgets('a read path drills in to the file route, carrying its line', (
+    testWidgets('a routed session opens the shared reader, carrying its line', (
       tester,
     ) async {
       final brokerClient = _client()
         ..fsListingsByPath[''] = _directory('')
-        ..fsListingsByPath['/repo/lib/a.dart'] = _file('lib/a.dart')
+        ..fsListingsByPath['/repo/lib/a.md'] = _file('lib/a.md')
         ..fsReadResult = const FsReadResult(
-          path: 'lib/a.dart',
+          path: 'lib/a.md',
           size: 40,
           limit: 1024 * 1024,
           truncated: false,
@@ -115,9 +189,14 @@ void main() {
       await tester.tap(find.byKey(const Key('tool-read-path')));
       await tester.pumpAndSettle();
 
-      // The path the broker resolved it to, and the mention's own line. The
-      // transcript is not swapped away for it — it is underneath on the stack.
-      expect(find.text('file route lib/a.dart#3'), findsOneWidget);
+      // Route availability does not create a second reader or lose the line.
+      expect(find.byKey(const Key('file-viewer-pane')), findsOneWidget);
+      expect(
+        find.byKey(const Key('file-viewer-anchor-number')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const Key('compact-manage-files')), findsOneWidget);
+      expect(brokerClient.fsReadPaths, ['lib/a.md']);
       // And the Files slot is not left holding a second copy of the same file
       // for the reader to find on Back.
       expect(
@@ -131,9 +210,9 @@ void main() {
     ) async {
       final brokerClient = _client()
         ..fsListingsByPath[''] = _directory('')
-        ..fsListingsByPath['/repo/lib/a.dart'] = _file('lib/a.dart')
+        ..fsListingsByPath['/repo/lib/a.md'] = _file('lib/a.md')
         ..fsReadResult = const FsReadResult(
-          path: 'lib/a.dart',
+          path: 'lib/a.md',
           size: 4000000,
           limit: 1048576,
           truncated: true,
@@ -156,7 +235,7 @@ void main() {
                   'toolClass': 'read',
                   'semantic': {
                     'kind': 'file-read',
-                    'path': '/repo/lib/a.dart',
+                    'path': '/repo/lib/a.md',
                     'startLine': 4120,
                     'preview': 'x',
                   },
@@ -244,7 +323,7 @@ const MessageWireEvent _readRow = MessageWireEvent(
       'toolClass': 'read',
       'semantic': {
         'kind': 'file-read',
-        'path': '/repo/lib/a.dart',
+        'path': '/repo/lib/a.md',
         'startLine': 3,
         'preview': 'gamma',
       },

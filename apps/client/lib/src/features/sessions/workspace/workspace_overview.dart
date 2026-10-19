@@ -801,40 +801,44 @@ class _TodayUsage extends ConsumerWidget {
         const SizedBox(height: 24),
         LayoutBuilder(
           builder: (context, constraints) {
+            final columns = constraints.maxWidth < 720 ? 2 : 4;
+            final width = (constraints.maxWidth - (columns - 1) * 16) / columns;
             final metrics = [
-              _Figure(
-                label: l10n.workspaceEstimatedTime,
-                value: runtimeValue,
-                // The dash says unavailable; how an available figure is
-                // estimated is the report's to explain, not this summary's.
-                note: active == null ? l10n.workspaceRuntimeUnavailable : '',
+              (l10n.workspaceTimeShort, runtimeValue),
+              (l10n.usageTokensLabel, tokenValue),
+              (
+                l10n.workspaceCostUsd,
+                available
+                    ? formatUsageCost(
+                        report.totals.cost,
+                        locale: locale,
+                        compact: true,
+                      )
+                    : '—',
               ),
-              _Figure(
-                label: l10n.usageTokensLabel,
-                value: tokenValue,
-                note: available
-                    ? usageTokenBreakdownText(l10n, report.totals, locale) ??
-                          l10n.workspaceTokenBreakdownUnavailable
-                    : '',
+              (
+                l10n.usageStatMessages,
+                available
+                    ? formatCompactCount(report.totals.requests, locale: locale)
+                    : '—',
               ),
             ];
-            return constraints.maxWidth < 520
-                ? Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      metrics[0],
-                      const SizedBox(height: 24),
-                      metrics[1],
-                    ],
-                  )
-                : Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Expanded(child: metrics[0]),
-                      const SizedBox(width: 48),
-                      Expanded(child: metrics[1]),
-                    ],
-                  );
+            return Wrap(
+              spacing: 16,
+              runSpacing: 20,
+              children: [
+                for (final metric in metrics)
+                  SizedBox(
+                    width: width,
+                    child: _Figure(
+                      label: metric.$1,
+                      value: metric.$2,
+                      note: '',
+                      fontSize: columns == 2 ? 28 : 32,
+                    ),
+                  ),
+              ],
+            );
           },
         ),
         if (!available)
@@ -845,6 +849,8 @@ class _TodayUsage extends ConsumerWidget {
                 ? usageTokdashUpgradeText(l10n, report!.runtime)
                 : l10n.usageUnavailable,
           ),
+        if (available && active == null)
+          _Note(text: l10n.workspaceRuntimeUnavailable),
         if (available && report.isPartial)
           _Note(
             text: l10n.workspacePartialUsage(report.sourceErrors.join(', ')),
@@ -855,10 +861,16 @@ class _TodayUsage extends ConsumerWidget {
 }
 
 class _Figure extends StatelessWidget {
-  const _Figure({required this.label, required this.value, required this.note});
+  const _Figure({
+    required this.label,
+    required this.value,
+    required this.note,
+    this.fontSize = 32,
+  });
   final String label;
   final String value;
   final String note;
+  final double fontSize;
   @override
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
@@ -873,7 +885,7 @@ class _Figure extends StatelessWidget {
       Text(
         value,
         style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-          fontSize: 32,
+          fontSize: fontSize,
           fontWeight: FontWeight.w400,
           letterSpacing: -1,
           height: 1.25,

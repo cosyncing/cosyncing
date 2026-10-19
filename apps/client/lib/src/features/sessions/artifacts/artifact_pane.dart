@@ -8,6 +8,7 @@ import 'package:cosyncing_client/src/features/connection/provider/connection_pro
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_html_handoff.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_media_source.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_open_with.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/file_renderers.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_viewer_pane.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_descriptor.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_file_browser.dart';
@@ -15,6 +16,8 @@ import 'package:cosyncing_client/src/features/sessions/detail/session_detail_con
 import 'package:cosyncing_client/src/features/sessions/detail/session_detail_state.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/compact_file_strip.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_actions.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_surface.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_view_memory.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_controller.dart';
@@ -189,6 +192,9 @@ Future<void> openSessionArtifact(
   SessionDetailKey session,
   SessionArtifactDescriptor descriptor,
 ) async {
+  final source = RosterSource.of(
+    ref.read(activeBrokerProfileProvider),
+  )?.storageKey;
   final pane = ArtifactPaneKey(
     session: session,
     artifactId: descriptor.actionStateKey,
@@ -205,24 +211,27 @@ Future<void> openSessionArtifact(
   }
   opened.state = descriptors;
   final scope = SidePaneScope.maybeOf(context);
-  if (scope?.available ?? false) {
-    scope!.expand();
-    await ref.read(filePanesControllerProvider.notifier).openPane(pane);
-  } else {
-    await Navigator.of(context).push<void>(
-      MaterialPageRoute(
-        builder: (context) => Scaffold(
-          appBar: AppBar(title: Text(pane.name)),
-          body: SafeArea(
-            child: ArtifactPaneBody(
-              pane: pane,
-              onClose: () => Navigator.of(context).pop(),
-            ),
-          ),
-        ),
-      ),
-    );
+  if (scope?.available ?? false) scope!.expand();
+  await ref.read(filePanesControllerProvider.notifier).openPane(pane);
+  if (!context.mounted ||
+      RosterSource.of(ref.read(activeBrokerProfileProvider))?.storageKey !=
+          source) {
+    return;
   }
+  final openedPane =
+      ref
+          .read(filePanesControllerProvider)
+          .valueOrNull
+          ?.panes
+          .any((p) => p.key == pane.key) ??
+      false;
+  if (!openedPane) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(AppLocalizations.of(context).fileLimitReached)),
+    );
+    return;
+  }
+  ref.read(compactFileSelectedProvider(session).notifier).state = true;
 }
 
 /// Delivered file content in the same renderer used by workspace files.
@@ -254,6 +263,9 @@ class ArtifactPaneBody extends ConsumerWidget {
       ),
     );
     final memory = ref.read(filePaneViewMemoryProvider);
+    final memoryKey =
+        '${RosterSource.of(ref.watch(activeBrokerProfileProvider))?.storageKey}'
+        '\u0000${pane.key}';
     return FileViewerPane(
       content: content,
       onOpenWith: kIsWeb
@@ -284,14 +296,28 @@ class ArtifactPaneBody extends ConsumerWidget {
         l10n: l10n,
       ),
       toolColor: context.tokens.toolColor(pane.session.tool),
-      initialView: memory.read(pane.key),
-      onViewChanged: (view) => memory.write(pane.key, view),
+      initialView:
+          memory.read(memoryKey) ??
+          (switch (ref
+              .watch(filePanesControllerProvider)
+              .valueOrNull
+              ?.modes[pane.key]) {
+            'source' => (mode: FileViewMode.source, offset: 0.0),
+            'rendered' => (mode: FileViewMode.rendered, offset: 0.0),
+            _ => null,
+          }),
+      offsetForMode: (mode) => memory.offset(memoryKey, mode),
+      onModeChanged: (mode) => ref
+          .read(filePanesControllerProvider.notifier)
+          .setMode(pane, mode.name)
+          .ignore(),
+      onViewChanged: (view) => memory.write(memoryKey, view),
       onRetry: () => ref.invalidate(artifactPaneReadProvider(pane)),
       onClose:
           onClose ??
           () {
-            memory.forget(pane.key);
-            ref.read(filePanesControllerProvider.notifier).close(pane).ignore();
+            memory.forget(memoryKey);
+            closeWorkspacePane(context, ref, pane).ignore();
           },
       onOpenExternally: content is FileViewerSource
           ? () => openWorkspaceHtmlInBrowser(

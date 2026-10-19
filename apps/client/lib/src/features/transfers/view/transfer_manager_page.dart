@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/app/router/session_routes.dart';
+import 'package:cosyncing_client/src/design/components/adaptive_picker.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/sessions.dart';
 import 'package:cosyncing_client/src/features/transfers/data/local_transfer_file_opener.dart';
@@ -558,25 +559,21 @@ class _TransferSortControl extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
-    return DropdownButton<_TransferSortMode>(
-      // See `docs/architecture/client-ui.md`.
-      key: const ValueKey('transfer-manager-sort-control'),
-      value: selectedSortMode,
-      isDense: true,
-      onChanged: (value) {
-        if (value == null) {
-          return;
-        }
-        onSortModeChanged(value);
-      },
-      items: [
-        for (final mode in _TransferSortMode.values)
-          DropdownMenuItem(
-            value: mode,
-            key: ValueKey('transfer-manager-sort-${mode.optionKey}'),
-            child: Text(_transferSortLabel(l10n, mode)),
-          ),
-      ],
+    return SizedBox(
+      width: 208,
+      child: AdaptivePicker<_TransferSortMode>(
+        key: const ValueKey('transfer-manager-sort-control'),
+        value: selectedSortMode,
+        onChanged: onSortModeChanged,
+        options: [
+          for (final mode in _TransferSortMode.values)
+            PickerOption(
+              key: ValueKey('transfer-manager-sort-${mode.optionKey}'),
+              value: mode,
+              label: _transferSortLabel(l10n, mode),
+            ),
+        ],
+      ),
     );
   }
 }

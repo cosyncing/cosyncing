@@ -1,6 +1,7 @@
 // F03a — Transcript detail modes, the message menu, and model labels on the
 // roster: what the user sees for the same history under each tool-display
 // setting, and what a right click offers on a row.
+import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:flutter/gestures.dart'
     show PointerDeviceKind, kSecondaryMouseButton;
 import 'package:flutter/material.dart';
@@ -11,6 +12,7 @@ import '../support/feature/cosyncing_app.dart';
 import '../support/feature/fake_broker.dart';
 import '../support/feature/roster_driver.dart';
 import '../support/feature/session_driver.dart';
+import '../support/feature/settings_driver.dart';
 import '../support/feature/transcript_wire.dart';
 
 List<Map<String, Object?>> mixedHistory() => [
@@ -41,6 +43,46 @@ List<Map<String, Object?>> mixedHistory() => [
 ];
 
 void main() {
+  featureTest(
+    'tool visibility follows global default until a session '
+    'explicitly overrides it',
+    (f) async {
+      var app = await openTranscript(f, mixedHistory());
+      final sessionLocation = app.router.routeInformationProvider.value.uri
+          .toString();
+      app.router.go(displaySettingsRoute);
+      await app.settle();
+      await app.toggle('tools-hide-default');
+      app.router.go(sessionLocation);
+      await app.settle();
+      expect(find.byKey(const ValueKey('tool-c1-details')), findsNothing);
+      await app.tapKey('session-detail-view-menu');
+      await app.pick('session-tool-visibility', 'Show tool calls');
+      expect(find.byKey(const ValueKey('tool-c1-details')), findsOneWidget);
+      app.router.go(displaySettingsRoute);
+      await app.settle();
+      await app.toggle('tools-hide-default');
+      await app.toggle('tools-hide-default');
+      app.router.go(sessionLocation);
+      await app.settle();
+      expect(find.byKey(const ValueKey('tool-c1-details')), findsOneWidget);
+      app = await f.restart(initialLocation: sessionLocation);
+      expect(find.byKey(const ValueKey('tool-c1-details')), findsOneWidget);
+      app.router.go(displaySettingsRoute);
+      await app.settle();
+      await app.tap(find.text('Reset session overrides'));
+      await app.tap(find.text('Undo'));
+      app.router.go(sessionLocation);
+      await app.settle();
+      expect(find.byKey(const ValueKey('tool-c1-details')), findsOneWidget);
+      await app.tapKey('session-detail-view-menu');
+      await app.pick('session-tool-visibility', 'Use default (Hidden)');
+      expect(find.byKey(const ValueKey('tool-c1-details')), findsNothing);
+      expect(find.text('Report ready'), findsOneWidget);
+      expect(find.text('report.zip'), findsOneWidget);
+    },
+  );
+
   group('tool display modes', () {
     final cases = <({String mode, bool tool, bool thinking, bool preamble})>[
       (mode: 'responsive', tool: true, thinking: true, preamble: true),

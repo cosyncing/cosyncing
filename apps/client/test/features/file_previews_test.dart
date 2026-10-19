@@ -8,8 +8,10 @@ import 'package:cosyncing_client/src/features/sessions/artifacts/file_media_sour
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_file_service.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_file_browser.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_detail_state.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_controller.dart';
 import 'package:cosyncing_client/src/features/transfers/data/local_transfer_file_opener.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 import 'package:video_player_platform_interface/video_player_platform_interface.dart'
@@ -25,6 +27,193 @@ import '../support/session_detail_page_test_harness.dart'
         RecordingSessionDetailTransferFileOpener;
 
 void main() {
+  featureTest(
+    'phone retains pinned documents and reader choice across chat and restart',
+    (f) async {
+      final broker = f.network.add('http://studio.test:7734')
+        ..addSession('s1', 'File review');
+      await f.storage.seedServer(broker);
+      var app = await f.launch(
+        viewport: FeatureViewport.phone,
+        overrides: [
+          sessionFileBrowserRepositoryProvider.overrideWith(
+            (ref) async => _TextWorkspace(),
+          ),
+        ],
+      );
+      await app.tapKey('workspace-open-drawer');
+      await app.openFromRoster('s1', cwd: '/work/studio');
+      expect(find.byKey(const Key('compact-manage-files')), findsOneWidget);
+      await app.enterText(
+        find.byKey(const Key('session-detail-prompt-input')),
+        'Keep my draft',
+      );
+      await app.tapKey('session-detail-view-menu');
+      await app.tapKey('session-detail-view-item-files');
+      await app.tapKey('session-detail-files-preview-plan.md');
+      await app.pumpUntil(
+        () => find.text('Rendered').evaluate().isNotEmpty,
+        reason: 'shared Markdown reader opens',
+      );
+      expect(find.byKey(const Key('compact-manage-files')), findsOneWidget);
+      expect(find.byKey(const Key('session-file-page')), findsNothing);
+      final rendered = find.byKey(const Key('file-viewer-rendered'));
+      await app.tester.drag(rendered, const Offset(0, -260));
+      await app.settle();
+      final renderedOffset = app.tester
+          .widget<ListView>(rendered)
+          .controller!
+          .offset;
+      expect(renderedOffset, greaterThan(0));
+      await app.tapKey('file-viewer-mode-source');
+      final source = find.byKey(const Key('file-viewer-lines'));
+      await app.tester.drag(source, const Offset(0, -180));
+      await app.settle();
+      final sourceOffset = app.tester
+          .widget<ListView>(source)
+          .controller!
+          .offset;
+      await app.tapKey('file-viewer-mode-rendered');
+      expect(
+        app.tester.widget<ListView>(rendered).controller!.offset,
+        closeTo(renderedOffset, 2),
+      );
+      await app.tapKey('file-viewer-mode-source');
+      expect(
+        app.tester.widget<ListView>(source).controller!.offset,
+        closeTo(sourceOffset, 2),
+      );
+      await app.tapKey('compact-manage-files');
+      await app.tap(find.byTooltip('Pin file'));
+      await app.tapKey('compact-files-close');
+      await app.tap(find.text('Chat').first);
+      expect(find.text('Keep my draft'), findsOneWidget);
+      await app.tap(find.text('plan.md').first);
+      expect(
+        app.tester.widget<ListView>(source).controller!.offset,
+        closeTo(sourceOffset, 2),
+      );
+      app.tester.view.physicalSize = const Size(1440, 900);
+      await app.settle();
+      expect(find.byKey(const Key('file-tabs-strip')), findsOneWidget);
+      expect(
+        app.tester.widget<ListView>(source).controller!.offset,
+        closeTo(sourceOffset, 2),
+      );
+      app.tester.view.physicalSize = FeatureViewport.phone.size;
+      await app.settle();
+      expect(
+        app.tester.widget<ListView>(source).controller!.offset,
+        closeTo(sourceOffset, 2),
+      );
+      await app.tapKey('compact-manage-files');
+      await app.tap(find.text('Files').last);
+      await app.tapKey('session-detail-files-preview-notes.md');
+      await app.tapKey('compact-manage-files');
+      await app.tap(find.byTooltip('Pin file'));
+      await app.tapKey('compact-files-close');
+      await app.tap(find.text('plan.md').first);
+      await app.tapKey('file-viewer-close');
+      await app.tap(find.text('Undo'));
+      final panes = app.container
+          .read(filePanesControllerProvider)
+          .requireValue;
+      expect(panes.pinned, hasLength(2));
+      expect(panes.modes.values, contains('source'));
+      app = await f.restart();
+      await app.tapKey('workspace-open-drawer');
+      await app.openFromRoster('s1', cwd: '/work/studio');
+      await app.tap(find.text('plan.md').first);
+      expect(
+        app.container.read(filePanesControllerProvider).requireValue.pinned,
+        hasLength(2),
+      );
+      await app.tapKey('compact-manage-files');
+      final notes = find.ancestor(
+        of: find.text('notes.md').last,
+        matching: find.byType(ListTile),
+      );
+      await app.tap(
+        find.descendant(of: notes, matching: find.byTooltip('Unpin file')),
+      );
+      await app.tapKey('compact-file-actions');
+      await app.tap(find.text('Close all unpinned files'));
+      expect(
+        app.container.read(filePanesControllerProvider).requireValue.panes,
+        hasLength(1),
+      );
+      expect(
+        app.container.read(filePanesControllerProvider).requireValue.pinned,
+        hasLength(1),
+      );
+      await app.tap(find.text('Undo'));
+      expect(
+        app.container.read(filePanesControllerProvider).requireValue.panes,
+        hasLength(2),
+      );
+      // System Back returns to the retained view before leaving the session.
+      await app.tap(find.text('plan.md').first);
+      await app.tapKey('workspace-open-drawer');
+      await app.tester.binding.handlePopRoute();
+      await app.settle();
+      expect(find.byKey(const Key('file-viewer-pane')), findsOneWidget);
+      await app.tester.binding.handlePopRoute();
+      await app.settle();
+      expect(find.byKey(const Key('file-viewer-pane')), findsNothing);
+      expect(find.byKey(const Key('compact-manage-files')), findsOneWidget);
+
+      // Moving one step stays within its pin group, even when the stored
+      // desktop order interleaves pinned and unpinned documents.
+      for (final path in ['log.md', 'todo.md']) {
+        await app.tapKey('compact-manage-files');
+        await app.tap(find.text('Files').last);
+        await app.tapKey('session-detail-files-preview-$path');
+      }
+      await app.tapKey('compact-manage-files');
+      Finder fileRow(String path) => find.ancestor(
+        of: find.text(path).last,
+        matching: find.byType(ListTile),
+      );
+      List<String> visibleOrder() => app.tester
+          .widgetList<ListTile>(find.byType(ListTile))
+          .map((tile) => tile.title)
+          .whereType<Text>()
+          .map((text) => text.data ?? '')
+          .where((text) => text.endsWith('.md'))
+          .toList();
+      Future<void> moveFile(String path, String action) async {
+        await app.tap(
+          find.descendant(
+            of: fileRow(path),
+            matching: find.byTooltip('Manage files'),
+          ),
+        );
+        await app.tap(find.text(action));
+      }
+
+      expect(visibleOrder(), ['plan.md', 'notes.md', 'log.md', 'todo.md']);
+      await moveFile('notes.md', 'Move later');
+      expect(visibleOrder(), ['plan.md', 'log.md', 'notes.md', 'todo.md']);
+      await moveFile('notes.md', 'Move earlier');
+      expect(visibleOrder(), ['plan.md', 'notes.md', 'log.md', 'todo.md']);
+      await app.tap(
+        find.descendant(
+          of: fileRow('log.md'),
+          matching: find.byTooltip('Pin file'),
+        ),
+      );
+      await moveFile('plan.md', 'Move later');
+      expect(visibleOrder(), ['log.md', 'plan.md', 'notes.md', 'todo.md']);
+      await app.tapKey('compact-files-close');
+      app = await f.restart();
+      await app.tapKey('workspace-open-drawer');
+      await app.openFromRoster('s1', cwd: '/work/studio');
+      await app.tapKey('compact-manage-files');
+      expect(visibleOrder(), ['log.md', 'plan.md', 'notes.md', 'todo.md']);
+      expect(app.tester.takeException(), isNull);
+    },
+  );
+
   for (final (theme, outcome) in [
     ('light', 'playback'),
     ('dark', 'background'),
@@ -526,5 +715,68 @@ class _MediaWorkspace
     int maxBytes = sessionFilePreviewDefaultMaxBytes,
   }) => throw StateError(
     'A media preview must not go through the truncated text read',
+  );
+}
+
+class _TextWorkspace extends _MediaWorkspace {
+  @override
+  Future<FsDirectoryResult> listPath(
+    SessionDetailKey sessionKey, {
+    String path = '',
+  }) async {
+    final base = await super.listPath(sessionKey, path: path);
+    return FsDirectoryResult(
+      path: base.path,
+      stat: base.stat,
+      entries: const [
+        FsDirEntry(
+          name: 'log.md',
+          path: 'log.md',
+          type: 'file',
+          size: 40,
+          mtimeMs: 0,
+        ),
+        FsDirEntry(
+          name: 'todo.md',
+          path: 'todo.md',
+          type: 'file',
+          size: 40,
+          mtimeMs: 0,
+        ),
+        FsDirEntry(
+          name: 'notes.md',
+          path: 'notes.md',
+          type: 'file',
+          size: 40,
+          mtimeMs: 0,
+        ),
+        FsDirEntry(
+          name: 'plan.md',
+          path: 'plan.md',
+          type: 'file',
+          size: 40,
+          mtimeMs: 0,
+        ),
+      ],
+    );
+  }
+
+  @override
+  Future<FsReadResult> readFile(
+    SessionDetailKey sessionKey, {
+    required String path,
+    int maxBytes = sessionFilePreviewDefaultMaxBytes,
+  }) async => FsReadResult(
+    path: path,
+    size: 40,
+    limit: maxBytes,
+    truncated: false,
+    encoding: 'utf8',
+    data: [
+      '# Review plan',
+      for (var i = 0; i < 100; i++)
+        'Review section $i. Keep this file reachable.',
+    ].join('\n\n'),
+    mimeType: 'text/markdown',
   );
 }

@@ -16,15 +16,40 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 /// inside them.
 class FilePaneViewMemory {
   final Map<String, FilePaneView> _byKey = {};
+  final Map<String, int> _openGenerations = {};
+  final Map<String, Map<FileViewMode, double>> _offsets = {};
+
+  /// Each face keeps its own reading position.
+  double offset(String key, FileViewMode mode) => _offsets[key]?[mode] ?? 0;
 
   /// The remembered view for [key], or null when the pane is newly opened.
   FilePaneView? read(String key) => _byKey[key];
 
   /// Records [view] for [key].
-  void write(String key, FilePaneView view) => _byKey[key] = view;
+  void write(String key, FilePaneView view) {
+    _byKey[key] = view;
+    (_offsets[key] ??= {})[view.mode] = view.offset;
+  }
+
+  /// Ordinary opening restores a preference, separate from tab resume.
+  /// A generation remounts an already visible wide-screen reader too.
+  void openWithPreference(String key, FileViewMode? mode) {
+    _openGenerations[key] = (_openGenerations[key] ?? 0) + 1;
+    if (mode == null) {
+      _byKey.remove(key);
+    } else {
+      write(key, (mode: mode, offset: offset(key, mode)));
+    }
+  }
+
+  /// Identity of the latest ordinary open, unchanged by tab/width switches.
+  int openGeneration(String key) => _openGenerations[key] ?? 0;
 
   /// Drops [key], so reopening that file starts at the top of its own face.
-  void forget(String key) => _byKey.remove(key);
+  void forget(String key) {
+    _byKey.remove(key);
+    _offsets.remove(key);
+  }
 }
 
 /// The process-wide view memory.

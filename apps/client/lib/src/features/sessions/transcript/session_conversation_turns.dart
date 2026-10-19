@@ -675,7 +675,10 @@ List<SessionTranscriptDisplayEntry> _buildTurnContent(
     messages: content,
     mode: ToolDisplayMode.responsive,
   );
-  if (mode != ToolDisplayMode.finalMessagesOnly) return entries;
+  if (mode != ToolDisplayMode.finalMessagesOnly &&
+      mode != ToolDisplayMode.finalAssistant) {
+    return entries;
+  }
 
   int? lastModelOutput;
   for (var index = 0; index < entries.length; index++) {
@@ -688,7 +691,10 @@ List<SessionTranscriptDisplayEntry> _buildTurnContent(
 
   return List<SessionTranscriptDisplayEntry>.unmodifiable([
     for (var index = 0; index < entries.length; index++)
-      if (entries[index] case final MessageTranscriptDisplayEntry entry)
+      if (mode == ToolDisplayMode.finalAssistant &&
+          entries[index] is! MessageTranscriptDisplayEntry)
+        entries[index]
+      else if (entries[index] case final MessageTranscriptDisplayEntry entry)
         if (entry.message.type == AgentMessageType.modelOutput
             ? index == lastModelOutput
             : _isFinalOnlyAlwaysVisibleType(entry.message.type))

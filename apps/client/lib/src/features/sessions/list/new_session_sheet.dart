@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
+import 'package:cosyncing_client/src/design/components/adaptive_picker.dart';
 import 'package:cosyncing_client/src/errors/localized_user_facing_error.dart';
 import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
@@ -571,7 +572,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
             const SizedBox(height: 16),
             KeyedSubtree(
               key: const Key('new-session-agent'),
-              child: DropdownButtonFormField<String>(
+              child: AdaptivePickerFormField<String>(
                 key: ValueKey(effectiveTool),
                 initialValue: effectiveTool,
                 decoration: InputDecoration(
@@ -601,7 +602,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
                 child: SelectableText(l10n.newSessionNoAgents),
               ),
             const SizedBox(height: 12),
-            DropdownButtonFormField<String>(
+            AdaptivePickerFormField<String>(
               // The selection is part of the key because FormFieldState
               // latches initialValue only at creation: an async per-tool
               // default prefill (or any programmatic selection change) must
@@ -715,7 +716,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
               const SizedBox(height: 12),
               KeyedSubtree(
                 key: const Key('new-session-reasoning-effort'),
-                child: DropdownButtonFormField<String>(
+                child: AdaptivePickerFormField<String>(
                   key: ValueKey(
                     'new-session-reasoning-effort-$selectedModelKey-'
                     '${selectedReasoningEffort ?? 'none'}',
@@ -816,7 +817,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
                     state.modeCatalogPhase ==
                         NewSessionModeCatalogPhase.ready)) ...[
               const SizedBox(height: 12),
-              DropdownButtonFormField<String>(
+              AdaptivePickerFormField<String>(
                 key: ValueKey(
                   'new-session-permission-${effectiveTool ?? 'none'}-'
                   '${state.modeCatalogPhase.name}-'
@@ -934,7 +935,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
               ),
             ),
             const SizedBox(height: 12),
-            DropdownButtonFormField<NewSessionStart>(
+            AdaptivePickerFormField<NewSessionStart>(
               key: const Key('new-session-start'),
               initialValue: _start,
               decoration: InputDecoration(labelText: l10n.newSessionStartLabel),

@@ -227,8 +227,14 @@ class _ChatPanel extends ConsumerWidget {
             (state.agentActions?.canFork ?? false) &&
             !state.forkBlockedAsAgentOwned,
         toolDisplayMode:
-            ref.watch(toolDisplayControllerProvider).valueOrNull ??
-            ToolDisplayMode.responsive,
+            (ref
+                    .watch(toolVisibilityControllerProvider)
+                    .valueOrNull
+                    ?.finalAssistantOnly ??
+                false)
+            ? ToolDisplayMode.finalAssistant
+            : ref.watch(toolDisplayControllerProvider).valueOrNull ??
+                  ToolDisplayMode.responsive,
         onForkFromMessage: onForkFromMessage,
         reportView: reportView,
         toolsExpanded: toolsExpanded,

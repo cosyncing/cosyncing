@@ -567,9 +567,9 @@ void main() {
         find.byKey(const Key('file-viewer-mode-rendered')),
         findsOneWidget,
       );
-      // Source is the default everywhere, so raw markdown is what opens.
-      expect(find.byKey(const Key('file-viewer-lines')), findsOneWidget);
-      expect(find.text('# Title'), findsOneWidget);
+      // Fresh supported documents open rendered; Source stays one tap away.
+      expect(find.byKey(const Key('file-viewer-rendered')), findsOneWidget);
+      expect(find.text('Title'), findsOneWidget);
     });
 
     testWidgets('wrap is withdrawn in a rendered view', (tester) async {
@@ -580,6 +580,8 @@ void main() {
           ),
         ),
       );
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('file-viewer-mode-source')));
       await tester.pump();
       expect(find.byKey(const Key('file-viewer-wrap')), findsOneWidget);
 
@@ -600,7 +602,7 @@ void main() {
         _host(FileViewerSource(preview: _markdown(text: '# Title'))),
       );
       await tester.pump();
-      await tester.tap(find.byKey(const Key('file-viewer-mode-rendered')));
+      await tester.tap(find.byKey(const Key('file-viewer-mode-source')));
       await tester.pumpAndSettle();
       expect(tester.binding.transientCallbackCount, 0);
       expect(find.byType(CircularProgressIndicator), findsNothing);

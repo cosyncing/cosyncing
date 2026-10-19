@@ -187,7 +187,7 @@ void main() {
       host(roster: () => null, status: SessionListStatus.loading),
     );
     await tester.pump();
-    expect(find.text('—'), findsNWidgets(4));
+    expect(find.text('—'), findsNWidgets(6));
     expect(find.text('Loading current data…'), findsOneWidget);
     final container = ProviderScope.containerOf(
       tester.element(find.byType(WorkspaceOverview)),
@@ -271,7 +271,28 @@ void main() {
     await tester.pumpWidget(host(usage: usage));
     await tester.pumpAndSettle();
     expect(find.text('1.2M'), findsOneWidget);
-    expect(find.text('Estimated agent activity'), findsOneWidget);
+    expect(find.text('Time'), findsOneWidget);
+    expect(find.text('Cost · USD'), findsOneWidget);
+    expect(find.text('Messages'), findsOneWidget);
+    expect(find.textContaining('Input:'), findsNothing);
+    tester.view.physicalSize = const Size(320, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpAndSettle();
+    expect(
+      tester.getTopLeft(find.text('Time')).dy,
+      tester.getTopLeft(find.text('Tokens')).dy,
+    );
+    expect(
+      tester.getTopLeft(find.text('Cost · USD')).dy,
+      tester.getTopLeft(find.text('Messages')).dy,
+    );
+    expect(
+      tester.getTopLeft(find.text('Cost · USD')).dy,
+      greaterThan(tester.getTopLeft(find.text('Time')).dy),
+    );
+    expect(tester.takeException(), isNull);
     expect(find.textContaining('Partial usage:'), findsOneWidget);
     // How the estimate is made, where days begin and how many sources were
     // read are the report's caveats; the summary states only its figures.

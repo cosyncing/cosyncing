@@ -78,28 +78,27 @@ class GeneralSettingsPage extends ConsumerWidget {
           SettingsSection(
             key: const Key('settings-read-aloud-section'),
             title: l10n.settingsReadAloudTitle,
-            child: ListTile(
+            child: SettingsRow(
+              stackTrailing: true,
               key: const Key('settings-read-aloud-rate'),
-              contentPadding: EdgeInsets.zero,
               leading: const Icon(Icons.record_voice_over_outlined),
               title: Text(l10n.readAloudSpeed),
               subtitle: Text(l10n.settingsReadAloudSpeedSubtitle),
-              trailing: DropdownButton<double>(
+              trailing: SettingsSelect<double>(
                 key: const Key('settings-read-aloud-rate-menu'),
                 value: readAloudRate.value ?? kDefaultReadAloudRate,
                 onChanged: readAloudRate.isLoading
                     ? null
                     : (rate) {
-                        if (rate == null) return;
                         ref
                             .read(readAloudRateControllerProvider.notifier)
                             .setRate(rate);
                       },
-                items: [
+                options: [
                   for (final rate in kReadAloudRates)
-                    DropdownMenuItem(
+                    SettingsSelectOption(
                       value: rate,
-                      child: Text(formatReadAloudRate(rate)),
+                      label: formatReadAloudRate(rate),
                     ),
                 ],
               ),
@@ -110,7 +109,6 @@ class GeneralSettingsPage extends ConsumerWidget {
             title: l10n.settingsDeveloperOptionsTitle,
             child: SwitchListTile.adaptive(
               key: const Key('settings-show-debug-views'),
-              contentPadding: EdgeInsets.zero,
               value: showDebugViews,
               onChanged: (value) => ref
                   .read(debugViewsControllerProvider.notifier)

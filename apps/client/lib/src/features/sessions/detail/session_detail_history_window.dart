@@ -455,7 +455,13 @@ final class TranscriptReleasedRange {
 bool transcriptReportDraws(AgentMessage message) =>
     message.type == AgentMessageType.modelOutput ||
     message.type == AgentMessageType.userMessage ||
-    message.type == AgentMessageType.fileArtifact;
+    message.type == AgentMessageType.fileArtifact ||
+    message.type == AgentMessageType.permissionRequest ||
+    message.type == AgentMessageType.questionRequest ||
+    message.type == AgentMessageType.error ||
+    message.type == AgentMessageType.notice ||
+    message.type == AgentMessageType.historyReset ||
+    message.type == AgentMessageType.unknown;
 
 /// Decoded estimate up to which a row the report view does not draw is held
 /// whole there; a heavier one is held as a shell (see [_hiddenRowShell]).

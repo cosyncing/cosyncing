@@ -4,6 +4,7 @@ import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/components.dart';
+import 'package:cosyncing_client/src/design/components/adaptive_picker.dart';
 import 'package:cosyncing_client/src/errors/localized_user_facing_error.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/schedules/controller/schedule_controller.dart';
@@ -620,7 +621,7 @@ class _ScheduleEditorState extends ConsumerState<_ScheduleEditor> {
                 ),
               ),
               const SizedBox(height: 12),
-              DropdownButtonFormField<_ScheduleTiming>(
+              AdaptivePickerFormField<_ScheduleTiming>(
                 key: const Key('schedule-editor-timing'),
                 initialValue: _timing,
                 decoration: InputDecoration(
@@ -733,7 +734,7 @@ class _ScheduleEditorState extends ConsumerState<_ScheduleEditor> {
                 ],
               ),
               const SizedBox(height: 12),
-              DropdownButtonFormField<ScheduleRetryBackoff>(
+              AdaptivePickerFormField<ScheduleRetryBackoff>(
                 key: const Key('schedule-editor-retry-backoff'),
                 initialValue: _backoff,
                 decoration: InputDecoration(

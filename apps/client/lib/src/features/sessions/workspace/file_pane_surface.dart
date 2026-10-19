@@ -8,6 +8,8 @@ import 'package:cosyncing_client/src/features/sessions/detail/session_detail_sta
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_presentation.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/compact_file_strip.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_actions.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_body.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_tabs_strip.dart';
@@ -52,11 +54,15 @@ class FilePaneSurface extends ConsumerWidget {
   const FilePaneSurface({
     required this.session,
     this.onLastClosed,
+    this.showTabs = true,
     super.key,
   });
 
   /// Whose files these are.
   final SessionDetailKey session;
+
+  /// Compact shell already owns its file switcher.
+  final bool showTabs;
 
   /// Called when the last file closes and this surface has nothing to show.
   ///
@@ -89,45 +95,51 @@ class FilePaneSurface extends ConsumerWidget {
       });
     }
 
-    return DecoratedBox(
-      decoration: BoxDecoration(color: tokens.surface2),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          FileTabsStrip(
-            panes: panes,
-            activeKey: activeFile?.key,
-            onSelect: (pane) => unawaited(controller.activate(pane)),
-            onClose: (pane) => unawaited(controller.close(pane)),
-            onReorder: (oldIndex, newIndex) =>
-                unawaited(controller.reorder(session, oldIndex, newIndex)),
-          ),
-          Expanded(
-            child: activeFile == null
-                ? const _NoFilesOpen()
-                : switch (activeFile) {
-                    FilePaneKey() => WorkspaceFilePaneBody(
-                      key: ValueKey(activeFile.key),
-                      pane: activeFile,
-                      sessionLabel: workspaceSessionLabel(
-                        session: session,
-                        open: ref
-                            .watch(openSessionsControllerProvider)
-                            .valueOrNull,
-                        l10n: l10n,
+    return Listener(
+      onPointerDown: (_) =>
+          ref.read(compactFileSelectedProvider(session).notifier).state = true,
+      child: DecoratedBox(
+        decoration: BoxDecoration(color: tokens.surface2),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (showTabs)
+              FileTabsStrip(
+                panes: panes,
+                activeKey: activeFile?.key,
+                onSelect: (pane) => unawaited(controller.activate(pane)),
+                onClose: (pane) =>
+                    unawaited(closeWorkspacePane(context, ref, pane)),
+                onReorder: (oldIndex, newIndex) =>
+                    unawaited(controller.reorder(session, oldIndex, newIndex)),
+              ),
+            Expanded(
+              child: activeFile == null
+                  ? const _NoFilesOpen()
+                  : switch (activeFile) {
+                      FilePaneKey() => WorkspaceFilePaneBody(
+                        key: ValueKey(activeFile.key),
+                        pane: activeFile,
+                        sessionLabel: workspaceSessionLabel(
+                          session: session,
+                          open: ref
+                              .watch(openSessionsControllerProvider)
+                              .valueOrNull,
+                          l10n: l10n,
+                        ),
                       ),
-                    ),
-                    ArtifactPaneKey() => ArtifactPaneBody(
-                      key: ValueKey(activeFile.key),
-                      pane: activeFile,
-                    ),
-                    SessionPanelKey() => SessionSidePanel(
-                      key: ValueKey(activeFile.key),
-                      pane: activeFile,
-                    ),
-                  },
-          ),
-        ],
+                      ArtifactPaneKey() => ArtifactPaneBody(
+                        key: ValueKey(activeFile.key),
+                        pane: activeFile,
+                      ),
+                      SessionPanelKey() => SessionSidePanel(
+                        key: ValueKey(activeFile.key),
+                        pane: activeFile,
+                      ),
+                    },
+            ),
+          ],
+        ),
       ),
     );
   }

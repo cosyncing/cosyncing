@@ -295,7 +295,7 @@ void main() {
       // The scrollbar lives inside the strip: no extra height.
       expect(
         tester.getSize(find.byType(OpenSessionsTabStrip)).height,
-        44,
+        40,
       );
 
       final scrollbar = find.byKey(const Key('open-sessions-tab-scrollbar'));

@@ -449,7 +449,7 @@ void main() {
       // Rows are 32dp, not Material's 48 or the 40 this menu shipped with.
       // Pinned because the compaction was an explicit product-owner request and
       // would otherwise drift back on the next Material default bump.
-      for (final name in ['chat', 'status', 'files', 'debug', 'report']) {
+      for (final name in ['chat', 'status', 'files', 'debug']) {
         expect(
           tester
               .getSize(find.byKey(Key('session-detail-view-item-$name')))

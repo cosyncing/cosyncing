@@ -18,8 +18,8 @@ FileRendererDescriptor htmlFileRenderer() => FileRendererDescriptor(
   source: const BuiltInRendererSource(),
   extensions: const {'html', 'htm', 'xhtml'},
   mimeTypes: const {'text/html', 'application/xhtml+xml'},
-  // Source everywhere, on every platform: the bytes are what the reader asked
-  // for, and a rendered page is the interpretation.
+  // Rendered is offered only where passive embedded preview is available;
+  // other platforms retain Source and their explicit external-open action.
   modes: canRenderHtmlInPane
       ? const {FileViewMode.source, FileViewMode.rendered}
       : const {FileViewMode.source},
@@ -66,6 +66,7 @@ Widget _buildHtml(BuildContext context, FileRenderRequest request) {
       : '';
   return buildPassiveHtmlView(
     key: const Key('file-viewer-html'),
+    onError: request.onRenderFailed,
     // The sandbox and JavaScriptMode.disabled stop scripts, forms, navigation
     // and popups. They do not stop SUBRESOURCE loads: `<img src="https://…">`,
     // a stylesheet link, `@font-face`, `<video>` all still fetch. Rendering a

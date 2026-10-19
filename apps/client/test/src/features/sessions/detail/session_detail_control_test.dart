@@ -396,6 +396,14 @@ void main() {
             theme: buildAppTheme(variant.tokens, variant.brightness),
           ),
         );
+        // Image decoding runs outside the fake test clock; await the asset
+        // before comparing the complete session surface.
+        await tester.runAsync(
+          () => precacheImage(
+            const AssetImage('assets/agents/claude.png'),
+            tester.element(find.byType(Scaffold).first),
+          ),
+        );
         await tester.pumpAndSettle();
         await expectLater(
           find.byKey(const Key('session-detail-observe-composer-bar')),

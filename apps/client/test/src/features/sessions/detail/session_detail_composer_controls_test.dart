@@ -1632,7 +1632,7 @@ void main() {
       // Both transcript toggles are reachable from the strip menu instead.
       await withSessionDetailViewMenu(tester, () async {
         expect(
-          find.byKey(const Key('session-detail-view-item-report')),
+          find.byKey(const Key('session-tool-visibility')),
           findsOneWidget,
         );
         expect(

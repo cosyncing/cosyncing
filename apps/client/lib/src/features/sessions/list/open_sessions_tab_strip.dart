@@ -35,14 +35,14 @@ class OpenSessionsTabStrip extends StatefulWidget {
   });
 
   /// Desktop bar height. The 36dp tabs sit centred in it, level with the
-  /// sidebar's brand row; compact layouts use a 44dp touch strip.
+  /// sidebar's brand row; compact layouts use a 40dp touch strip.
   static const double height = 52;
 
   /// Desktop tab height inside [height].
   static const double tabHeight = 36;
 
   /// Compact strip height.
-  static const double compactHeight = 44;
+  static const double compactHeight = 40;
 
   /// The open sessions, left to right.
   final List<SessionRef> refs;
@@ -168,7 +168,7 @@ class _OpenSessionsTabStripState extends State<OpenSessionsTabStrip> {
     }
     final tokens = context.tokens;
     final l10n = AppLocalizations.of(context);
-    final compact = WindowSizeClass.of(context) == WindowSizeClass.compact;
+    final compact = WindowSizeClass.of(context) != WindowSizeClass.expanded;
     // The strip's old 1dp bottom hairline is now the scrollbar track: the same
     // separator-colored line, but with a draggable VS Code-style thumb overlaid
     // when the tabs overflow. It lives *inside* the strip (bottom-anchored in a
@@ -184,6 +184,14 @@ class _OpenSessionsTabStripState extends State<OpenSessionsTabStrip> {
           if (widget.onOpenRoster != null)
             IconButton(
               key: const Key('workspace-open-drawer'),
+              style: compact
+                  ? IconButton.styleFrom(
+                      fixedSize: const Size(40, 40),
+                      minimumSize: const Size(40, 40),
+                      padding: EdgeInsets.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    )
+                  : null,
               tooltip: l10n.workspaceShowSessionsTooltip,
               onPressed: widget.onOpenRoster,
               icon: const StrokeIcon(StrokeGlyph.menu),
@@ -212,8 +220,8 @@ class _OpenSessionsTabStripState extends State<OpenSessionsTabStrip> {
                             ? ListView.builder(
                                 controller: _controller,
                                 scrollDirection: Axis.horizontal,
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 4,
+                                padding: EdgeInsets.symmetric(
+                                  horizontal: compact ? 0 : 4,
                                 ),
                                 itemCount: refs.length,
                                 itemBuilder: (context, index) {
@@ -237,8 +245,8 @@ class _OpenSessionsTabStripState extends State<OpenSessionsTabStrip> {
                                 scrollController: _controller,
                                 scrollDirection: Axis.horizontal,
                                 buildDefaultDragHandles: false,
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 4,
+                                padding: EdgeInsets.symmetric(
+                                  horizontal: compact ? 0 : 4,
                                 ),
                                 itemCount: refs.length,
                                 onReorderItem: reorder,
@@ -287,6 +295,14 @@ class _OpenSessionsTabStripState extends State<OpenSessionsTabStrip> {
           if (refs.isNotEmpty && widget.onCloseAll != null)
             IconButton(
               key: const Key('workspace-close-all-tabs'),
+              style: compact
+                  ? IconButton.styleFrom(
+                      fixedSize: const Size(40, 40),
+                      minimumSize: const Size(40, 40),
+                      padding: EdgeInsets.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    )
+                  : null,
               tooltip: l10n.workspaceCloseAllTabs,
               onPressed: widget.onCloseAll,
               icon: const StrokeIcon(StrokeGlyph.closeAll),
@@ -575,7 +591,7 @@ class _Tab extends StatelessWidget {
         (ref.status == null
             ? l10n.sessionDetailTitleOpening
             : l10n.sessionDetailTitleUntitled);
-    final compact = WindowSizeClass.of(context) == WindowSizeClass.compact;
+    final compact = WindowSizeClass.of(context) != WindowSizeClass.expanded;
     // A fixed target, independent of the platform's visual density: desktop
     // density used to shrink this to 20dp, which also shortened the row and
     // left the title riding the top of its tab.
@@ -588,10 +604,10 @@ class _Tab extends StatelessWidget {
       child: Padding(
         padding: EdgeInsets.symmetric(
           vertical: compact
-              ? 2
+              ? 0
               : (OpenSessionsTabStrip.height - OpenSessionsTabStrip.tabHeight) /
                     2,
-          horizontal: 2,
+          horizontal: compact ? 0 : 2,
         ),
         // Middle-click closes the tab. This Chrome tab affordance needs
         // no chord and no reservation, so it works identically on native and on
@@ -617,7 +633,10 @@ class _Tab extends StatelessWidget {
                       ? MediaQuery.sizeOf(context).width - 140
                       : 240,
                 ),
-                padding: const EdgeInsets.only(left: 12, right: 4),
+                padding: EdgeInsets.only(
+                  left: compact ? 8 : 12,
+                  right: compact ? 0 : 4,
+                ),
                 child: Stack(
                   alignment: AlignmentDirectional.centerStart,
                   children: [
@@ -738,6 +757,12 @@ class _OverviewTab extends StatelessWidget {
     final icon = StrokeIcon(StrokeGlyph.overview, color: color);
     if (iconOnly) {
       return IconButton(
+        style: IconButton.styleFrom(
+          fixedSize: const Size(40, 40),
+          minimumSize: const Size(40, 40),
+          padding: EdgeInsets.zero,
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        ),
         tooltip: label,
         isSelected: selected,
         onPressed: onPressed,

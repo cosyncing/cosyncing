@@ -20,6 +20,7 @@ import 'package:cosyncing_client/src/features/sessions/list/open_sessions_contro
 import 'package:cosyncing_client/src/features/sessions/list/session_list_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
 import 'package:cosyncing_client/src/features/sessions/list/sessions_branch_screen.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/compact_file_strip.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_body.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_frame.dart';
@@ -740,10 +741,22 @@ class _AppCommandShell extends ConsumerWidget {
     final path = GoRouterState.of(context).uri.path;
     final isCompactWorkspace =
         path == sessionsRoute && MediaQuery.sizeOf(context).width <= 900;
+    final activeSession = ref
+        .watch(openSessionsControllerProvider)
+        .valueOrNull
+        ?.active;
+    final activeKey = activeSession == null
+        ? null
+        : SessionDetailKey(
+            tool: activeSession.tool,
+            sessionId: activeSession.id,
+          );
     final returnToOverview =
         isCompactWorkspace &&
         !ref.watch(workspaceOverviewVisibleProvider) &&
-        ref.watch(openSessionsControllerProvider).valueOrNull?.active != null;
+        activeKey != null;
+    final returnFromFile =
+        returnToOverview && ref.watch(compactFileSelectedProvider(activeKey));
     // Back reaches this route from a destination opened over Sessions only
     // once its branch has nothing left to pop: Settings' own pages step back
     // to Settings first. From there it returns to where that destination was
@@ -753,7 +766,10 @@ class _AppCommandShell extends ConsumerWidget {
       canPop: !returnToOverview && !leaveDestination,
       onPopInvokedWithResult: (didPop, result) {
         if (didPop) return;
-        if (returnToOverview) {
+        if (returnFromFile) {
+          ref.read(compactFileSelectedProvider(activeKey).notifier).state =
+              false;
+        } else if (returnToOverview) {
           ref.read(workspaceOverviewVisibleProvider.notifier).state = true;
         } else if (leaveDestination) {
           trail.back();
