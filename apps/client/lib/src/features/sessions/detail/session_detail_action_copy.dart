@@ -44,24 +44,6 @@ String? _forkActionStatusText(
   };
 }
 
-String? _cloneActionStatusText(
-  AppLocalizations l10n,
-  SessionActionState action,
-) {
-  final refusal = action.refusal;
-  if (refusal != null) return _sessionActionRefusalText(l10n, refusal);
-  final failure = action.failure;
-  if (failure != null) return localizedFailureText(l10n, failure);
-  return switch (action.phase) {
-    SessionActionPhase.idle => null,
-    SessionActionPhase.inProgress => l10n.sessionCloneCreating,
-    SessionActionPhase.success => l10n.sessionCloneCreated(
-      _sessionActionCreatedTitle(action),
-    ),
-    SessionActionPhase.failed => l10n.sessionCloneFailed,
-  };
-}
-
 String _sessionActionCreatedTitle(SessionActionState action) {
   final title = action.createdSessionTitle?.trim();
   if (title != null && title.isNotEmpty) return title;
@@ -79,35 +61,6 @@ String? _transcriptExportStatusText(
   TranscriptExportActionPhase.exported => l10n.sessionExportReady,
   TranscriptExportActionPhase.error => l10n.sessionExportFailed,
 };
-
-/// Exact text copied by the one-tap retained-transcript action.
-///
-/// It consumes the same bounded canonical and optimistic rows the Chat view
-/// renders. It does not fetch older pages, expand tools, or reuse rendered
-/// widget text, so lazy history and structured rendering stay untouched while
-/// Markdown source — including fences — remains byte-for-byte faithful within
-/// each message. Explicit markers prevent discontiguous retained runs from
-/// being flattened into a falsely continuous transcript.
-String buildRetainedTranscriptCopyText({
-  required List<List<AgentMessage>> segments,
-  required String omissionMarker,
-  required bool hasLeadingOmission,
-}) {
-  final parts = <String>[];
-  if (hasLeadingOmission) parts.add(omissionMarker);
-  var hasCopiedSegment = false;
-  for (final messages in segments) {
-    final segment = messages
-        .map(_messageCopyText)
-        .where((text) => text.isNotEmpty)
-        .join('\n\n');
-    if (segment.isEmpty) continue;
-    if (hasCopiedSegment) parts.add(omissionMarker);
-    parts.add(segment);
-    hasCopiedSegment = true;
-  }
-  return parts.join('\n\n');
-}
 
 /// Localized subtitle for a disabled Status action, or null when the action is
 /// enabled or already reporting progress through its status line.
@@ -139,47 +92,7 @@ String? _disabledActionReason(
   return l10n.sessionActionDisabledCapabilityUnknown;
 }
 
-/// Copies the bounded retained transcript from the Status panel.
-class _SessionTranscriptCopyTile extends StatelessWidget {
-  const _SessionTranscriptCopyTile({required this.state});
-
-  final SessionDetailState state;
-
-  @override
-  Widget build(BuildContext context) {
-    final l10n = AppLocalizations.of(context);
-    return ListTile(
-      key: const Key('session-detail-copy-transcript-button'),
-      leading: const Icon(Icons.copy_all_outlined, size: 18),
-      title: Text(l10n.sessionCopyTranscript),
-      subtitle: Text(l10n.sessionCopyTranscriptDescription),
-      enabled: state.transcriptMessageEvents.isNotEmpty,
-      onTap: state.transcriptMessageEvents.isEmpty
-          ? null
-          : () => unawaited(_copyTranscript(context)),
-    );
-  }
-
-  Future<void> _copyTranscript(BuildContext context) async {
-    final l10n = AppLocalizations.of(context);
-    final messenger = ScaffoldMessenger.of(context);
-    final text = buildRetainedTranscriptCopyText(
-      segments: state.transcriptMessageSegments,
-      omissionMarker: l10n.sessionTranscriptCopyOmissionMarker,
-      hasLeadingOmission:
-          state.hasEarlierHistory || state.leadingTranscriptHistoryGap != null,
-    );
-    if (text.isEmpty) return;
-    await Clipboard.setData(ClipboardData(text: text));
-    messenger.showSnackBar(
-      SnackBar(content: Text(l10n.sessionTranscriptCopied)),
-    );
-  }
-}
-
-/// The labeled Local data zone: rebuildable cache actions behind a restrained
-/// dashed error boundary. Rows stay low-emphasis; only the confirmation button
-/// carries the destructive fill.
+/// Session-scoped cache cleanup, with confirmation and broker-source fencing.
 class _SessionLocalDataZone extends ConsumerStatefulWidget {
   const _SessionLocalDataZone({
     required this.sessionKey,
@@ -199,51 +112,20 @@ class _SessionLocalDataZoneState extends ConsumerState<_SessionLocalDataZone> {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     final l10n = AppLocalizations.of(context);
-    final tokens = context.tokens;
-    final danger = tokens.statusError;
-    return CustomPaint(
-      foregroundPainter: _DashedRRectBorderPainter(
-        color: danger.withValues(alpha: 0.45),
-        radius: tokens.radiusLg,
-      ),
-      child: Card(
-        key: const Key('session-actions-group-local-data'),
-        margin: EdgeInsets.zero,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(tokens.radiusLg),
+    final danger = context.tokens.statusError;
+    return Material(
+      type: MaterialType.transparency,
+      child: ListTile(
+        key: const Key('session-detail-clear-current-cache-button'),
+        leading: Icon(Icons.delete_sweep_outlined, size: 18, color: danger),
+        title: Text(
+          l10n.sessionClearCurrentCache,
+          style: TextStyle(color: danger),
         ),
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-              child: Align(
-                alignment: AlignmentDirectional.centerStart,
-                child: Text(
-                  l10n.sessionActionsLocalDataCaption,
-                  key: const Key('session-actions-local-data-caption'),
-                  style: theme.textTheme.labelSmall?.copyWith(color: danger),
-                ),
-              ),
-            ),
-            ListTile(
-              key: const Key('session-detail-clear-current-cache-button'),
-              leading: Icon(
-                Icons.delete_sweep_outlined,
-                size: 18,
-                color: danger,
-              ),
-              title: Text(
-                l10n.sessionClearCurrentCache,
-                style: TextStyle(color: danger),
-              ),
-              subtitle: Text(l10n.sessionClearCurrentCacheDescription),
-              enabled: !_pending,
-              onTap: _pending ? null : () => unawaited(_clearCurrentCache()),
-            ),
-          ],
-        ),
+        subtitle: Text(l10n.sessionClearCurrentCacheDescription),
+        enabled: !_pending,
+        onTap: _pending ? null : () => unawaited(_clearCurrentCache()),
       ),
     );
   }
@@ -348,20 +230,17 @@ class _SessionLocalDataZoneState extends ConsumerState<_SessionLocalDataZone> {
   }
 }
 
-/// The Status tab's three purposeful action groups: Session, Transcript, and
-/// the labeled Local data zone.
+/// Session actions, transcript export and session-scoped cache cleanup.
 class _SessionActionGroups extends StatelessWidget {
   const _SessionActionGroups({
     required this.sessionKey,
     required this.state,
     required this.canDetach,
     required this.canFork,
-    required this.canClone,
     required this.canExport,
     required this.hasActiveBrokerClient,
     required this.onDetach,
     required this.onForkSession,
-    required this.onCloneSession,
     required this.onExportTranscript,
   });
 
@@ -369,12 +248,10 @@ class _SessionActionGroups extends StatelessWidget {
   final SessionDetailState state;
   final bool canDetach;
   final bool canFork;
-  final bool canClone;
   final bool canExport;
   final bool hasActiveBrokerClient;
   final VoidCallback onDetach;
   final VoidCallback onForkSession;
-  final VoidCallback onCloneSession;
   final VoidCallback onExportTranscript;
 
   @override
@@ -418,6 +295,13 @@ class _SessionActionGroups extends StatelessWidget {
           ),
           child: Column(
             children: [
+              if (state.sessionInfo != null) ...[
+                SessionVisibilityTile(
+                  session: state.sessionInfo!,
+                  connected: hasActiveBrokerClient && compatibleControls,
+                ),
+                const Divider(height: 1),
+              ],
               ListTile(
                 key: const Key('session-detail-detach-button'),
                 leading: const Icon(Icons.link_off, size: 18),
@@ -431,33 +315,24 @@ class _SessionActionGroups extends StatelessWidget {
                 key: const Key('session-detail-fork-button'),
                 leading: const Icon(Icons.call_split, size: 18),
                 title: Text(l10n.sessionForkLatest),
+                subtitle: switch (state.forkBlockedAsAgentOwned
+                    ? l10n.sessionForkAgentOwnedRefusal
+                    : _disabledActionReason(
+                        l10n,
+                        enabled: canFork,
+                        busy: state.forkSessionActionState.isBusy,
+                        connected: connected,
+                        compatibleControls: compatibleControls,
+                        brokerClientAvailable: hasActiveBrokerClient,
+                        capability: state.agentActions?.canFork,
+                        capabilityLoaded: state.agentActions?.loaded ?? false,
+                        unsupported: l10n.sessionForkUnsupported,
+                      )) {
+                  null => null,
+                  final reason => Text(reason),
+                },
                 enabled: canFork,
                 onTap: canFork ? onForkSession : null,
-              ),
-              const Divider(height: 1),
-              ListTile(
-                key: const Key('session-detail-clone-button'),
-                leading: const Icon(Icons.difference_outlined, size: 18),
-                title: Text(l10n.sessionDuplicate),
-                subtitle: switch (_disabledActionReason(
-                  l10n,
-                  enabled: canClone,
-                  busy: state.cloneSessionActionState.isBusy,
-                  connected: connected,
-                  compatibleControls: compatibleControls,
-                  capability: state.agentActions?.canClone,
-                  capabilityLoaded: state.agentActions?.loaded ?? false,
-                  unsupported: l10n.sessionDuplicateDisabledUnsupported,
-                  brokerClientAvailable: hasActiveBrokerClient,
-                )) {
-                  null => null,
-                  final reason => Text(
-                    reason,
-                    key: const Key('session-detail-clone-disabled-reason'),
-                  ),
-                },
-                enabled: canClone,
-                onTap: canClone ? onCloneSession : null,
               ),
             ],
           ),
@@ -497,8 +372,6 @@ class _SessionActionGroups extends StatelessWidget {
                 enabled: canExport,
                 onTap: canExport ? onExportTranscript : null,
               ),
-              const Divider(height: 1),
-              _SessionTranscriptCopyTile(state: state),
             ],
           ),
         ),
@@ -510,54 +383,4 @@ class _SessionActionGroups extends StatelessWidget {
       ],
     );
   }
-}
-
-/// 1dp dashed rounded border for the Local data zone.
-///
-/// Deliberately quieter than a solid error outline: the boundary marks a
-/// blast-radius zone around rebuildable cache actions without spending the
-/// solid-red emphasis reserved for irreversible operations.
-class _DashedRRectBorderPainter extends CustomPainter {
-  const _DashedRRectBorderPainter({
-    required this.color,
-    required this.radius,
-  });
-
-  final Color color;
-  final double radius;
-
-  static const double _dash = 4;
-  static const double _gap = 4;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = color
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1;
-    final path = Path()
-      ..addRRect(
-        RRect.fromRectAndRadius(
-          Rect.fromLTWH(0.5, 0.5, size.width - 1, size.height - 1),
-          Radius.circular(radius),
-        ),
-      );
-    for (final metric in path.computeMetrics()) {
-      var distance = 0.0;
-      while (distance < metric.length) {
-        canvas.drawPath(
-          metric.extractPath(
-            distance,
-            (distance + _dash).clamp(0, metric.length),
-          ),
-          paint,
-        );
-        distance += _dash + _gap;
-      }
-    }
-  }
-
-  @override
-  bool shouldRepaint(_DashedRRectBorderPainter oldDelegate) =>
-      oldDelegate.color != color || oldDelegate.radius != radius;
 }

@@ -10,6 +10,7 @@ import 'package:cosyncing_client/src/features/sessions/list/broker_client_sessio
 import 'package:cosyncing_client/src/features/sessions/list/new_session_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_repository.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_visibility_metadata.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/roster_snapshot_store.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_identity.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_projection.dart';
@@ -331,6 +332,37 @@ class SessionListController extends Notifier<SessionListState> {
     _markSnapshotDirty();
   }
 
+  /// Applies only broker visibility fields, without overwriting newer activity.
+  void acceptSessionVisibility(List<SessionInfo> updates) {
+    if (_disposed) return;
+    final byKey = {for (final info in updates) '${info.tool}/${info.id}': info};
+    final sessions = [
+      for (final info in state.sessions)
+        _visibilityUpdate(info, byKey['${info.tool}/${info.id}']),
+    ];
+    state = state.copyWith(sessions: sessions);
+    _markSnapshotDirty();
+  }
+
+  SessionInfo _visibilityUpdate(SessionInfo info, SessionInfo? update) {
+    if (update == null ||
+        (update.appVisibilityRevision ?? -1) <
+            (info.appVisibilityRevision ?? -1)) {
+      return info;
+    }
+    if (info.appHidden == update.appHidden &&
+        info.appHiddenByAncestor == update.appHiddenByAncestor &&
+        info.appVisibilityRevision == update.appVisibilityRevision) {
+      return info;
+    }
+    return SessionInfo.fromJson({
+      ...info.toJson(),
+      'appHidden': update.appHidden,
+      'appHiddenByAncestor': update.appHiddenByAncestor,
+      'appVisibilityRevision': update.appVisibilityRevision,
+    });
+  }
+
   Future<void> _load({required bool silent, bool acceptReset = false}) async {
     final totalTimer = Stopwatch()..start();
     final repositoryTimer = Stopwatch()..start();
@@ -449,6 +481,7 @@ class SessionListController extends Notifier<SessionListState> {
           sessions: _rowsFrom(
             response,
             keepKnown: !revisionNamespaceChanged && !repositoryChanged,
+            preserveVisibility: !repositoryChanged,
           ),
           machine: response.machine,
           revision: snapshotRevision,
@@ -560,9 +593,17 @@ class SessionListController extends Notifier<SessionListState> {
   List<SessionInfo> _rowsFrom(
     ListSessionsResponse response, {
     required bool keepKnown,
+    required bool preserveVisibility,
   }) {
+    final known = {for (final row in state.sessions) _sessionKey(row): row};
+    final incoming = [
+      for (final row in response.sessions)
+        preserveVisibility
+            ? retainNewerSessionVisibility(row, known[_sessionKey(row)])
+            : row,
+    ];
     if (response.complete || !keepKnown || state.sessions.isEmpty) {
-      return response.sessions;
+      return incoming;
     }
     // The same key and the same order the delta feed uses. A merge that kept
     // insertion order would leave the retained rows sorted by whatever an
@@ -571,7 +612,7 @@ class SessionListController extends Notifier<SessionListState> {
     // roster re-sorted the list.
     final merged = <String, SessionInfo>{
       for (final session in state.sessions) _sessionKey(session): session,
-      for (final session in response.sessions) _sessionKey(session): session,
+      for (final session in incoming) _sessionKey(session): session,
     };
     return merged.values.toList(growable: false)..sort(_compareSessions);
   }
@@ -873,7 +914,10 @@ class SessionListController extends Notifier<SessionListState> {
       if (delta.removed) {
         byKey.remove(key);
       } else if (delta.session case final session?) {
-        byKey[_sessionKey(session)] = session;
+        byKey[_sessionKey(session)] = retainNewerSessionVisibility(
+          session,
+          byKey[_sessionKey(session)],
+        );
       } else {
         return false;
       }

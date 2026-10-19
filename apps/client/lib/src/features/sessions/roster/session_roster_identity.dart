@@ -117,6 +117,7 @@ final class SessionRosterIdentity {
     this.modelId,
     this.updatedAt,
     this.createdAt,
+    this.appHidden = false,
   });
 
   /// Projects the identity fields of an authoritative roster row.
@@ -135,6 +136,7 @@ final class SessionRosterIdentity {
       modelId: sessionModelTechnicalId(session),
       updatedAt: session.updatedAt,
       createdAt: session.createdAt,
+      appHidden: session.appHidden ?? false,
     );
   }
 
@@ -163,6 +165,7 @@ final class SessionRosterIdentity {
       modelId: _optionalString(json['modelId']),
       updatedAt: _optionalInt(json['updatedAt']),
       createdAt: _optionalInt(json['createdAt']),
+      appHidden: json['appHidden'] == true,
     );
   }
 
@@ -214,6 +217,9 @@ final class SessionRosterIdentity {
   /// zero buried the newest row in the roster at the bottom of the cached pane.
   int? get recencyAnchor => updatedAt ?? createdAt;
 
+  /// Last accepted visibility preference, separate from live activity.
+  final bool appHidden;
+
   /// Stable routing key, matching `sessionRosterKey` for the same session.
   String get rosterKey => '$tool/$sessionId';
 
@@ -222,6 +228,7 @@ final class SessionRosterIdentity {
 
   /// Encodes this row, omitting absent fields so the payload stays small.
   Map<String, Object?> toJson() => <String, Object?>{
+    if (appHidden) 'appHidden': true,
     'tool': tool,
     'id': sessionId,
     if (title.isNotEmpty) 'title': title,

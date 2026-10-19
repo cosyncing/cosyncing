@@ -199,7 +199,11 @@ final class CachedRosterProjection {
     // an orphan means the parent genuinely is not in the roster. Overriding
     // "hide background sessions" for that case would show the user rows they
     // asked not to see, in the one view that cannot be filtered back.
-    bool visible(String key) => _originVisible(byKey[key]!.origin, preferences);
+    // Keep hidden ancestors in the tree until emission: removing them during
+    // indexing would turn a not-yet-updated cached child into a visible orphan.
+    bool visible(String key) =>
+        !byKey[key]!.appHidden &&
+        _originVisible(byKey[key]!.origin, preferences);
 
     final emitted = <CachedRosterRow>[];
     for (final rootKey in order) {

@@ -120,6 +120,7 @@ const AUTHORIZATION: Record<string, Partial<Record<Method, Rule>>> = {
   '/api/sessions/{id}/{id}/export/preflight': { POST: 'observe+files' },
   '/api/sessions/{id}/{id}/fork': { POST: 'drive' },
   '/api/sessions/{id}/{id}/rename': { PATCH: 'drive', POST: 'drive' },
+  '/api/sessions/{id}/{id}/visibility': { PATCH: 'drive' },
   '/api/sessions/{id}/{id}/stream': { GET: 'observe' },
   '/api/tokdash/usage': { GET: 'observe' },
   '/api/tokdash/quota': { GET: 'observe' },

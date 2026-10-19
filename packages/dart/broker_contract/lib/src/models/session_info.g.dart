@@ -270,6 +270,9 @@ SessionInfo _$SessionInfoFromJson(Map<String, dynamic> json) => SessionInfo(
   control: json['control'] == null
       ? null
       : SessionControlState.fromJson(json['control'] as Map<String, dynamic>),
+  appHidden: json['appHidden'] as bool?,
+  appHiddenByAncestor: json['appHiddenByAncestor'] as bool?,
+  appVisibilityRevision: (json['appVisibilityRevision'] as num?)?.toInt(),
   sessionOwner: json['sessionOwner'] == null
       ? null
       : SessionOwnerProjection.fromJson(
@@ -303,6 +306,9 @@ Map<String, dynamic> _$SessionInfoToJson(SessionInfo instance) =>
       'terminalSyncHint': instance.terminalSyncHint?.toJson(),
       'control': instance.control?.toJson(),
       'sessionOwner': instance.sessionOwner?.toJson(),
+      'appHidden': instance.appHidden,
+      'appHiddenByAncestor': instance.appHiddenByAncestor,
+      'appVisibilityRevision': instance.appVisibilityRevision,
     };
 
 const _$SessionStatusEnumMap = {

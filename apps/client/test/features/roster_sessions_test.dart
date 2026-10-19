@@ -18,6 +18,7 @@ import 'package:flutter_test/flutter_test.dart';
 import '../support/feature/cosyncing_app.dart';
 import '../support/feature/fake_broker.dart';
 import '../support/feature/roster_driver.dart';
+import '../support/feature/session_driver.dart';
 
 final AppLocalizations en = lookupAppLocalizations(const Locale('en'));
 
@@ -71,7 +72,10 @@ void main() {
         expect(find.text('Last month'), findsNothing);
 
         await app.tapKey('session-roster-filter-button');
-        await app.tapKey('session-roster-filter-activity-today');
+        await app.choose(
+          find.byKey(const Key('session-roster-filter-activity')),
+          en.sessionRosterLast24Hours,
+        );
         expect(app.rosterReads(studio).map(windowOf), contains('1d'));
         await app.expandProject('/work/studio');
         expect(find.text('Fresh work'), findsOneWidget);
@@ -79,15 +83,94 @@ void main() {
         final label = app.tester.widget<Text>(
           find.byKey(const Key('session-roster-window-label')),
         );
-        expect(label.data, en.sessionRosterActivityToday);
+        expect(label.data, en.sessionRosterLast24Hours);
 
         // The menu stays open between choices.
-        await app.tapKey('session-roster-filter-activity-any');
+        await app.choose(
+          find.byKey(const Key('session-roster-filter-activity')),
+          en.sessionRosterActivityAny,
+        );
         await app.expandProject('/work/studio');
         expect(find.text('Last month'), findsOneWidget);
       },
     );
   });
+
+  featureTest(
+    'hiding retains its open tab, supports Undo and Unhide, '
+    'and custom days reach the broker',
+    (f) async {
+      final studio = f.network.add('http://studio.test:7734')
+        ..addSession(
+          'hide-me',
+          'Keep this conversation',
+          extra: {
+            'appHidden': false,
+            'appHiddenByAncestor': false,
+            'appVisibilityRevision': 0,
+          },
+        )
+        ..addSession('other', 'Another conversation');
+      await f.storage.seedServer(studio);
+      final app = await f.launch();
+      await app.openFromRoster('hide-me', cwd: '/work/studio');
+      await app.tapKey('session-actions-codex-hide-me');
+      await app.tap(find.text(en.sessionHide));
+      await app.waitForAbsent(app.row('hide-me'));
+      expect(app.tab('hide-me'), findsOneWidget);
+      await app.tap(find.text(en.sessionVisibilityUndo));
+      await app.waitFor(app.row('hide-me'));
+      await app.tester.longPress(app.row('hide-me'));
+      await app.settle();
+      await app.tap(find.text(en.sessionHide));
+      await app.waitForAbsent(app.row('hide-me'));
+      await app.tapKey('session-roster-filter-button');
+      await app.tapKey('session-roster-show-hidden');
+      await app.waitFor(app.row('hide-me'));
+      await app.choose(
+        find.byKey(const Key('session-roster-filter-activity')),
+        en.sessionRosterCustom,
+      );
+      await app.enterText(
+        find.byKey(const Key('session-roster-custom-days')),
+        '0',
+      );
+      await app.tap(find.text(en.done));
+      expect(find.text(en.sessionRosterInvalidDays), findsOneWidget);
+      expect(app.rosterReads(studio).map(windowOf), isNot(contains('0d')));
+      await app.enterText(
+        find.byKey(const Key('session-roster-custom-days')),
+        '2',
+      );
+      await app.tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+      await app.settle();
+      expect(app.rosterReads(studio).map(windowOf), contains('3d'));
+      await app.tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await app.tester.testTextInput.receiveAction(TextInputAction.done);
+      await app.settle();
+      expect(app.rosterReads(studio).map(windowOf), contains('2d'));
+      await app.tap(find.text(en.done));
+      await app.tapKey('session-actions-codex-hide-me');
+      await app.tap(find.text(en.sessionUnhide));
+      expect(
+        studio.sessions.firstWhere((s) => s['id'] == 'hide-me')['appHidden'],
+        false,
+      );
+      expect(app.tab('hide-me'), findsOneWidget);
+      await app.openStatus();
+      await app.tapKey('session-detail-hide-button');
+      expect(app.tab('hide-me'), findsOneWidget);
+      expect(
+        studio.sessions.firstWhere((s) => s['id'] == 'hide-me')['appHidden'],
+        true,
+      );
+      await app.tapKey('session-detail-hide-button');
+      expect(
+        studio.sessions.firstWhere((s) => s['id'] == 'hide-me')['appHidden'],
+        false,
+      );
+    },
+  );
 
   featureTest(
     'Home counts old active sessions before filters and never fetches all time',
@@ -143,7 +226,10 @@ void main() {
       noOverviewFetches();
       await app.search('');
       await app.tapKey('session-roster-filter-button');
-      await app.tapKey('session-roster-filter-activity-today');
+      await app.choose(
+        find.byKey(const Key('session-roster-filter-activity')),
+        en.sessionRosterLast24Hours,
+      );
       expect(count('waiting', '2'), findsOneWidget);
       noOverviewFetches();
       // Close the filter popover before changing the source.
@@ -1038,6 +1124,19 @@ void main() {
         expect(inList('Child two'), findsOneWidget);
         expect(inList('Parent work'), findsOneWidget);
         expect(inList('Child one'), findsNothing, reason: 'not on the path');
+        // A parent visibility delta can precede its descendants' updates.
+        // Search must never expose that temporarily stale child metadata.
+        studio.updateSession('p1', {
+          'appHidden': true,
+          'appVisibilityRevision': 1,
+        });
+        await app.waitForAbsent(inList('Parent work'));
+        expect(inList('Child two'), findsNothing);
+        await app.tapKey('session-roster-filter-button');
+        await app.tapKey('session-roster-show-hidden');
+        expect(inList('Parent work'), findsOneWidget);
+        expect(inList('Child two'), findsOneWidget);
+        await app.tap(find.text(en.done));
       },
     );
   });

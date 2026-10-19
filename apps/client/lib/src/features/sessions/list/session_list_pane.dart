@@ -28,6 +28,8 @@ import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+part 'session_roster_filter_panel.dart';
+
 /// Runs the shared display-only project-alias flow from either roster layout.
 Future<void> renameProjectAliasFromList(
   BuildContext context,
@@ -372,8 +374,13 @@ class _SessionListPaneState extends ConsumerState<SessionListPane> {
     if (_appVisible && _tickerEnabled) _relativeTimeNow = _now;
     _relativeTimeLabels.clear();
     final queryActivity = _activityWindow(widget.queryWindow);
-    if (_filters.activity != queryActivity) {
-      _filters = _filters.copyWith(activity: queryActivity);
+    if (_filters.activity != queryActivity ||
+        (queryActivity == SessionActivityWindow.custom &&
+            _filters.customDays != widget.queryWindow.days)) {
+      _filters = _filters.copyWith(
+        activity: queryActivity,
+        customDays: widget.queryWindow.days,
+      );
     }
     // One forest per rebuild for navigation reveal and projection.
     final lineage = SessionRosterLineage.build(widget.sessions);
@@ -480,6 +487,7 @@ class _SessionListPaneState extends ConsumerState<SessionListPane> {
       _SectionEntry() => _RosterSectionLabel(
         key: entryKey(entry),
         activity: _filters.activity,
+        customDays: _filters.customDays,
       ),
       _EmptyEntry() => _FilteredEmptyMessage(key: entryKey(entry)),
       _ProjectEntry(:final group, :final topGap) => _ProjectHeader(
@@ -535,7 +543,9 @@ class _SessionListPaneState extends ConsumerState<SessionListPane> {
           searchController: _searchController,
           searchFocusNode: widget.searchFocusNode,
           onChanged: (filters) {
-            final activityChanged = filters.activity != _filters.activity;
+            final activityChanged =
+                filters.activity != _filters.activity ||
+                filters.customDays != _filters.customDays;
             setState(() {
               _filters = filters;
               _navigationRevealKeys.clear();
@@ -549,7 +559,7 @@ class _SessionListPaneState extends ConsumerState<SessionListPane> {
             });
             if (activityChanged) {
               widget.onQueryWindowChanged?.call(
-                _queryWindow(filters.activity),
+                _queryWindow(filters.activity, filters.customDays),
               );
             }
           },
@@ -851,7 +861,8 @@ class _RosterSearchBarState extends State<_RosterSearchBar> {
   bool get _hasMenuFilters =>
       widget.filters.status != null ||
       widget.filters.tool != null ||
-      widget.filters.activity != _kDefaultRosterFilters.activity;
+      widget.filters.activity != _kDefaultRosterFilters.activity ||
+      widget.filters.showHidden;
 
   @override
   Widget build(BuildContext context) {
@@ -936,11 +947,6 @@ class _RosterSearchBarState extends State<_RosterSearchBar> {
               tools: widget.tools,
               active: _hasMenuFilters,
               onChanged: widget.onChanged,
-              onClear: () {
-                widget.searchController.clear();
-                setState(() {});
-                widget.onChanged(_kDefaultRosterFilters);
-              },
             ),
           ],
         ),
@@ -987,135 +993,138 @@ class _RosterFilterMenu extends StatelessWidget {
     required this.tools,
     required this.active,
     required this.onChanged,
-    required this.onClear,
   });
-
   final SessionRosterFilters filters;
   final List<String> tools;
   final bool active;
   final ValueChanged<SessionRosterFilters> onChanged;
-  final VoidCallback onClear;
-
   @override
   Widget build(BuildContext context) {
-    final tokens = context.tokens;
     final l10n = AppLocalizations.of(context);
-    final textTheme = Theme.of(context).textTheme;
-    Widget heading(String label) => Padding(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-      child: Text(
-        label,
-        style: textTheme.labelSmall?.copyWith(color: tokens.textTertiary),
-      ),
-    );
-    Widget choice<T>({
-      required Key key,
-      required T value,
-      required T current,
-      required String label,
-      required VoidCallback onSelected,
-    }) => MenuItemButton(
-      key: key,
-      closeOnActivate: false,
-      onPressed: onSelected,
-      leadingIcon: SizedBox.square(
-        dimension: 16,
-        child: value == current
-            ? Icon(Icons.check, size: 16, color: tokens.accent)
-            : null,
-      ),
-      child: Text(label, style: textTheme.bodySmall),
-    );
-    return MenuAnchor(
-      alignmentOffset: const Offset(-160, 4),
-      menuChildren: [
-        heading(l10n.sessionRosterFilterStatus),
-        for (final (status, label) in <(SessionStatus?, String)>[
-          (null, l10n.sessionRosterAllStatuses),
-          (SessionStatus.needsInput, l10n.sessionRosterStatusNeedsInput),
-          (SessionStatus.working, l10n.sessionRosterStatusWorking),
-          (SessionStatus.idle, l10n.sessionRosterStatusIdle),
-        ])
-          choice<SessionStatus?>(
-            key: Key('session-roster-filter-status-${status?.name ?? 'all'}'),
-            value: status,
-            current: filters.status,
-            label: label,
-            onSelected: () => onChanged(
-              filters.copyWith(status: status, clearStatus: status == null),
-            ),
-          ),
-        const Divider(height: 8),
-        heading(l10n.sessionRosterFilterAgent),
-        for (final tool in <String?>[null, ...tools])
-          choice<String?>(
-            key: Key('session-roster-filter-agent-${tool ?? 'all'}'),
-            value: tool,
-            current: filters.tool,
-            label: tool == null
-                ? l10n.sessionRosterAllAgents
-                : sessionToolLabel(l10n, tool),
-            onSelected: () => onChanged(
-              filters.copyWith(tool: tool, clearTool: tool == null),
-            ),
-          ),
-        const Divider(height: 8),
-        heading(l10n.sessionRosterFilterActivity),
-        for (final (window, label) in <(SessionActivityWindow, String)>[
-          (SessionActivityWindow.today, l10n.sessionRosterActivityToday),
-          (
-            SessionActivityWindow.last7Days,
-            l10n.sessionRosterActivityLast7Days,
-          ),
-          (
-            SessionActivityWindow.last30Days,
-            l10n.sessionRosterActivityLast30Days,
-          ),
-          (SessionActivityWindow.any, l10n.sessionRosterActivityAny),
-        ])
-          choice<SessionActivityWindow>(
-            key: Key('session-roster-filter-activity-${window.name}'),
-            value: window,
-            current: filters.activity,
-            label: label,
-            onSelected: () => onChanged(filters.copyWith(activity: window)),
-          ),
-        if (active || filters.query.isNotEmpty) ...[
-          const Divider(height: 8),
-          MenuItemButton(
-            key: const Key('session-roster-clear-filters'),
-            onPressed: onClear,
-            child: Text(
-              l10n.sessionRosterClearFilters,
-              style: textTheme.bodySmall,
-            ),
-          ),
-        ],
-      ],
-      builder: (context, controller, _) => _RosterBarButton(
-        key: const Key('session-roster-filter-button'),
-        tooltip: l10n.sessionRosterFilters,
-        onPressed: () =>
-            controller.isOpen ? controller.close() : controller.open(),
-        child: Stack(
-          clipBehavior: Clip.none,
-          children: [
-            StrokeIcon(
-              StrokeGlyph.filter,
-              color: active ? tokens.accent : tokens.textSecondary,
-            ),
-            if (active)
-              Positioned(
-                right: -2,
-                top: -2,
-                child: StatusDot(
-                  key: const Key('session-roster-filters-active'),
-                  color: tokens.accent,
-                  size: 6,
+    final count =
+        (filters.status == null ? 0 : 1) +
+        (filters.tool == null ? 0 : 1) +
+        (filters.activity == SessionActivityWindow.last7Days ||
+                (filters.activity == SessionActivityWindow.custom &&
+                    filters.customDays == 7)
+            ? 0
+            : 1) +
+        (filters.showHidden ? 1 : 0);
+    return _RosterBarButton(
+      key: const Key('session-roster-filter-button'),
+      tooltip: l10n.sessionRosterFilters,
+      onPressed: () {
+        if (WindowSizeClass.of(context) == WindowSizeClass.compact) {
+          unawaited(
+            showModalBottomSheet<void>(
+              context: context,
+              isScrollControlled: true,
+              builder: (sheetContext) => SafeArea(
+                child: Padding(
+                  padding: EdgeInsets.only(
+                    bottom: MediaQuery.viewInsetsOf(sheetContext).bottom,
+                  ),
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxHeight: MediaQuery.sizeOf(sheetContext).height * .85,
+                    ),
+                    child: SingleChildScrollView(
+                      child: _RosterFilterPanel(
+                        filters: filters,
+                        tools: tools,
+                        onChanged: onChanged,
+                        onClose: () => Navigator.of(sheetContext).pop(),
+                      ),
+                    ),
+                  ),
                 ),
               ),
-          ],
-        ),
+            ),
+          );
+        } else {
+          final box = context.findRenderObject()! as RenderBox;
+          final anchor = box.localToGlobal(Offset(0, box.size.height + 4));
+          final size = MediaQuery.sizeOf(context);
+          final width = (size.width - 32).clamp(0.0, 336.0);
+          final left = (anchor.dx + box.size.width - width).clamp(
+            16.0,
+            size.width - width - 16,
+          );
+          final top = anchor.dy.clamp(
+            16.0,
+            (size.height - 240).clamp(16.0, double.infinity),
+          );
+          unawaited(
+            showDialog<void>(
+              context: context,
+              barrierColor: context.tokens.surface.withValues(alpha: 0),
+              builder: (dialogContext) => Stack(
+                children: [
+                  Positioned(
+                    left: left,
+                    top: top,
+                    width: width,
+                    child: Material(
+                      color: context.tokens.surface,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(
+                          context.tokens.radiusLg,
+                        ),
+                        side: BorderSide(color: context.tokens.separator),
+                      ),
+                      clipBehavior: Clip.antiAlias,
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxHeight: size.height - top - 16,
+                        ),
+                        child: SingleChildScrollView(
+                          child: _RosterFilterPanel(
+                            filters: filters,
+                            tools: tools,
+                            onChanged: onChanged,
+                            onClose: () => Navigator.of(dialogContext).pop(),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        }
+      },
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          StrokeIcon(
+            StrokeGlyph.filter,
+            color: active
+                ? context.tokens.accent
+                : context.tokens.textSecondary,
+          ),
+          if (count > 0)
+            Positioned(
+              right: -8,
+              top: -8,
+              child: Container(
+                key: const Key('session-roster-filters-active'),
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                decoration: BoxDecoration(
+                  color: context.tokens.accent,
+                  borderRadius: BorderRadius.circular(
+                    context.tokens.radiusSm,
+                  ),
+                ),
+                child: Text(
+                  '$count',
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    color: context.tokens.accentInk,
+                  ),
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }
@@ -1123,7 +1132,13 @@ class _RosterFilterMenu extends StatelessWidget {
 
 /// The "Projects" caption, with the standing activity window beside it.
 class _RosterSectionLabel extends StatelessWidget {
-  const _RosterSectionLabel({required this.activity, super.key});
+  const _RosterSectionLabel({
+    required this.activity,
+    this.customDays = 3,
+    super.key,
+  });
+
+  final int customDays;
 
   final SessionActivityWindow activity;
 
@@ -1135,8 +1150,9 @@ class _RosterSectionLabel extends StatelessWidget {
       context,
     ).textTheme.labelMedium?.copyWith(color: tokens.textTertiary);
     final window = switch (activity) {
+      SessionActivityWindow.custom => l10n.sessionRosterLastDays(customDays),
       SessionActivityWindow.any => l10n.sessionRosterActivityAny,
-      SessionActivityWindow.today => l10n.sessionRosterActivityToday,
+      SessionActivityWindow.today => l10n.sessionRosterLast24Hours,
       SessionActivityWindow.last7Days => l10n.sessionRosterActivityLast7Days,
       SessionActivityWindow.last30Days => l10n.sessionRosterActivityLast30Days,
       SessionActivityWindow.older7Days => l10n.sessionRosterActivityOlder7Days,
@@ -1571,6 +1587,7 @@ class _SessionRow extends StatelessWidget {
         tool: session.tool,
         sessionId: session.id,
         title: session.title,
+        session: session,
         child: Material(
           color: selected ? tokens.surfaceHover : tokens.sidebar,
           borderRadius: radius,
@@ -1583,7 +1600,7 @@ class _SessionRow extends StatelessWidget {
               child: Padding(
                 padding: EdgeInsets.only(
                   left: 28 + _kSessionRowIndentStep * indentDepth,
-                  right: 12,
+                  right: 4,
                 ),
                 child: Row(
                   children: [
@@ -1592,7 +1609,7 @@ class _SessionRow extends StatelessWidget {
                     Expanded(
                       child: Tooltip(
                         // Hover still reveals the full title. A touch hold
-                        // opens the row's rename dialog.
+                        // opens the row's action menu.
                         triggerMode: TooltipTriggerMode.manual,
                         message: [
                           title,
@@ -1807,17 +1824,21 @@ SessionActivityWindow _activityWindow(SessionRosterQueryWindow window) =>
       SessionRosterQueryWindow.today => SessionActivityWindow.today,
       SessionRosterQueryWindow.last7Days => SessionActivityWindow.last7Days,
       SessionRosterQueryWindow.last30Days => SessionActivityWindow.last30Days,
+      _ => SessionActivityWindow.custom,
     };
 
-SessionRosterQueryWindow _queryWindow(SessionActivityWindow window) =>
-    switch (window) {
-      SessionActivityWindow.any ||
-      SessionActivityWindow.older7Days ||
-      SessionActivityWindow.older30Days => SessionRosterQueryWindow.any,
-      SessionActivityWindow.today => SessionRosterQueryWindow.today,
-      SessionActivityWindow.last7Days => SessionRosterQueryWindow.last7Days,
-      SessionActivityWindow.last30Days => SessionRosterQueryWindow.last30Days,
-    };
+SessionRosterQueryWindow _queryWindow(
+  SessionActivityWindow window,
+  int customDays,
+) => switch (window) {
+  SessionActivityWindow.custom => SessionRosterQueryWindow.custom(customDays),
+  SessionActivityWindow.any ||
+  SessionActivityWindow.older7Days ||
+  SessionActivityWindow.older30Days => SessionRosterQueryWindow.any,
+  SessionActivityWindow.today => SessionRosterQueryWindow.today,
+  SessionActivityWindow.last7Days => SessionRosterQueryWindow.last7Days,
+  SessionActivityWindow.last30Days => SessionRosterQueryWindow.last30Days,
+};
 
 /// A [StatusPill] for a session's [SessionStatus], colored from the active
 /// semantic tokens (working / needs-input / idle).

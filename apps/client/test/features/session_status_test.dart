@@ -292,10 +292,10 @@ void main() {
         await app.openStatus();
         expect(
           find.text(en.sessionDuplicateDisabledUnsupported),
-          findsOneWidget,
+          findsNothing,
         );
         expect(find.text(en.sessionExportDisabledUnsupported), findsOneWidget);
-        for (final key in ['clone', 'fork']) {
+        for (final key in ['fork']) {
           expect(
             app.tester
                 .widget<ListTile>(find.byKey(Key('session-detail-$key-button')))
@@ -384,7 +384,7 @@ void main() {
     );
 
     featureTest(
-      'Fork at latest and Duplicate each ask the broker once and open the '
+      'Fork at latest asks the broker once and opens the '
       'new session in its own tab',
       (f) async {
         final studio = studioWith(f)
@@ -398,19 +398,6 @@ void main() {
         );
         expect(
           studio.requestsTo('/api/sessions/codex/s1/fork', method: 'POST'),
-          hasLength(1),
-        );
-
-        await app.tester.tap(app.tab('s1'));
-        await app.settle();
-        await app.openStatus();
-        await app.tapKey('session-detail-clone-button');
-        await app.pumpUntil(
-          () => app.tab('clone-of-s1').evaluate().isNotEmpty,
-          reason: 'the duplicate opens in a tab',
-        );
-        expect(
-          studio.requestsTo('/api/sessions/codex/s1/clone', method: 'POST'),
           hasLength(1),
         );
       },
@@ -450,23 +437,25 @@ void main() {
     );
 
     featureTest(
-      'Copy transcript puts the retained transcript on the clipboard',
+      'Status omits Duplicate, Copy transcript and the local-data wrapper',
       (f) async {
-        final studio = studioWith(f);
-        studio.transcripts['s1'] = [
-          modelOutput('First thing said.', id: 'm1'),
-          modelOutput('Second thing said.', id: 'm2'),
-        ];
-        final app = await openSession(f, studio);
-        final clipboard = app.captureClipboard();
+        final app = await openSession(f, studioWith(f));
         await app.openStatus();
-        await app.tapKey('session-detail-copy-transcript-button');
-        expect(clipboard, hasLength(1));
-        expect(clipboard.single, contains('First thing said.'));
-        expect(clipboard.single, contains('Second thing said.'));
         expect(
-          clipboard.single.indexOf('First'),
-          lessThan(clipboard.single.indexOf('Second')),
+          find.byKey(const Key('session-detail-copy-transcript-button')),
+          findsNothing,
+        );
+        expect(
+          find.byKey(const Key('session-detail-clone-button')),
+          findsNothing,
+        );
+        expect(
+          find.byKey(const Key('session-actions-local-data-caption')),
+          findsNothing,
+        );
+        expect(
+          find.byKey(const Key('session-detail-clear-current-cache-button')),
+          findsOneWidget,
         );
       },
     );

@@ -129,6 +129,7 @@ export const BROKER_ROUTE_POLICIES: readonly RoutePolicyEntry<BrokerRoute>[] = [
   { route: '/api/sessions/{id}/{id}/export', methods: ['POST'], policy: OBSERVE_FILES },
   { route: '/api/sessions/{id}/{id}/export/preflight', methods: ['POST'], policy: OBSERVE_FILES },
   { route: '/api/sessions/{id}/{id}/fork', methods: ['POST'], policy: DRIVE },
+  { route: '/api/sessions/{id}/{id}/visibility', methods: ['PATCH'], policy: DRIVE },
   { route: '/api/sessions/{id}/{id}/rename', methods: ['PATCH', 'POST'], policy: DRIVE },
   { route: '/api/sessions/{id}/{id}/stream', methods: ['GET'], policy: OBSERVE },
   { route: '/api/tokdash/usage', methods: ['GET'], policy: OBSERVE },

@@ -401,8 +401,11 @@ void main() {
         // The row's tooltip carries the harness and model line.
         final text = app.tester
             .widget<Tooltip>(
-              find.descendant(
-                of: app.row('s1'),
+              find.ancestor(
+                of: find.descendant(
+                  of: app.row('s1'),
+                  matching: find.text('Fix login'),
+                ),
                 matching: find.byType(Tooltip),
               ),
             )

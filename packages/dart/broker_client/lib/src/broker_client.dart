@@ -699,6 +699,21 @@ class BrokerClient {
     return ModeCatalogResponse.fromJson(response);
   }
 
+  /// Sets cosyncing visibility without changing the native session.
+  Future<List<SessionInfo>> setSessionVisibility(
+    String tool,
+    String id, {
+    required bool hidden,
+  }) async {
+    final response = await _patch<Map<String, dynamic>>(
+      _resolver.sessionVisibilityEndpoint(tool, id),
+      data: {'hidden': hidden},
+    );
+    return (response['sessions'] as List<dynamic>)
+        .map((value) => SessionInfo.fromJson(value as Map<String, dynamic>))
+        .toList();
+  }
+
   /// Renames a session.
   ///
   /// `PATCH /api/sessions/:tool/:id/rename`

@@ -8,6 +8,13 @@ const DAY_MS = 86_400_000;
 
 /** Map the roster `?window=` value to a max age in ms, or undefined for "all"/unset (no filter). */
 export function parseSessionWindowMs(v: string | null): number | undefined {
+  const custom = /^(\d+)d$/.exec((v ?? '').trim());
+  if (custom) {
+    const days = Number(custom[1]);
+    if (Number.isSafeInteger(days) && days > 0 && days <= 36500) return days * DAY_MS;
+    throw new Error('window days must be an integer from 1 to 36500');
+  }
+  if (/d$/.test((v ?? '').trim())) throw new Error('window days must be an integer from 1 to 36500');
   switch ((v ?? '').trim()) {
     case '1d': return DAY_MS;
     case '7d': return 7 * DAY_MS;

@@ -1737,5 +1737,39 @@
   "storageCacheTitle": "セッションキャッシュ",
   "storageDataTitle": "アプリデータ",
   "storageDataDescription": "キャッシュを削除しても、下書き、送信待ちメッセージ、接続、設定は保持されます。",
-  "storageCacheScope": "このデバイス · すべての接続"
+  "storageCacheScope": "このデバイス · すべての接続",
+  "sessionHide": "セッションを非表示",
+  "sessionUnhide": "セッションを再表示",
+  "sessionHidden": "セッションを非表示にしました",
+  "sessionUnhidden": "セッションを再表示しました",
+  "sessionVisibilityUndo": "元に戻す",
+  "sessionVisibilityConnect": "接続して表示設定を変更",
+  "sessionVisibilityUnsupported": "セッションを非表示にするにはブローカーを更新してください",
+  "sessionVisibilityParent": "先に親セッションを再表示してください",
+  "sessionVisibilityFailed": "表示設定を保存できませんでした",
+  "sessionActionsMenu": "セッション操作",
+  "sessionRosterShowHidden": "非表示のセッションを表示",
+  "sessionRosterShowHiddenHelp": "非表示にしたセッションも含める",
+  "sessionRosterResetFilters": "フィルターをリセット",
+  "sessionRosterLast24Hours": "過去24時間",
+  "sessionRosterCustom": "カスタム…",
+  "sessionRosterLastPrefix": "過去",
+  "sessionRosterDaysSuffix": "日間",
+  "sessionRosterInvalidDays": "1〜36,500の整数を入力してください。",
+  "sessionRosterLastDays": "過去{days}日間",
+  "@sessionRosterLastDays": {
+    "placeholders": {
+      "days": {
+        "type": "int"
+      }
+    }
+  },
+  "sessionRosterEmptyCustomDays": "過去{days}日間にアクティブなセッションはありません。",
+  "@sessionRosterEmptyCustomDays": {
+    "placeholders": {
+      "days": {
+        "type": "int"
+      }
+    }
+  }
 }

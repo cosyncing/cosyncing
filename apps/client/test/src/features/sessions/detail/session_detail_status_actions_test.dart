@@ -7,97 +7,40 @@ import 'package:flutter_test/flutter_test.dart';
 
 import '../../../../support/session_detail_page_test_harness.dart';
 
-/// V1/V2-R1 Status-action refinements: distinct icons, purposeful groups, a
-/// labeled single-session Local data zone, token-driven
-/// destructive confirmation, and disabled reasons — in English and Chinese.
+/// Status keeps useful actions and a plain session-cache cleanup row.
 void main() {
-  Icon leadingIconOf(WidgetTester tester, Key tileKey) {
-    final tile = tester.widget<ListTile>(find.byKey(tileKey));
-    return tile.leading! as Icon;
-  }
-
   Future<void> openStatusTab(WidgetTester tester) async {
     await tester.pumpAndSettle();
     await openSessionDetailTestTab(tester, 'session-detail-tab-status');
   }
 
   group('Session Detail Status actions refinement', () {
-    testWidgets('Duplicate and Copy transcript carry distinct icons', (
+    testWidgets('Status keeps Fork and Export without Duplicate or Copy', (
       tester,
     ) async {
       await tester.pumpWidget(buildSessionDetailTestPage(events: const []));
       await openStatusTab(tester);
       await showSessionStatusTestItem(
         tester,
-        const Key('session-detail-copy-transcript-button'),
+        const Key('session-detail-clear-current-cache-button'),
       );
-
-      final duplicate = leadingIconOf(
-        tester,
-        const Key('session-detail-clone-button'),
-      );
-      final copyTranscript = leadingIconOf(
-        tester,
-        const Key('session-detail-copy-transcript-button'),
-      );
-      expect(duplicate.icon, Icons.difference_outlined);
-      expect(copyTranscript.icon, Icons.copy_all_outlined);
-      expect(duplicate.icon, isNot(copyTranscript.icon));
+      for (final key in [
+        'session-detail-fork-button',
+        'session-detail-export-transcript-button',
+        'session-detail-clear-current-cache-button',
+      ]) {
+        expect(find.byKey(Key(key)), findsOneWidget);
+      }
+      for (final key in [
+        'session-detail-clone-button',
+        'session-detail-copy-transcript-button',
+        'session-actions-group-local-data',
+        'session-actions-local-data-caption',
+        'session-detail-clear-all-cache-button',
+      ]) {
+        expect(find.byKey(Key(key)), findsNothing);
+      }
     });
-
-    testWidgets(
-      'actions are grouped into Session, Transcript, and Local data zones',
-      (tester) async {
-        await tester.pumpWidget(buildSessionDetailTestPage(events: const []));
-        await openStatusTab(tester);
-        await showSessionStatusTestItem(
-          tester,
-          const Key('session-detail-clear-current-cache-button'),
-        );
-
-        for (final (group, tile) in [
-          ('session-actions-group-session', 'session-detail-detach-button'),
-          ('session-actions-group-session', 'session-detail-fork-button'),
-          ('session-actions-group-session', 'session-detail-clone-button'),
-          (
-            'session-actions-group-transcript',
-            'session-detail-export-transcript-button',
-          ),
-          (
-            'session-actions-group-transcript',
-            'session-detail-copy-transcript-button',
-          ),
-          (
-            'session-actions-group-local-data',
-            'session-detail-clear-current-cache-button',
-          ),
-        ]) {
-          expect(
-            find.descendant(
-              of: find.byKey(Key(group)),
-              matching: find.byKey(Key(tile)),
-            ),
-            findsOneWidget,
-            reason: '$tile must live in $group',
-          );
-        }
-
-        // Local cleanup stays scoped to this session. Device-wide cleanup
-        // belongs to Settings → General → Storage.
-        expect(
-          find.byKey(const Key('session-actions-local-data-caption')),
-          findsOneWidget,
-        );
-        expect(
-          find.text('Local data — rebuildable, but gone until re-synced'),
-          findsOneWidget,
-        );
-        expect(
-          find.byKey(const Key('session-detail-clear-all-cache-button')),
-          findsNothing,
-        );
-      },
-    );
 
     testWidgets('destructive confirmation buttons use statusError', (
       tester,
@@ -139,7 +82,7 @@ void main() {
       ('Roomy', UiDensity.spacious),
     ]) {
       testWidgets(
-        'grouping and zone label hold at $densityName density',
+        'actions hold at $densityName density',
         (tester) async {
           await tester.pumpWidget(
             buildSessionDetailTestPage(
@@ -160,8 +103,7 @@ void main() {
           for (final key in const [
             Key('session-actions-group-session'),
             Key('session-actions-group-transcript'),
-            Key('session-actions-group-local-data'),
-            Key('session-actions-local-data-caption'),
+            Key('session-detail-clear-current-cache-button'),
           ]) {
             expect(
               find.byKey(key),
@@ -173,7 +115,7 @@ void main() {
       );
     }
 
-    testWidgets('grouping, zone label, and reasons render in Chinese', (
+    testWidgets('cache confirmation and disabled reasons render in Chinese', (
       tester,
     ) async {
       await tester.pumpWidget(
@@ -193,8 +135,8 @@ void main() {
         const Key('session-detail-clear-current-cache-button'),
       );
 
-      expect(find.text('本地数据 — 可重建，重新同步前不可用'), findsOneWidget);
-      expect(find.text('此代理类型不支持复制会话。'), findsOneWidget);
+      expect(find.text('本地数据 — 可重建，重新同步前不可用'), findsNothing);
+      expect(find.text('此代理类型不支持复制会话。'), findsNothing);
       expect(find.text('此代理类型不支持导出对话记录。'), findsOneWidget);
 
       await tester.tap(

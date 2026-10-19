@@ -178,15 +178,15 @@ void main() {
         ),
         builder: (context, child) => MediaQuery(
           data: MediaQuery.of(context).copyWith(disableAnimations: true),
-          child: child!,
+          child: RepaintBoundary(
+            key: const Key('workspace-review-capture'),
+            child: child,
+          ),
         ),
         home: Scaffold(
-          body: RepaintBoundary(
-            key: const Key('workspace-review-capture'),
-            child: WorkspaceFrame(
-              child: SessionsWorkspace(
-                detailBuilder: (context, ref) => Text('DETAIL ${ref.key}'),
-              ),
+          body: WorkspaceFrame(
+            child: SessionsWorkspace(
+              detailBuilder: (context, ref) => Text('DETAIL ${ref.key}'),
             ),
           ),
         ),
@@ -292,6 +292,34 @@ void main() {
           await tester.tap(find.byKey(const Key('session-children-claude/a')));
           await tester.pumpAndSettle();
           await capture('roster');
+          final l10n = lookupAppLocalizations(const Locale('en'));
+          await tester.tap(
+            find.byKey(const Key('session-roster-filter-button')),
+          );
+          await tester.pumpAndSettle();
+          await tester.tap(
+            find.byKey(const Key('session-roster-filter-activity')),
+          );
+          await tester.pumpAndSettle();
+          await tester.tap(find.text(l10n.sessionRosterCustom).last);
+          await tester.pumpAndSettle();
+          await tester.enterText(
+            find.byKey(const Key('session-roster-custom-days')),
+            '3',
+          );
+          await tester.testTextInput.receiveAction(TextInputAction.done);
+          await tester.pumpAndSettle();
+          expect(tester.takeException(), isNull);
+          await capture('filters');
+          // Restore the standing choice before continuing the same open flow.
+          await tester.tap(
+            find.byKey(const Key('session-roster-filter-activity')),
+          );
+          await tester.pumpAndSettle();
+          await tester.tap(find.text(l10n.sessionRosterActivityAny).last);
+          await tester.pumpAndSettle();
+          await tester.tap(find.text(l10n.done));
+          await tester.pumpAndSettle();
           await tester.tapAt(
             tester.getTopLeft(find.byKey(const Key('session-row-claude/a'))) +
                 const Offset(18, 20),
@@ -444,7 +472,7 @@ void main() {
     }
 
     for (final gesture in ['long press', 'long click', 'right click']) {
-      testWidgets('a roster $gesture opens the rename dialog directly '
+      testWidgets('a roster $gesture offers Rename in the action menu '
           'without opening the row', (tester) async {
         final container = await openSession(tester);
         final before = container
@@ -466,6 +494,10 @@ void main() {
                 : PointerDeviceKind.touch,
           );
         }
+        await tester.pumpAndSettle();
+        final l10n = lookupAppLocalizations(const Locale('en'));
+        expect(find.text(l10n.sessionHide), findsOneWidget);
+        await tester.tap(find.text(l10n.sessionDetailRenameTooltip));
         await tester.pumpAndSettle();
         expect(find.byType(AlertDialog), findsOneWidget);
         expect(

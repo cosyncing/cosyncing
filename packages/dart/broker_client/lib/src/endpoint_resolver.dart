@@ -236,6 +236,10 @@ class EndpointResolver {
   String createSessionEndpoint(String tool) =>
       '$baseUrl/api/sessions/${Uri.encodeComponent(tool)}';
 
+  /// Broker-owned session visibility endpoint.
+  String sessionVisibilityEndpoint(String tool, String id) =>
+      '$sessionsEndpoint/${Uri.encodeComponent(tool)}/${Uri.encodeComponent(id)}/visibility';
+
   /// Rename session endpoint.
   String renameSessionEndpoint(String tool, String id) =>
       '$baseUrl/api/sessions/${Uri.encodeComponent(tool)}/${Uri.encodeComponent(id)}/rename';

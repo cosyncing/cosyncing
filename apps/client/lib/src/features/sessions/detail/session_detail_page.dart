@@ -56,6 +56,7 @@ import 'package:cosyncing_client/src/features/sessions/list/session_list_present
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_model_preference_store.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_visibility_action.dart';
 import 'package:cosyncing_client/src/features/sessions/renderers/message_renderer_registry.dart';
 import 'package:cosyncing_client/src/features/sessions/requests/session_command_args_codec.dart';
 import 'package:cosyncing_client/src/features/sessions/requests/session_request_action_helpers.dart';
@@ -126,8 +127,8 @@ part 'session_detail_chrome.dart';
 part 'session_detail_composer.dart';
 part 'session_detail_conversation_turn.dart';
 part 'session_detail_debug.dart';
-part 'session_detail_files_terminal.dart';
 part 'session_detail_file_search.dart';
+part 'session_detail_files_terminal.dart';
 part 'session_detail_live_cards.dart';
 part 'session_detail_message_actions.dart';
 part 'session_detail_model_label.dart';
@@ -1381,26 +1382,6 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
     );
   }
 
-  Future<void> _cloneSession() async {
-    final controller = ref.read(sessionDetailControllerProvider(_key).notifier);
-    final created = await controller.cloneSession();
-    if (!mounted || created == null) {
-      return;
-    }
-
-    if (GoRouter.maybeOf(context) == null) {
-      return;
-    }
-    if (!await _establishDraftDurabilityBarrier() || !mounted) return;
-
-    context.go(
-      sessionDetailLocation(
-        tool: created.tool,
-        sessionId: created.id,
-      ),
-    );
-  }
-
   Future<void> _downloadArtifact(SessionArtifactDescriptor descriptor) async {
     await ref
         .read(sessionDetailControllerProvider(_key).notifier)
@@ -1596,7 +1577,6 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
       draft: _promptController,
       onExport: () => unawaited(_startTranscriptExport()),
       onFork: () => unawaited(_forkSession()),
-      onClone: () => unawaited(_cloneSession()),
       onDownloadArtifact: _downloadArtifact,
       onPreviewArtifact: _previewArtifact,
       onPreviewFile: _previewSessionFile,
@@ -2838,7 +2818,6 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                             onExportTranscript: () =>
                                 unawaited(_startTranscriptExport()),
                             onForkSession: () => unawaited(_forkSession()),
-                            onCloneSession: () => unawaited(_cloneSession()),
                           ),
                         ),
                       ),

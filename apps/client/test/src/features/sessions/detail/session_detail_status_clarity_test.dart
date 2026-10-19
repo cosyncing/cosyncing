@@ -446,7 +446,7 @@ void main() {
           'Technical details',
           'Detach',
           'Fork at latest',
-          'Copy transcript',
+          'Export transcript',
         ]) {
           expect(
             controlTextSize(label),
