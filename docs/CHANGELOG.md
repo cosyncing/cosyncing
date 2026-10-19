@@ -11,6 +11,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+## 0.7.1 — 2026-10-19
+
 ### Added
 
 - Hide and unhide chats from the roster or Status, with Undo. Visibility syncs
