@@ -5,45 +5,64 @@ then use `cosy pair` to authorize the client.
 
 ## Update your client with this release
 
-0.7.1 is about the session list. You can hide a chat from the roster or from
-Status and undo it, a hidden chat stays hidden on your other devices paired to
-the same Server, and a compact filter panel adds **Show hidden** plus custom
-activity windows such as the last two or three days. On phones the composer
-sits just above the keyboard instead of leaving a keyboard-sized gap under it.
+0.7.2 gives the app its own update screen. Settings → Updates checks this
+device and each saved server separately, without changing the active
+connection, and lists the named components, the exact versions and anything
+that interrupted the check before you install what you select. Prepared
+downloads and server jobs survive an app restart or a lost response: reopen
+Updates and choose **Continue remaining updates**. Server owners can review
+which devices may run updates and revoke that permission later.
 
-Hiding chats needs a 0.7.1 Server, which now owns session visibility and
-carries it to a session's subagents; against an older Server the hide action
-reads as unavailable. Custom day counts in the filter panel need that Server
-too, and fall back to showing everything on an older one. The broker contract
-moves to revision 33 and the minimum accepted client revision stays 17, so a
-0.6.x or 0.7.0 native client still drives a 0.7.1 Server. The web client ships
-with the broker and always matches it.
+A desktop update in this release still ends in a **Download**, or in
+`cosy update` for a desktop the all-in-one installer placed. The staged
+handoff that would replace the app in place exists, but a release advertises
+internal installation only for a platform where replacement, relaunch and
+recovery have been accepted with the installed helper, and 0.7.2 advertises
+none. Existing desktop apps need one manual upgrade to acquire the new screen;
+on macOS, running the new signed all-in-one installer once registers the
+independent user helper for a later release to use.
 
-Update the Server first with `cosy update`; the app then offers the 0.7.1
-download, and on an installer-owned desktop `cosy update` takes the client too
-once you have quit it. Nothing else about the Server moves in this release: Bun
-stays at 1.3.14 and npm distribution stays retired at 0.6.6.
+The broker contract moves to revision 34 and the minimum accepted client
+revision stays 17, so a 0.6.x or 0.7.x native client still drives a 0.7.2
+Server. Messages sent from other Claude sessions and subagent reports need both
+the 0.7.2 Server and a 0.7.2 client to appear as a collapsible 'Message from
+…' row; an older client draws the same delivery as an ordinary event row.
+Nothing else about the Server moves in this release: Bun stays at 1.3.14 and
+npm distribution stays retired at 0.6.6.
 
-## What's new in 0.7.1
+Update the Server first with `cosy update`; the app then offers the 0.7.2
+download.
 
-- Hide and unhide a chat from the roster or Status, with Undo. Visibility syncs
-  across devices on the same Server and covers a session's subagents, while an
-  open tab, agent activity, notifications and approval alerts keep working for
-  a hidden session.
-- A compact roster filter panel with **Show hidden** and custom activity
-  windows, so the last two or three days is a choice next to seven and thirty.
-- Session activity cards show compact summaries with scripts in expandable
-  details, and Status and chat share dismissal and clear-finished controls.
-- Session information opens in a centered dialog with more room for its title.
-- Settings → General → Storage now houses device-wide session cache cleanup.
-  Status drops Duplicate and Copy transcript and simplifies its cache row;
-  per-message copy, Fork and transcript export stay where they were.
-- On phones the composer stays just above the keyboard. Tapping Send keeps the
-  editor focused, and a long draft uses the available height instead of
-  crowding out the conversation.
+## What's new in 0.7.2
 
-Hiding chats and the custom day windows are in the Server; the rest is in the
-app.
+- Settings → Updates checks this app and your saved servers without switching
+  to them, shows what each one would install and what got in the way, and lets
+  you run only the parts you select. Interrupted work is recoverable, and a
+  server that can only be updated by hand reports the available version and the
+  installer to run.
+- A local desktop update helper carries the in-place install path: it stages
+  the signed build, saves drafts, waits for the app to exit fully, replaces it
+  and verifies the reopened build. Continuing an update reconciles an
+  interrupted helper job before it retries, and a failure after exit reopens
+  the unchanged app only when its integrity and stopped state can be
+  confirmed. Nothing installs in place until a signed release enables the
+  platform.
+- Messages from other Claude sessions and subagent reports collapse into a
+  'Message from …' row instead of a queued user message, stay visible in
+  Final-only mode, and carry their own footer with completion and error
+  notifications.
+- Compact sessions keep open and pinned files in a slim chat/file strip, and
+  file links and browser selections share one reader. Supported documents open
+  rendered by default and remember an explicit reader choice.
+- Selection controls use anchored popups on phones and desktop, with quieter
+  settings rows and borderless dark surfaces.
+- Display settings add a default tool-call visibility with persistent
+  per-session overrides, kept separate from assistant-message filtering.
+- Overview shows Time, Tokens, Cost and Messages in a two-column mobile grid,
+  and narrow session navigation uses tighter spacing around the menu, Overview
+  and session tabs while keeping usable touch targets.
+- Refused-send details scroll inside the narrow chat reading area, so the draft
+  and the Send button stay reachable in a short phone window.
 
 ## Downloads
 
