@@ -501,12 +501,10 @@ Widget _eventMessageRenderer(BuildContext context, AgentMessage message) {
   // labelled for a human. Every other event keeps the generic card below, so an
   // unknown or future event still renders honestly rather than disappearing.
   //
-  // Steering is checked first because it is the user's own words arriving by an
-  // unusual route. An ordinary event row hides that the message reached the
-  // agent at
-  // all, which is the one thing a reader mid-turn needs to know, and a user
-  // bubble
-  // would claim it was typed at that terminal.
+  // Steering is checked before generic events because it carries the user's
+  // words through an unusual route. Its dedicated row shows that the message
+  // reached the agent without claiming it was typed at that terminal.
+  if (message.peerMessage != null) return _PeerMessageRow(message: message);
   if (message.steeringMessage != null) {
     return _SteeringRow(message: message);
   }

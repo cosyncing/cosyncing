@@ -1407,7 +1407,7 @@ _stitchConversationBoundary(
     turnKey: left.turnKey,
     openReason: left.openReason,
     userMessage: left.userMessage,
-    continuationNotice: left.continuationNotice,
+    continuationOpener: left.continuationOpener,
     content: content,
     modelText: mergedModelText,
     distinctToolCallCount:
@@ -1991,6 +1991,12 @@ String? stableTranscriptMessageKey(AgentMessage message) {
     final payload = message.raw['payload'];
     final steeringKey = payload is Map ? nonEmpty(payload['key']) : null;
     if (steeringKey != null) return '$typeKey:steering:$steeringKey';
+  }
+  // Peer deliveries keep their native identity across live/history replay.
+  if (message.eventName == kPeerMessageEvent) {
+    final payload = message.raw['payload'];
+    final peerKey = payload is Map ? nonEmpty(payload['key']) : null;
+    if (peerKey != null) return '$typeKey:peer:$peerKey';
   }
   final requestId = nonEmpty(message.raw['requestId']);
   if (requestId != null) {

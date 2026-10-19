@@ -1823,5 +1823,26 @@
   "fileCloseUnpinned": "고정되지 않은 파일 모두 닫기",
   "fileMoveEarlier": "앞으로 이동",
   "fileMoveLater": "뒤로 이동",
-  "fileViewerRenderedFailed": "미리 보기를 사용할 수 없어 소스를 표시합니다."
+  "fileViewerRenderedFailed": "미리 보기를 사용할 수 없어 소스를 표시합니다.",
+  "transcriptPeerMessageFrom": "{name}의 메시지",
+  "transcriptPeerReportFrom": "{name}의 보고서",
+  "transcriptPeerAnotherSession": "다른 세션",
+  "transcriptPeerSubagent": "하위 에이전트",
+  "transcriptPeerSessionOrigin": "다른 세션",
+  "transcriptPeerAgentOrigin": "하위 에이전트",
+  "transcriptPeerEmptyReport": "보고서 내용이 없습니다.",
+  "@transcriptPeerMessageFrom": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "@transcriptPeerReportFrom": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  }
 }

@@ -1823,5 +1823,26 @@
   "fileCloseUnpinned": "未固定のファイルをすべて閉じる",
   "fileMoveEarlier": "前へ移動",
   "fileMoveLater": "後ろへ移動",
-  "fileViewerRenderedFailed": "プレビューを表示できません。ソースを表示しています。"
+  "fileViewerRenderedFailed": "プレビューを表示できません。ソースを表示しています。",
+  "transcriptPeerMessageFrom": "{name}からのメッセージ",
+  "transcriptPeerReportFrom": "{name}からの報告",
+  "transcriptPeerAnotherSession": "別のセッション",
+  "transcriptPeerSubagent": "サブエージェント",
+  "transcriptPeerSessionOrigin": "別のセッション",
+  "transcriptPeerAgentOrigin": "サブエージェント",
+  "transcriptPeerEmptyReport": "レポートの内容はありません。",
+  "@transcriptPeerMessageFrom": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "@transcriptPeerReportFrom": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  }
 }

@@ -28,6 +28,10 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - `cosy status` and the end of `cosy update` use colour: green for ready and
   running, red for stopped, failed or unreachable, yellow for warnings. Output
   stays plain when piped, under `NO_COLOR`, and on a dumb terminal.
+- Messages from other Claude sessions and subagent reports now show as a
+  collapsible 'Message from …' row instead of a queued user message. They remain
+  visible in Final-only mode. Peer-woken turns have their own footer and send
+  completion and error notifications.
 
 - Overview shows Time, Tokens, Cost and Messages in a two-column mobile grid.
 - Compact sessions retain open and pinned files in a slim chat/file strip;

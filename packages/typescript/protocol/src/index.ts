@@ -1463,6 +1463,26 @@ export interface UnknownTranscriptTypePayload {
  */
 export const STEERING_MESSAGE_EVENT = 'steering.message';
 
+/** A provenance-stamped delivery from another session or subagent. */
+export const PEER_MESSAGE_EVENT = 'peer.message';
+export const PEER_MESSAGE_BODY_MAX_UNITS = 64_000;
+
+/** Payload carried by a {@link PEER_MESSAGE_EVENT} event. */
+export interface PeerMessagePayload {
+  senderKind: 'session' | 'agent';
+  /** Readable sender name, never a socket path. */
+  from?: string;
+  /** Unwrapped material, with recognized harness framing removed. An empty
+   * hand-back remains a report delivery and retains its turn boundary. */
+  body: string;
+  truncated?: boolean;
+  handback?: boolean;
+  /** Native delivery uuid for replay deduplication. */
+  key?: string;
+  /** Present only when this delivery opened a turn. */
+  turnId?: string;
+}
+
 /** Payload carried by a {@link STEERING_MESSAGE_EVENT} event. */
 export interface SteeringMessagePayload {
   /** What the user sent. */
@@ -1484,9 +1504,9 @@ export interface SteeringMessagePayload {
  * The result is always well-formed UTF-16 — see the surrogate backoff below —
  * so a bound measured in code units never produces a broken character.
  */
-export function boundContextBody(text: string): { body: string; truncated?: boolean } {
-  if (text.length <= CONTEXT_INJECTION_BODY_MAX_UNITS) return { body: text };
-  let end = CONTEXT_INJECTION_BODY_MAX_UNITS;
+export function boundContextBody(text: string, max = CONTEXT_INJECTION_BODY_MAX_UNITS): { body: string; truncated?: boolean } {
+  if (text.length <= max) return { body: text };
+  let end = max;
   // Never cut BETWEEN the halves of a surrogate pair. JavaScript string indices
   // are UTF-16 code units, so an emoji occupies two of them, and a slice that
   // lands in the middle keeps a lone high surrogate — not a character at all,
@@ -2124,7 +2144,8 @@ export type ClientMessageKind = (typeof BROKER_CLIENT_MESSAGE_KINDS)[number];
  * code is added, so the surface hash is where revision 28 left it; the number
  * moves because the DTOs did. The minimum client revision stays at 17: an older
  * client ignores every new field, draws the card it draws today, and draws the
- * two events as ordinary event rows.
+ * two events as ordinary event rows. Revision 34 follows the same free-form
+ * event convention for `peer.message`; its DTO and compatibility note are below.
  *
  * `question-resolved` gains `answers`: the answer the question closed with,
  * one row per question in the card's order, in the shape the app's `answer`
@@ -2141,7 +2162,11 @@ export type ClientMessageKind = (typeof BROKER_CLIENT_MESSAGE_KINDS)[number];
  */
 /** Revision 33 adds broker-persisted session visibility and its mutation route.
  * The optional metadata and route preserve the existing compatibility window. */
-export const BROKER_CONTRACT_REVISION = 33 as const;
+/** Revision 34 adds the peer.message constant and payload DTO only. Event names
+ * remain free-form: the surface hash and minimum client (17) are unchanged.
+ * A compatible revision-33 client renders an ordinary event card. Revision 32
+ * and earlier clients are read-only under the one-revision overlap window. */
+export const BROKER_CONTRACT_REVISION = 34 as const;
 // Revision 17 removes public artifact bearer capabilities. The client-first
 // release sequence must complete before this broker ships; older clients do not
 // authenticate artifact downloads and therefore must fail closed as read-only.

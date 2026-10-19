@@ -64,7 +64,12 @@ way. An asynchronous question (`blocking: false`) raises no event. A finished
 turn or goal notifies once per occurrence: turns dedupe on the adapter's run
 key, and goals on their key plus start time. A run the tool opened itself
 (`origin: 'background'`, such as Claude continuing after a background task
-reported) never notifies.
+reported) stays silent. A Claude continuation later identified from native peer
+provenance becomes an ordinary turn and can notify, even if the identification
+arrives after its result. The policy keeps only the most recent background start
+per session for that correction; a newer run, session end, or evidence older than
+24 hours makes it ineligible. A terminal frame without an observed start cannot
+raise an outcome.
 
 Every event alerts once. Nothing is re-alerted on a timer: an unanswered
 request stays in the inbox until it is answered, and an unchanged condition

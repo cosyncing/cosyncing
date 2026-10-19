@@ -23,6 +23,9 @@ const String kContextInjectionEvent = 'context.injection';
 /// message the user never typed in that terminal.
 const String kSteeringMessageEvent = 'steering.message';
 
+/// A provenance-stamped session message or subagent report.
+const String kPeerMessageEvent = 'peer.message';
+
 /// Canonical `AgentMessage.type` values emitted by the broker.
 ///
 /// See `docs/protocol/contract-sync.md`.
@@ -1345,6 +1348,45 @@ extension ToolAgentMessage on AgentMessage {
       source: source,
       body: body,
       truncated: payload['truncated'] == true,
+    );
+  }
+
+  /// Peer delivery, with a turn id only for a delivery that opened a turn.
+  /// An empty hand-back retains its report row and turn boundary; other empty
+  /// deliveries have no content to render.
+  ({
+    String senderKind,
+    String? from,
+    String body,
+    bool truncated,
+    bool handback,
+    String? key,
+    String? turnId,
+  })?
+  get peerMessage {
+    if (eventName != kPeerMessageEvent) return null;
+    final payload = raw['payload'];
+    if (payload is! Map) return null;
+    final body = payload['body'];
+    final senderKind = payload['senderKind'];
+    if (body is! String ||
+        (body.trim().isEmpty && payload['handback'] != true) ||
+        (senderKind != 'session' && senderKind != 'agent')) {
+      return null;
+    }
+    String? optional(String field) {
+      final value = payload[field];
+      return value is String && value.trim().isNotEmpty ? value : null;
+    }
+
+    return (
+      senderKind: senderKind as String,
+      from: optional('from'),
+      body: body,
+      truncated: payload['truncated'] == true,
+      handback: payload['handback'] == true,
+      key: optional('key'),
+      turnId: optional('turnId'),
     );
   }
 

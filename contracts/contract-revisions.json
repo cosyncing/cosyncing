@@ -206,6 +206,13 @@
       "minimumClientRevision": 17,
       "clientMinimumBrokerRevision": 16,
       "change": "Add broker-owned session visibility with inherited subagent hiding, durable revisions and an authenticated visibility mutation. Roster windows accept custom day counts. Optional metadata preserves older client compatibility."
+    },
+    {
+      "revision": 34,
+      "surfaceHash": "fnv1a32:0766c8f4",
+      "minimumClientRevision": 17,
+      "clientMinimumBrokerRevision": 16,
+      "change": "Add the peer.message event constant and payload DTO for provenance-stamped session messages and subagent reports. DTO only: the surface hash is unchanged and the minimum client remains 17. Compatible revision-33 clients render an ordinary event card; revision-32 and earlier clients are read-only under the one-revision overlap window."
     }
   ]
 }

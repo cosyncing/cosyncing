@@ -301,6 +301,54 @@ void main() {
       expectNoResolutionRows(ToolDisplayMode.finalMessagesOnly);
     });
   });
+  test('Final-only preserves incoming peer and steering messages', () {
+    final messages = [
+      _message('user-message', {'text': 'Start'}),
+      _message('model-output', {'text': 'Earlier', 'final': true}),
+      _message('event', {
+        'name': kPeerMessageEvent,
+        'payload': {
+          'senderKind': 'session',
+          'body': 'Please review',
+          'key': 'wake',
+          'turnId': 'wake',
+        },
+      }),
+      _message('event', {
+        'name': kPeerMessageEvent,
+        'payload': {
+          'senderKind': 'agent',
+          'body': 'Mid-turn report',
+          'key': 'mid',
+        },
+      }),
+      _message('event', {
+        'name': kSteeringMessageEvent,
+        'payload': {
+          'text': 'Keep going',
+          'source': 'cosyncing-claude',
+          'key': 'steering',
+        },
+      }),
+      _message('model-output', {'text': 'Final answer', 'final': true}),
+    ];
+    final entries =
+        buildSessionTranscriptDisplayEntries(
+              messages: messages,
+              mode: ToolDisplayMode.finalMessagesOnly,
+            )
+            .whereType<MessageTranscriptDisplayEntry>()
+            .map((entry) => entry.message)
+            .toList();
+    expect(
+      entries.where((message) => message.peerMessage != null),
+      hasLength(2),
+    );
+    expect(
+      entries.where((message) => message.steeringMessage != null),
+      hasLength(1),
+    );
+  });
   group('internal bookkeeping', () {
     test('metadata updates never become transcript rows', () {
       final entries = buildSessionTranscriptDisplayEntries(

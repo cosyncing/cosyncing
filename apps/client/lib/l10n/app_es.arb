@@ -1823,5 +1823,26 @@
   "fileCloseUnpinned": "Cerrar todos los archivos sin fijar",
   "fileMoveEarlier": "Mover antes",
   "fileMoveLater": "Mover después",
-  "fileViewerRenderedFailed": "Vista previa no disponible. Se muestra el código fuente."
+  "fileViewerRenderedFailed": "Vista previa no disponible. Se muestra el código fuente.",
+  "transcriptPeerMessageFrom": "Mensaje de {name}",
+  "transcriptPeerReportFrom": "Informe de {name}",
+  "transcriptPeerAnotherSession": "otra sesión",
+  "transcriptPeerSubagent": "un subagente",
+  "transcriptPeerSessionOrigin": "Otra sesión",
+  "transcriptPeerAgentOrigin": "Subagente",
+  "transcriptPeerEmptyReport": "El informe no tiene contenido.",
+  "@transcriptPeerMessageFrom": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "@transcriptPeerReportFrom": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  }
 }
