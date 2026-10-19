@@ -98,6 +98,12 @@ void FlutterWindow::OnDestroy() {
 void FlutterWindow::HandleWindowCall(
     const flutter::MethodCall<flutter::EncodableValue>& call,
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+  if (call.method_name() == "quitForUpdate") {
+    result->Success();
+    quitting_ = true;
+    PostMessage(GetHandle(), WM_CLOSE, 0, 0);
+    return;
+  }
   if (call.method_name() == "raise") {
     result->Success(flutter::EncodableValue(ShowAndRaise()));
     return;

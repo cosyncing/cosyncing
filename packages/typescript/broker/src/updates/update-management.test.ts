@@ -260,7 +260,7 @@ test('the channel answer names an immutable release, and the inventory reports t
   expect(rows.broker?.canApply).toBe(true);
   // No trusted native handoff exists in this build, so the app row says so instead of
   // letting the UI infer support from the operating system name.
-  expect(rows.client?.blockers.map((blocker) => blocker.code)).toContain('helper-missing');
+  expect(rows.client?.blockers.map((blocker) => blocker.code)).toContain('desktop-out-of-scope');
   expect(rows.client?.canApply).toBe(false);
 });
 
@@ -292,12 +292,11 @@ test('preparation downloads and authenticates the pinned artifact without stoppi
   const staged = readdirSync(join(h.stagingRoot, job.jobId));
   expect(staged).toContain('prepared.json');
   const manifest = JSON.parse(readFileSync(join(h.stagingRoot, job.jobId, 'prepared.json'), 'utf8')) as {
-    releaseId: string; digest: string; bytes: number; component: string;
+    releaseId: string; digest: string; bytes: number; component: string; name: string;
   };
   expect(manifest.releaseId).toBe(releaseIdFor(R1.version, R1.sourceCommit));
   expect(manifest.component).toBe('broker');
-  const artifact = staged.find((name) => name !== 'prepared.json')!;
-  const bytes = readFileSync(join(h.stagingRoot, job.jobId, artifact));
+  const bytes = readFileSync(join(h.stagingRoot, job.jobId, manifest.name));
   expect(createHash('sha256').update(bytes).digest('hex')).toBe(manifest.digest);
   expect(manifest.bytes).toBe(bytes.byteLength);
 });

@@ -459,6 +459,8 @@ export interface UpgradeDependencies {
    * A pin that does not match the served release is a refusal, never a substitution.
    */
   pinnedReleaseId?: string;
+  /** Re-check the durable job and live narrow grant immediately before service disruption. */
+  authorizeCommit?: () => void;
   service?: UpgradeServiceController;
   /** Told as each long step starts, so a terminal can say what the run is waiting on. */
   progress?: (event: UpgradeProgressEvent) => void;
@@ -2100,6 +2102,14 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
     });
     try {
       serviceWasActive = dependencies.service ? (await dependencies.service.inspect()).active : false;
+      dependencies.authorizeCommit?.();
+    } catch (error) {
+      try { unlinkRegular(stagingPath); } catch { /* preserve the authorization failure */ }
+      abandonRuntime();
+      return result('blocked', 3, error instanceof Error ? error.message : 'update-authorization-failed',
+        'The reviewed update is no longer authorized. The installed build was not changed.', fromVersion, recovered, toVersion);
+    }
+    try {
       journalAt('prepared');
       if (dependencies.faultAfter === 'journal-prepared') throw new Error('upgrade-fixture-interrupted');
       if (serviceWasActive) progress({ step: 'restarting', version: toVersion });

@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { desktopBridgeIsOwned, desktopBridgePaths, removeDesktopBridge } from '../updates/desktop-update-bridge.ts';
+import { DESKTOP_HELPER_RESOURCE_ID } from '../updates/desktop-updater-support.ts';
 import {
   existsSync,
   lstatSync,
@@ -2476,7 +2478,15 @@ export async function inspectUninstall(options: LifecycleBaseOptions & { purgeDa
   else if (claude.status === 'unreadable') warnings.push({ detailCode: 'claude-settings-unreadable-preserved', summary: 'Unreadable Claude settings will be preserved.' });
   if (env.install.committed) {
     for (const item of env.install.state.resources) {
-      if (item.id === 'broker-alias') {
+      if (item.id === DESKTOP_HELPER_RESOURCE_ID) {
+        if (item.target === desktopBridgePaths(env.home).root
+            && item.ownership.marker === 'cosyncing:desktop-helper:v1'
+            && desktopBridgeIsOwned(env.home, item.ownership.installedSha256)) {
+          actions.push({ id: 'desktop-helper.remove', target: item.target, legacy: false });
+        } else {
+          warnings.push({ detailCode: 'desktop-helper-preserved', summary: 'The desktop update helper changed and will be preserved.' });
+        }
+      } else if (item.id === 'broker-alias') {
         const expected = join(env.home, 'bin', PRODUCT_IDENTITY.aliasBinary);
         let liveAliasMatches = !lexists(item.target);
         if (!liveAliasMatches) {
@@ -2806,7 +2816,11 @@ export async function runUninstall(options: UninstallOptions): Promise<Lifecycle
     retainedResources = env.install.committed ? [...env.install.state.resources] : [];
     for (const action of plan.actions) {
       try {
-        if (action.id === 'service.remove') {
+        if (action.id === 'desktop-helper.remove') {
+          const resource = retainedResources.find((r) => r.id === DESKTOP_HELPER_RESOURCE_ID);
+          removeDesktopBridge(env.home, resource?.ownership.installedSha256);
+          retainedResources = retainedResources.filter((r) => r.id !== DESKTOP_HELPER_RESOURCE_ID);
+        } else if (action.id === 'service.remove') {
           const current = await env.provider!.inspect();
           if (current.definition !== 'current' || current.environment !== 'current') {
             throw new Error('service-drift');

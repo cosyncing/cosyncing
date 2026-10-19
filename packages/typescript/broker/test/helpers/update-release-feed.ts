@@ -134,11 +134,12 @@ function feedJsApp(version: string): ReleaseJavaScriptApp {
 }
 
 function feedWebSidecar(version: string): ReleaseWebSidecar {
+  const bytes = artifactBytes('web', version);
   return {
     name: 'cosyncing-web-app.tar.gz',
     mount: '/cosy/',
-    size: 1_024,
-    sha256: digest(`web-${version}`),
+    size: bytes.length,
+    sha256: digestBytes(bytes),
     url: `${FEED_BASE}/${version}/cosyncing-web-app.tar.gz`,
     buildId: digest(`build-${version}`, 16),
     cacheManifestSha256: digest(`cache-${version}`),
@@ -229,6 +230,7 @@ export function createFakeReleaseFeed(options: {
       artifactBodies.set(artifact.url, artifactBytes(`artifact-${artifact.target}`, release.version));
     }
     if (release.jsApp) artifactBodies.set(release.jsApp.url, artifactBytes('jsapp', release.version));
+    if (release.webApp) artifactBodies.set(release.webApp.url, artifactBytes('web', release.version));
   }
   const requests = { get manifests() { return manifests; }, get signatures() { return signatures; }, get total() { return manifests + signatures; } };
 

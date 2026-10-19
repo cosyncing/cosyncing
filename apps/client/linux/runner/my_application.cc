@@ -14,6 +14,18 @@ struct _MyApplication {
 
 G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
 
+static void window_method_call(FlMethodChannel* channel, FlMethodCall* call,
+                               gpointer user_data) {
+  MyApplication* self = MY_APPLICATION(user_data);
+  const gchar* method = fl_method_call_get_name(call);
+  if (g_strcmp0(method, "quitForUpdate") == 0) {
+    fl_method_call_respond_success(call, nullptr, nullptr);
+    g_application_quit(G_APPLICATION(self));
+  } else {
+    fl_method_call_respond_not_implemented(call, nullptr);
+  }
+}
+
 // Called when first Flutter frame received.
 static void first_frame_cb(MyApplication* self, FlView* view) {
   gtk_widget_show(gtk_widget_get_toplevel(GTK_WIDGET(view)));
@@ -74,6 +86,13 @@ static void my_application_activate(GApplication* application) {
   gtk_widget_realize(GTK_WIDGET(view));
 
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
+
+  g_autoptr(FlStandardMethodCodec) codec = fl_standard_method_codec_new();
+  g_autoptr(FlMethodChannel) channel = fl_method_channel_new(
+      fl_engine_get_binary_messenger(fl_view_get_engine(view)),
+      "com.cosyncing.client/window", FL_METHOD_CODEC(codec));
+  fl_method_channel_set_method_call_handler(channel, window_method_call,
+                                           g_object_ref(self), g_object_unref);
 
   gtk_widget_grab_focus(GTK_WIDGET(view));
 }

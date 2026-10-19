@@ -148,6 +148,7 @@ export interface CliDependencies {
     manifestUrl?: string;
     components?: readonly UpdateComponent[];
     pinnedReleaseId?: string;
+    preparedJobId?: string;
     interactive: boolean;
     invocation: string;
     stdout: CliWriter;
@@ -601,6 +602,7 @@ async function defaultRunUpgrade(options: {
   manifestUrl?: string;
   components?: readonly UpdateComponent[];
   pinnedReleaseId?: string;
+  preparedJobId?: string;
   interactive: boolean;
   invocation: string;
   stdout: CliWriter;
@@ -624,6 +626,22 @@ async function defaultRunUpgrade(options: {
     import('../updates/post-upgrade-check.ts'),
   ]);
   const home = (await import('../installation/setup-state.ts')).setupStateHome();
+  let prepared: ReturnType<typeof import('../updates/prepared-upgrade.ts')['preparedUpgradeInput']> | undefined;
+  if (options.preparedJobId) {
+    try {
+      prepared = (await import('../updates/prepared-upgrade.ts')).preparedUpgradeInput(home, options.preparedJobId);
+      if (prepared.pinnedReleaseId !== options.pinnedReleaseId
+          || options.components?.length !== 1 || options.components[0] !== 'broker') {
+        throw new Error('update-prepared-scope-mismatch');
+      }
+    } catch (error) {
+      const result = { schemaVersion: 1, status: 'blocked', exitCode: 2,
+        detailCode: error instanceof Error ? error.message : 'update-preparation-unreadable',
+        summary: 'The reviewed preparation could not be used. The installed build was not changed.' };
+      writeCommandResult(result, options.json, options.stdout, options.stderr);
+      return result;
+    }
+  }
   const setupState = (await import('../installation/setup-state.ts')).readSetupState(home);
   const service = (await import('../installation/setup-state.ts')).isDurableServiceChoice(setupState.serviceChoice)
     ? (() => {
@@ -666,6 +684,7 @@ async function defaultRunUpgrade(options: {
     ...(options.manifestUrl ? { manifestUrl: options.manifestUrl } : {}),
     ...(options.components ? { components: options.components } : {}),
     ...(options.pinnedReleaseId ? { pinnedReleaseId: options.pinnedReleaseId } : {}),
+    ...(prepared ?? {}),
     ...(service ? { service } : {}),
     // The whole run used to be silent until its last line. JSON output stays one document.
     ...(options.json ? {} : { progress: (event: Parameters<typeof postUpgrade.upgradeProgressText>[0]) => {
@@ -754,6 +773,32 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
   const command = invocationName(dependencies.invocation, applicationIdentity(buildInfo).applicationPath);
   const [rawRequested = 'help', ...args] = argv;
   const requested = rawRequested === 'update' ? 'upgrade' : rawRequested;
+
+  if (requested === 'client-update' || requested === 'client-update-bridge') {
+    const { runDesktopUpdateCommand } = await import('./desktop-update-command.ts');
+    const { setupStateHome } = await import('../installation/setup-state.ts');
+    const identity = applicationIdentity(buildInfo);
+    if (!identity.runtimePath || identity.distribution !== 'bootstrap-js') {
+      stdout.write(`${JSON.stringify({ ok: false, detailCode: 'desktop-update-setup-required' })}\n`);
+      return 1;
+    }
+    const deps = { context: { home: setupStateHome() }, applicationPath: identity.applicationPath,
+      runtimePath: identity.runtimePath };
+    if (requested === 'client-update-bridge') {
+      if (args.length !== 0) return 2;
+      await (await import('../updates/desktop-update-bridge.ts')).startDesktopBridge(deps);
+      return 0;
+    }
+    if (args.length === 1 && args[0] === 'install-helper') {
+      try {
+        await (await import('../updates/desktop-update-bridge.ts')).installDesktopBridge(deps);
+        stdout.write(`${JSON.stringify({ ok: true })}\n`); return 0;
+      } catch {
+        stdout.write(`${JSON.stringify({ ok: false, detailCode: 'desktop-update-helper-setup-failed' })}\n`); return 1;
+      }
+    }
+    return runDesktopUpdateCommand(args, deps, stdout);
+  }
 
   if (requested === 'help' || requested === '--help' || requested === '-h') {
     if (args.length > 0) {
@@ -1184,6 +1229,7 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     let manifestUrl: string | undefined;
     let components: readonly UpdateComponent[] | undefined;
     let pinnedReleaseId: string | undefined;
+    let preparedJobId: string | undefined;
     for (let index = 0; index < args.length; index += 1) {
       const arg = args[index]!;
       if (arg === '--yes' && !yes) { yes = true; continue; }
@@ -1214,6 +1260,15 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
         index += 1;
         continue;
       }
+      if (arg === '--prepared-job' && preparedJobId === undefined) {
+        const value = args[++index];
+        if (!value || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) {
+          stderr.write(`${command} upgrade: --prepared-job requires a durable job id\n`);
+          return 2;
+        }
+        preparedJobId = value;
+        continue;
+      }
       if (arg === '--manifest' && manifestUrl === undefined) {
         const value = args[index + 1];
         try {
@@ -1228,6 +1283,10 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
         continue;
       }
       stderr.write(`${command} upgrade: unknown or duplicate option ${JSON.stringify(arg)}\n`);
+      return 2;
+    }
+    if (preparedJobId && (!pinnedReleaseId || components?.length !== 1 || components[0] !== 'broker')) {
+      stderr.write(`${command} upgrade: --prepared-job requires a pinned broker-only operation\n`);
       return 2;
     }
     if (!yes && !process.stdin.isTTY && !dependencies.runUpgrade) {
@@ -1248,6 +1307,7 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
         ...(manifestUrl ? { manifestUrl } : {}),
         ...(components ? { components } : {}),
         ...(pinnedReleaseId ? { pinnedReleaseId } : {}),
+        ...(preparedJobId ? { preparedJobId } : {}),
         interactive: process.stdin.isTTY,
         invocation: command,
         stdout,

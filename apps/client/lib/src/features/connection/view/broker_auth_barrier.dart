@@ -1,8 +1,11 @@
+import 'package:cosyncing_client/l10n/app_localizations.dart';
+import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/features/connection/controller/broker_gate_controller.dart';
 import 'package:cosyncing_client/src/features/connection/model/broker_gate_state.dart';
 import 'package:cosyncing_client/src/features/connection/view/broker_connection_gate.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 /// Blocks the entire UI while the broker has refused this device's credential.
 ///
@@ -27,10 +30,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 /// its blocking/fall-through semantics stay pinned to production.
 class BrokerAuthBarrier extends ConsumerWidget {
   /// Creates the barrier around [child].
-  const BrokerAuthBarrier({required this.child, super.key});
+  const BrokerAuthBarrier({required this.child, this.router, super.key});
 
   /// The whole routed app surface this barrier can replace.
   final Widget? child;
+
+  /// Local update management remains reachable after a remote credential fails.
+  final GoRouter? router;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -40,6 +46,19 @@ class BrokerAuthBarrier extends ConsumerWidget {
     if (gate == null || gate.status != BrokerGateStatus.unauthorized) {
       return body;
     }
+    final routes = router;
+    if (routes != null) {
+      return ValueListenableBuilder<RouteInformation>(
+        valueListenable: routes.routeInformationProvider,
+        builder: (context, route, _) => route.uri.path == updatesRoute
+            ? body
+            : _gate(context, onUpdates: () => routes.go(updatesRoute)),
+      );
+    }
+    return _gate(context);
+  }
+
+  Widget _gate(BuildContext context, {VoidCallback? onUpdates}) {
     return Scaffold(
       key: const Key('broker-auth-barrier'),
       body: SafeArea(
@@ -48,7 +67,17 @@ class BrokerAuthBarrier extends ConsumerWidget {
             padding: const EdgeInsets.all(16),
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 560),
-              child: const BrokerConnectionGate(),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const BrokerConnectionGate(),
+                  if (onUpdates != null)
+                    TextButton(
+                      onPressed: onUpdates,
+                      child: Text(AppLocalizations.of(context).updatesTitle),
+                    ),
+                ],
+              ),
             ),
           ),
         ),

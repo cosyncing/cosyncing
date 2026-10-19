@@ -108,6 +108,23 @@ class OpenSessionsController extends AsyncNotifier<OpenSessionsState> {
 
   OpenSessionsStore get _store => ref.read(openSessionsStoreProvider);
 
+  /// Makes every mounted composer's exact value durable before a full app exit.
+  Future<void> flushDraftsForUpdate() async {
+    final source = _sourceKey;
+    for (final session in List<SessionRef>.of(_current.refs)) {
+      final provider = sessionDetailControllerProvider(
+        SessionDetailKey(tool: session.tool, sessionId: session.id),
+      );
+      if (!ref.exists(provider)) continue;
+      final flush = ref.read(provider.notifier).flushStagedLocalDraft();
+      if (flush != null && !(await flush).isDurable) {
+        throw StateError('update-draft-not-saved');
+      }
+      if (_sourceKey != source) throw StateError('update-source-changed');
+    }
+    await _operationTail;
+  }
+
   @override
   Future<OpenSessionsState> build() async {
     final profile = ref.watch(activeBrokerProfileProvider);

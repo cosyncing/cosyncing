@@ -126,9 +126,7 @@ class BrokerClient {
   ///
   /// `GET /api/health`
   Future<HealthResponse> getHealth() async {
-    final response = await _get<Map<String, dynamic>>(
-      _resolver.healthEndpoint,
-    );
+    final response = await _get<Map<String, dynamic>>(_resolver.healthEndpoint);
     return HealthResponse.fromJson(response);
   }
 
@@ -242,6 +240,143 @@ class BrokerClient {
     return BrokerUpdateTriggerResponse.fromJson(response);
   }
 
+  /// Sanitized inventory; usable independently of session compatibility.
+  Future<BrokerUpdateInventory> getUpdateInventory({
+    bool refresh = false,
+  }) async {
+    final json = await _get<Map<String, dynamic>>(
+      '${_resolver.baseUrl}/api/broker/updates${refresh ? '?refresh=1' : ''}',
+      receiveTimeout: const Duration(seconds: 20),
+    );
+    return BrokerUpdateInventory.fromJson(
+      json['inventory'] as Map<String, dynamic>,
+    );
+  }
+
+  /// Checks the signed channel without preparing or installing anything.
+  Future<BrokerUpdateCheck> checkUpdates() async {
+    final json = await _get<Map<String, dynamic>>(
+      '${_resolver.baseUrl}/api/broker/updates/check',
+      receiveTimeout: const Duration(seconds: 20),
+    );
+    return BrokerUpdateCheck.fromJson(json['check'] as Map<String, dynamic>);
+  }
+
+  /// Reviews one immutable server-only target. It never changes a host desktop.
+  Future<BrokerUpdatePlan> planUpdate({
+    required String releaseId,
+    required UpdateBuildIdentity expected,
+    required Map<String, dynamic> clientContract,
+    List<String> acknowledgements = const [],
+  }) async {
+    final json = await _post<Map<String, dynamic>>(
+      '${_resolver.baseUrl}/api/broker/updates/plans',
+      receiveTimeout: const Duration(seconds: 30),
+      data: {
+        'releaseId': releaseId,
+        'components': ['broker'],
+        'expected': expected.toJson(),
+        'clientContract': clientContract,
+        'acknowledgements': acknowledgements,
+      },
+    );
+    return BrokerUpdatePlan.fromJson(json['plan'] as Map<String, dynamic>);
+  }
+
+  /// Idempotent preparation; the job waits at ready until explicitly applied.
+  Future<BrokerUpdateJob> prepareUpdate({
+    required String planId,
+    required String idempotencyKey,
+  }) async => _updateJobResponse(
+    await _post<Map<String, dynamic>>(
+      '${_resolver.baseUrl}/api/broker/updates/jobs',
+      data: {'planId': planId, 'idempotencyKey': idempotencyKey},
+      receiveTimeout: const Duration(minutes: 10),
+    ),
+  );
+
+  /// Revalidates authority and the target before committing a ready job.
+  Future<BrokerUpdateJob> applyUpdate({
+    required String jobId,
+    required String idempotencyKey,
+  }) async => _updateJobResponse(
+    await _post<Map<String, dynamic>>(
+      '${_resolver.baseUrl}/api/broker/updates/jobs/${Uri.encodeComponent(jobId)}/apply',
+      receiveTimeout: const Duration(seconds: 30),
+      data: {'idempotencyKey': idempotencyKey},
+    ),
+  );
+
+  /// Reads durable progress after a lost response or server restart.
+  Future<BrokerUpdateJob> getUpdateJob(
+    String jobId,
+  ) async => _updateJobResponse(
+    await _get<Map<String, dynamic>>(
+      '${_resolver.baseUrl}/api/broker/updates/jobs/${Uri.encodeComponent(jobId)}',
+      receiveTimeout: const Duration(seconds: 20),
+    ),
+  );
+
+  /// Cancels only before a safe commit boundary.
+  Future<BrokerUpdateJob> cancelUpdateJob(
+    String jobId,
+  ) async => _updateJobResponse(
+    await _post<Map<String, dynamic>>(
+      '${_resolver.baseUrl}/api/broker/updates/jobs/${Uri.encodeComponent(jobId)}/cancel',
+      receiveTimeout: const Duration(seconds: 20),
+      data: const <String, dynamic>{},
+    ),
+  );
+
+  /// Sanitized terminal outcomes for the history view.
+  Future<List<BrokerUpdateHistoryEntry>> getUpdateHistory() async {
+    final json = await _get<Map<String, dynamic>>(
+      '${_resolver.baseUrl}/api/broker/updates/history',
+      receiveTimeout: const Duration(seconds: 20),
+    );
+    final rows = (json['history'] as List<dynamic>)
+        .cast<Map<String, dynamic>>();
+    return rows.map(BrokerUpdateHistoryEntry.fromJson).toList();
+  }
+
+  /// Requests owner permission; this operation cannot grant itself authority.
+  Future<void> requestUpdatePermission() async {
+    await _post<Map<String, dynamic>>(
+      '${_resolver.baseUrl}/api/broker/update-grants/request',
+      receiveTimeout: const Duration(seconds: 20),
+      data: const <String, dynamic>{},
+    );
+  }
+
+  /// Owner-side requests and revocable grants.
+  Future<BrokerUpdateGrants> getUpdateGrants() async =>
+      BrokerUpdateGrants.fromJson(
+        await _get<Map<String, dynamic>>(
+          '${_resolver.baseUrl}/api/broker/update-grants',
+          receiveTimeout: const Duration(seconds: 20),
+        ),
+      );
+
+  /// Grants only the narrow server update permission to the named paired peer.
+  Future<void> grantUpdatePermission(String peerId) async {
+    await _post<Map<String, dynamic>>(
+      '${_resolver.baseUrl}/api/broker/update-grants',
+      receiveTimeout: const Duration(seconds: 20),
+      data: {'peerId': peerId},
+    );
+  }
+
+  /// Revokes a device's update authority, including pending commits.
+  Future<void> revokeUpdatePermission(String peerId) async {
+    await _delete<Map<String, dynamic>>(
+      '${_resolver.baseUrl}/api/broker/update-grants/${Uri.encodeComponent(peerId)}',
+      receiveTimeout: const Duration(seconds: 20),
+    );
+  }
+
+  BrokerUpdateJob _updateJobResponse(Map<String, dynamic> json) =>
+      BrokerUpdateJob.fromJson(json['job'] as Map<String, dynamic>);
+
   /// Restarts all broker-managed runtimes and broker process.
   ///
   /// `POST /api/broker/restart-all`
@@ -259,9 +394,7 @@ class BrokerClient {
   ///
   /// `GET /api/agents`
   Future<List<AgentInfo>> listAgents() async {
-    final response = await _get<List<dynamic>>(
-      _resolver.agentRosterEndpoint,
-    );
+    final response = await _get<List<dynamic>>(_resolver.agentRosterEndpoint);
     return response
         .map((e) => AgentInfo.fromJson(e as Map<String, dynamic>))
         .toList();
@@ -410,9 +543,7 @@ class BrokerClient {
   /// The Dio client carries no default timeout, so a superseded read that is
   /// merely ignored keeps its request and connection slot alive indefinitely.
   /// A canceled read throws [RequestCancelled].
-  Future<ScheduleListResponse> listSchedules({
-    CancelToken? cancelToken,
-  }) async {
+  Future<ScheduleListResponse> listSchedules({CancelToken? cancelToken}) async {
     final response = await _get<Map<String, dynamic>>(
       _resolver.schedulesEndpoint,
       cancelToken: cancelToken,
@@ -423,9 +554,7 @@ class BrokerClient {
   /// Creates an existing-session or new-session schedule.
   ///
   /// `POST /api/schedules`
-  Future<ScheduleCreateResponse> createSchedule(
-    ScheduleCreate request,
-  ) async {
+  Future<ScheduleCreateResponse> createSchedule(ScheduleCreate request) async {
     final response = await _post<Map<String, dynamic>>(
       _resolver.schedulesEndpoint,
       data: request.toJson(),
@@ -637,9 +766,7 @@ class BrokerClient {
   /// Revokes a wake-token registration by [deviceId].
   ///
   /// `DELETE /api/push/wake-tokens/:deviceId`
-  Future<PushWakeTokenRevokeResponse> revokeWakeToken(
-    String deviceId,
-  ) async {
+  Future<PushWakeTokenRevokeResponse> revokeWakeToken(String deviceId) async {
     final response = await _delete<Map<String, dynamic>>(
       _resolver.wakeTokenEndpoint(deviceId),
     );
@@ -737,10 +864,7 @@ class BrokerClient {
   ///
   /// [name] is the new display alias. Pass null to reset it. The broker never
   /// moves or renames [cwd].
-  Future<RenameProjectResponse> renameProject(
-    String cwd,
-    String? name,
-  ) async {
+  Future<RenameProjectResponse> renameProject(String cwd, String? name) async {
     final response = await _patch<Map<String, dynamic>>(
       _resolver.renameProjectEndpoint,
       data: {'cwd': cwd, 'name': name},
@@ -782,10 +906,7 @@ class BrokerClient {
   /// Clones a session.
   ///
   /// `POST /api/sessions/:tool/:id/clone`
-  Future<CloneSessionResponse> cloneSession(
-    String tool,
-    String id,
-  ) async {
+  Future<CloneSessionResponse> cloneSession(String tool, String id) async {
     final response = await _post<Map<String, dynamic>>(
       _resolver.cloneSessionEndpoint(tool, id),
     );
@@ -832,13 +953,10 @@ class BrokerClient {
     int? maxBytes,
   }) async {
     final response = await _get<Map<String, dynamic>>(
-      _appendQuery(
-        _resolver.fsReadEndpoint(tool, id),
-        {
-          if (path != null) 'path': path,
-          if (maxBytes != null) 'maxBytes': '$maxBytes',
-        },
-      ),
+      _appendQuery(_resolver.fsReadEndpoint(tool, id), {
+        if (path != null) 'path': path,
+        if (maxBytes != null) 'maxBytes': '$maxBytes',
+      }),
     );
     return FsReadResult.fromJson(response);
   }
@@ -864,10 +982,9 @@ class BrokerClient {
     String? path,
   }) async {
     final response = await _get<Map<String, dynamic>>(
-      _appendQuery(
-        _resolver.fsDirectoryEndpoint(tool, id),
-        {if (path != null) 'path': path},
-      ),
+      _appendQuery(_resolver.fsDirectoryEndpoint(tool, id), {
+        if (path != null) 'path': path,
+      }),
     );
     return FsDirectoryResult.fromJson(response);
   }
@@ -902,10 +1019,7 @@ class BrokerClient {
     }
     try {
       final response = await _dio.get<List<int>>(
-        _appendQuery(
-          _resolver.fsDownloadEndpoint(tool, id),
-          {'path': path},
-        ),
+        _appendQuery(_resolver.fsDownloadEndpoint(tool, id), {'path': path}),
         options: Options(
           responseType: ResponseType.bytes,
           headers: {
@@ -921,10 +1035,7 @@ class BrokerClient {
       );
       final headers = response.headers;
       final mime =
-          _firstAvailableHeader(
-            headers,
-            const ['x-cosyncing-mime-type'],
-          ) ??
+          _firstAvailableHeader(headers, const ['x-cosyncing-mime-type']) ??
           headers.value('content-type');
       return ArtifactDownload(
         bytes: response.data ?? <int>[],
@@ -976,10 +1087,7 @@ class BrokerClient {
     var overLimit = false;
     try {
       final response = await _dio.get<List<int>>(
-        _appendQuery(
-          _resolver.fsDownloadEndpoint(tool, id),
-          {'path': path},
-        ),
+        _appendQuery(_resolver.fsDownloadEndpoint(tool, id), {'path': path}),
         options: Options(
           responseType: ResponseType.bytes,
           headers: {
@@ -1002,9 +1110,7 @@ class BrokerClient {
         },
       );
       final headers = response.headers;
-      final advertised = _parseContentLength(
-        headers.value('content-length'),
-      );
+      final advertised = _parseContentLength(headers.value('content-length'));
       final bytes = response.data ?? <int>[];
       if ((advertised != null && advertised > maxBytes) ||
           bytes.length > maxBytes) {
@@ -1014,10 +1120,7 @@ class BrokerClient {
         );
       }
       final mime =
-          _firstAvailableHeader(
-            headers,
-            const ['x-cosyncing-mime-type'],
-          ) ??
+          _firstAvailableHeader(headers, const ['x-cosyncing-mime-type']) ??
           headers.value('content-type');
       return ArtifactDownload(
         bytes: bytes,
@@ -1096,11 +1199,7 @@ class BrokerClient {
   /// Discards an incomplete or unconsumed staged upload.
   ///
   /// `DELETE /api/sessions/:tool/:id/uploads/:uploadId`
-  Future<void> discardUpload(
-    String tool,
-    String id,
-    String uploadId,
-  ) async {
+  Future<void> discardUpload(String tool, String id, String uploadId) async {
     await _delete<Map<String, dynamic>>(
       _resolver.uploadStatusEndpoint(tool, id, uploadId),
     );
@@ -1212,23 +1311,17 @@ class BrokerClient {
         contentType: headers.value('content-type'),
         contentLength: _parseContentLength(headers.value('content-length')),
         artifactKey:
-            _firstAvailableHeader(
-              headers,
-              const [
-                'x-artifact-key',
-                'x-cosyncing-artifact-key',
-                'x-broker-artifact-key',
-              ],
-            ) ??
+            _firstAvailableHeader(headers, const [
+              'x-artifact-key',
+              'x-cosyncing-artifact-key',
+              'x-broker-artifact-key',
+            ]) ??
             _artifactKeyFromUrl(response.requestOptions.uri),
-        contentHash: _firstAvailableHeader(
-          headers,
-          const [
-            'x-content-hash',
-            'x-cosyncing-content-hash',
-            'x-broker-content-hash',
-          ],
-        ),
+        contentHash: _firstAvailableHeader(headers, const [
+          'x-content-hash',
+          'x-cosyncing-content-hash',
+          'x-broker-content-hash',
+        ]),
         sourceUrl: response.requestOptions.uri.toString(),
         statusCode: response.statusCode ?? 200,
         etag: headers.value('etag'),
@@ -1288,23 +1381,17 @@ class BrokerClient {
         contentType: headers.value('content-type'),
         contentLength: advertised,
         artifactKey:
-            _firstAvailableHeader(
-              headers,
-              const [
-                'x-artifact-key',
-                'x-cosyncing-artifact-key',
-                'x-broker-artifact-key',
-              ],
-            ) ??
+            _firstAvailableHeader(headers, const [
+              'x-artifact-key',
+              'x-cosyncing-artifact-key',
+              'x-broker-artifact-key',
+            ]) ??
             _artifactKeyFromUrl(response.requestOptions.uri),
-        contentHash: _firstAvailableHeader(
-          headers,
-          const [
-            'x-content-hash',
-            'x-cosyncing-content-hash',
-            'x-broker-content-hash',
-          ],
-        ),
+        contentHash: _firstAvailableHeader(headers, const [
+          'x-content-hash',
+          'x-cosyncing-content-hash',
+          'x-broker-content-hash',
+        ]),
         sourceUrl: response.requestOptions.uri.toString(),
         statusCode: response.statusCode ?? 200,
         etag: headers.value('etag'),
@@ -1364,9 +1451,7 @@ class BrokerClient {
       return _decodeBrokerErrorString(data);
     }
     if (data is List<int>) {
-      return _decodeBrokerErrorString(
-        utf8.decode(data, allowMalformed: true),
-      );
+      return _decodeBrokerErrorString(utf8.decode(data, allowMalformed: true));
     }
     return null;
   }
@@ -1430,11 +1515,18 @@ class BrokerClient {
   /// for — an injected interceptor, a client-wide abort — is a fault to them,
   /// not abandoned work. Without the guard it would arrive as an unrelated
   /// "the caller abandoned this" signal instead of a [BrokerException].
-  Future<T> _get<T>(String path, {CancelToken? cancelToken}) async {
+  Future<T> _get<T>(
+    String path, {
+    CancelToken? cancelToken,
+    Duration? receiveTimeout,
+  }) async {
     try {
       final response = await _dio.get<T>(
         path,
-        options: Options(headers: _resolver.authHeaders),
+        options: Options(
+          headers: _resolver.authHeaders,
+          receiveTimeout: receiveTimeout,
+        ),
         cancelToken: cancelToken,
       );
       return response.data as T;
@@ -1537,11 +1629,14 @@ class BrokerClient {
 
   /// Wraps a Dio DELETE request, converting [DioException]
   /// to [BrokerException].
-  Future<T> _delete<T>(String path) async {
+  Future<T> _delete<T>(String path, {Duration? receiveTimeout}) async {
     try {
       final response = await _dio.delete<T>(
         path,
-        options: Options(headers: _resolver.jsonHeaders),
+        options: Options(
+          headers: _resolver.jsonHeaders,
+          receiveTimeout: receiveTimeout,
+        ),
       );
       return response.data as T;
     } on DioException catch (e) {
@@ -1757,9 +1852,7 @@ class BrokerClient {
         segments[4] != 'artifact' ||
         segments
             .sublist(2)
-            .any(
-              (segment) => segment.isEmpty || segment.contains('/'),
-            )) {
+            .any((segment) => segment.isEmpty || segment.contains('/'))) {
       return null;
     }
     return _ArtifactTicketIdentity(
@@ -1806,10 +1899,7 @@ class BrokerClient {
     return int.tryParse(value);
   }
 
-  String? _firstAvailableHeader(
-    Headers headers,
-    List<String> keys,
-  ) {
+  String? _firstAvailableHeader(Headers headers, List<String> keys) {
     for (final key in keys) {
       final value = headers.value(key);
       if (value != null && value.isNotEmpty) {

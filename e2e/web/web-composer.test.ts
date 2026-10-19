@@ -64,6 +64,7 @@ describe('phone composer', () => {
         const page = await context.newPage();
         page.setDefaultTimeout(10_000);
         const prompts: Record<string, unknown>[] = [];
+        const drafts: Record<string, unknown>[] = [];
         let historyReceived = false;
         page.on('websocket', (socket) => socket.on('framereceived', ({ payload }) => {
           const frame = JSON.parse(String(payload));
@@ -72,8 +73,9 @@ describe('phone composer', () => {
         page.on('websocket', (socket) => socket.on('framesent', ({ payload }) => {
           const frame = JSON.parse(String(payload));
           if (frame.kind === 'prompt') prompts.push(frame);
+          if (frame.kind === 'draft') drafts.push(frame);
         }));
-        await page.goto(`${broker.url}/cosy/#/sessions/pi/${encodeURIComponent(pi.id)}`);
+        await page.goto(`${broker.url}/cosy/#/sessions/pi/${encodeURIComponent(pi.id)}`, { waitUntil: 'domcontentloaded' });
         await eventually(() => historyReceived, { what: 'the session history to arrive' });
         await page.waitForFunction(() => !document.getElementById('cosyncing-startup-shell'));
         // Exercise ordinary canvas touch input before enabling screen-reader
@@ -87,6 +89,7 @@ describe('phone composer', () => {
         const prompt = `One touch from ${colorScheme}`;
         await page.keyboard.insertText(prompt);
         await eventually(() => field.inputValue().then((value) => value === prompt), { what: 'the focused draft to contain the typed text' });
+        await eventually(() => drafts.some((frame) => frame.text === prompt), { what: 'Flutter to publish the typed draft' });
         const originalY = (await field.boundingBox())!.y;
         for (const inset of [96, keyboardHeight, 0, keyboardHeight]) {
           await keyboard(page, inset);
@@ -101,18 +104,22 @@ describe('phone composer', () => {
           });
         }
 
-        const input = await context.newCDPSession(page);
-        await input.send('Input.dispatchTouchEvent', {
-          type: 'touchStart',
-          touchPoints: [{ x: width - 41, y: height - keyboardHeight - 33 }],
-        });
-        // Let pointer-down focus handling complete before releasing the tap.
+        // Settle rendering before touching. Waiting for frames between down
+        // and up can turn this into a tooltip long-press under parallel load.
         await page.evaluate(() => new Promise<void>((resolve) => {
           requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
         }));
-        expect(await page.evaluate(() => document.activeElement?.tagName)).toBe('TEXTAREA');
+        await page.evaluate(() => {
+          const state = window as Window & { sendPointerFocus?: string };
+          window.addEventListener('pointerdown', () => {
+            // Runs after Flutter's pointer-down handlers and focus microtasks,
+            // while the browser is still handling this first touch.
+            queueMicrotask(() => { state.sendPointerFocus = document.activeElement?.tagName; });
+          }, { once: true });
+        });
         expect(prompts).toHaveLength(0);
-        await input.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+        await page.touchscreen.tap(width - 41, height - keyboardHeight - 33);
+        expect(await page.evaluate(() => (window as Window & { sendPointerFocus?: string }).sendPointerFocus)).toBe('TEXTAREA');
         await eventually(() => prompts.length === 1, { what: 'one prompt from the first touch' });
         const command = await pi.nextCommand((item) => item.kind === 'prompt');
         expect(command.text).toBe(`One touch from ${colorScheme}`);

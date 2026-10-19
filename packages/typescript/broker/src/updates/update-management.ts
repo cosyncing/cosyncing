@@ -19,8 +19,7 @@
  *   3. Authority is per operation, not per connection. Peer mutations need the narrow
  *      `broker:update` grant, and an unreadable grant store is never a grant.
  */
-import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   UPDATE_ACKNOWLEDGEMENTS,
@@ -44,13 +43,11 @@ import {
   type UpdatePlanRequest,
 } from '@cosyncing/protocol';
 import type { BuildInfo } from '../runtime/build-info.ts';
-import { atomicWriteJsonOwnerOnly } from '../security/secure-files.ts';
 import type { UpdateGrantStore } from '../security/update-grants.ts';
 import type { BrokerUpdateLaunchDecision } from './broker-update.ts';
 import { randomBytes } from 'node:crypto';
 import {
   checkReleaseUpdate,
-  MAX_RELEASE_ARTIFACT_BYTES,
   MAX_RELEASE_MANIFEST_BYTES,
   releaseIdCommit,
   releaseIdFromManifest,
@@ -70,6 +67,7 @@ import {
   type SavedServerObservation,
 } from './update-planner.ts';
 import type { StoredUpdatePlan, UpdateOperationStore, UpdatePrincipalRef } from './update-operation-store.ts';
+import { stageUpgradeArtifacts } from './prepared-upgrade.ts';
 
 /** The authenticated caller, reduced to what the update surface needs. Never a credential. */
 export type UpdateManagementCaller = {
@@ -321,7 +319,7 @@ export function updateInventory(
   const installation = dependencies.installation();
   const active = (component: UpdateComponent): UpdateJob | undefined =>
     dependencies.store.activeJobFor([component], installation.installationId);
-  const ownershipProven = observed.broker.ownership !== 'unknown';
+  const ownershipProven = observed.broker.ownership === 'cosyncing-installer';
   const components = [observed.broker, ...(observed.client === undefined ? [] : [observed.client])].map((state) => {
     const job = active(state.component);
     const blockers: UpdateBlocker[] = [];
@@ -333,14 +331,24 @@ export function updateInventory(
         guidance: 'Re-run the installer once to record an owned installation.',
       });
     }
+    if (state.ownership === 'package-manager') {
+      blockers.push({ code: 'package-manager-owned', component: state.component,
+        detail: 'This installation is owned by its package manager and cannot be replaced from the app.',
+        guidance: 'Migrate through the signed installer before using in-app installation.' });
+    }
+    if (state.component === 'broker' && dependencies.handoff === undefined) {
+      blockers.push({ code: 'unsupported-platform', component: 'broker',
+        detail: 'This service has no qualified independent in-app update runner.',
+        guidance: 'Use the signed installer or cosy update on this server.' });
+    }
     if (state.component === 'client') {
-      // Advertised as missing rather than assumed: no trusted native handoff exists in
-      // this build, so the honest answer is that the app cannot be replaced from here.
+      // The local helper is a separate same-user surface. This remote server
+      // API must never claim authority to close a desktop on its host.
       blockers.push({
-        code: 'helper-missing',
-        detail: 'This host has no trusted desktop updater yet, so the app cannot be replaced from the server.',
+        code: 'desktop-out-of-scope',
+        detail: 'A server update cannot close or replace the desktop app installed on this host.',
         component: 'client',
-        guidance: 'Re-run the installer for this machine, or update the app from its own channel.',
+        guidance: 'Open Settings → Updates in that desktop app to use its own local update helper.',
       });
     }
     const isAvailable = state.component === 'broker' && channel?.available !== undefined && channel.available.version !== running;
@@ -777,20 +785,11 @@ async function prepareArtifacts(
   const staging = join(dependencies.stagingRoot, safeSegment(job.jobId));
   mkdirSync(staging, { recursive: true, mode: 0o700 });
   try {
-    const bytes = await fetchBounded(dependencies, candidate.url, MAX_RELEASE_ARTIFACT_BYTES);
-    const digest = createHash('sha256').update(bytes).digest('hex');
-    if (digest !== candidate.sha256 || bytes.byteLength !== candidate.size) {
-      throw new Error('release-artifact-digest-mismatch');
-    }
-    writeFileSync(join(staging, candidate.name), bytes, { mode: 0o600 });
-    atomicWriteJsonOwnerOnly(join(staging, 'prepared.json'), {
-      schemaVersion: UPDATE_JOB_SCHEMA_VERSION,
-      releaseId: plan.releaseId,
-      component: broker.component,
-      name: candidate.name,
-      digest,
-      bytes: bytes.byteLength,
-      stagedAt: clock(dependencies)().toISOString(),
+    await stageUpgradeArtifacts({
+      stagingRoot: dependencies.stagingRoot,
+      jobId: job.jobId,
+      candidate,
+      download: (url, maximum) => fetchBounded(dependencies, url, maximum),
     });
     const ready = dependencies.store.transition(job.jobId, 'host', 'ready', 'preparation-verified',
       [{ component: broker.component, outcome: 'prepared', stage: 'verifying', actual: broker.from }]);
@@ -1188,6 +1187,18 @@ export function reconcileInterruptedUpdates(
       closed = closed || action !== 'transition-refused';
       settled.push({ jobId: entry.job.jobId, action });
       continue;
+    }
+    if (entry.job.applyAcceptedAt === undefined
+        && ['accepted', 'preparing', 'ready'].includes(entry.job.phase)) {
+      const reviewed = dependencies.store.readPlan(entry.job.planId);
+      if (reviewed.ok && Date.parse(reviewed.value.plan.expiresAt) <= atMs) {
+        const expired = dependencies.store.transition(entry.job.jobId, 'host', 'failed', 'prepared-review-expired',
+          entry.job.components.map((component) => ({ component: component.component,
+            outcome: 'failed' as const, actual: component.actual })));
+        closed = closed || expired.ok;
+        settled.push({ jobId: entry.job.jobId, action: expired.ok ? 'prepared-review-expired' : 'transition-refused' });
+        continue;
+      }
     }
     if (entry.action !== 'finish-committed') {
       settled.push({ jobId: entry.job.jobId, action: entry.action });

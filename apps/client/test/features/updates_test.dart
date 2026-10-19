@@ -26,10 +26,12 @@ import 'package:cosyncing_client/src/features/connection/data/broker_identity_st
 import 'package:cosyncing_client/src/features/sessions/detail/session_notification_hooks.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/settings/controller/locale_controller.dart';
+import 'package:cosyncing_client/src/platform/desktop/desktop_keep_running.dart';
 import 'package:cosyncing_client/src/platform/update/android_client_update.dart';
 import 'package:cosyncing_client/src/platform/update/android_update_platform_contract.dart';
-import 'package:cosyncing_client/src/platform/update/desktop_client_update.dart';
 import 'package:cosyncing_client/src/platform/update/desktop_client_update_provider.dart';
+import 'package:cosyncing_client/src/platform/update/local_desktop_updater.dart';
+import 'package:cosyncing_client/src/platform/update/local_desktop_updater_provider.dart';
 import 'package:cosyncing_client/src/platform/update/native_client_update.dart';
 import 'package:cosyncing_client/src/platform/update/stable_release_manifest.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_participants.dart';
@@ -41,6 +43,7 @@ import '../support/feature/composer_wire.dart';
 import '../support/feature/cosyncing_app.dart';
 import '../support/feature/roster_driver.dart';
 import '../support/feature/settings_wire.dart';
+import '../support/feature/update_wire.dart';
 
 const _signer =
     '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
@@ -139,9 +142,554 @@ final class _Lifecycle implements BrokerAppLifecycleMonitor {
   void dispose() => unawaited(_changes.close());
 }
 
+class _DesktopHelper implements LocalDesktopUpdater {
+  bool updated = false;
+  bool failNextArm = false;
+  String? recoveredPhase;
+  final jobs = <String, Map<String, dynamic>>{};
+  int arms = 0;
+  @override
+  Future<Map<String, dynamic>> inspect() async => {
+    'helperVersion': '1.0.0',
+    'runtimeVersion': '1.3.14',
+    'version': updated ? '2.0.0' : '1.0.0',
+    'host': 'linux-x64',
+    'installationId': 'local-installation',
+  };
+  @override
+  Future<Map<String, dynamic>> prepare(String id, String release) async {
+    final job = jobs.putIfAbsent(
+      id,
+      () => {'id': id, 'releaseId': release, 'phase': 'ready'},
+    );
+    return job;
+  }
+
+  @override
+  Future<Map<String, dynamic>> arm(String id) async {
+    arms++;
+    if (failNextArm) {
+      failNextArm = false;
+      return jobs[id]!
+        ..['phase'] = 'failed'
+        ..['detailCode'] = 'fixture-replacement-refused';
+    }
+    return jobs[id]!..['phase'] = 'waiting-for-exit';
+  }
+
+  @override
+  Future<Map<String, dynamic>> status(String id) async {
+    final job = jobs[id];
+    if (job == null) {
+      throw const DesktopUpdaterUnavailable('desktop-update-job-not-found');
+    }
+    if (updated) {
+      job['phase'] = 'succeeded';
+    } else if (recoveredPhase != null &&
+        const ['waiting-for-exit', 'replacing'].contains(job['phase'])) {
+      job['phase'] = recoveredPhase;
+      recoveredPhase = null;
+    }
+    return job;
+  }
+
+  @override
+  Future<void> cancel(String id) async {
+    jobs[id]!['phase'] = 'cancelled';
+  }
+
+  @override
+  Future<void> acknowledgeStartup(String version) async {}
+}
+
+class _UpdateWindow extends DesktopWindowChannel {
+  _UpdateWindow(this._quit);
+  final Future<void> Function() _quit;
+  @override
+  Future<void> quitForUpdate() => _quit();
+}
+
 void main() {
-  final dialog = find.byKey(const Key('android-client-update-dialog'));
   Finder key(String k) => find.byKey(Key(k));
+  featureTest('the desktop app saves its draft before a full quit and resumes '
+      'only unfinished updates after relaunch', (f) async {
+    final studio = f.network.add('http://studio.test:7734')
+      ..addSession('s1', 'Draft');
+    ComposerDesk(studio);
+    await f.storage.seedServer(studio);
+    final helper = _DesktopHelper();
+    var quits = 0;
+    final window = _UpdateWindow(() async {
+      expect(WebHandoffParticipants.instance.frozen.value, isTrue);
+      final drafts = await f.storage.database
+          .select(f.storage.database.sessionDraftRows)
+          .get();
+      expect(drafts.map((r) => r.draftText), contains('keep this exact draft'));
+      quits++;
+    });
+    var app = await f.launch(
+      overrides: [
+        clientTargetPlatformProvider.overrideWithValue(TargetPlatform.linux),
+        clientIsWebProvider.overrideWithValue(false),
+        localDesktopUpdaterProvider.overrideWithValue(helper),
+        desktopWindowChannelProvider.overrideWithValue(window),
+        desktopClientVersionProvider.overrideWithValue('1.0.0'),
+        stableReleaseManifestFetcherProvider.overrideWithValue(
+          () async => {
+            ..._desktopManifest('2.0.0'),
+            'sourceCommit': '2222222',
+            'updater': <String, Object?>{
+              'schemaVersion': 1,
+              'releaseId': 'rel-2.0.0+2222222',
+              'minimumHelperVersion': '1.0.0',
+              'clientContract': {
+                'revision': cosyncingClientContractRevision,
+                'minimumBrokerRevision': cosyncingClientMinimumBrokerRevision,
+                'surfaceHash': cosyncingClientContractSurfaceHash,
+              },
+              'desktop': {
+                'linux-x64': {
+                  'capabilities': [
+                    'prepare',
+                    'client-replace',
+                    'client-relaunch',
+                  ],
+                },
+              },
+            },
+          },
+        ),
+      ],
+    );
+    await app.openFromRoster('s1', cwd: '/work/studio');
+    await app.type('keep this exact draft');
+    await app.go(updatesRoute);
+    await app.pumpUntil(
+      () => key('updates-select-app').evaluate().isNotEmpty,
+      reason: 'the owned app update is selectable',
+    );
+    await app.tapKey('updates-review');
+    await app.tapKey('updates-ack-app-will-close');
+    await app.tapKey('updates-ack-compatibility-unconfirmed');
+    expect(quits, 0);
+    await app.tapKey('updates-apply');
+    await app.pumpUntil(
+      () => quits == 1,
+      reason: 'drafts are durable before the native quit',
+    );
+    expect(helper.arms, 1);
+    expect(helper.jobs.length, 1);
+    app = await f.restart(initialLocation: updatesRoute);
+    await app.tapKey('updates-continue');
+    await app.pumpUntil(
+      () =>
+          app.tester.widget<FilledButton>(key('updates-continue')).onPressed !=
+          null,
+      reason: 'a live exit worker is preserved without a second handoff',
+    );
+    expect(helper.arms, 1);
+    expect(quits, 1);
+    helper.recoveredPhase = 'ready';
+    await app.tapKey('updates-continue');
+    await app.pumpUntil(
+      () => quits == 2,
+      reason: 'status recovers the interrupted exit worker before rearming',
+    );
+    expect(helper.jobs.length, 1);
+    helper.jobs.values.single['phase'] = 'replacing';
+    helper.recoveredPhase = 'rolled_back';
+    app = await f.restart(initialLocation: updatesRoute);
+    await app.tapKey('updates-continue');
+    await app.pumpUntil(
+      () => quits == 3,
+      reason: 'a recovered replacement is retried under a fresh key',
+    );
+    expect(helper.jobs.length, 2);
+    helper.updated = true;
+    app = await f.restart();
+    await app.go(updatesRoute);
+    await app.tapKey('updates-continue');
+    await app.waitFor(find.textContaining(en.updatesSucceeded));
+    expect(helper.arms, 3);
+    expect(quits, 3);
+    expect(helper.jobs.length, 2);
+  });
+  featureTest(
+    'a manual-only server shows its checked version and update guidance',
+    (f) async {
+      final studio = f.network.add('http://studio.test:7734');
+      final desk = UpdateDesk(studio, now: f.now)..canApply = false;
+      final profile = await f.storage.seedServer(studio, ownerToken: 'owner');
+      final app = await f.launch(
+        initialLocation: updatesRoute,
+        viewport: FeatureViewport.narrowPhoneTall,
+        overrides: [clientIsWebProvider.overrideWithValue(true)],
+      );
+      await app.waitFor(find.textContaining('1.0.0 → 2.0.0'));
+      await app.waitFor(find.text(UpdateDesk.manualGuidance));
+      expect(find.text(UpdateDesk.manualBlocker), findsOneWidget);
+      expect(find.text(en.updatesServerManual), findsOneWidget);
+      expect(find.text(en.updatesCheckFailed), findsNothing);
+      expect(
+        app.tester
+            .widget<CheckboxListTile>(key('updates-server-${profile.id}'))
+            .onChanged,
+        isNull,
+      );
+      expect(desk.preparations, isEmpty);
+      expect(desk.applies, isEmpty);
+      expect(app.tester.takeException(), isNull);
+    },
+  );
+  featureTest('a combined update requires known compatibility and stages the '
+      'server before a safe app-first restart', (f) async {
+    final studio = f.network.add('http://studio.test:7734');
+    final desk = UpdateDesk(studio, now: f.now)..contractKnown = false;
+    await f.storage.seedServer(studio, ownerToken: 'owner');
+    final helper = _DesktopHelper();
+    var quits = 0;
+    var app = await f.launch(
+      initialLocation: updatesRoute,
+      overrides: [
+        clientIsWebProvider.overrideWithValue(false),
+        localDesktopUpdaterProvider.overrideWithValue(helper),
+        desktopWindowChannelProvider.overrideWithValue(
+          _UpdateWindow(() async {
+            expect(desk.preparations.length, 1);
+            expect(desk.applies, isEmpty);
+            quits++;
+          }),
+        ),
+        stableReleaseManifestFetcherProvider.overrideWithValue(
+          () async => {
+            ..._desktopManifest('2.0.0'),
+            'updater': {
+              'schemaVersion': 1,
+              'releaseId': 'rel-2.0.0+2222222',
+              'minimumHelperVersion': '1.0.0',
+              'clientContract': {
+                'revision': cosyncingClientContractRevision + 1,
+                'minimumBrokerRevision': cosyncingClientMinimumBrokerRevision,
+                'surfaceHash': cosyncingClientContractSurfaceHash,
+              },
+              'desktop': {
+                'linux-x64': {
+                  'capabilities': [
+                    'prepare',
+                    'client-replace',
+                    'client-relaunch',
+                  ],
+                },
+              },
+            },
+          },
+        ),
+      ],
+    );
+    await app.waitFor(key('updates-select-app'));
+    await app.pumpUntil(
+      () =>
+          app.tester.widget<FilledButton>(key('updates-review')).onPressed !=
+          null,
+      reason: 'app and server checks finish before review',
+    );
+    await app.tapKey('updates-review');
+    await app.waitFor(find.text(en.updatesReviewChanged));
+    expect(desk.preparations, isEmpty);
+    expect(helper.jobs, isEmpty);
+    desk
+      ..contractKnown = true
+      ..targetRevision = cosyncingClientContractRevision + 2;
+    await app.tapKey('updates-check');
+    await app.tapKey('updates-review');
+    await app.waitFor(key('updates-ack-app-will-close'));
+    await app.tapKey('updates-ack-app-will-close');
+    await app.tapKey('updates-ack-server-will-disconnect');
+    await app.tapKey('updates-apply');
+    await app.pumpUntil(() => quits == 1, reason: 'the app-first step quits');
+    expect(desk.applies, isEmpty);
+    helper.updated = true;
+    app = await f.restart(initialLocation: updatesRoute);
+    await app.tapKey('updates-continue');
+    await app.pumpUntil(
+      () => desk.applies.length == 1,
+      reason: 'the reopened app continues the prepared server update',
+    );
+    expect(helper.arms, 1);
+    expect(desk.preparations.length, 1);
+    expect(app.tester.takeException(), isNull);
+  });
+  featureTest('a failed app replacement retries only the app after the server '
+      'has already updated', (f) async {
+    final studio = f.network.add('http://studio.test:7734');
+    final desk = UpdateDesk(studio, now: f.now);
+    await f.storage.seedServer(studio, ownerToken: 'owner');
+    final helper = _DesktopHelper()..failNextArm = true;
+    var quits = 0;
+    var app = await f.launch(
+      initialLocation: updatesRoute,
+      overrides: [
+        clientIsWebProvider.overrideWithValue(false),
+        localDesktopUpdaterProvider.overrideWithValue(helper),
+        desktopWindowChannelProvider.overrideWithValue(
+          _UpdateWindow(() async {
+            quits++;
+          }),
+        ),
+        stableReleaseManifestFetcherProvider.overrideWithValue(
+          () async => {
+            ..._desktopManifest('2.0.0'),
+            'updater': {
+              'schemaVersion': 1,
+              'releaseId': 'rel-2.0.0+2222222',
+              'minimumHelperVersion': '1.0.0',
+              'clientContract': {
+                'revision': cosyncingClientContractRevision,
+                'minimumBrokerRevision': cosyncingClientMinimumBrokerRevision,
+                'surfaceHash': cosyncingClientContractSurfaceHash,
+              },
+              'desktop': {
+                'linux-x64': {
+                  'capabilities': [
+                    'prepare',
+                    'client-replace',
+                    'client-relaunch',
+                  ],
+                },
+              },
+            },
+          },
+        ),
+      ],
+    );
+    await app.waitFor(key('updates-select-app'));
+    await app.pumpUntil(
+      () =>
+          app.tester.widget<FilledButton>(key('updates-review')).onPressed !=
+          null,
+      reason: 'app and server checks have finished',
+    );
+    await app.tapKey('updates-review');
+    await app.tapKey('updates-ack-app-will-close');
+    await app.tapKey('updates-ack-server-will-disconnect');
+    await app.tapKey('updates-apply');
+    await app.pumpUntil(
+      () =>
+          helper.arms == 1 &&
+          app.tester.widget<FilledButton>(key('updates-continue')).onPressed !=
+              null,
+      reason: 'the app failure is recorded after the server succeeded',
+    );
+    expect(desk.applies.length, 1);
+    expect(quits, 0);
+    await app.tapKey('updates-continue');
+    await app.pumpUntil(
+      () => quits == 1,
+      reason: 'only the failed app component is retried',
+    );
+    expect(helper.jobs.length, 2);
+    expect(helper.arms, 2);
+    expect(desk.applies.length, 1);
+    helper.updated = true;
+    app = await f.restart(initialLocation: updatesRoute);
+    await app.tapKey('updates-continue');
+    await app.pumpUntil(
+      () => find.textContaining(en.updatesSucceeded).evaluate().length == 2,
+      reason: 'both component results remain successful after reopening',
+    );
+    expect(desk.applies.length, 1);
+    expect(helper.arms, 2);
+  });
+  featureTest(
+    'Updates reviews named saved servers without changing the active one, '
+    'then stages every selection before the first restart',
+    (f) async {
+      final studio = f.network.add('http://studio.test:7734');
+      final laptop = f.network.add('http://laptop.test:7734');
+      final events = <String>[];
+      final a = UpdateDesk(studio, now: f.now, onEvent: events.add);
+      final b = UpdateDesk(laptop, now: f.now, onEvent: events.add)
+        ..jobReadHeld = Completer<void>();
+      final first = await f.storage.seedServer(studio, ownerToken: 'owner');
+      final second = await f.storage.seedServer(
+        laptop,
+        active: false,
+        ownerToken: 'owner',
+      );
+      final app = await f.launch(
+        initialLocation: updatesRoute,
+        viewport: FeatureViewport.narrowPhoneTall,
+        overrides: [clientIsWebProvider.overrideWithValue(true)],
+      );
+      await app.waitFor(key('updates-server-${second.id}'));
+      await app.pumpUntil(
+        () =>
+            app.tester
+                .widget<CheckboxListTile>(key('updates-server-${second.id}'))
+                .onChanged !=
+            null,
+        reason: 'saved-server update availability has been checked',
+      );
+      await app.tapKey('updates-server-${second.id}');
+      await app.tapKey('updates-review');
+      await app.waitFor(key('updates-ack-server-will-disconnect'));
+      expect(a.preparations, isEmpty);
+      expect(b.preparations, isEmpty);
+      await app.tapKey('updates-ack-server-will-disconnect');
+      await app.tapKey('updates-apply');
+      await app.pumpUntil(
+        () => a.applies.isNotEmpty && b.jobReads > 0,
+        reason: 'the first server finishes before the second may apply',
+      );
+      await app.tapKey('updates-cancel');
+      b.jobReadHeld!.complete();
+      await app.waitFor(find.textContaining(en.canceled));
+      expect(a.applies.length, 1);
+      expect(b.applies, isEmpty);
+      expect(b.preparations.values.single['phase'], 'cancelled');
+      expect(a.preparations.length, 1);
+      expect(b.preparations.length, 1);
+      expect(events.take(3), ['prepared', 'prepared', 'applied']);
+      expect(await f.storage.activeServer.getActiveProfileId(), first.id);
+      expect(laptop.requestsTo('/api/sessions'), isEmpty);
+      expect(app.tester.takeException(), isNull);
+    },
+  );
+
+  featureTest('a credential change while progress is in flight cannot apply '
+      "the previous credential's update", (f) async {
+    final studio = f.network.add(
+      'http://studio.test:7734',
+      ownerToken: 'owner',
+    );
+    final desk = UpdateDesk(studio, now: f.now)
+      ..jobReadHeld = Completer<void>();
+    final profile = await f.storage.seedServer(studio, ownerToken: 'owner');
+    final app = await f.launch(
+      initialLocation: updatesRoute,
+      overrides: [clientIsWebProvider.overrideWithValue(true)],
+    );
+    await app.pumpUntil(
+      () =>
+          key('updates-review').evaluate().isNotEmpty &&
+          app.tester.widget<FilledButton>(key('updates-review')).onPressed !=
+              null,
+      reason: 'the server is eligible for review',
+    );
+    await app.tapKey('updates-review');
+    await app.tapKey('updates-ack-server-will-disconnect');
+    await app.tapKey('updates-apply');
+    await app.pumpUntil(
+      () => desk.jobReads > 0,
+      reason: 'progress is being read before commit',
+    );
+    await f.storage.credentials.writeBrokerToken(
+      profile.credentialKey!,
+      'replacement',
+    );
+    desk.jobReadHeld!.complete();
+    await app.waitFor(find.text(en.updatesReviewChanged));
+    expect(desk.applies, isEmpty);
+    expect(desk.preparations.values.single['phase'], 'ready');
+    await app.tapKey('updates-cancel');
+    await app.pumpUntil(
+      () =>
+          app.tester.widget<FilledButton>(key('updates-review')).onPressed !=
+          null,
+      reason: 'inaccessible old work does not lock all future reviews',
+    );
+    expect(find.textContaining(en.updatesNeedsAttention), findsWidgets);
+    expect(desk.applies, isEmpty);
+  });
+  featureTest(
+    'a lost preparation response survives app restart and resumes the same job',
+    (f) async {
+      final studio = f.network.add('http://studio.test:7734');
+      final desk = UpdateDesk(studio, now: f.now)
+        ..losePreparationResponse = true;
+      await f.storage.seedServer(studio, ownerToken: 'owner');
+      var app = await f.launch(
+        initialLocation: updatesRoute,
+        viewport: FeatureViewport.phoneTall,
+        overrides: [clientIsWebProvider.overrideWithValue(true)],
+      );
+      await app.pumpUntil(
+        () =>
+            app.tester.widget<FilledButton>(key('updates-review')).onPressed !=
+            null,
+        reason: 'the active server has an actionable update',
+      );
+      await app.tapKey('updates-review');
+      await app.tapKey('updates-ack-server-will-disconnect');
+      await app.tapKey('updates-apply');
+      await app.waitFor(key('updates-continue'));
+      expect(desk.preparations.length, 1);
+      expect(desk.applies, isEmpty);
+      app = await f.restart();
+      await app.go(updatesRoute);
+      await app.tapKey('updates-continue');
+      await app.pumpUntil(
+        () => desk.applies.isNotEmpty,
+        reason: 'the original job is recovered',
+      );
+      expect(desk.preparations.length, 1);
+      expect(desk.applies.length, 1);
+    },
+  );
+
+  featureTest(
+    'update permission is requested explicitly and revocation '
+    'prevents an install',
+    (f) async {
+      final studio = f.network.add('http://studio.test:7734');
+      final desk = UpdateDesk(studio, now: f.now)..allowed = false;
+      studio.peerTokens.add('phone');
+      final profile = await f.storage.seedServer(studio, peerToken: 'phone');
+      final app = await f.launch(
+        initialLocation: updatesRoute,
+        viewport: FeatureViewport.phoneTall,
+        overrides: [clientIsWebProvider.overrideWithValue(true)],
+      );
+      await app.waitFor(key('updates-request-${profile.id}'));
+      await app.tapKey('updates-request-${profile.id}');
+      expect(desk.requests, contains('phone'));
+      expect(desk.grants, isEmpty);
+      await app.waitForAbsent(find.byType(SnackBar));
+      await app.tapKey('updates-review');
+      expect(desk.preparations, isEmpty);
+      expect(desk.applies, isEmpty);
+      desk.allowed = true;
+      await app.tapKey('updates-check');
+      await app.tapKey('updates-review');
+      await app.tapKey('updates-ack-server-will-disconnect');
+      desk.preparationHeld = Completer<void>();
+      await app.tapKey('updates-apply');
+      await app.pumpUntil(
+        () => desk.preparations.isNotEmpty,
+        reason: 'the reviewed download is staged before revocation',
+      );
+      desk.revoked = true;
+      desk.preparationHeld!.complete();
+      await app.pumpUntil(
+        () =>
+            key('updates-continue').evaluate().isNotEmpty &&
+            app.tester
+                    .widget<FilledButton>(key('updates-continue'))
+                    .onPressed !=
+                null,
+        reason: 'revocation pauses the prepared operation',
+      );
+      expect(desk.applies, isEmpty);
+      expect(
+        studio
+            .requestsTo('/api/broker/updates/jobs/job-0/apply')
+            .single
+            .answered,
+        403,
+      );
+    },
+  );
+  final dialog = find.byKey(const Key('android-client-update-dialog'));
 
   featureTest(
     'an Android update is offered, never installed without a tap, and '
@@ -280,12 +828,13 @@ void main() {
       expect(platform.installCalls, 3, reason: 'a bad APK is never installed');
       expect(app.tester.takeException(), isNull);
 
-      // Settings > General offers the same verified release and a re-check.
+      // Settings > Updates offers the same verified release and a re-check.
       await app.tester.binding.handlePopRoute();
       await app.settle();
       await relaunch('1.8.0', 18);
       await app.tapKey('android-client-update-later');
       await app.go(generalSettingsRoute);
+      await app.tapKey('settings-general-updates');
       await app.reveal(key('settings-native-client-update-section'));
       expect(find.text('Version 1.8.0 is ready to download.'), findsOneWidget);
       expect(key('settings-native-client-update-install'), findsOneWidget);
@@ -322,9 +871,7 @@ void main() {
         }),
       ],
     );
-    final pointer = key('settings-desktop-build-update');
-    final download = key('settings-desktop-build-download');
-    final failure = key('settings-desktop-build-download-failure');
+    final pointer = key('settings-desktop-updates-link');
     final behindAdvice = key('settings-client-behind-compatibility');
 
     // Seeds what the broker said about this client when it last greeted.
@@ -363,64 +910,34 @@ void main() {
       await app.waitFor(key('settings-broker-version'));
     }
 
-    // A broker release newer than this build: the pointer, naming the broker.
+    // Every desktop version location opens the same Updates screen. The
+    // eligible app release comes from its own channel, not this server.
     await app.waitFor(pointer);
-    expect(find.text('New desktop build available'), findsOneWidget);
-    expect(find.textContaining('This server runs 0.6.0.'), findsOneWidget);
-    await app.tap(download);
-    expect(launched, [Uri.parse(desktopClientDownloadUrl)]);
-    expect(
-      launched.single.toString(),
-      'https://github.com/cosyncing/cosyncing/releases',
-    );
-
-    // A launcher that cannot open the page, or throws, says the same thing,
-    // in the language of the app.
+    await app.tapKey('settings-open-updates');
+    await app.waitFor(key('settings-native-client-update-section'));
+    expect(find.text('Version 0.5.9 is ready to download.'), findsOneWidget);
+    await app.tapKey('settings-native-client-update-download');
+    expect(launched.single.path, contains('client-v0.5.9/'));
     launcher = 'refuses';
-    await app.tap(download);
-    expect(failure, findsOneWidget);
+    await app.tapKey('settings-native-client-update-download');
     expect(
       find.text(en.settingsDesktopBuildUpdateLaunchFailed),
       findsOneWidget,
     );
-    launcher = 'throws';
-    await reopen('0.6.0');
-    await app.tap(download);
-    expect(failure, findsOneWidget);
-    await app.container
-        .read(localeControllerProvider.notifier)
-        .setLocale(const Locale('zh'));
-    await app.settle();
-    launcher = 'refuses';
-    await app.waitForAbsent(find.byType(SnackBar));
-    await app.tap(download);
-    expect(
-      find.text(
-        lookupAppLocalizations(
-          const Locale('zh'),
-        ).settingsDesktopBuildUpdateLaunchFailed,
-      ),
-      findsOneWidget,
-    );
-    await app.container
-        .read(localeControllerProvider.notifier)
-        .setLocale(const Locale('en'));
-
-    // Silent when equal, unreadable, or when this build is the newer one.
     for (final brokerVersion in ['0.5.8', null, '0.5.7']) {
       await reopen(brokerVersion);
-      expect(pointer, findsNothing, reason: '$brokerVersion');
+      expect(pointer, findsOneWidget, reason: '$brokerVersion');
     }
 
-    // Who owns the guidance. Behind: the pointer alone. Equal or unreadable:
-    // the compatibility advice, naming the server. Ahead: neither.
+    // Cached compatibility advice stays attributed to the server it greeted.
+    // The version link remains available independently of that advice.
     await reopen('0.6.0');
     await greeted();
     await reopen('0.6.0');
     expect(pointer, findsOneWidget);
     expect(behindAdvice, findsNothing, reason: 'no contradictory advice');
     await reopen('0.5.8');
-    expect(pointer, findsNothing);
+    expect(pointer, findsOneWidget);
     expect(behindAdvice, findsOneWidget);
     expect(
       find.text(
@@ -432,7 +949,7 @@ void main() {
     await reopen(null);
     expect(behindAdvice, findsOneWidget);
     await reopen('0.5.7');
-    expect(pointer, findsNothing);
+    expect(pointer, findsOneWidget);
     expect(
       behindAdvice,
       findsNothing,
@@ -440,8 +957,8 @@ void main() {
     );
 
     // The release channel: a newer desktop release lights the dot on the
-    // Settings button and offers its own download in Settings > General.
-    app = await f.restart(initialLocation: generalSettingsRoute);
+    // Settings button and offers its own download in Settings > Updates.
+    app = await f.restart(initialLocation: updatesRoute);
     await app.waitFor(key('settings-native-client-update-section'));
     expect(find.text('Version 0.5.9 is ready to download.'), findsOneWidget);
     launched.clear();
@@ -454,7 +971,7 @@ void main() {
     );
     expect(app.container.read(nativeClientUpdateAvailableProvider), isTrue);
     release = '0.5.8';
-    app = await f.restart(initialLocation: generalSettingsRoute);
+    app = await f.restart(initialLocation: updatesRoute);
     await app.waitFor(key('settings-native-client-update-section'));
     expect(find.text('Version 0.5.9 is ready to download.'), findsNothing);
     expect(app.container.read(nativeClientUpdateAvailableProvider), isFalse);
@@ -475,7 +992,7 @@ void main() {
       await app.container
           .read(localeControllerProvider.notifier)
           .setLocale(language);
-      app = await f.restart(initialLocation: generalSettingsRoute);
+      app = await f.restart(initialLocation: updatesRoute);
       await app.waitFor(key('settings-native-client-update-section'));
       await app.reveal(key('settings-native-client-update-download'));
       expect(app.tester.takeException(), isNull, reason: '$language');

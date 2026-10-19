@@ -1192,6 +1192,13 @@ fi
 
 # Where the client will look, which is not always where the broker keeps its state. On a sandboxed macOS
 # client that is the container; everywhere else it is the state home the installer and broker share.
+if [ "$OS" = Darwin ] && [ -z "$CLIENT_SKIP" ]; then
+  # The sandboxed app cannot spawn Bun outside its container. Install its narrow,
+  # independent same-user helper through the already authenticated JS bundle.
+  if ! "$BUN_BIN" "$APPLICATION" client-update install-helper >/dev/null; then
+    printf 'Desktop updates: helper setup needs attention; Download remains available.\n' >&2
+  fi
+fi
 HANDOFF_HOME="$STATE_HOME"
 if [ -n "$CLIENT_CONTAINER" ]; then
   HANDOFF_HOME="$CLIENT_CONTAINER/.cosyncing"

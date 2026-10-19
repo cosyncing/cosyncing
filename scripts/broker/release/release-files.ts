@@ -28,6 +28,8 @@ import {
   PINNED_BUN_RUNTIME_VERSION,
 } from '../../../packages/typescript/broker/src/runtime/application-identity.ts';
 import { pinnedReleaseBunRuntime } from '../../../packages/typescript/broker/src/updates/bun-runtime-upgrade.ts';
+import { DESKTOP_UPDATE_HELPER_VERSION, QUALIFIED_DESKTOP_UPDATER_HOSTS } from '../../../packages/typescript/broker/src/updates/desktop-updater-support.ts';
+import { CLIENT_MINIMUM_BROKER_CONTRACT_REVISION, UPDATE_MANAGEMENT_CONTRACT_VERSION } from '../../../packages/typescript/protocol/src/index.ts';
 import {
   PUBLISHED_SCHEMA_VERSIONS,
   type PublishedBrokerContract,
@@ -941,6 +943,20 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
     sourceCommit: options.sourceCommit,
     publishedAt,
     artifacts: [],
+    updater: {
+      schemaVersion: 1,
+      releaseId: `rel-${releaseVersion}+${options.sourceCommit.slice(0, 7)}`,
+      managementContractVersion: UPDATE_MANAGEMENT_CONTRACT_VERSION,
+      minimumHelperVersion: DESKTOP_UPDATE_HELPER_VERSION,
+      clientContract: {
+        revision: jsEvidence.contract.revision,
+        minimumBrokerRevision: CLIENT_MINIMUM_BROKER_CONTRACT_REVISION,
+        surfaceHash: jsEvidence.contract.surfaceHash,
+      },
+      desktop: Object.fromEntries(clients
+        .filter((client) => QUALIFIED_DESKTOP_UPDATER_HOSTS.includes(client.host))
+        .map((client) => [client.host, { capabilities: ['prepare', 'client-replace', 'client-relaunch'] }])),
+    },
     desktopClients: Object.fromEntries(clients.map((client) => [client.host, {
       name: client.name,
       version: releaseVersion,

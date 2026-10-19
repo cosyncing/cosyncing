@@ -13,6 +13,18 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Added
 
+- Settings → Updates checks this app and saved servers without changing the
+  active connection. Review named components, exact versions and interruptions
+  before installation; prepared work and server jobs can be recovered after an
+  app restart or lost response. Owners can review and revoke device update
+  permissions. Updating a server never replaces the desktop app on that host.
+- Installer-owned desktop updates have a local helper that stages the signed
+  app, saves drafts, waits for full exit, replaces it and verifies the reopened
+  build. Internal installation requires a helper-capable installation and a
+  platform enabled by the signed release; other installations retain Download.
+  The macOS all-in-one installer installs an independent helper so the app can
+  retain its sandbox.
+
 - `cosy update` ends by checking the installed broker, including when the
   release is already current. A service that was stopped is started and
   checked until it answers; a disabled service is left alone. Anything setup
@@ -46,6 +58,11 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Continuing a desktop update reconciles interrupted helper jobs before retrying.
+  If installation fails after exit but before replacement, the unchanged app
+  reopens only when its integrity and stopped state can be confirmed.
+- Servers requiring manual updates show the available version and installer
+  guidance after a successful update check.
 - Refused-send details scroll within the narrow chat reading area, keeping the
   draft and Send button accessible in short phone windows.
 

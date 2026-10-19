@@ -20,12 +20,27 @@ import {
   isHarnessRoot,
   reapHarnessProcesses,
 } from '../../scripts/ci/lib/harness-leaks.ts';
-import { eventually, REPO_ROOT } from '../harness/index.ts';
+import { eventually, REPO_ROOT, startBroker } from '../harness/index.ts';
 
 const PROBE = join(import.meta.dir, 'harness-leaks.probe.ts');
 
 describe.skipIf(process.platform === 'win32')('harness process lifetime', () => {
   const roots: string[] = [];
+
+  test('a healthy unrelated listener is never adopted as the spawned broker', async () => {
+    const stranger = Bun.serve({
+      hostname: '127.0.0.1', port: 0,
+      fetch: () => Response.json({ ok: true, unrelated: true }),
+    });
+    try {
+      await expect(startBroker({ name: 'harness-port-owner', port: stranger.port! }))
+        .rejects.toThrow(/broker exited with code 1 before becoming healthy/);
+      const response = await fetch(`http://127.0.0.1:${stranger.port}/api/health`);
+      expect(await response.json()).toEqual({ ok: true, unrelated: true });
+    } finally {
+      stranger.stop(true);
+    }
+  });
   afterAll(async () => {
     // Only what is provably under the probe's own root, whatever happened above.
     await reapHarnessProcesses(findHarnessProcesses(roots));

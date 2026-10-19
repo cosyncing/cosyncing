@@ -5,5 +5,8 @@ const int cosyncingClientContractRevision = 34;
 /// Oldest broker contract this client can safely drive.
 const int cosyncingClientMinimumBrokerRevision = 16;
 
+/// Contract overlap policy shared with the broker update planner.
+const int cosyncingBrokerContractOverlapRevisions = 1;
+
 /// Deterministic identity of the public surface used by this client.
 const String cosyncingClientContractSurfaceHash = 'fnv1a32:0766c8f4';
