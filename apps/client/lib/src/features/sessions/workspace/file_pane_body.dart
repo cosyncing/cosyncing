@@ -1,10 +1,14 @@
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
+import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_html_handoff.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_open_with.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/file_renderers.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_viewer_pane.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_file_browser.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_actions.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_view_memory.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_pane_key.dart';
@@ -18,7 +22,18 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 /// anchor is a property of the navigation that opened the tab, not of the tab.
 /// Reopening the workspace restores the file, not the jump — which is also why
 /// this is never persisted.
-final filePaneAnchorProvider = StateProvider<Map<String, int>>((ref) => {});
+final filePaneAnchorProvider = StateProvider<Map<String, int>>((ref) {
+  ref.watch(activeBrokerProfileProvider);
+  return {};
+});
+
+/// A resolved transcript reference hands its existing bounded read to the pane.
+/// Entries are consumed once; Retry always performs a fresh read.
+final Provider<Map<String, SessionFilePreview>> filePanePreviewHandoffProvider =
+    Provider((ref) {
+      ref.watch(activeBrokerProfileProvider);
+      return {};
+    });
 
 /// One file pane's own read.
 ///
@@ -30,6 +45,21 @@ final filePaneAnchorProvider = StateProvider<Map<String, int>>((ref) => {});
 final AutoDisposeFutureProviderFamily<FileViewerContent, FilePaneKey>
 filePaneReadProvider = FutureProvider.autoDispose
     .family<FileViewerContent, FilePaneKey>((ref, pane) async {
+      final handoff = ref.read(filePanePreviewHandoffProvider).remove(pane.key);
+      if (handoff != null) {
+        return FileViewerSource(
+          preview: SessionFilePreview(
+            path: handoff.path,
+            displayName: handoff.displayName,
+            mimeType: handoff.mimeType,
+            size: handoff.size,
+            limit: handoff.limit,
+            truncated: handoff.truncated,
+            text: handoff.text,
+            media: handoff.media,
+          ),
+        );
+      }
       final displayName = pane.path.split('/').last;
       final repository = await ref.watch(
         sessionFileBrowserRepositoryProvider.future,
@@ -152,14 +182,47 @@ class WorkspaceFilePaneBody extends ConsumerWidget {
     // Read once, at mount: the memory is a handoff across a resize, not a
     // binding. Watching it would make every scroll frame a rebuild.
     final memory = ref.read(filePaneViewMemoryProvider);
+    final source = RosterSource.of(
+      ref.watch(activeBrokerProfileProvider),
+    )?.storageKey;
+    final memoryKey = '$source\u0000${pane.key}';
     return FileViewerPane(
+      key: ValueKey((memoryKey, memory.openGeneration(memoryKey))),
       content: content,
       onOpenWith: kIsWeb
           ? null
           : () =>
                 openWorkspaceFileWithApp(context, ref, pane.session, pane.path),
-      initialView: memory.read(pane.key),
-      onViewChanged: (view) => memory.write(pane.key, view),
+      initialView:
+          memory.read(memoryKey) ??
+          (switch (ref
+              .watch(filePanesControllerProvider)
+              .valueOrNull
+              ?.modes[pane.key]) {
+            'source' => (mode: FileViewMode.source, offset: 0.0),
+            'rendered' => (mode: FileViewMode.rendered, offset: 0.0),
+            _ => null,
+          }),
+      offsetForMode: (mode) => memory.offset(memoryKey, mode),
+      onAnchorHandled: anchor == null
+          ? null
+          : () {
+              if (RosterSource.of(
+                    ref.read(activeBrokerProfileProvider),
+                  )?.storageKey !=
+                  source) {
+                return;
+              }
+              final anchors = ref.read(filePaneAnchorProvider.notifier);
+              if (anchors.state[pane.key] == anchor) {
+                anchors.update((value) => {...value}..remove(pane.key));
+              }
+            },
+      onModeChanged: (mode) => ref
+          .read(filePanesControllerProvider.notifier)
+          .setMode(pane, mode.name)
+          .ignore(),
+      onViewChanged: (view) => memory.write(memoryKey, view),
       onOpenExternally: switch (content) {
         FileViewerSource(:final preview) => () => openWorkspaceHtmlInBrowser(
           sessionKey: '${pane.session.tool}/${pane.session.sessionId}',
@@ -176,8 +239,8 @@ class WorkspaceFilePaneBody extends ConsumerWidget {
       onClose: () {
         // Closing a file forgets where you were in it: reopening it later is
         // a new read, not a resumed one.
-        memory.forget(pane.key);
-        ref.read(filePanesControllerProvider.notifier).close(pane).ignore();
+        memory.forget(memoryKey);
+        closeWorkspacePane(context, ref, pane).ignore();
       },
     );
   }

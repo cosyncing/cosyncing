@@ -8,6 +8,7 @@ library;
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/components.dart';
+import 'package:cosyncing_client/src/design/components/adaptive_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show OverflowBoxFit;
 
@@ -238,7 +239,7 @@ class SettingsRow extends StatelessWidget {
           child: title,
         ),
         if (subtitle case final subtitle?) ...[
-          const SizedBox(height: 2),
+          const SizedBox(height: 4),
           DefaultTextStyle.merge(
             style: theme.textTheme.bodySmall?.copyWith(
               color: tokens.textTertiary,
@@ -250,8 +251,14 @@ class SettingsRow extends StatelessWidget {
     );
     final row = LayoutBuilder(
       builder: (context, constraints) {
-        final trailing = this.trailing;
+        var trailing = this.trailing;
         final leading = this.leading;
+        if (trailing is SettingsSelect && constraints.maxWidth < 440) {
+          return trailing.buildRow(context, title: title, subtitle: subtitle);
+        }
+        if (trailing is SettingsSelect && title is Text) {
+          trailing = trailing.withTitle((title as Text).data);
+        }
         final stacked =
             trailing != null &&
             stackTrailing &&
@@ -394,113 +401,128 @@ class SettingsSwitchRow extends StatelessWidget {
 }
 
 /// One choice in a [SettingsSelect].
-class SettingsSelectOption<T> {
-  /// Creates a choice.
-  const SettingsSelectOption({
-    required this.value,
-    required this.label,
-    this.leading,
-  });
+typedef SettingsSelectOption<T> = PickerOption<T>;
 
-  /// The value this choice selects.
-  final T value;
-
-  /// What the choice is called.
-  final String label;
-
-  /// Optional swatch or glyph before [label].
-  final Widget? leading;
-}
-
-/// A borderless, filled select: the current choice and a chevron, with the
-/// choices in a menu. Replaces chips, segmented buttons and radio lists for a
-/// setting that holds one of a few named values.
+/// Quiet shared selector; settings rows become the full trigger on phones.
 class SettingsSelect<T> extends StatelessWidget {
-  /// Creates a select.
+  /// Creates a selector using the shared anchored popup.
   const SettingsSelect({
     required this.value,
     required this.options,
     required this.onChanged,
-    this.width = 240,
+    this.width = 208,
+    this.title,
     super.key,
   });
 
-  /// The selected value; must be one of [options].
+  /// Current choice.
   final T value;
 
-  /// Choices, in menu order.
+  /// Available choices.
   final List<SettingsSelectOption<T>> options;
 
-  /// Called with a newly chosen value, or null to disable the control.
+  /// Selection callback, or null when disabled.
   final ValueChanged<T>? onChanged;
 
-  /// Width when the select sits beside its label; stacked, it fills the row.
+  /// Desktop trigger width.
   final double width;
 
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final tokens = context.tokens;
-    final onChanged = this.onChanged;
-    Widget label(SettingsSelectOption<T> option) => Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        if (option.leading case final leading?) ...[
-          leading,
-          const SizedBox(width: 8),
-        ],
-        Flexible(
-          child: Text(
-            option.label,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-        ),
-      ],
-    );
-    final select = DecoratedBox(
-      decoration: BoxDecoration(
-        color: tokens.surface2,
-        borderRadius: BorderRadius.circular(tokens.radiusMd),
-      ),
-      child: DropdownButtonHideUnderline(
-        child: DropdownButton<T>(
-          value: value,
-          isExpanded: true,
-          isDense: true,
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-          borderRadius: BorderRadius.circular(tokens.radiusMd),
-          dropdownColor: tokens.surface,
-          focusColor: tokens.surfaceHover,
-          style: theme.textTheme.bodyMedium?.copyWith(
-            color: tokens.textPrimary,
-          ),
-          icon: Icon(
-            Icons.keyboard_arrow_down,
-            size: 16,
-            color: tokens.textSecondary,
-          ),
-          items: [
-            for (final option in options)
-              DropdownMenuItem<T>(value: option.value, child: label(option)),
+  /// Popup heading inherited from the settings row.
+  final String? title;
+
+  /// Attaches the surrounding settings label without changing the value.
+  Widget withTitle(String? label) => SettingsSelect<T>(
+    key: key,
+    value: value,
+    options: options,
+    onChanged: onChanged,
+    width: width,
+    title: label,
+  );
+
+  /// Builds the whole-row phone trigger.
+  Widget buildRow(
+    BuildContext context, {
+    required Widget title,
+    Widget? subtitle,
+  }) {
+    final option = options.where((o) => o.value == value).firstOrNull;
+    final t = context.tokens;
+    return AdaptivePicker<T>(
+      key: key,
+      value: value,
+      options: options,
+      onChanged: onChanged,
+      title: title is Text ? title.data : null,
+      trigger: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  DefaultTextStyle(
+                    style: Theme.of(context).textTheme.bodyMedium!,
+                    child: title,
+                  ),
+                  if (subtitle != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: DefaultTextStyle(
+                        style: Theme.of(
+                          context,
+                        ).textTheme.bodySmall!.copyWith(color: t.textTertiary),
+                        child: subtitle,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            Flexible(
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  if (option?.leading case final leading?) ...[
+                    leading,
+                    const SizedBox(width: 8),
+                  ],
+                  Flexible(
+                    child: Text(
+                      option?.label ?? '',
+                      key: const Key('picker-current-value'),
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: onChanged == null ? t.textTertiary : t.accent,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Icon(
+                    Icons.keyboard_arrow_down,
+                    size: 16,
+                    color: t.textTertiary,
+                  ),
+                ],
+              ),
+            ),
           ],
-          onChanged: onChanged == null
-              ? null
-              : (next) {
-                  if (next != null && next != value) onChanged(next);
-                },
         ),
-      ),
-    );
-    // Beside a label a Row offers unbounded width, so the select takes its
-    // own; stacked under the label it fills the row.
-    return LayoutBuilder(
-      builder: (context, constraints) => SizedBox(
-        width: constraints.hasBoundedWidth ? constraints.maxWidth : width,
-        child: select,
       ),
     );
   }
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    width: width,
+    child: AdaptivePicker<T>(
+      value: value,
+      title: title,
+      options: options,
+      onChanged: onChanged,
+    ),
+  );
 }
 
 /// Collapsed disclosure holding a raw diagnostic string.

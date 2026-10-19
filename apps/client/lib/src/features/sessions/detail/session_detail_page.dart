@@ -9,6 +9,7 @@ import 'package:cosyncing_client/src/app/router/session_routes.dart';
 import 'package:cosyncing_client/src/app/shortcuts/app_shortcuts.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/components.dart';
+import 'package:cosyncing_client/src/design/components/adaptive_picker.dart';
 import 'package:cosyncing_client/src/design/derived_theme.dart';
 import 'package:cosyncing_client/src/design/window_size_class.dart';
 import 'package:cosyncing_client/src/errors/localized_user_facing_error.dart';
@@ -23,6 +24,7 @@ import 'package:cosyncing_client/src/features/schedules/view/schedule_message_sh
 import 'package:cosyncing_client/src/features/sessions/artifacts/artifact_pane.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_html_handoff.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_open_with.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/file_renderers.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_viewer_pane.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_descriptor.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_file_service.dart';
@@ -70,17 +72,23 @@ import 'package:cosyncing_client/src/features/sessions/transcript/session_transc
 import 'package:cosyncing_client/src/features/sessions/transcript/tool_display_mode.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/transcript_file_resolution.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/transcript_prefetch.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/compact_file_strip.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_body.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_surface.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_view_memory.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_controller.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_store.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/session_viewport_registry.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/side_pane_scope.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_focus.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_frame.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_pane_key.dart';
 import 'package:cosyncing_client/src/features/settings/controller/broker_credentials_controller.dart';
 import 'package:cosyncing_client/src/features/settings/controller/conversation_display_controller.dart';
 import 'package:cosyncing_client/src/features/settings/controller/debug_views_controller.dart';
 import 'package:cosyncing_client/src/features/settings/controller/tool_display_controller.dart';
+import 'package:cosyncing_client/src/features/settings/controller/tool_visibility_controller.dart';
+import 'package:cosyncing_client/src/features/settings/view/settings_common.dart';
 import 'package:cosyncing_client/src/features/transfers/data/local_transfer_file_opener.dart';
 import 'package:cosyncing_client/src/features/voice/controller/read_aloud_controller.dart';
 import 'package:cosyncing_client/src/features/voice/controller/read_aloud_rate_controller.dart';
@@ -267,7 +275,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
   String? _lastAuthoritativePermissionMode;
   bool _permissionModeObserved = false;
   bool _permissionModeReconcileScheduled = false;
-  bool _reportView = false;
+
   final bool _toolsExpanded = false;
   final int _toolExpansionRevision = 0;
   int _promptRevision = 0;
@@ -1434,13 +1442,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
       ref.read(sessionFileBrowserKeyProvider(_key));
 
   Future<void> _previewSessionFile(FsDirEntry entry) async {
-    // With the split available the file becomes its own pane beside the
-    // browser, so the listing stays where the reader left it. Otherwise the
-    // read lands in browser state and the Files slot renders it in place.
-    if (_openInFilePane(entry.path, null)) return;
-    await ref
-        .read(sessionFileBrowserControllerProvider(_fileBrowserKey).notifier)
-        .previewFile(entry);
+    _openWorkspaceFile(entry.path, null);
   }
 
   /// Stable identity so the link scope only notifies on a real gate change.
@@ -1472,6 +1474,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
         .read(sessionFileBrowserControllerProvider(browserKey).notifier)
         .openReference(reference);
     if (!mounted) return;
+    if (browserKey != _fileBrowserKey) return;
     final browser = ref.read(sessionFileBrowserControllerProvider(browserKey));
     if (browser.phase == SessionFileBrowserPhase.error ||
         browser.phase == SessionFileBrowserPhase.remoteDisabled) {
@@ -1485,57 +1488,59 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
       );
       return;
     }
-    // Where the file lands depends on whether there is room to show it beside
-    // the transcript. With the split available it opens as its own pane and
-    // the reader keeps their place; without it, the Files slot is the only
-    // surface there is, so the view has to switch.
     final preview = ref
         .read(sessionFileBrowserControllerProvider(browserKey))
         .preview;
-    if (preview != null && _openInFilePane(preview.path, reference.line)) {
-      return;
-    }
-    // `maybeOf`, not `of`: the drill-in needs a router, and this page is also
-    // mounted without one. Where there is no route to push, the Files slot is
-    // the only surface there is and switching to it stays correct.
-    final router = GoRouter.maybeOf(context);
-    if (preview != null && router != null) {
-      // No room for a second pane, so the file is a pushed route instead --
-      // the transcript stays on the stack underneath rather than being
-      // swapped away, which is what switching to the Files slot used to cost.
-      // The browser's own preview is closed on the way out: the drill-in is
-      // now the surface showing this file, and leaving a second copy behind
-      // the route would greet the reader on Back.
+    if (preview != null) {
+      _openWorkspaceFile(preview.path, reference.line, preview: preview);
       ref
           .read(sessionFileBrowserControllerProvider(browserKey).notifier)
           .closePreview();
-      unawaited(
-        router.push(
-          sessionFileLocation(
-            tool: _key.tool,
-            sessionId: _key.sessionId,
-            path: preview.path,
-            line: reference.line,
-          ),
-        ),
-      );
-      return;
+    } else {
+      _selectView(_SessionDetailView.files);
     }
-    _selectView(_SessionDetailView.files);
   }
 
-  /// Opens [path] as a file pane, when the window is wide enough to show one.
-  ///
-  /// Returns false at narrower widths, where the caller keeps the in-place
-  /// behaviour rather than opening a pane the layout will not render.
-  bool _openInFilePane(String path, int? line) {
+  /// Opens a file in the shared working set at every width.
+  void _openWorkspaceFile(
+    String path,
+    int? line, {
+    SessionFilePreview? preview,
+  }) {
+    final source = RosterSource.of(
+      ref.read(activeBrokerProfileProvider),
+    )?.storageKey;
     final scope = SidePaneScope.maybeOf(context);
     final canOpen =
         scope?.available ??
         (WindowSizeClass.of(context) == WindowSizeClass.expanded);
-    if (!canOpen) return false;
-    scope?.expand();
+    if (canOpen) scope?.expand();
     final pane = FilePaneKey(session: _key, path: path);
+    if (line == null) {
+      final mode = ref
+          .read(filePanesControllerProvider)
+          .valueOrNull
+          ?.modes[pane.key];
+      ref.read(filePaneViewMemoryProvider).openWithPreference(
+        '$source\u0000${pane.key}',
+        switch (mode) {
+          'source' => FileViewMode.source,
+          'rendered' => FileViewMode.rendered,
+          _ => null,
+        },
+      );
+    }
+    if (preview != null) {
+      final handoff = ref.read(filePanePreviewHandoffProvider);
+      handoff[pane.key] = preview;
+      while (handoff.length > 8) {
+        handoff.remove(handoff.keys.first);
+      }
+      ref.invalidate(filePaneReadProvider(pane));
+    }
+    ref
+        .read(filePaneAnchorProvider.notifier)
+        .update((anchors) => {...anchors}..remove(pane.key));
     if (line != null) {
       ref
           .read(filePaneAnchorProvider.notifier)
@@ -1544,9 +1549,33 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
           );
     }
     unawaited(
-      ref.read(filePanesControllerProvider.notifier).open(_key, path),
+      ref.read(filePanesControllerProvider.notifier).open(_key, path).then((_) {
+        if (!mounted ||
+            RosterSource.of(
+                  ref.read(activeBrokerProfileProvider),
+                )?.storageKey !=
+                source) {
+          return;
+        }
+        final opened =
+            ref
+                .read(filePanesControllerProvider)
+                .valueOrNull
+                ?.forSession(_key)
+                .any((p) => p.key == pane.key) ??
+            false;
+        if (!opened) {
+          ref.read(filePanePreviewHandoffProvider).remove(pane.key);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(AppLocalizations.of(context).fileLimitReached),
+            ),
+          );
+          return;
+        }
+        ref.read(compactFileSelectedProvider(_key).notifier).state = true;
+      }),
     );
-    return true;
   }
 
   /// Probes the workspace-file gate once per attach.
@@ -1776,6 +1805,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
       setState(() => _view = _SessionDetailView.chat);
       return;
     }
+    ref.read(compactFileSelectedProvider(_key).notifier).state = false;
     setState(() {
       _view = view;
       if (view == _SessionDetailView.terminal) _terminalFresh = false;
@@ -1824,7 +1854,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
   /// longer looking at.
   Widget _viewSlot(
     _SessionDetailView view, {
-    required _SessionDetailView active,
+    required _SessionDetailView? active,
     required bool showTerminalTab,
     required Widget Function() builder,
   }) {
@@ -2597,8 +2627,46 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
         : state.tool;
     final control = SessionControlView.fromSessionDetailState(state);
     final detailFreshness = SessionDetailFreshnessPresentation.fromState(state);
-    final isSubView = _view != _SessionDetailView.chat;
+    final narrowFiles =
+        !(SidePaneScope.maybeOf(context)?.available ??
+            (WindowSizeClass.of(context) == WindowSizeClass.expanded));
+    final fileAsync = narrowFiles
+        ? ref.watch(filePanesControllerProvider)
+        : null;
+    final fileState =
+        fileAsync == null || fileAsync.isLoading || fileAsync.hasError
+        ? null
+        : fileAsync.valueOrNull;
+    if (narrowFiles) {
+      ref.listen(filePanesControllerProvider, (previous, next) {
+        if (next.isLoading ||
+            next.hasError ||
+            !ref.read(compactFileSelectedProvider(_key))) {
+          return;
+        }
+        bool hasDocuments(FilePanesState? value) =>
+            value?.forSession(_key).any((p) => p is! SessionPanelKey) ?? false;
+        if (hasDocuments(previous?.valueOrNull) &&
+            !hasDocuments(next.valueOrNull)) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) _selectView(_SessionDetailView.chat);
+          });
+        }
+      });
+    }
+    final readingFile =
+        narrowFiles &&
+        ref.watch(compactFileSelectedProvider(_key)) &&
+        (fileState?.activeFor(_key) is FilePaneKey ||
+            fileState?.activeFor(_key) is ArtifactPaneKey);
+    final isSubView = readingFile || _view != _SessionDetailView.chat;
 
+    final reportView = ref.watch(hideSessionToolsProvider(_key));
+    final toolPreferences = ref
+        .watch(toolVisibilityControllerProvider)
+        .valueOrNull;
+    final toolPreferenceKey = ref.watch(toolVisibilityKeyProvider(_key));
+    final toolOverride = toolPreferences?.overrides[toolPreferenceKey];
     final page = AppCallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.keyK, control: true):
@@ -2671,33 +2739,78 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                         SessionDriveRestorePhase.restoring,
                     badgeLabel: progressBadge,
                     onStatusTap: () => _selectView(_SessionDetailView.status),
-                    viewLabel: isSubView ? _viewLabel(l10n, _view) : null,
-                    onBack: isSubView
+                    viewLabel: readingFile
+                        ? l10n.sessionViewFiles
+                        : isSubView
+                        ? _viewLabel(l10n, _view)
+                        : null,
+                    onBack: readingFile
+                        ? () =>
+                              ref
+                                      .read(
+                                        compactFileSelectedProvider(
+                                          _key,
+                                        ).notifier,
+                                      )
+                                      .state =
+                                  false
+                        : isSubView
                         ? () => _selectView(_SessionDetailView.chat)
                         : null,
                     onPopRoute: _popRouteCallback(),
                     menu: _SessionViewMenu(
-                      view: effectiveView,
+                      view: readingFile
+                          ? _SessionDetailView.files
+                          : effectiveView,
                       showTerminal: showTerminalTab,
                       showDebug: showDebugViews,
                       statusBadgeCount: statusBadgeCount,
                       terminalFresh: _terminalFresh,
                       backgroundCommandCount: backgroundCommandCount,
-                      reportView: _reportView,
                       onSelectView: _selectView,
-                      onReportViewChanged: (value) {
-                        ref
-                            .read(
-                              sessionDetailControllerProvider(_key).notifier,
-                            )
-                            .setHistoryReportView(reportView: value);
-                        setState(() => _reportView = value);
-                      },
+                      toolVisibility: toolOverride == null
+                          ? ToolVisibility.inherit
+                          : toolOverride
+                          ? ToolVisibility.hide
+                          : ToolVisibility.show,
+                      defaultHidden: toolPreferences?.hideByDefault ?? true,
+                      onToolVisibilityChanged:
+                          toolPreferenceKey == null || toolPreferences == null
+                          ? null
+                          : (value) => ref
+                                .read(toolVisibilityControllerProvider.notifier)
+                                .setOverride(toolPreferenceKey, value),
                     ),
+                  ),
+                if (narrowFiles)
+                  CompactFileStrip(
+                    session: _key,
+                    reading: readingFile,
+                    chatSelected:
+                        !readingFile &&
+                        effectiveView == _SessionDetailView.chat,
+                    onChat: () => _selectView(_SessionDetailView.chat),
+                    onRead: () =>
+                        ref
+                                .read(
+                                  compactFileSelectedProvider(_key).notifier,
+                                )
+                                .state =
+                            true,
+                    onBrowse: () => _selectView(_SessionDetailView.files),
+                  ),
+                if (toolPreferences?.saveFailed ?? false)
+                  TextButton(
+                    onPressed: () => ref
+                        .read(toolVisibilityControllerProvider.notifier)
+                        .retry(),
+                    child: Text(l10n.toolsSaveRetry),
                   ),
                 if (state.activeTransientRetryStatus case final retry?)
                   _OpenCodeRetryStatusBand(retry: retry),
-                if (state.error != null && !state.bootstrapState.hasFailed)
+                if (state.error != null &&
+                    !state.bootstrapState.hasFailed &&
+                    (!narrowFiles || isSubView))
                   _PageTabContent(
                     bottomPadding: 0,
                     child: _ErrorBanner(failure: state.error!),
@@ -2717,12 +2830,14 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                   ),
                 Expanded(
                   child: IndexedStack(
-                    index: _kSessionViewOrder.indexOf(effectiveView),
+                    index: readingFile
+                        ? _kSessionViewOrder.length
+                        : _kSessionViewOrder.indexOf(effectiveView),
                     sizing: StackFit.expand,
                     children: [
                       _viewSlot(
                         _SessionDetailView.chat,
-                        active: effectiveView,
+                        active: readingFile ? null : effectiveView,
                         showTerminalTab: showTerminalTab,
                         builder: () => _PageTabContent(
                           // Full-bleed so the transcript scrollbar reaches
@@ -2744,6 +2859,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                             onProbeNeeded: _probeFileLinkGate,
                             child: _ChatPanel(
                               key: const Key('session-detail-tab-panel-chat'),
+                              showPageError: narrowFiles && !isSubView,
                               sessionKey: _key,
                               sessionLabel: '${_key.tool} · $visibleTitle',
                               state: state,
@@ -2770,7 +2886,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                               archivedLiveState: archivedLiveState,
                               onArchiveLiveState: _archiveLiveStateItems,
                               archiveTargetKey: _statusTabFlightTargetKey,
-                              reportView: _reportView,
+                              reportView: reportView,
                               toolsExpanded: _toolsExpanded,
                               toolExpansionRevision: _toolExpansionRevision,
                               onSendCommand: () => _sendCommand(commands),
@@ -2882,6 +2998,10 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                               )
                             : const SizedBox.shrink(),
                       ),
+                      if (readingFile)
+                        FilePaneSurface(session: _key, showTabs: false)
+                      else
+                        const SizedBox.shrink(),
                     ],
                   ),
                 ),
@@ -2891,10 +3011,20 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
         ),
       ),
     );
+    final drawerOpen =
+        WorkspaceFrameScope.maybeOf(context)?.drawerOpen ?? false;
     return VisibleAttentionSessionScope(
       tool: widget.tool,
       sessionId: widget.sessionId,
-      child: page,
+      child: PopScope(
+        canPop: !readingFile,
+        onPopInvokedWithResult: (didPop, result) {
+          if (!didPop && readingFile && !drawerOpen) {
+            ref.read(compactFileSelectedProvider(_key).notifier).state = false;
+          }
+        },
+        child: page,
+      ),
     );
   }
 

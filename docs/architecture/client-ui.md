@@ -61,7 +61,12 @@ The read-only search API shares the existing file permissions and workspace gate
 It rejects traversal, skips symlinks and common dependency/cache directories, and
 bounds entries, depth, elapsed time and matches. The UI reports partial results
 instead of assuming they are complete. Files open beside the transcript on wide
-landscape screens and through the compact file route on smaller screens.
+landscape screens and in the same session shell on smaller screens. Legacy file
+URLs resolve into that shell. A 40 dp strip keeps Chat, open/pinned documents and file management
+reachable without duplicating reader tabs. Pins and explicit reader modes are
+stored per broker source and session; source/rendered scroll positions remain
+local to the running app. Supported documents default to Rendered; source-line
+links select Source. The wide split layout is unchanged.
 
 ## Session telemetry
 
@@ -190,3 +195,17 @@ design layer.
 
 Changes to wire behavior must follow [contract synchronization](../protocol/contract-sync.md).
 Adapter support claims and evidence live in the [adapter support matrix](../protocol/adapter-support.md).
+
+## Selection and transcript preferences
+
+The shared adaptive picker anchors its popup to the triggering control on all
+screen sizes. Settings use a quiet label/value row on phones, and a value
+button on desktop. Popup width follows the trigger; a bounded list scrolls,
+flipping above when needed. Dark popups have no decorative perimeter border.
+
+Display settings separate tool-call visibility, tool detail expansion and
+assistant-message filtering. A device default controls visibility unless a
+session explicitly selects Show or Hide. Use default removes that override.
+Overrides include broker-source identity and survive closing tabs and cache
+cleanup. Reset session overrides offers Undo. Required input, delivered files,
+errors and notices remain available when routine tool calls are hidden.

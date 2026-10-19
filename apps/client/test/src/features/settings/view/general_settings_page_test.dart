@@ -82,6 +82,19 @@ void main() {
     await tester.tap(menu);
     await tester.pumpAndSettle();
     for (final label in const ['0.75×', '1.0×', '1.25×', '1.5×']) {
+      await tester.scrollUntilVisible(
+        find.descendant(
+          of: find.byKey(const Key('adaptive-picker-popup')),
+          matching: find.text(label),
+        ),
+        80,
+        scrollable: find
+            .descendant(
+              of: find.byKey(const Key('adaptive-picker-popup')),
+              matching: find.byType(Scrollable),
+            )
+            .last,
+      );
       expect(find.text(label), findsWidgets);
     }
     await tester.tap(find.text('1.5×').last);

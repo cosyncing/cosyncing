@@ -1,3 +1,4 @@
+import 'package:cosyncing_client/src/design/components/adaptive_picker.dart';
 // Roster, new-session and open-tab verbs for feature tests (F02).
 //
 // Everything is a thin finder or a user gesture over the real App; waiting is
@@ -77,13 +78,13 @@ extension RosterDriver on AppDriver {
   /// The agent picker in the New session sheet.
   Finder get agentPicker => find.descendant(
     of: find.byKey(const Key('new-session-agent')),
-    matching: find.byType(DropdownButtonFormField<String>),
+    matching: find.byType(AdaptivePickerFormField<String>),
   );
 
   /// The model picker in the New session sheet.
   Finder get modelPicker => find.byWidgetPredicate(
     (w) =>
-        w is DropdownButtonFormField<String> &&
+        w is AdaptivePickerFormField<String> &&
         w.key is ValueKey<String> &&
         (w.key! as ValueKey<String>).value.startsWith('new-session-model-'),
   );
@@ -91,7 +92,7 @@ extension RosterDriver on AppDriver {
   /// The permission-mode picker in the New session sheet.
   Finder get modePicker => find.byWidgetPredicate(
     (w) =>
-        w is DropdownButtonFormField<String> &&
+        w is AdaptivePickerFormField<String> &&
         w.key is ValueKey<String> &&
         (w.key! as ValueKey<String>).value.startsWith(
           'new-session-permission-',
@@ -101,20 +102,16 @@ extension RosterDriver on AppDriver {
   /// Opens [picker] and chooses the entry labelled [label].
   Future<void> choose(Finder picker, String label) async {
     await tap(picker);
+    await tester.ensureVisible(find.text(label).last);
     await tester.tap(find.text(label).last);
     await settle();
   }
 
   /// The labels [picker] offers, in order.
   List<String> optionsOf(Finder picker) {
-    final button = tester.widget<DropdownButton<String>>(
-      find.descendant(
-        of: picker,
-        matching: find.byType(DropdownButton<String>),
-      ),
-    );
+    final button = tester.widget<AdaptivePickerFormField<String>>(picker);
     return [
-      for (final item in button.items!)
+      for (final item in button.items)
         switch (item.child) {
           final Text text => text.data ?? '',
           final Tooltip tooltip when tooltip.child is Text =>

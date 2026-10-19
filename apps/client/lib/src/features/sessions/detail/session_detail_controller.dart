@@ -30,6 +30,7 @@ import 'package:cosyncing_client/src/features/sessions/transcript/session_draft_
 import 'package:cosyncing_client/src/features/sessions/transcript/session_outbox.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/session_transcript_store.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/created_session_attach_intents.dart';
+import 'package:cosyncing_client/src/features/settings/controller/tool_visibility_controller.dart';
 import 'package:cosyncing_client/src/platform/clock/app_clock.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -350,6 +351,18 @@ class SessionDetailController
 
   @override
   SessionDetailState build(SessionDetailKey arg) {
+    final visibilityKey = ref.read(toolVisibilityKeyProvider(arg));
+    bool hidden(AsyncValue<ToolVisibilityPreferences> value) {
+      final preferences = value.valueOrNull;
+      return preferences == null ||
+          (preferences.overrides[visibilityKey] ?? preferences.hideByDefault);
+    }
+
+    historyReportView = hidden(ref.read(toolVisibilityControllerProvider));
+    ref.listen(toolVisibilityControllerProvider, (previous, next) {
+      final hide = hidden(next);
+      if (historyReportView != hide) setHistoryReportView(reportView: hide);
+    });
     _cacheWriteFence = ref.read(sessionCacheWriteFenceProvider);
     ref.onDispose(() {
       _disposed = true;

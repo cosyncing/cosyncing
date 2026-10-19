@@ -9,7 +9,10 @@ enum ToolDisplayMode {
   tier1Only('tier-1-only'),
 
   /// Keep user turns, final assistant messages, and safety surfaces only.
-  finalMessagesOnly('final-messages-only');
+  finalMessagesOnly('final-messages-only'),
+
+  /// Final assistant text with independently controlled tool visibility.
+  finalAssistant('final-assistant');
 
   const ToolDisplayMode(this.token);
 

@@ -7,7 +7,6 @@ enum _SessionViewMenuAction {
   terminal,
   files,
   debug,
-  reportView,
 }
 
 /// Row height for every entry in the ⋮ menu.
@@ -38,9 +37,10 @@ class _SessionViewMenu extends StatelessWidget {
     required this.statusBadgeCount,
     required this.terminalFresh,
     required this.backgroundCommandCount,
-    required this.reportView,
     required this.onSelectView,
-    required this.onReportViewChanged,
+    required this.toolVisibility,
+    required this.defaultHidden,
+    required this.onToolVisibilityChanged,
   });
 
   final _SessionDetailView view;
@@ -53,9 +53,10 @@ class _SessionViewMenu extends StatelessWidget {
 
   /// Background shell commands still running, counted for the attention dot.
   final int backgroundCommandCount;
-  final bool reportView;
   final ValueChanged<_SessionDetailView> onSelectView;
-  final ValueChanged<bool> onReportViewChanged;
+  final ToolVisibility toolVisibility;
+  final bool defaultHidden;
+  final ValueChanged<ToolVisibility>? onToolVisibilityChanged;
 
   /// Unseen signals from views the user is not currently looking at.
   ///
@@ -131,8 +132,6 @@ class _SessionViewMenu extends StatelessWidget {
               onSelectView(_SessionDetailView.files);
             case _SessionViewMenuAction.debug:
               onSelectView(_SessionDetailView.debug);
-            case _SessionViewMenuAction.reportView:
-              onReportViewChanged(!reportView);
           }
         },
         itemBuilder: (context) => [
@@ -180,12 +179,37 @@ class _SessionViewMenu extends StatelessWidget {
           // destinations from toggles, not open a gap in the middle of a
           // six-row menu.
           const PopupMenuDivider(height: 8),
-          _toggle(
-            context,
-            action: _SessionViewMenuAction.reportView,
-            name: 'report',
-            label: l10n.sessionComposerMenuReportView,
-            checked: reportView,
+          _SessionPickerEntry(
+            child: SizedBox(
+              width: 240,
+              child: SettingsSelect<ToolVisibility>(
+                key: const Key('session-tool-visibility'),
+                title: l10n.toolsVisibility,
+                value: toolVisibility,
+                options: [
+                  SettingsSelectOption(
+                    value: ToolVisibility.inherit,
+                    label: l10n.toolsUseDefault(
+                      defaultHidden ? l10n.toolsHidden : l10n.toolsShown,
+                    ),
+                  ),
+                  SettingsSelectOption(
+                    value: ToolVisibility.show,
+                    label: l10n.toolsShow,
+                  ),
+                  SettingsSelectOption(
+                    value: ToolVisibility.hide,
+                    label: l10n.toolsHide,
+                  ),
+                ],
+                onChanged: onToolVisibilityChanged == null
+                    ? null
+                    : (value) {
+                        onToolVisibilityChanged!(value);
+                        Navigator.pop(context);
+                      },
+              ),
+            ),
           ),
         ],
       ),
@@ -231,40 +255,6 @@ class _SessionViewMenu extends StatelessWidget {
               const SizedBox(width: 12),
               _MenuSignalBadge(name: name, count: badgeCount),
             ],
-          ],
-        ),
-      ),
-    );
-  }
-
-  PopupMenuEntry<_SessionViewMenuAction> _toggle(
-    BuildContext context, {
-    required _SessionViewMenuAction action,
-    required String name,
-    required String label,
-    required bool checked,
-  }) {
-    final theme = Theme.of(context);
-    final tokens = context.tokens;
-    return PopupMenuItem<_SessionViewMenuAction>(
-      key: Key('session-detail-view-item-$name'),
-      value: action,
-      height: MediaQuery.sizeOf(context).width < 600 ? 40 : _menuItemHeight,
-      padding: _menuItemPadding,
-      child: _SessionMenuFade(
-        child: Row(
-          children: [
-            Icon(
-              checked
-                  ? Icons.check_box_outlined
-                  : Icons.check_box_outline_blank,
-              size: 18,
-              color: checked ? tokens.accent : tokens.textTertiary,
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(label, style: theme.textTheme.bodySmall),
-            ),
           ],
         ),
       ),
@@ -326,4 +316,35 @@ class _SessionMenuFade extends StatelessWidget {
       child: child,
     );
   }
+}
+
+/// A focusable selector owns its own gestures and semantics inside the menu.
+class _SessionPickerEntry extends PopupMenuEntry<_SessionViewMenuAction> {
+  const _SessionPickerEntry({required this.child});
+  final Widget child;
+  @override
+  double get height => 72;
+  @override
+  bool represents(_SessionViewMenuAction? value) => false;
+  @override
+  State<_SessionPickerEntry> createState() => _SessionPickerEntryState();
+}
+
+class _SessionPickerEntryState extends State<_SessionPickerEntry> {
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          AppLocalizations.of(context).toolsVisibility,
+          style: Theme.of(context).textTheme.labelSmall,
+        ),
+        const SizedBox(height: 4),
+        widget.child,
+      ],
+    ),
+  );
 }

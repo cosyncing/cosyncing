@@ -468,7 +468,7 @@ void main() {
           .text,
       'print(42)',
     );
-    await tester.pageBack();
+    await tester.tap(find.byKey(const Key('session-detail-view-back')));
     await tester.pumpAndSettle();
     expect(
       find.byKey(const Key('session-detail-tab-panel-chat')),

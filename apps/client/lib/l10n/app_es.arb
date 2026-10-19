@@ -1771,5 +1771,57 @@
         "type": "int"
       }
     }
-  }
+  },
+  "pickerSearchChoices": "Buscar opciones",
+  "pickerNoChoices": "Sin coincidencias",
+  "workspaceTimeShort": "Tiempo",
+  "workspaceCostUsd": "Coste · USD",
+  "filePin": "Fijar archivo",
+  "fileUnpin": "Desfijar archivo",
+  "fileManage": "Administrar archivos",
+  "fileLimitReached": "Límite de archivos alcanzado. Cierra uno que no necesites.",
+  "toolsHideDefault": "Ocultar llamadas a herramientas por defecto",
+  "toolsHideDefaultHint": "Se aplica a las sesiones con el valor predeterminado en este dispositivo. Cada sesión puede cambiarlo.",
+  "toolsUseDefault": "Usar valor predeterminado ({value})",
+  "toolsHidden": "Ocultas",
+  "toolsShown": "Visibles",
+  "toolsShow": "Mostrar llamadas a herramientas",
+  "toolsHide": "Ocultar llamadas a herramientas",
+  "toolsSaveRetry": "No se pudo guardar la visibilidad. Reintentar",
+  "toolsOverridesCount": "{count} sesiones usan un ajuste personalizado",
+  "toolsOverridesReset": "Ajustes de sesión restablecidos",
+  "toolsResetOverrides": "Restablecer ajustes de sesión",
+  "toolsAssistantMessages": "Mensajes del asistente",
+  "toolsAssistantAll": "Todos los mensajes",
+  "toolsDetails": "Detalles de herramientas",
+  "@toolsUseDefault": {
+    "placeholders": {
+      "value": {
+        "type": "String"
+      }
+    }
+  },
+  "@toolsOverridesCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "fileClosed": "Se cerró {name}",
+  "toolsVisibility": "Llamadas a herramientas",
+  "@fileClosed": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "filePinned": "Fijados",
+  "fileOtherOpen": "Otros archivos abiertos",
+  "fileCloseOthers": "Cerrar otros archivos sin fijar",
+  "fileCloseUnpinned": "Cerrar todos los archivos sin fijar",
+  "fileMoveEarlier": "Mover antes",
+  "fileMoveLater": "Mover después",
+  "fileViewerRenderedFailed": "Vista previa no disponible. Se muestra el código fuente."
 }

@@ -2044,9 +2044,8 @@ class _CommandPickerSheetState extends State<_CommandPickerSheet> {
             Row(
               children: [
                 Expanded(
-                  child: DropdownButtonFormField<String>(
+                  child: AdaptivePickerFormField<String>(
                     key: const Key('session-detail-command-picker'),
-                    isExpanded: true,
                     hint: Text(
                       _hasCommands
                           ? l10n.selectCommand

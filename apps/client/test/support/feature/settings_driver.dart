@@ -34,7 +34,16 @@ extension SettingsDriver on AppDriver {
     await tester.tap(find.byKey(Key(key)));
     await settle();
     // The open menu repeats the selected label; its entries come last.
-    await tester.tap(find.text(option).last);
+    final popup = find.byKey(const Key('adaptive-picker-popup'));
+    final target = find.descendant(of: popup, matching: find.text(option));
+    await tester.scrollUntilVisible(
+      target,
+      80,
+      scrollable: find
+          .descendant(of: popup, matching: find.byType(Scrollable))
+          .last,
+    );
+    await tester.tap(target);
     await settle();
   }
 
@@ -42,7 +51,7 @@ extension SettingsDriver on AppDriver {
   String selected(String key) {
     final texts = find.descendant(
       of: find.byKey(Key(key)),
-      matching: find.byType(Text),
+      matching: find.byKey(const Key('picker-current-value')),
     );
     return tester.widget<Text>(texts.first).data!;
   }

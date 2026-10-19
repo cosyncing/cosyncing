@@ -109,14 +109,32 @@ void main() {
       expect(app.theme.brightness, Brightness.light);
       expect(app.textScale, 1);
 
-      // At phone width every select stacks under its label.
+      // At phone width the label and value share a full-width picker trigger.
       final density = find.byKey(const Key('appearance-density'));
       await app.reveal(density);
       expect(app.tester.getSize(density).width, greaterThan(300));
       expect(
         app.tester.getTopLeft(density).dy,
-        greaterThan(app.tester.getTopLeft(find.text(en.densityLabel)).dy + 8),
+        lessThanOrEqualTo(app.tester.getTopLeft(find.text(en.densityLabel)).dy),
       );
+
+      // The popup stays aligned to the phone row and dismisses without
+      // changing the value. Keyboard choice commits only when activated.
+      await app.tapKey('appearance-theme-mode');
+      final popup = find.byKey(const Key('adaptive-picker-popup'));
+      final trigger = find.byKey(const Key('appearance-theme-mode'));
+      expect(
+        app.tester.getSize(popup).width,
+        closeTo(app.tester.getSize(trigger).width, 1),
+      );
+      expect(
+        app.tester.getTopLeft(popup).dx,
+        closeTo(app.tester.getTopLeft(trigger).dx, 1),
+      );
+      await app.tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await app.settle();
+      expect(popup, findsNothing);
+      expect(app.theme.brightness, Brightness.light);
 
       await app.pick('appearance-theme', en.themeGraphiteMinimalistName);
       await app.pick('appearance-theme-mode', en.themeModeDark);
@@ -237,7 +255,7 @@ void main() {
       ];
       var app = await f.launch(
         overrides: overrides,
-        initialLocation: settingsRoute,
+        initialLocation: displaySettingsRoute,
       );
 
       // Out of the box: background sessions hidden, IDE sessions shown, tool
@@ -254,10 +272,11 @@ void main() {
 
       await app.toggle('settings-show-background-sessions');
       await app.toggle('settings-show-vscode-sessions');
-      await app.pick('tool-display-mode', en.toolDisplayFinalTitle);
+      await app.pick('tool-display-mode', en.toolDisplayCollapsedTitle);
+      await app.toggle('tools-hide-default');
       await app.pick('conversation-font', en.settingsEnhancementFontSize(19));
       await app.toggle('conversation-reading-width');
-      await app.openCategory('general');
+      await app.go(generalSettingsRoute);
       expect(
         find.byKey(const Key('settings-keyboard-shortcuts')),
         findsOneWidget,
@@ -266,16 +285,17 @@ void main() {
       await app.toggle('settings-show-debug-views');
       expect(app.isOn('settings-show-debug-views'), isTrue);
 
-      app = await f.restart(initialLocation: settingsRoute);
+      app = await f.restart(initialLocation: displaySettingsRoute);
       expect(app.isOn('settings-show-background-sessions'), isTrue);
       expect(app.isOn('settings-show-vscode-sessions'), isFalse);
-      expect(app.selected('tool-display-mode'), en.toolDisplayFinalTitle);
+      expect(app.selected('tool-display-mode'), en.toolDisplayCollapsedTitle);
+      expect(app.isOn('tools-hide-default'), isTrue);
       expect(
         app.selected('conversation-font'),
         en.settingsEnhancementFontSize(19),
       );
       expect(app.isOn('conversation-reading-width'), isTrue);
-      await app.openCategory('general');
+      await app.go(generalSettingsRoute);
       expect(app.isOn('settings-show-debug-views'), isTrue);
 
       // Stored values no build writes fall back on their own: each preference
@@ -288,7 +308,7 @@ void main() {
         'conversation_display',
         '{"fontSize": 99, "messageSpacing": 20, "readingWidth": true}',
       );
-      app = await f.restart(initialLocation: settingsRoute);
+      app = await f.restart(initialLocation: displaySettingsRoute);
       expect(app.isOn('settings-show-background-sessions'), isFalse);
       expect(app.isOn('settings-show-vscode-sessions'), isFalse);
       expect(app.selected('tool-display-mode'), en.toolDisplayResponsiveTitle);
@@ -298,7 +318,7 @@ void main() {
       );
       expect(app.selected('conversation-spacing'), en.densitySpacious);
       expect(app.isOn('conversation-reading-width'), isTrue);
-      await app.openCategory('general');
+      await app.go(generalSettingsRoute);
       expect(app.isOn('settings-show-debug-views'), isFalse);
 
       // A choice made before the stored ones have loaded is kept next to them.
@@ -307,7 +327,7 @@ void main() {
         '{"fontSize": 19, "messageSpacing": 12, "readingWidth": false}',
       );
       store.gate = Completer<void>();
-      app = await f.restart(initialLocation: settingsRoute);
+      app = await f.restart(initialLocation: displaySettingsRoute);
       await app.pick('conversation-spacing', en.densitySpacious);
       store.gate!.complete();
       await app.settle();

@@ -25,6 +25,8 @@ class FilePanesState {
   const FilePanesState({
     this.panes = const [],
     this.activeBySession = const {},
+    this.pinned = const {},
+    this.modes = const {},
   });
 
   /// Decodes a persisted working set, empty on anything malformed.
@@ -52,8 +54,27 @@ class FilePanesState {
       // all rebuild and re-serialize whatever they were given, so a row
       // written by a client that predates the bound would otherwise stay
       // oversized until the reader happened to open a file.
+      final rawModes = decoded['modes'];
+      final modes = <String, String>{
+        if (rawModes is Map)
+          for (final e in rawModes.entries)
+            if (e.key is String &&
+                (e.value == 'source' || e.value == 'rendered'))
+              e.key as String: e.value as String,
+      };
+      final rawPinned = decoded['pinned'];
+      final pins = rawPinned is List
+          ? rawPinned.whereType<String>().toSet()
+          : <String>{};
+      final retained = _bounded(panes, active, pins);
+      final keys = retained.map((p) => p.key).toSet();
       return FilePanesState(
-        panes: List.unmodifiable(_bounded(panes, active)),
+        modes: {
+          for (final e in modes.entries)
+            if (keys.contains(e.key)) e.key: e.value,
+        },
+        pinned: pins.intersection(keys),
+        panes: List.unmodifiable(retained),
         activeBySession: active,
       );
     } on Object {
@@ -66,6 +87,12 @@ class FilePanesState {
 
   /// Every open file pane, in strip order, across all sessions.
   final List<SidePaneKey> panes;
+
+  /// Documents explicitly retained by the reader.
+  final Set<String> pinned;
+
+  /// Explicit reader mode choices for open documents.
+  final Map<String, String> modes;
 
   /// Session key to the pane key active within that session's strip.
   final Map<String, String> activeBySession;
@@ -105,16 +132,31 @@ class FilePanesState {
 
   /// Opens or activates any right-panel tab.
   FilePanesState openedPane(SidePaneKey pane) {
+    if (panes.any((p) => p.key == pane.key)) return activated(pane);
     final session = pane.session;
+    if (!panes.any((p) => p.key == pane.key) &&
+        panes.length >= workingSetLimit &&
+        panes.every(
+          (p) => pinned.contains(p.key) || _active.containsValue(p.key),
+        )) {
+      return this;
+    }
     final next = <SidePaneKey>[
       for (final existing in panes)
         if (existing.key != pane.key) existing,
       pane,
     ];
     final active = <String, String>{..._active, _sessionKey(session): pane.key};
+    final retained = _bounded(next, active, pinned);
+    final keys = retained.map((p) => p.key).toSet();
     return FilePanesState(
-      panes: List.unmodifiable(_bounded(next, active)),
+      panes: List.unmodifiable(retained),
       activeBySession: active,
+      pinned: pinned,
+      modes: {
+        for (final e in modes.entries)
+          if (keys.contains(e.key)) e.key: e.value,
+      },
     );
   }
 
@@ -132,9 +174,10 @@ class FilePanesState {
   static List<SidePaneKey> _bounded(
     List<SidePaneKey> next,
     Map<String, String> active,
+    Set<String> pinned,
   ) {
     if (next.length <= workingSetLimit) return next;
-    final spared = active.values.toSet();
+    final spared = {...active.values, ...pinned};
     final trimmed = [...next];
     var index = 0;
     while (trimmed.length > workingSetLimit && index < trimmed.length) {
@@ -144,7 +187,7 @@ class FilePanesState {
       }
       trimmed.removeAt(index);
     }
-    return trimmed;
+    return trimmed.take(workingSetLimit).toList();
   }
 
   /// Closes one file pane.
@@ -165,10 +208,14 @@ class FilePanesState {
       if (siblings.isEmpty) {
         active.remove(sessionKey);
       } else {
-        active[sessionKey] = siblings.last.key;
+        final prior = forSession(pane.session);
+        final index = prior.indexWhere((p) => p.key == pane.key);
+        active[sessionKey] = siblings[index.clamp(0, siblings.length - 1)].key;
       }
     }
     return FilePanesState(
+      pinned: pinned.difference({pane.key}),
+      modes: {...modes}..remove(pane.key),
       panes: List.unmodifiable(remaining),
       activeBySession: active,
     );
@@ -177,6 +224,8 @@ class FilePanesState {
   /// Makes [pane] active within its own session.
   FilePanesState activated(SidePaneKey pane) => FilePanesState(
     panes: panes,
+    pinned: pinned,
+    modes: modes,
     activeBySession: {..._active, _sessionKey(pane.session): pane.key},
   );
 
@@ -203,6 +252,8 @@ class FilePanesState {
           if (pane.session == session) moved[next++] else pane,
       ]),
       activeBySession: _active,
+      pinned: pinned,
+      modes: modes,
     );
   }
 
@@ -215,14 +266,20 @@ class FilePanesState {
   String toJsonString() => jsonEncode(<String, dynamic>{
     'panes': [for (final pane in panes) pane.toJson()],
     'active': activeBySession,
+    'pinned': pinned.toList(),
+    'modes': modes,
   });
 
   /// Returns a copy with [panes] and [activeBySession] replaced.
   FilePanesState copyWith({
     List<SidePaneKey>? panes,
     Map<String, String>? activeBySession,
+    Set<String>? pinned,
+    Map<String, String>? modes,
   }) => FilePanesState(
     panes: panes ?? this.panes,
+    pinned: pinned ?? this.pinned,
+    modes: modes ?? this.modes,
     activeBySession: activeBySession ?? this.activeBySession,
   );
 }

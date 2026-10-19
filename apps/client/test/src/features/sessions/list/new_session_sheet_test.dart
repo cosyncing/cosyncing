@@ -4,6 +4,7 @@ import 'package:broker_client/broker_client.dart';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_theme.dart';
+import 'package:cosyncing_client/src/design/components/adaptive_picker.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
@@ -262,6 +263,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('High').last);
     await tester.pumpAndSettle();
+    await tester.ensureVisible(find.byKey(const Key('new-session-submit')));
     await tester.tap(find.byKey(const Key('new-session-submit')));
     await tester.pumpAndSettle();
 
@@ -415,7 +417,7 @@ void main() {
       // invoking the pick callback captured while broker A's catalog was
       // rendered, with A's value (the sheet's `_modelKey` wire format).
       final staleOnChanged = tester
-          .widget<DropdownButtonFormField<String>>(_modelDropdown())
+          .widget<AdaptivePickerFormField<String>>(_modelDropdown())
           .onChanged!;
       const staleValue = 'openai\u0000first-model\u0000';
       _switchToAlternateBroker(tester);
@@ -468,7 +470,7 @@ void main() {
       // Same race, but the stale callback carries the "Default" entry: it
       // must not pollute B's declined set nor clear B's selection.
       final staleOnChanged = tester
-          .widget<DropdownButtonFormField<String>>(_modelDropdown())
+          .widget<AdaptivePickerFormField<String>>(_modelDropdown())
           .onChanged!;
       _switchToAlternateBroker(tester);
       await tester.pumpAndSettle();
@@ -799,7 +801,7 @@ void main() {
 
 Finder _modelDropdown() => find.byWidgetPredicate(
   (widget) =>
-      widget is DropdownButtonFormField<String> &&
+      widget is AdaptivePickerFormField<String> &&
       widget.key is ValueKey<String> &&
       (widget.key! as ValueKey<String>).value.startsWith(
         'new-session-model-',
@@ -808,7 +810,7 @@ Finder _modelDropdown() => find.byWidgetPredicate(
 
 Finder _effortDropdown() => find.byWidgetPredicate(
   (widget) =>
-      widget is DropdownButtonFormField<String> &&
+      widget is AdaptivePickerFormField<String> &&
       widget.key is ValueKey<String> &&
       (widget.key! as ValueKey<String>).value.startsWith(
         'new-session-reasoning-effort-',

@@ -6,6 +6,7 @@ import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/app/router/session_routes.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/components.dart';
+import 'package:cosyncing_client/src/design/components/adaptive_picker.dart';
 import 'package:cosyncing_client/src/errors/localized_user_facing_error.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_inbox_controller.dart';
 import 'package:cosyncing_client/src/features/attention/model/attention_inbox.dart';
@@ -315,25 +316,17 @@ class _AttentionPageState extends ConsumerState<AttentionPage> {
                           ),
                           SizedBox(
                             width: 280,
-                            child: DropdownButton<_PendingFilter>(
-                              isExpanded: true,
+                            child: AdaptivePicker<_PendingFilter>(
                               key: const Key('attention-pending-filter'),
                               value: _pendingFilter,
-                              underline: const SizedBox.shrink(),
                               onChanged: (value) {
-                                if (value != null) {
-                                  setState(() => _pendingFilter = value);
-                                }
+                                setState(() => _pendingFilter = value);
                               },
-                              items: [
+                              options: [
                                 for (final entry in pendingLabels.entries)
-                                  DropdownMenuItem(
+                                  PickerOption(
                                     value: entry.key,
-                                    child: Text(
-                                      entry.value,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
+                                    label: entry.value,
                                   ),
                               ],
                             ),
