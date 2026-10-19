@@ -242,16 +242,12 @@ bool isInternalBookkeepingMessage(AgentMessage message) {
 
 /// Whether a Final-only view keeps this row.
 ///
-/// A steering row survives because it is the user's own words: Final-only hides
-/// the
-/// agent's working, not what the human said. Dropping it would show an app-sent
-/// message in Full mode and nothing in Final-only, which reads as a send that
-/// was
-/// lost. Matched on the payload rather than the event name, so it stays true of
-/// an
-/// adapter that maps its own steering shape onto the same accessor.
+/// Incoming messages survive Final-only: steering retains the user's words and
+/// peer deliveries retain the request or report behind the agent's reply.
 bool _isFinalOnlyAlwaysVisible(AgentMessage message) {
-  if (message.steeringMessage != null) return true;
+  if (message.steeringMessage != null || message.peerMessage != null) {
+    return true;
+  }
   return switch (message.type) {
     AgentMessageType.userMessage ||
     AgentMessageType.permissionRequest ||

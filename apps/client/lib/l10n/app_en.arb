@@ -6625,5 +6625,26 @@
   "fileCloseUnpinned": "Close all unpinned files",
   "fileMoveEarlier": "Move earlier",
   "fileMoveLater": "Move later",
-  "fileViewerRenderedFailed": "Preview unavailable. Showing source."
+  "fileViewerRenderedFailed": "Preview unavailable. Showing source.",
+  "transcriptPeerMessageFrom": "Message from {name}",
+  "transcriptPeerReportFrom": "Report from {name}",
+  "transcriptPeerAnotherSession": "another session",
+  "transcriptPeerSubagent": "a subagent",
+  "transcriptPeerSessionOrigin": "Another session",
+  "transcriptPeerAgentOrigin": "Subagent",
+  "transcriptPeerEmptyReport": "No report content.",
+  "@transcriptPeerMessageFrom": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "@transcriptPeerReportFrom": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  }
 }

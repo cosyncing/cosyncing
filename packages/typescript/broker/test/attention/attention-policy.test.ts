@@ -122,7 +122,7 @@ describe('turn outcomes', () => {
     assert.deepEqual(threadGoals().slice(2), ['goal-finished:codex:session-1:thread-1:400']);
   });
 
-  test('a run the tool opened itself never notifies and leaves nothing open; a prompted one does', async () => {
+  test('background runs stay silent, and a new prompted turn retires their late-notification eligibility', async () => {
     const { clock, store, send } = world({ tool: 'claude' });
     for (const status of ['done', 'error'] as const) {
       const key = `session-1:run:wake-${status}`;
@@ -131,11 +131,56 @@ describe('turn outcomes', () => {
       await send({ type: 'run-summary', key, turnId: `wake-${status}`, status, origin: 'background' });
     }
     assert.equal(store.listEvents().length, 0);
-    assert.equal(store.listObservations().length, 0);
     await send({ type: 'run-summary', key: 'session-1:run:u1', turnId: 'u1', status: 'running', origin: 'user' });
     clock.now += MINUTE;
     await send({ type: 'run-summary', key: 'session-1:run:u1', turnId: 'u1', status: 'done', origin: 'user' });
+    await send({ type: 'run-summary', key: 'session-1:run:wake-error', turnId: 'wake-error', status: 'error' });
     assert.equal(store.findByDedupeKey('run-finished:claude:session-1:session-1:run:u1')?.kind, 'run-finished');
+    assert.equal(store.listEvents().length, 1);
+  });
+
+  test('a live continuation identified as a peer before or after its result notifies once under the peer turn', async () => {
+    // The Pi bridge cannot emit background origins. Exercise these canonical adapter deliveries
+    // through the policy's public entry point, including a terminal-only correction after result.
+    for (const status of ['done', 'error'] as const) {
+      for (const identifiedAfterResult of [false, true]) {
+        const { store, send } = world({ tool: 'claude' });
+        await send({ type: 'run-summary', key: 'live-run', turnId: 'provisional', status: 'running', origin: 'background' });
+        if (identifiedAfterResult) {
+          await send({ type: 'run-summary', key: 'live-run', turnId: 'provisional', status, origin: 'background' });
+          assert.equal(store.listEvents().length, 0);
+        } else {
+          await send({ type: 'run-summary', key: 'live-run', turnId: 'peer-wake', status: 'running' });
+        }
+        const terminal = { type: 'run-summary', key: 'live-run', turnId: 'peer-wake', status } as const;
+        await send(terminal);
+        const event = store.listEvents()[0];
+        assert.equal(store.listEvents().length, 1);
+        assert.equal(event?.kind, status === 'done' ? 'run-finished' : 'run-failed');
+        assert.equal(event?.turnId, 'peer-wake');
+        await send(terminal);
+        assert.deepEqual(store.listEvents(), [event], 'a terminal correction replay must not notify twice');
+      }
+    }
+  });
+
+  test('peer terminal corrections need recent live evidence and cannot resurrect an older or ended run', async () => {
+    for (const retiredBy of ['unseen', 'new-background', 'expired', 'session-ended'] as const) {
+      const { clock, store, send, policy, session } = world({ tool: 'claude' });
+      if (retiredBy !== 'unseen') {
+        await send({ type: 'run-summary', key: 'old', turnId: 'old', status: 'running', origin: 'background' });
+        await send({ type: 'run-summary', key: 'old', turnId: 'old', status: 'done', origin: 'background' });
+      }
+      if (retiredBy === 'new-background') {
+        await send({ type: 'run-summary', key: 'new', turnId: 'new', status: 'running', origin: 'background' });
+      } else if (retiredBy === 'expired') {
+        clock.now += 25 * HOUR;
+      } else if (retiredBy === 'session-ended') {
+        await policy.handleSessionEnded(session);
+      }
+      await send({ type: 'run-summary', key: 'old', turnId: 'peer-wake', status: 'done' });
+      assert.equal(store.listEvents().length, 0, retiredBy);
+    }
   });
 
   test('a step that does not end its turn closes silently; the last step notifies once', async () => {
@@ -168,7 +213,7 @@ describe('turn outcomes', () => {
     assert.equal(store.findByDedupeKey('run-finished:claude:session-1:session-1:run:u1')?.sessionTitle, 'Refactor the parser');
   });
 
-  test('a running and a done summary that arrive together make one completion, and a replay adds none', async () => {
+  test('batched running, result and late peer correction make one completion, and a replay adds none', async () => {
     const service = new AttentionService({ store: { home: tempRoot(), now: () => 1_000 }, policy: { now: () => 1_000 } });
     try {
       const session = { id: 'native', tool: 'codex', title: 'Native', status: 'idle' as const, attachMode: 'live' as const };
@@ -183,6 +228,18 @@ describe('turn outcomes', () => {
       assert.equal(completions.length, 1);
       assert.equal(completions[0]?.state, 'resolved');
       assert.equal(completions[0]?.presentationRevision, 1);
+      const peerSession = { ...session, tool: 'claude' };
+      const peerResult = { type: 'run-summary' as const, key: 'live-peer', turnId: 'peer-wake', status: 'error' as const };
+      await Promise.all([
+        service.handleMessage(peerSession, { ...peerResult, turnId: 'provisional', status: 'running', origin: 'background' }),
+        service.handleMessage(peerSession, { ...peerResult, turnId: 'provisional', origin: 'background' }),
+        service.handleMessage(peerSession, peerResult),
+      ]);
+      await service.handleMessage(peerSession, peerResult);
+      const failures = service.store.listEvents().filter((event) => event.kind === 'run-failed');
+      assert.equal(failures.length, 1);
+      assert.equal(failures[0]?.turnId, 'peer-wake');
+      assert.equal(failures[0]?.presentationRevision, 1);
     } finally {
       service.dispose();
     }

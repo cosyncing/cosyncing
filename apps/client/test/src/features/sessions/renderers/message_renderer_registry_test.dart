@@ -27,17 +27,107 @@ void main() {
     });
 
     for (final fixture in _renderedFixtures) {
-      testWidgets(
-        'renders ${fixture.caseName} payload fields',
-        (tester) async {
-          await _pumpRenderer(tester, fixture.message);
+      testWidgets('renders ${fixture.caseName} payload fields', (tester) async {
+        await _pumpRenderer(tester, fixture.message);
 
-          for (final expectedText in fixture.expectedText) {
-            expect(find.textContaining(expectedText), findsAtLeastNWidgets(1));
-          }
-        },
-      );
+        for (final expectedText in fixture.expectedText) {
+          expect(find.textContaining(expectedText), findsAtLeastNWidgets(1));
+        }
+      });
     }
+
+    group('peer messages', () {
+      AgentMessage peer({
+        String? from,
+        String senderKind = 'session',
+        bool handback = false,
+        String body = 'Review complete.',
+        bool truncated = false,
+      }) => AgentMessage.fromJson({
+        'type': 'event',
+        'name': kPeerMessageEvent,
+        'payload': {
+          'senderKind': senderKind,
+          if (from != null) 'from': from,
+          'body': body,
+          'handback': handback,
+          'truncated': truncated,
+        },
+      });
+      for (final brightness in Brightness.values) {
+        testWidgets('peer disclosure and semantics in ${brightness.name}', (
+          tester,
+        ) async {
+          final semantics = tester.ensureSemantics();
+          await _pumpRenderer(
+            tester,
+            peer(
+              from: 'Review transcript lane',
+              senderKind: 'agent',
+              handback: true,
+              truncated: true,
+            ),
+            brightness: brightness,
+          );
+          final toggle = find.byKey(const Key('transcript-peer-toggle'));
+          expect(
+            find.text('Report from Review transcript lane'),
+            findsOneWidget,
+          );
+          expect(find.byKey(const Key('transcript-peer-body')), findsNothing);
+          expect(tester.getSize(toggle).height, greaterThanOrEqualTo(40));
+          expect(
+            tester.getSemantics(toggle),
+            isSemantics(
+              isButton: true,
+              hasExpandedState: true,
+              isExpanded: false,
+            ),
+          );
+          await tester.tap(toggle);
+          await tester.pumpAndSettle();
+          expect(find.text('Subagent'), findsOneWidget);
+          expect(find.textContaining('Review complete.'), findsOneWidget);
+          expect(
+            find.text('Shortened. The agent received more than this.'),
+            findsOneWidget,
+          );
+          expect(
+            tester.getSemantics(toggle),
+            isSemantics(hasExpandedState: true, isExpanded: true),
+          );
+          await tester.tap(toggle);
+          await tester.pumpAndSettle();
+          expect(find.byKey(const Key('transcript-peer-body')), findsNothing);
+          semantics.dispose();
+        });
+      }
+      testWidgets('localized fallbacks and empty payload handling', (
+        tester,
+      ) async {
+        await _pumpRenderer(tester, peer());
+        expect(find.text('Message from another session'), findsOneWidget);
+        await tester.tap(find.byKey(const Key('transcript-peer-toggle')));
+        await tester.pump();
+        expect(find.text('Another session'), findsOneWidget);
+        await _pumpRenderer(tester, peer(senderKind: 'agent', handback: true));
+        expect(find.text('Report from a subagent'), findsOneWidget);
+        await _pumpRenderer(tester, peer(body: ''));
+        expect(find.byKey(const Key('transcript-peer-toggle')), findsNothing);
+      });
+      testWidgets('long sender fits a phone', (tester) async {
+        await _pumpRendererAtWidth(
+          tester,
+          peer(
+            from:
+                'Review the transcript and all of its history windows '
+                'on a narrow phone',
+          ),
+          width: 400,
+        );
+        expect(tester.takeException(), isNull);
+      });
+    });
 
     group('injected context', () {
       AgentMessage contextMessage({

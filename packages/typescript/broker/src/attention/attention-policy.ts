@@ -87,6 +87,7 @@ export class AttentionPolicy {
       && (event.kind === 'permission-required' || event.kind === 'question-required' || event.kind === 'sync-degraded'));
     const observationPrefixes = [
       `run:${session.tool}:${session.id}:`,
+      `background-run:${session.tool}:${session.id}:`,
       `goal:${session.tool}:${session.id}:`,
     ];
     const observations = this.store.listObservations().filter((observation) =>
@@ -108,6 +109,7 @@ export class AttentionPolicy {
   async handleObservationLost(session: SessionInfo): Promise<void> {
     const prefixes = [
       `run:${session.tool}:${session.id}:`,
+      `background-run:${session.tool}:${session.id}:`,
       `goal:${session.tool}:${session.id}:`,
     ];
     const staleBefore = this.now() - LIVE_EVIDENCE_MAX_AGE_MS;
@@ -247,25 +249,45 @@ export class AttentionPolicy {
     message: Extract<AgentMessage, { type: 'run-summary' }>,
   ): Promise<void> {
     const observationKey = `run:${session.tool}:${session.id}:${message.key}`;
-    // A run the tool opened itself (a background continuation) never notifies: without the
-    // running half its terminal has no pair.
-    if (message.origin === 'background') return;
+    const backgroundKey = `background-run:${session.tool}:${session.id}:latest`;
+    // Claude may identify a live continuation as a peer turn only after its result, when the
+    // native wake reaches disk. Keep one observed background start per session so that its
+    // corrected terminal can notify without emitting a fictitious second running transition.
+    // Background terminals remain silent. A newer start, session end, or expiry retires evidence.
+    if (message.origin === 'background') {
+      if (message.status === 'running') {
+        const previous = this.store.getObservation(backgroundKey);
+        if (previous?.data.runKey !== message.key) {
+          await this.store.putObservation({
+            key: backgroundKey,
+            kind: 'run',
+            observedAt: this.now(),
+            data: { runKey: message.key },
+          });
+        }
+      }
+      return;
+    }
     if (message.status === 'running') {
+      await this.store.deleteObservation(backgroundKey);
       const existing = this.store.getObservation(observationKey);
-      if (!existing) {
+      if (!existing || existing.data.turnId !== message.turnId) {
         await this.store.putObservation({
           key: observationKey,
           kind: 'run',
-          observedAt: this.now(),
+          observedAt: existing?.observedAt ?? this.now(),
           data: { turnId: message.turnId },
         });
       }
       return;
     }
 
-    const observation = this.store.getObservation(observationKey);
+    const background = this.store.getObservation(backgroundKey);
+    const latePeer = background?.data.runKey === message.key
+      && background.observedAt >= this.now() - LIVE_EVIDENCE_MAX_AGE_MS;
+    const observation = this.store.getObservation(observationKey) ?? (latePeer ? background : undefined);
     if (!observation) return;
-    await this.store.deleteObservation(observationKey);
+    await this.store.deleteObservation(observation.key);
     const turnId = typeof observation.data.turnId === 'string' ? observation.data.turnId : message.turnId;
     // One event per run occurrence, keyed as the adapter keys the run's transcript footer. A turn id
     // alone is not an occurrence: Codex reopens a closed turn id as a new generation with its own

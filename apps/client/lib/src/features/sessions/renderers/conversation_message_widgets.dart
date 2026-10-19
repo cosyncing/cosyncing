@@ -481,52 +481,12 @@ class _ContextInjectionRowState extends State<_ContextInjectionRow> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // One merged semantics node: the label comes from the Text, the tap
-          // from the InkWell, and the disclosure state is declared explicitly
-          // so a screen reader knows the row opens and whether it is open.
-          MergeSemantics(
-            child: Semantics(
-              button: true,
-              expanded: _expanded,
-              child: InkWell(
-                key: const Key('transcript-context-toggle'),
-                borderRadius: BorderRadius.circular(context.tokens.radiusMd),
-                onTap: () => setState(() => _expanded = !_expanded),
-                child: ConstrainedBox(
-                  // 40 is the floor for a real touch target, not the 36 some
-                  // quiet transcript affordances use: this one is tapped to
-                  // read the material, so it has to be reliably hittable on a
-                  // phone. Still under the 48 of primary controls, so it does
-                  // not push the messages around it apart.
-                  constraints: const BoxConstraints(minHeight: 40),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 4,
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.article_outlined, size: 16, color: quiet),
-                        const SizedBox(width: 8),
-                        Text(
-                          l10n.transcriptContextLabel,
-                          style: theme.textTheme.labelMedium?.copyWith(
-                            color: quiet,
-                          ),
-                        ),
-                        const SizedBox(width: 4),
-                        Icon(
-                          _expanded ? Icons.expand_less : Icons.expand_more,
-                          size: 18,
-                          color: quiet,
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
+          _TranscriptDisclosure(
+            icon: Icons.article_outlined,
+            label: l10n.transcriptContextLabel,
+            toggleKey: const Key('transcript-context-toggle'),
+            expanded: _expanded,
+            onTap: () => setState(() => _expanded = !_expanded),
           ),
           if (_expanded)
             Padding(
@@ -611,53 +571,12 @@ class _SteeringRowState extends State<_SteeringRow> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // One merged semantics node, as with the context row: the label comes
-          // from
-          // the Text, the tap from the InkWell, and the disclosure state is
-          // declared so
-          // a screen reader knows the row opens and whether it is open.
-          MergeSemantics(
-            child: Semantics(
-              button: true,
-              expanded: _expanded,
-              child: InkWell(
-                key: const Key('transcript-steering-toggle'),
-                borderRadius: BorderRadius.circular(context.tokens.radiusMd),
-                onTap: () => setState(() => _expanded = !_expanded),
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(minHeight: 40),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 4,
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          Icons.subdirectory_arrow_right_outlined,
-                          size: 16,
-                          color: quiet,
-                        ),
-                        const SizedBox(width: 8),
-                        Text(
-                          l10n.transcriptSteeringLabel,
-                          style: theme.textTheme.labelMedium?.copyWith(
-                            color: quiet,
-                          ),
-                        ),
-                        const SizedBox(width: 4),
-                        Icon(
-                          _expanded ? Icons.expand_less : Icons.expand_more,
-                          size: 18,
-                          color: quiet,
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
+          _TranscriptDisclosure(
+            icon: Icons.subdirectory_arrow_right_outlined,
+            label: l10n.transcriptSteeringLabel,
+            toggleKey: const Key('transcript-steering-toggle'),
+            expanded: _expanded,
+            onTap: () => setState(() => _expanded = !_expanded),
           ),
           if (_expanded)
             Padding(
@@ -677,6 +596,149 @@ class _SteeringRowState extends State<_SteeringRow> {
                     style: TextStyle(color: quiet),
                     child: _MarkdownBody(source: steered.text),
                   ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Shared quiet disclosure. MergeSemantics combines the Text label, InkWell tap
+/// and explicit expanded state so a screen reader announces one operable row.
+/// The 40 dp floor keeps material reliably tappable on a phone (unlike a 36 dp
+/// quiet affordance), while staying below primary controls' 48 dp to preserve
+/// transcript density.
+class _TranscriptDisclosure extends StatelessWidget {
+  const _TranscriptDisclosure({
+    required this.icon,
+    required this.label,
+    required this.toggleKey,
+    required this.expanded,
+    required this.onTap,
+  });
+  final IconData icon;
+  final String label;
+  final Key toggleKey;
+  final bool expanded;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final quiet = theme.colorScheme.onSurfaceVariant;
+    return MergeSemantics(
+      child: Semantics(
+        button: true,
+        expanded: expanded,
+        child: InkWell(
+          key: toggleKey,
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(context.tokens.radiusMd),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 40),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(icon, size: 16, color: quiet),
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.labelMedium?.copyWith(
+                        color: quiet,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  Icon(
+                    expanded ? Icons.expand_less : Icons.expand_more,
+                    size: 18,
+                    color: quiet,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Provenance-stamped peer material is neither a prompt nor a queued send.
+/// Collapse long reports by default; origin and report text belong inside.
+class _PeerMessageRow extends StatefulWidget {
+  const _PeerMessageRow({required this.message});
+  final AgentMessage message;
+  @override
+  State<_PeerMessageRow> createState() => _PeerMessageRowState();
+}
+
+class _PeerMessageRowState extends State<_PeerMessageRow> {
+  bool _expanded = false;
+  @override
+  Widget build(BuildContext context) {
+    final peer = widget.message.peerMessage;
+    if (peer == null) return const SizedBox.shrink();
+    final l10n = AppLocalizations.of(context);
+    final theme = Theme.of(context);
+    final quiet = theme.colorScheme.onSurfaceVariant;
+    final name =
+        peer.from ??
+        (peer.senderKind == 'session'
+            ? l10n.transcriptPeerAnotherSession
+            : l10n.transcriptPeerSubagent);
+    final label = peer.handback
+        ? l10n.transcriptPeerReportFrom(name)
+        : l10n.transcriptPeerMessageFrom(name);
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _TranscriptDisclosure(
+            icon: Icons.forum_outlined,
+            label: label,
+            toggleKey: const Key('transcript-peer-toggle'),
+            expanded: _expanded,
+            onTap: () => setState(() => _expanded = !_expanded),
+          ),
+          if (_expanded)
+            Padding(
+              padding: const EdgeInsets.only(left: 8, top: 4, bottom: 8),
+              child: Column(
+                key: const Key('transcript-peer-body'),
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    peer.senderKind == 'session'
+                        ? l10n.transcriptPeerSessionOrigin
+                        : l10n.transcriptPeerAgentOrigin,
+                    style: theme.textTheme.labelSmall?.copyWith(color: quiet),
+                  ),
+                  const SizedBox(height: 4),
+                  DefaultTextStyle.merge(
+                    style: TextStyle(color: quiet),
+                    child: peer.body.trim().isEmpty
+                        ? Text(l10n.transcriptPeerEmptyReport)
+                        : _MarkdownBody(source: peer.body),
+                  ),
+                  if (peer.truncated) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      l10n.transcriptContextTruncated,
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: quiet,
+                        fontStyle: FontStyle.italic,
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),

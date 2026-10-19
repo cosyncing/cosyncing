@@ -6,6 +6,170 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   group('turn boundaries', () {
+    test('Drive peer opener arriving after output preserves both answers', () {
+      for (final mode in [
+        ToolDisplayMode.responsive,
+        ToolDisplayMode.finalMessagesOnly,
+      ]) {
+        final previous = [
+          _user('u1', 'Start'),
+          _model('a1', 'Previous answer'),
+        ];
+        final running = _msg('run-summary', {
+          'key': 'owned-run',
+          'turnId': 'live-unknown',
+          'origin': 'background',
+          'assistantMessageKey': 'a2',
+          'status': 'running',
+        });
+        final reply = _model('a2', 'Peer reply');
+        final before = buildConversationTurns(
+          messages: [...previous, running, reply],
+          mode: mode,
+        );
+        expect(before, hasLength(2));
+        expect(before[0].modelText, 'Previous answer');
+        expect(before[1].modelText, 'Peer reply');
+
+        // Reconciliation can move the latest summary to the end. Its explicit
+        // assistant anchor must still place the late opener before the reply.
+        final done = _msg('run-summary', {
+          'key': 'owned-run',
+          'turnId': 'native-peer',
+          'assistantMessageKey': 'a2',
+          'status': 'done',
+          'totalRuntimeMs': 200,
+        });
+        final peer = _msg('event', {
+          'name': kPeerMessageEvent,
+          'payload': {
+            'senderKind': 'session',
+            'body': 'Review this.',
+            'key': 'native-peer',
+            'turnId': 'native-peer',
+          },
+        });
+        final after = buildConversationTurns(
+          messages: [...previous, reply, peer, done],
+          mode: mode,
+        );
+        expect(after, hasLength(2));
+        expect(after[0].modelText, 'Previous answer');
+        expect(after[1].modelText, 'Peer reply');
+        expect(after[1].continuationOpener, peer);
+        expect(after[1].runSummary?.totalRuntimeMs, 200);
+        expect(after[1].turnKey, 'turn:continuation:native-peer');
+      }
+    });
+
+    test(
+      'late coalesced peer stays beside its task wake and shared footer',
+      () {
+        final task = _msg('notice', {
+          'message': 'Task completed',
+          'semantic': {
+            'kind': 'continuation',
+            'reason': 'task-notification',
+            'turnId': 'task',
+          },
+        });
+        final peer = _msg('event', {
+          'name': kPeerMessageEvent,
+          'payload': {
+            'senderKind': 'session',
+            'body': 'Review',
+            'key': 'peer',
+            'turnId': 'task',
+          },
+        });
+        for (final mode in [
+          ToolDisplayMode.responsive,
+          ToolDisplayMode.finalMessagesOnly,
+        ]) {
+          final turns = buildConversationTurns(
+            messages: [
+              _user('u1', 'Start'),
+              _model('a1', 'Previous answer'),
+              task,
+              _model('a2', 'Shared reply'),
+              peer,
+              _runSummary(
+                status: 'done',
+                turnId: 'task',
+                assistantMessageKey: 'a2',
+                totalRuntimeMs: 200,
+              ),
+            ],
+            mode: mode,
+          );
+          expect(turns, hasLength(2));
+          expect(turns[0].modelText, 'Previous answer');
+          expect(turns[1].modelText, 'Shared reply');
+          expect(turns[1].continuationOpener, task);
+          expect(turns[1].runSummary?.totalRuntimeMs, 200);
+        }
+      },
+    );
+
+    test(
+      'peer wakes split turns, coalesce without output and own the footer',
+      () {
+        AgentMessage peer(String key, {bool opens = true}) => _msg('event', {
+          'name': kPeerMessageEvent,
+          'payload': {
+            'senderKind': 'session',
+            'body': key == 'peer-3' ? '' : 'Review this.',
+            if (key == 'peer-3') 'handback': true,
+            'key': key,
+            if (opens) 'turnId': key,
+          },
+        });
+        for (final mode in [
+          ToolDisplayMode.responsive,
+          ToolDisplayMode.finalMessagesOnly,
+        ]) {
+          final turns = buildConversationTurns(
+            messages: [
+              _user('u1', 'Start'),
+              _model('a1', 'Started'),
+              peer('mid-turn', opens: false),
+              peer('peer-1'),
+              peer('peer-2'),
+              _runSummary(
+                status: 'done',
+                turnId: 'peer-1',
+                totalRuntimeMs: 200,
+              ),
+              _model('a2', 'Peer answer'),
+              peer('peer-3'),
+              _runSummary(
+                status: 'done',
+                turnId: 'peer-3',
+                totalRuntimeMs: 300,
+              ),
+            ],
+            mode: mode,
+          );
+          expect(turns, hasLength(3));
+          expect(turns[0].runSummary, isNull);
+          expect(turns[1].continuationOpener?.peerMessage?.turnId, 'peer-1');
+          expect(turns[1].turnKey, 'turn:continuation:peer-1');
+          expect(turns[1].isPartial, isFalse);
+          expect(turns[1].runSummary?.totalRuntimeMs, 200);
+          expect(turns[2].runSummary?.totalRuntimeMs, 300);
+          final displayed = turns
+              .expand((turn) => turn.content)
+              .whereType<MessageTranscriptDisplayEntry>()
+              .map((entry) => entry.message.peerMessage?.key)
+              .whereType<String>();
+          expect(
+            displayed,
+            containsAll(['mid-turn', 'peer-1', 'peer-2', 'peer-3']),
+          );
+        }
+      },
+    );
+
     test('each delivered user message opens a turn', () {
       final turns = buildConversationTurns(
         messages: [
@@ -62,7 +226,7 @@ void main() {
       expect(turns[1].isPartial, isFalse);
       expect(turns[1].userMessage, isNull);
       expect(
-        turns[1].continuationNotice?.transcriptContinuationTurnId,
+        turns[1].continuationOpener?.transcriptContinuationTurnId,
         'continuation-turn',
       );
       expect(turns[1].turnKey, 'turn:continuation:continuation-turn');

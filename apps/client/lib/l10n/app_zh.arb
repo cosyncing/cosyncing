@@ -2802,5 +2802,26 @@
   "fileCloseUnpinned": "关闭所有未固定文件",
   "fileMoveEarlier": "向前移动",
   "fileMoveLater": "向后移动",
-  "fileViewerRenderedFailed": "预览不可用，已显示源文件。"
+  "fileViewerRenderedFailed": "预览不可用，已显示源文件。",
+  "transcriptPeerMessageFrom": "来自{name}的消息",
+  "transcriptPeerReportFrom": "来自{name}的报告",
+  "transcriptPeerAnotherSession": "另一个会话",
+  "transcriptPeerSubagent": "子代理",
+  "transcriptPeerSessionOrigin": "另一个会话",
+  "transcriptPeerAgentOrigin": "子代理",
+  "transcriptPeerEmptyReport": "报告内容为空。",
+  "@transcriptPeerMessageFrom": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "@transcriptPeerReportFrom": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  }
 }

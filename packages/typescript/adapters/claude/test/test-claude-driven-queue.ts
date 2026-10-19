@@ -665,36 +665,9 @@ async function main(): Promise<void> {
     ({ type: 'assistant', uuid, timestamp, message: { id, role: 'assistant', model: 'claude-opus-5', content: [{ type: 'text', text }], stop_reason: stop } });
   const wakeLine = (uuid: string, timestamp = nowIso()): any =>
     ({ type: 'user', uuid, timestamp, origin: { kind: 'task-notification' }, message: { role: 'user', content: [{ type: 'text', text: '<task-notification>\n<task-id>t1</task-id>\n<summary>Agent "explore" finished</summary>\n</task-notification>' }] } });
-  {
-    const h = newConn();
-    h.append(wakeLine('wake-1'));
-    h.append(assistantLine('cont-1', 'msg_cont', 'continuing after the wake', null));
-    h.drain();
-    check('q: continuation assistant rows after a task-notification line do not demote',
-      (h.conn as any).demoted === false && (h.conn as any).tailContinuationOpenedAt !== undefined, JSON.stringify(h.msgs.filter((m: any) => m.type === 'error')));
-    h.append(assistantLine('cont-2', 'msg_cont', 'done', 'end_turn'));
-    h.drain();
-    check('q: the terminal line is exonerated too and closes the window with a grace stamp',
-      (h.conn as any).demoted === false && (h.conn as any).tailContinuationOpenedAt === undefined && Date.now() - (h.conn as any).lastTurnEndedAt < 2_000);
-    h.append(assistantLine('cont-3', 'msg_cont', 'trailing per-block twin', 'end_turn'));
-    h.drain();
-    check('q: the terminal message\'s trailing per-block line rides the grace stamp', (h.conn as any).demoted === false);
-    (h.conn as any).lastTurnEndedAt = Date.now() - 60_000; // grace long over, window closed
-    h.append(assistantLine('for-1', 'msg_foreign', 'a second writer mid-turn', null));
-    h.drain();
-    check('q: after the continuation closed, a foreign assistant row still convicts', (h.conn as any).demoted === true);
-    await h.conn.close();
-  }
-  {
-    const h = newConn(); // a stale wake (30 min bound) cannot shelter a real foreign writer
-    h.append(wakeLine('wake-stale'));
-    h.drain();
-    (h.conn as any).tailContinuationOpenedAt = Date.now() - 31 * 60_000;
-    h.append(assistantLine('for-2', 'msg_foreign2', 'foreign under a stale window', null));
-    h.drain();
-    check('q: an expired continuation window no longer exonerates', (h.conn as any).demoted === true);
-    await h.conn.close();
-  }
+  // Tail-only wake ownership and foreign-writer refusal are exercised through
+  // the live-child scenario in test-claude-jsonl.ts. The old private-state
+  // tests granted a wake ownership without any stdout evidence.
   {
     const h = newConn(); // ownership proof by stdout echo, independent of any notification
     (h.conn as any).handleEvent({ type: 'assistant', message: { id: 'msg_ours', role: 'assistant', content: [{ type: 'text', text: 'streamed by our child' }] } });
@@ -778,7 +751,9 @@ async function main(): Promise<void> {
     const first = summaries.filter((m) => m.turnId === 'wake-output-1');
     const second = summaries.filter((m) => m.turnId === 'wake-output-2');
     check('q: output-bearing live continuation is cancelled before the next wake opens',
-      first.map((m) => m.status).join(',') === 'running,cancelled'
+      first[0]?.status === 'running'
+        && first.filter((m) => m.status !== 'running').map((m) => m.status).join(',') === 'cancelled'
+        && new Set(first.map((m) => m.key)).size === 1
         && second.map((m) => m.status).join(',') === 'running'
         && summaries.findIndex((m) => m.turnId === 'wake-output-1' && m.status === 'cancelled')
           < summaries.findIndex((m) => m.turnId === 'wake-output-2' && m.status === 'running'),

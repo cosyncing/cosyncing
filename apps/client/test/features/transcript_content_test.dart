@@ -387,6 +387,76 @@ void main() {
     }
   });
 
+  featureTest('peer reports collapse and dedupe live replays by native key', (
+    f,
+  ) async {
+    final broker = f.network.add('http://peer.test:7734');
+    final peer = row('event', {
+      'name': kPeerMessageEvent,
+      'payload': {
+        'senderKind': 'agent',
+        'from': 'Review transcript lane',
+        'body': 'The transcript review passed.',
+        'handback': true,
+        'turnId': 'peer-turn',
+        'key': 'peer-delivery',
+      },
+    });
+    final app = await openTranscript(
+      f,
+      [userRow('Start review', key: 'peer-user'), peer],
+      broker: broker,
+      viewport: FeatureViewport.phoneTall,
+      deepLink: true,
+    );
+    expect(find.text('Report from Review transcript lane'), findsOneWidget);
+    expect(find.textContaining('The transcript review passed.'), findsNothing);
+    await app.live(broker, peer);
+    expect(find.byKey(const Key('transcript-peer-toggle')), findsOneWidget);
+    await app.tapKey('transcript-peer-toggle');
+    expect(
+      find.textContaining('The transcript review passed.'),
+      findsOneWidget,
+    );
+    await app.tapKey('transcript-peer-toggle');
+    expect(find.byKey(const Key('transcript-peer-body')), findsNothing);
+    await app.live(
+      broker,
+      row('event', {
+        'name': kPeerMessageEvent,
+        'payload': {
+          'senderKind': 'agent',
+          'from': 'Review transcript lane',
+          'body': 'The transcript review passed.',
+          'handback': true,
+          'key': 'another-peer-delivery',
+        },
+      }),
+    );
+    expect(find.byKey(const Key('transcript-peer-toggle')), findsNWidgets(2));
+    await app.live(
+      broker,
+      row('event', {
+        'name': kPeerMessageEvent,
+        'payload': {
+          'senderKind': 'agent',
+          'from': 'Empty report',
+          'body': '',
+          'handback': true,
+          'key': 'empty-report',
+          'turnId': 'empty-report',
+        },
+      }),
+    );
+    expect(find.text('Report from Empty report'), findsOneWidget);
+    expect(find.text('Event'), findsNothing);
+    await app.tester.tap(find.text('Report from Empty report'));
+    await app.settle();
+    expect(find.text('No report content.'), findsOneWidget);
+
+    expect(app.tester.takeException(), isNull);
+  });
+
   group('injected context and steering', () {
     featureTest('injected context is collapsed with a human label, opens to '
         'its origin and material, and says when it was clipped', (f) async {

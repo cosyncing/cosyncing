@@ -206,7 +206,7 @@ enum ConversationTurnOpenReason {
   /// A delivered user message opened the turn.
   userMessage,
 
-  /// A structured system notice opened a continuation without a user prompt.
+  /// A system notice or peer delivery opened a turn without a user prompt.
   continuation,
 
   /// The opener fell outside the retained transcript window.
@@ -222,7 +222,7 @@ final class ConversationTurn {
     required this.turnKey,
     required this.openReason,
     required this.userMessage,
-    required this.continuationNotice,
+    required this.continuationOpener,
     required this.content,
     required this.modelText,
     required this.distinctToolCallCount,
@@ -249,11 +249,11 @@ final class ConversationTurn {
   /// retained history window ([isPartial] is then true).
   final AgentMessage? userMessage;
 
-  /// The structured notice that opened a system continuation turn.
+  /// The notice or peer delivery that opened a system continuation turn.
   ///
-  /// It remains in [content] so the ordinary notice renderer displays the
+  /// It remains in [content] so its ordinary renderer displays the
   /// boundary; this field carries segmentation and stable turn identity only.
-  final AgentMessage? continuationNotice;
+  final AgentMessage? continuationOpener;
 
   /// Whether this is a truncated leading turn whose opener is unavailable.
   bool get isPartial => openReason == ConversationTurnOpenReason.partial;
@@ -311,19 +311,33 @@ List<ConversationTurn> buildConversationTurns({
   // A queued prompt delivered mid-turn is re-emitted in place at its queued
   // position; correct that here so it does not open its turn early and steal
   // the running turn's output.
-  final ordered = _reorderDeliveredPrompts(messages);
+  final ordered = _placeLiveContinuationBoundaries(
+    _reorderDeliveredPrompts(messages),
+  );
 
+  // A Drive run starts before its opener reaches the transcript poll. The
+  // running summary establishes the boundary immediately. Its assistant
+  // anchor preserves that boundary when history reconciliation moves the
+  // terminal summary, and when the native opener arrives after the reply.
+  final openers = <String, AgentMessage>{};
+  for (final message in ordered) {
+    final id =
+        message.peerMessage?.turnId ?? message.transcriptContinuationTurnId;
+    if (id != null) openers.putIfAbsent(id, () => message);
+  }
+  final placedOpeners = <AgentMessage>{};
+  final openedRuns = <String>{};
   final segments = <_TurnSegment>[];
   final runSummaryMessages = <AgentMessage>[];
   _TurnSegment? current;
 
   _TurnSegment openTurn({
     AgentMessage? userMessage,
-    AgentMessage? continuationNotice,
+    AgentMessage? continuationOpener,
   }) {
     final segment = _TurnSegment(
       userMessage: userMessage,
-      continuationNotice: continuationNotice,
+      continuationOpener: continuationOpener,
     );
     segments.add(segment);
     return segment;
@@ -337,18 +351,40 @@ List<ConversationTurn> buildConversationTurns({
       case AgentMessageType.runSummary:
         // Held for by-key association; never a visible chat row.
         runSummaryMessages.add(message);
+        final turnId = _stringField(message.raw['turnId']);
+        final opener = openers[turnId];
+        if (turnId != null && openedRuns.add(turnId)) {
+          if (opener != null && placedOpeners.add(opener)) {
+            if (current?.isOutputFreeContinuation != true) {
+              current = openTurn(continuationOpener: opener);
+            }
+            current!.content.add(opener);
+          } else if (opener == null &&
+              message.raw['origin'] == 'background' &&
+              message.raw['userMessageKey'] == null) {
+            current = openTurn(continuationOpener: message);
+          }
+        }
         continue;
       case AgentMessageType.userMessage when !message.userMessageQueued:
         current = openTurn(userMessage: message);
+      case AgentMessageType.event when message.peerMessage?.turnId != null:
+        if (!placedOpeners.add(message)) continue;
+        if (current?.openerTurnId != message.peerMessage?.turnId &&
+            current?.isOutputFreeContinuation != true) {
+          current = openTurn(continuationOpener: message);
+        }
+        current!.content.add(message);
       case AgentMessageType.notice
           when message.transcriptNoticeSemanticKind ==
               TranscriptNoticeSemanticKind.continuation:
+        if (!placedOpeners.add(message)) continue;
         // Claude coalesces consecutive task notifications until the
         // continuation produces assistant output. Keep every notification
         // visible, but open only the first display boundary so the client and
         // runtime retain the same turn cardinality.
         if (current?.isOutputFreeContinuation != true) {
-          current = openTurn(continuationNotice: message);
+          current = openTurn(continuationOpener: message);
         }
         current!.content.add(message);
       case _:
@@ -367,7 +403,7 @@ List<ConversationTurn> buildConversationTurns({
     if (userKey != null) turnByUserKey[userKey] = index;
     final turnId =
         _stringField(segment.userMessage?.raw['turnId']) ??
-        segment.continuationNotice?.transcriptContinuationTurnId;
+        segment.openerTurnId;
     if (turnId != null) turnByTurnId[turnId] = index;
     for (final message in segment.content) {
       if (message.type != AgentMessageType.modelOutput) continue;
@@ -418,11 +454,11 @@ List<ConversationTurn> buildConversationTurns({
         turnKey: _turnKey(segments[index], index),
         openReason: segments[index].userMessage != null
             ? ConversationTurnOpenReason.userMessage
-            : segments[index].continuationNotice != null
+            : segments[index].continuationOpener != null
             ? ConversationTurnOpenReason.continuation
             : ConversationTurnOpenReason.partial,
         userMessage: segments[index].userMessage,
-        continuationNotice: segments[index].continuationNotice,
+        continuationOpener: segments[index].continuationOpener,
         content: _buildTurnContent(segments[index].content, mode),
         modelText: _modelTextAggregate(segments[index].content),
         distinctToolCallCount: _distinctToolCallCount(segments[index].content),
@@ -433,6 +469,52 @@ List<ConversationTurn> buildConversationTurns({
       ),
   ];
   return List<ConversationTurn>.unmodifiable(turns);
+}
+
+// A live continuation may stream before its native opener is written. Use the
+// run's first assistant anchor to place that opener ahead of its own output,
+// even after incremental history reconciliation moves the latest summary.
+List<AgentMessage> _placeLiveContinuationBoundaries(
+  List<AgentMessage> messages,
+) {
+  final openerIndices = <String, List<int>>{};
+  final assistantIndices = <String, int>{};
+  for (var index = 0; index < messages.length; index++) {
+    final message = messages[index];
+    final turnId =
+        message.peerMessage?.turnId ?? message.transcriptContinuationTurnId;
+    if (turnId != null) (openerIndices[turnId] ??= []).add(index);
+    if (message.type == AgentMessageType.modelOutput ||
+        message.type == AgentMessageType.thinking) {
+      final key = _stringField(message.raw['key']);
+      if (key != null) assistantIndices.putIfAbsent(key, () => index);
+    }
+  }
+  final before = <int, List<AgentMessage>>{};
+  final moved = <int>{};
+  for (var index = 0; index < messages.length; index++) {
+    final summary = messages[index];
+    if (summary.type != AgentMessageType.runSummary) continue;
+    final openerGroup = openerIndices[_stringField(summary.raw['turnId'])];
+    // Prompted runs never create a second boundary from their telemetry.
+    if (openerGroup == null && summary.raw['origin'] != 'background') continue;
+    final assistantIndex =
+        assistantIndices[_stringField(summary.raw['assistantMessageKey'])];
+    final target = assistantIndex != null && assistantIndex < index
+        ? assistantIndex
+        : index;
+    for (final from in openerGroup ?? [index]) {
+      if (from <= target || !moved.add(from)) continue;
+      (before[target] ??= []).add(messages[from]);
+    }
+  }
+  if (moved.isEmpty) return messages;
+  return [
+    for (var index = 0; index < messages.length; index++) ...[
+      ...?before[index],
+      if (!moved.contains(index)) messages[index],
+    ],
+  ];
 }
 
 /// Corrects the display position of a queued prompt that was delivered
@@ -643,14 +725,21 @@ List<AgentMessage> _reorderDeliveredPrompts(List<AgentMessage> messages) {
 
 /// Mutable per-turn accumulator used only while projecting.
 class _TurnSegment {
-  _TurnSegment({this.userMessage, this.continuationNotice});
+  _TurnSegment({this.userMessage, this.continuationOpener});
 
   final AgentMessage? userMessage;
-  final AgentMessage? continuationNotice;
+  final AgentMessage? continuationOpener;
   final List<AgentMessage> content = [];
 
+  String? get openerTurnId =>
+      continuationOpener?.peerMessage?.turnId ??
+      continuationOpener?.transcriptContinuationTurnId ??
+      (continuationOpener?.type == AgentMessageType.runSummary
+          ? _stringField(continuationOpener?.raw['turnId'])
+          : null);
+
   bool get isOutputFreeContinuation =>
-      continuationNotice != null &&
+      continuationOpener != null &&
       !content.any(
         (message) =>
             message.type == AgentMessageType.modelOutput ||
@@ -697,7 +786,7 @@ List<SessionTranscriptDisplayEntry> _buildTurnContent(
       else if (entries[index] case final MessageTranscriptDisplayEntry entry)
         if (entry.message.type == AgentMessageType.modelOutput
             ? index == lastModelOutput
-            : _isFinalOnlyAlwaysVisibleType(entry.message.type))
+            : _isFinalOnlyAlwaysVisible(entry.message))
           entry,
   ]);
 }
@@ -706,17 +795,20 @@ List<SessionTranscriptDisplayEntry> _buildTurnContent(
 // resolution is a request-state transition folded into its request card, never
 // a standalone Chat row (CR2). The canonical list keeps every frame for
 // Debug/persistence/attention.
-bool _isFinalOnlyAlwaysVisibleType(AgentMessageType type) => switch (type) {
-  AgentMessageType.userMessage ||
-  AgentMessageType.permissionRequest ||
-  AgentMessageType.questionRequest ||
-  AgentMessageType.fileArtifact ||
-  AgentMessageType.notice ||
-  AgentMessageType.historyReset ||
-  AgentMessageType.error ||
-  AgentMessageType.unknown => true,
-  _ => false,
-};
+bool _isFinalOnlyAlwaysVisible(AgentMessage message) =>
+    message.peerMessage != null ||
+    message.steeringMessage != null ||
+    switch (message.type) {
+      AgentMessageType.userMessage ||
+      AgentMessageType.permissionRequest ||
+      AgentMessageType.questionRequest ||
+      AgentMessageType.fileArtifact ||
+      AgentMessageType.notice ||
+      AgentMessageType.historyReset ||
+      AgentMessageType.error ||
+      AgentMessageType.unknown => true,
+      _ => false,
+    };
 
 String _modelTextAggregate(List<AgentMessage> content) {
   final segments = <String>[];
@@ -770,9 +862,9 @@ String _turnKey(_TurnSegment segment, int index) {
     final seq = opener.seq;
     if (seq != null) return 'turn:user-seq:$seq';
   }
-  final continuation = segment.continuationNotice;
+  final continuation = segment.continuationOpener;
   if (continuation != null) {
-    final turnId = continuation.transcriptContinuationTurnId;
+    final turnId = segment.openerTurnId;
     if (turnId != null) return 'turn:continuation:$turnId';
     final id = continuation.id;
     if (id != null && id.isNotEmpty) return 'turn:continuation-id:$id';

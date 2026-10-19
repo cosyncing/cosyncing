@@ -76,9 +76,9 @@ export class ClaudeHistoryStore {
       for (const suffix of ['', '-wal', '-shm']) rmSync(this.path + suffix, { force: true });
       this.db = open();
     }
-    if (this.get('schema') !== 2) {
+    if (this.get('schema') !== 4) {
       this.db.exec('DELETE FROM meta; DROP TABLE state; CREATE TABLE state (space TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(space,key)); DELETE FROM messages; DELETE FROM dependencies;');
-      this.set('schema', 2);
+      this.set('schema', 4);
     }
   }
 
@@ -128,7 +128,7 @@ export class ClaudeHistoryStore {
     };
   }
   resetMapping(): void {
-    this.db.exec("DELETE FROM state WHERE space != 'calls'; DELETE FROM messages; DELETE FROM dependencies;");
+    this.db.exec("DELETE FROM state WHERE space NOT IN ('calls', 'peerNames'); DELETE FROM messages; DELETE FROM dependencies;");
     this.set('mapper', undefined);
     this.set('runtime', undefined);
     this.set('taskFallback', undefined);

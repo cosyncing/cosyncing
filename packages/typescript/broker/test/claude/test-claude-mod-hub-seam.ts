@@ -920,6 +920,9 @@ async function forkCallSection(): Promise<void> {
   const sub = s.mod.fire('tool.check', { tool: 'Write', tool_use_id: 'toolu_sub_w', agentId: 'agent-1', input: { file_path: '/tmp/sub.txt', content: 'x' } });
   check('P-10 fork seam: a subagent\'s call after the main turn ended is still held for the app',
     await until(() => s.liveFrames.some((f) => f.message.type === 'permission-request' && String(f.message.requestId).startsWith('cm-')), 3000));
+  // The broker publishes the card before the ack draws the terminal band.
+  check('P-10 fork seam: the acknowledged subagent call draws its terminal band',
+    await until(() => s.mod.record.bands.some((b) => b.label === "Show Claude's dialog"), 3000));
   s.mod.tapBand("Show Claude's dialog");
   await within(sub);
   // The next turn's own question is held again.
