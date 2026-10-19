@@ -1,24 +1,63 @@
 import 'package:cosyncing_client/src/features/settings/data/session_display_preferences_store.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 /// Device-local roster query window saved across restarts.
-enum SessionRosterQueryWindow {
-  /// Explicit unbounded history.
-  any('all'),
+@immutable
+final class SessionRosterQueryWindow {
+  const SessionRosterQueryWindow._(this.days);
 
-  /// Sessions active today.
-  today('1d'),
+  /// A custom rolling window, up to one hundred years.
+  const SessionRosterQueryWindow.custom(int days)
+    : assert(days > 0 && days <= 36500, 'Days must be between 1 and 36500'),
+      days = days;
 
-  /// Fresh-install default.
-  last7Days('7d'),
+  /// Restores presets and valid custom choices from device storage.
+  factory SessionRosterQueryWindow.parse(String? value) {
+    for (final preset in values) {
+      if (preset.queryValue == value) return preset;
+    }
+    final match = RegExp(r'^(\d+)d$').firstMatch(value ?? '');
+    final days = int.tryParse(match?.group(1) ?? '');
+    return days != null && days > 0 && days <= 36500
+        ? SessionRosterQueryWindow.custom(days)
+        : last7Days;
+  }
 
-  /// Sessions active in the last thirty days.
-  last30Days('1m');
+  /// Rolling day count, or null for all time.
+  final int? days;
 
-  const SessionRosterQueryWindow(this.queryValue);
+  /// All sessions regardless of activity.
+  static const any = SessionRosterQueryWindow._(null);
 
-  /// Broker `window` query value.
-  final String queryValue;
+  /// Last twenty-four hours.
+  static const today = SessionRosterQueryWindow._(1);
+
+  /// Last seven days, the default.
+  static const last7Days = SessionRosterQueryWindow._(7);
+
+  /// Last thirty days.
+  static const last30Days = SessionRosterQueryWindow._(30);
+
+  /// Compact preset choices.
+  static const List<SessionRosterQueryWindow> values = [
+    any,
+    today,
+    last7Days,
+    last30Days,
+  ];
+
+  /// Broker query and persisted preference value.
+  String get queryValue => days == null
+      ? 'all'
+      : days == 30
+      ? '1m'
+      : '${days}d';
+  @override
+  bool operator ==(Object other) =>
+      other is SessionRosterQueryWindow && other.days == days;
+  @override
+  int get hashCode => days.hashCode;
 }
 
 /// Persists the user's roster time choice; fresh installs use seven days.
@@ -36,10 +75,7 @@ class SessionRosterWindowController
     final value = await ref
         .read(sessionDisplayPreferencesStoreProvider)
         .getSessionRosterWindow();
-    return SessionRosterQueryWindow.values.firstWhere(
-      (window) => window.queryValue == value,
-      orElse: () => SessionRosterQueryWindow.last7Days,
-    );
+    return SessionRosterQueryWindow.parse(value);
   }
 
   /// Saves [window] before publishing it to request owners.

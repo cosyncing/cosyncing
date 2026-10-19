@@ -33,6 +33,7 @@ export interface DurableStateLayout {
   attention: string;
   peers: string;
   wakeRegistrations: string;
+  sessionVisibility: string;
   transportKeys: string;
   brokerToken: string;
   piIntegration: string;
@@ -44,7 +45,7 @@ export interface DurableStateLayout {
 }
 
 export interface DurableSchemaSpec {
-  id: 'config' | 'broker-instance' | 'setup' | 'install' | 'schedules' | 'attention' | 'peers' | 'wake-registrations' | 'artifacts';
+  id: 'config' | 'broker-instance' | 'setup' | 'install' | 'schedules' | 'attention' | 'peers' | 'wake-registrations' | 'artifacts' | 'session-visibility';
   root: 'state' | 'cache';
   relativePath: string;
   versionField: 'schemaVersion' | 'version';
@@ -61,6 +62,7 @@ export const DURABLE_SCHEMA_REGISTRY: readonly DurableSchemaSpec[] = Object.free
   { id: 'attention', root: 'state', relativePath: 'attention-events.json', versionField: 'version', currentVersion: 1, sensitive: true },
   { id: 'peers', root: 'state', relativePath: 'transport-peers.json', versionField: 'version', currentVersion: 2, sensitive: true },
   { id: 'wake-registrations', root: 'state', relativePath: 'push-wake-tokens.json', versionField: 'version', currentVersion: 2, sensitive: true },
+  { id: 'session-visibility', root: 'state', relativePath: 'session-visibility.json', versionField: 'version', currentVersion: 1, sensitive: true },
   { id: 'artifacts', root: 'cache', relativePath: 'artifacts/index.json', versionField: 'version', currentVersion: 1, sensitive: true },
 ]);
 
@@ -146,6 +148,7 @@ export function durableStateLayout(options: { stateRoot?: string; cacheRoot?: st
     attention: join(stateRoot, 'attention-events.json'),
     peers: join(stateRoot, 'transport-peers.json'),
     wakeRegistrations: join(stateRoot, 'push-wake-tokens.json'),
+    sessionVisibility: join(stateRoot, 'session-visibility.json'),
     transportKeys: join(stateRoot, 'transport-keys'),
     brokerToken: join(stateRoot, 'secrets', 'broker-token'),
     piIntegration: join(stateRoot, 'secrets', 'pi-integration.json'),
@@ -568,6 +571,7 @@ export function backupDurableStores(options: {
     { path: layout.attention, label: 'state/attention-events.json', destination: join(path, 'state', 'attention-events.json') },
     { path: layout.peers, label: 'state/transport-peers.json', destination: join(path, 'state', 'transport-peers.json') },
     { path: layout.wakeRegistrations, label: 'state/push-wake-tokens.json', destination: join(path, 'state', 'push-wake-tokens.json') },
+    { path: layout.sessionVisibility, label: 'state/session-visibility.json', destination: join(path, 'state', 'session-visibility.json') },
     { path: layout.transportKeys, label: 'state/transport-keys', destination: join(path, 'state', 'transport-keys') },
     { path: layout.brokerToken, label: 'state/secrets/broker-token', destination: join(path, 'state', 'secrets', 'broker-token') },
     { path: layout.piIntegration, label: 'state/secrets/pi-integration.json', destination: join(path, 'state', 'secrets', 'pi-integration.json') },

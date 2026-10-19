@@ -13,8 +13,8 @@
  * transcript watcher, never by the safety net.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { appendFileSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { appendFileSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { type Broker, type BrokerClient, eventually, SOON_MS, startBroker } from '../harness/index.ts';
 import { type FakeClaudeAgents, installFakeClaudeAgents } from '../harness/fakes/claude-agents.ts';
 import {
@@ -180,6 +180,8 @@ describe('the session roster', () => {
         COSYNCING_ROSTER_COLD_PARTIAL_MS: '120000',
         // The smallest journal the broker allows, so a client can fall behind it.
         COSYNCING_ROSTER_DELTA_JOURNAL: '32',
+        // Exercise real window eviction with small fixtures on every platform.
+        COSYNCING_TEST_ROSTER_WINDOW_LIMIT: '3',
       }),
     });
     client = broker.client();
@@ -423,6 +425,10 @@ describe('the session roster', () => {
     expect(aged.session).toBeUndefined();
     expect(aged.revision).toBeGreaterThan(admitted.revision);
 
+    // A forced refresh can join a sweep started by the preceding long poll.
+    // Drain that sweep before deleting, so its earlier read cannot mask removal.
+    const settled = await rosterSnapshot(client, { window, refresh: true });
+    expect(settled.body.complete).toBe(true);
     unlinkSync(pi.doomed!.path);
     const refreshed = await rosterSnapshot(client, { window, refresh: true });
     expect(ids(refreshed.body.sessions)).not.toContain(pi.doomed!.id);
@@ -570,4 +576,82 @@ describe('the session roster', () => {
     expect(roster.body.revision).toBeLessThan(before);
     expect(await feed.request(before)).toMatchObject({ resetRequired: true, deltas: [] });
   });
+  test('visibility syncs across clients, hides subagents and survives cache clearing and restart', async () => {
+    const other = broker.client();
+    try {
+      const before = (await rosterSnapshot(client, { refresh: true })).body.sessions;
+      const parent = before.find((row) => row.id === fileSessionId(watchedPath));
+      const child = before.find((row) => row.origin === 'subagent' && row.parentThreadId === parent?.nativeId);
+      expect(parent).toBeDefined();
+      expect(child).toBeDefined();
+      const nativeBefore = readFileSync(watchedPath, 'utf8');
+      const route = (row: any) => `/api/sessions/${row.tool}/${encodeURIComponent(row.id)}/visibility`;
+      const change = (row: any, hidden: boolean) => client.request('PATCH', route(row), { hidden });
+      const feed = new RosterFeed(other);
+      await feed.start();
+      expect((await client.request('PATCH', route(parent), { hidden: 'yes' })).status).toBe(400);
+      // An independently hidden child must not be unhidden by restoring its parent.
+      expect((await change(child, true)).status).toBe(200);
+      expect((await rosterSnapshot(other)).body.sessions.find((row) => row.id === parent.id)?.appHidden).toBe(false);
+      const hidden = await change(parent, true);
+      expect(hidden.status).toBe(200);
+      expect(hidden.body.session).toMatchObject({ appHidden: true, status: parent.status, attachMode: parent.attachMode });
+      const published = await feed.waitFor((delta) => delta.sessionId === parent.id && delta.session?.appHidden === true);
+      expect(published.changedFields).toContain('appHidden');
+      let rows = (await rosterSnapshot(other)).body.sessions;
+      expect(rows.find((row) => row.id === child.id)).toMatchObject({ appHidden: true, appHiddenByAncestor: true });
+      expect((await change(child, false)).status).toBe(409);
+      // A subagent discovered after Hide inherits the parent's preference.
+      const latePath = join(dirname(watchedPath), WATCHED_UUID, 'subagents', 'agent-hidden-late.jsonl');
+      writeFileSync(latePath.replace(/\.jsonl$/, '.meta.json'), line({ toolUseId: 'late-child-tool' }));
+      writeFileSync(latePath, claudeUser('agent-hidden-late', 1, broker.paths.home) + claudeEndTurn('agent-hidden-late', 1));
+      rows = (await rosterSnapshot(other, { refresh: true })).body.sessions;
+      expect(rows.find((row) => row.id === fileSessionId(latePath))).toMatchObject({ appHidden: true, appHiddenByAncestor: true });
+      expect(rows.find((row) => row.id === pi.recent!.id)?.appHidden).toBe(false);
+      expect((await client.delete(`/api/sessions/${parent.tool}/${encodeURIComponent(parent.id)}/cache`)).status).toBe(200);
+      await broker.restart();
+      rows = (await rosterSnapshot(other, { refresh: true })).body.sessions;
+      expect(rows.find((row) => row.id === parent.id)?.appHidden).toBe(true);
+      expect(rows.find((row) => row.id === child.id)?.appHidden).toBe(true);
+      expect((await change(parent, false)).status).toBe(200);
+      rows = (await rosterSnapshot(other)).body.sessions;
+      expect(rows.find((row) => row.id === parent.id)?.appHidden).toBe(false);
+      expect(rows.find((row) => row.id === fileSessionId(latePath))?.appHidden).toBe(false);
+      expect(rows.find((row) => row.id === child.id)).toMatchObject({ appHidden: true, appHiddenByAncestor: false });
+      expect((await change(child, false)).status).toBe(200);
+      expect(readFileSync(watchedPath, 'utf8')).toBe(nativeBefore);
+    } finally { other.closeAll(); }
+  });
+
+  test('custom activity windows load their own range and use distinct cached representations', async () => {
+    for (const window of ['0d', '-2d', '1.5d', '36501d']) {
+      expect((await client.get(`/api/sessions?window=${window}`)).status).toBe(400);
+      expect((await client.get(`/api/session-roster-deltas?window=${window}`)).status).toBe(400);
+    }
+    const two = await rosterSnapshot(client, { window: '2d', refresh: true });
+    const four = await rosterSnapshot(client, { window: '4d', refresh: true });
+    const sixty = await rosterSnapshot(client, { window: '60d', refresh: true });
+    expect(ids(two.body.sessions)).not.toContain(pi.days3!.id);
+    expect(ids(four.body.sessions)).toContain(pi.days3!.id);
+    expect(ids(four.body.sessions)).not.toContain(pi.days20!.id);
+    expect(ids(sixty.body.sessions)).toContain(pi.days20!.id);
+    expect(ids(sixty.body.sessions)).not.toContain(pi.days100!.id);
+    const again = await rosterSnapshot(client, { window: '2d', headers: { 'if-none-match': sixty.headers.get('etag')! } });
+    expect(again.status).toBe(200);
+    expect(ids(again.body.sessions)).not.toContain(pi.days20!.id);
+    // Trying many ranges evicts dormant snapshots; a prior cursor must reset,
+    // never silently match a different journal that happens to reuse its number.
+    const retained = await client.get(`/api/session-roster-deltas?window=2d&after=${two.body.revision}`);
+    expect(retained.status).toBe(200);
+    expect(retained.body.resetRequired).not.toBe(true);
+    for (let days = 101; days <= 104; days++) {
+      const pressure = await rosterSnapshot(client, { window: `${days}d` });
+      expect(pressure.status).toBe(200);
+      expect(pressure.body.complete).toBe(true);
+    }
+    const resumed = await client.get(`/api/session-roster-deltas?window=2d&after=${two.body.revision}`);
+    expect(resumed.body.resetRequired).toBe(true);
+    expect(ids((await rosterSnapshot(client, { window: '2d' })).body.sessions)).not.toContain(pi.days20!.id);
+  });
+
 });

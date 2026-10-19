@@ -190,6 +190,14 @@ export class RosterSweepCache<T> {
     this.now = options.now ?? Date.now;
   }
 
+  /** Drop a dormant window; a running sweep owns its snapshot until it settles. */
+  forget(key: string): boolean {
+    if (this.inflight.has(key)) return false;
+    this.snapshots.delete(key);
+    this.servedAhead.delete(key);
+    return true;
+  }
+
   snapshot(key: string): RosterSweepSnapshot<T> | undefined {
     return this.snapshots.get(key);
   }

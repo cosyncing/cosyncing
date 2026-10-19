@@ -32,6 +32,13 @@ async function flush(turns = 12): Promise<void> {
   for (let index = 0; index < turns; index += 1) await new Promise((resolve) => { setTimeout(resolve, 0); });
 }
 
+async function waitFor(predicate: () => boolean): Promise<void> {
+  const deadline = performance.now() + 3_000;
+  while (!predicate() && performance.now() < deadline) {
+    await new Promise((resolve) => { setTimeout(resolve, 10); });
+  }
+}
+
 const SESSION_ID = 'session-fixture-001';
 const LAUNCH_TOKEN = 'launch-token-not-a-real-one';
 
@@ -339,7 +346,8 @@ const COOKIE: DshCookie = { name: 'dsh-auth-fixture', value: 'v1.stored-cookie',
   await flush(2);
   check('a half-written announcement is held, not exchanged half', store.saved.length === 0);
   adapter.observeManagedOutput(tail);
-  await flush(20);
+  // Observe the autonomous exchange without starting one through isAvailable.
+  await waitFor(() => store.saved.length > 0);
   const stored = store.saved[0];
   check('the split announcement is reassembled and exchanged without user input',
     stored !== undefined && host.issuedCookie !== null,
@@ -360,7 +368,6 @@ const COOKIE: DshCookie = { name: 'dsh-auth-fixture', value: 'v1.stored-cookie',
 
   // The launch token dies with the launch; the cookie does not.
   adapter.managedLaunchEnded('host-exited-during-start');
-  await flush(4);
   const availableAfterExit = await adapter.isAvailable();
   check('a finished launch keeps the cookie it earned and forgets the token that bought it',
     availableAfterExit && store.saved.length === 1,
@@ -380,9 +387,8 @@ const COOKIE: DshCookie = { name: 'dsh-auth-fixture', value: 'v1.stored-cookie',
     fetchImpl: probeAwareFetch(scriptedFetch(host.baseUrl, host, { 'session/list': () => ({ items: [] }) })),
   });
   adapter.observeManagedOutput(`dsh web: ${host.baseUrl}/?token=not-the-hosts-token\n`);
-  await flush(20);
-  const attempts = host.requests.filter((request) => request.path === '/').length;
   const available = await adapter.isAvailable();
+  const attempts = host.requests.filter((request) => request.path === '/').length;
   check('a refused token stores nothing and becomes an availability failure',
     store.saved.length === 0 && available === false, `saved=${String(store.saved.length)} available=${String(available)}`);
   check('a refused token is not hammered: one exchange, then it stands',

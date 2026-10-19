@@ -140,6 +140,7 @@ const Map<String, BrokerContractAdoption> brokerRouteAdoption = {
   '/api/sessions/{id}/{id}/export/preflight': _adopted,
   '/api/sessions/{id}/{id}/fork': _adopted,
   '/api/sessions/{id}/{id}/rename': _adopted,
+  '/api/sessions/{id}/{id}/visibility': _adopted,
   '/api/sessions/{id}/{id}/stream': _adopted,
   '/api/tokdash/usage': BrokerContractAdoption(
     BrokerContractAdoptionDisposition.deferred,

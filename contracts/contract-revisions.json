@@ -199,6 +199,13 @@
       "minimumClientRevision": 17,
       "clientMinimumBrokerRevision": 16,
       "change": "Adds bounded, revocable media-preview capabilities for image, PDF and video decoders. Existing artifact downloads still require authentication; workspace previews retain the workspace gate."
+    },
+    {
+      "revision": 33,
+      "surfaceHash": "fnv1a32:0766c8f4",
+      "minimumClientRevision": 17,
+      "clientMinimumBrokerRevision": 16,
+      "change": "Add broker-owned session visibility with inherited subagent hiding, durable revisions and an authenticated visibility mutation. Roster windows accept custom day counts. Optional metadata preserves older client compatibility."
     }
   ]
 }

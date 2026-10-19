@@ -496,9 +496,10 @@ try {
     atomicWriteOwnerOnly(join(layout.artifactBlobs, 'aa', 'blob'), 'artifact bytes');
     atomicWriteOwnerOnly(layout.artifactUrlSecret, 'artifact-secret');
 
+    atomicWriteOwnerOnly(join(stateRoot, 'session-visibility.json'), JSON.stringify({ version: 1, revision: 1, hidden: ['session'], links: {}, changed: { session: 1 } }));
     const schema = inspectDurableSchemas(layout);
-    check('all nine durable JSON stores have explicit current schema records',
-      DURABLE_SCHEMA_REGISTRY.length === 9 && schema.every((item) => item.status === 'ok'));
+    check('all ten durable JSON stores have explicit current schema records',
+      DURABLE_SCHEMA_REGISTRY.length === 10 && schema.every((item) => item.status === 'ok'));
     const validBrokerInstance = readFileSync(layout.brokerInstance, 'utf8');
     atomicWriteOwnerOnly(layout.brokerInstance, '{"version":1,"instanceId":"invalid"}\n');
     const malformedInstance = inspectDurableSchemas(layout)
@@ -534,6 +535,7 @@ try {
     check('migration backup includes private schedules, peers, keys, attention, and artifact cache',
       readFileSync(scheduleCopy, 'utf8').includes('FULL PRIVATE PROMPT') &&
         existsSync(join(backup.path, 'state', 'broker-instance.json')) &&
+        existsSync(join(backup.path, 'state', 'session-visibility.json')) &&
         existsSync(join(backup.path, 'state', 'transport-peers.json')) &&
         existsSync(join(backup.path, 'state', 'push-wake-tokens.json')) &&
         existsSync(join(backup.path, 'state', 'transport-keys', 'broker.json')) &&

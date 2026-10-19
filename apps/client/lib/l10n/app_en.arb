@@ -6396,5 +6396,39 @@
   "storageCacheTitle": "Session cache",
   "storageDataTitle": "App data",
   "storageDataDescription": "Drafts, queued messages, connections and preferences are kept when you clear the cache.",
-  "storageCacheScope": "On this device · All connections"
+  "storageCacheScope": "On this device · All connections",
+  "sessionHide": "Hide session",
+  "sessionUnhide": "Unhide session",
+  "sessionHidden": "Session hidden",
+  "sessionUnhidden": "Session unhidden",
+  "sessionVisibilityUndo": "Undo",
+  "sessionVisibilityConnect": "Connect to change visibility",
+  "sessionVisibilityUnsupported": "Update the broker to hide sessions",
+  "sessionVisibilityParent": "Unhide the parent session first",
+  "sessionVisibilityFailed": "Could not save session visibility",
+  "sessionActionsMenu": "Session actions",
+  "sessionRosterShowHidden": "Show hidden sessions",
+  "sessionRosterShowHiddenHelp": "Include sessions you’ve hidden",
+  "sessionRosterResetFilters": "Reset filters",
+  "sessionRosterLast24Hours": "Last 24 hours",
+  "sessionRosterCustom": "Custom…",
+  "sessionRosterLastPrefix": "Last",
+  "sessionRosterDaysSuffix": "days",
+  "sessionRosterInvalidDays": "Enter a whole number from 1 to 36,500.",
+  "sessionRosterLastDays": "{days, plural, =1{Last 1 day} other{Last {days} days}}",
+  "@sessionRosterLastDays": {
+    "placeholders": {
+      "days": {
+        "type": "int"
+      }
+    }
+  },
+  "sessionRosterEmptyCustomDays": "{days, plural, =1{No sessions active in the last day.} other{No sessions active in the last {days} days.}}",
+  "@sessionRosterEmptyCustomDays": {
+    "placeholders": {
+      "days": {
+        "type": "int"
+      }
+    }
+  }
 }

@@ -157,6 +157,7 @@ import {
 } from '../sessions/history-page-cache.ts';
 import { storedHistoryIndex } from '../sessions/stored-history-index.ts';
 import { refreshSessionOptions } from '../sessions/session-options.ts';
+import { SessionVisibilityStore } from '../sessions/session-visibility-store.ts';
 import { SessionMetadataStore } from '../sessions/session-metadata-store.ts';
 import {
   getCodexUpdatePolicy,
@@ -974,6 +975,7 @@ process.env.COSYNCING_BROKER_BUILD_VERSION = BUILD_INFO.version;
 }
 
 const sessionMetadata = new SessionMetadataStore();
+const sessionVisibility = new SessionVisibilityStore(setupStateHome());
 // Test hook (source runs only): a short external-host discovery budget makes abandonment observable in about a second.
 const registry = new AgentRegistry(
   BUILD_INFO.packaged ? {} : { discoveryBudgetCapMs: envNumber('COSYNCING_TEST_DISCOVERY_BUDGET_MS', 0) || undefined },
@@ -1442,16 +1444,53 @@ const rosterRevision = new RosterRevisionStore(
 );
 const rosterWindowRevisions = new Map<number, RosterRevisionStore>();
 const rosterWindowExpiresAt = new Map<number, number>();
+// Custom day ranges must not retain a whole roster/journal for every value the
+// user has tried. Tiny cursor floors survive eviction so old feeds reset safely.
+const rosterWindowCursorFloors = new Map<number, number>();
+const rosterWindowUsers = new Map<number, number>();
+// A small source-fixture limit exercises eviction without repeated expensive
+// native discovery on Windows. Packaged brokers always retain the normal 16.
+const MAX_DORMANT_ROSTER_WINDOWS = BUILD_INFO.packaged ? 16
+  : Math.max(1, Math.min(16, Math.floor(envNumber('COSYNCING_TEST_ROSTER_WINDOW_LIMIT', 16))));
+
+function retainRosterWindow(windowMs: number | undefined): () => void {
+  if (windowMs === undefined) return () => {};
+  rosterWindowUsers.set(windowMs, (rosterWindowUsers.get(windowMs) ?? 0) + 1);
+  return () => {
+    const remaining = (rosterWindowUsers.get(windowMs) ?? 1) - 1;
+    if (remaining) rosterWindowUsers.set(windowMs, remaining);
+    else rosterWindowUsers.delete(windowMs);
+    pruneRosterWindows();
+  };
+}
+
+function pruneRosterWindows(): void {
+  for (const [windowMs, store] of rosterWindowRevisions) {
+    if (rosterWindowRevisions.size <= MAX_DORMANT_ROSTER_WINDOWS) break;
+    if (rosterWindowUsers.has(windowMs) || rosterPollClients.has(windowMs)) continue;
+    if (!rosterSweeps.forget(String(windowMs))) continue;
+    rosterWindowCursorFloors.set(windowMs, store.revision + 1);
+    rosterWindowRevisions.delete(windowMs);
+    rosterWindowExpiresAt.delete(windowMs);
+    rosterSafetyReconciledAt.delete(String(windowMs));
+    for (const key of rosterRepresentations.keys()) {
+      if (key.startsWith(`${windowMs}ms|`)) rosterRepresentations.delete(key);
+    }
+  }
+}
 
 function rosterRevisionForWindow(windowMs: number | undefined): RosterRevisionStore {
   if (windowMs === undefined) return rosterRevision;
   let store = rosterWindowRevisions.get(windowMs);
   if (!store) {
+    // A gap forces a reconnecting client to take a fresh snapshot after eviction.
     store = new RosterRevisionStore(
       Math.max(32, Math.floor(envNumber('COSYNCING_ROSTER_DELTA_JOURNAL', 512))),
+      rosterWindowCursorFloors.get(windowMs) ?? 0,
     );
-    rosterWindowRevisions.set(windowMs, store);
   }
+  rosterWindowRevisions.delete(windowMs);
+  rosterWindowRevisions.set(windowMs, store);
   return store;
 }
 
@@ -2425,7 +2464,8 @@ function clearDivergenceOnSharedRejoin(info: SessionInfo): boolean {
 
 function decorateSession(info: SessionInfo): SessionInfo {
   clearDivergenceOnSharedRejoin(info);
-  return sessionMetadata.apply({ ...info, machine: MACHINE });
+  sessionVisibility.observe([info]);
+  return sessionVisibility.apply(sessionMetadata.apply({ ...info, machine: MACHINE }));
 }
 
 /**
@@ -2481,7 +2521,8 @@ const rosterRepresentations = new Map<string, RosterRepresentation>();
 const rosterSafetyReconciledAt = new Map<string, number>();
 
 function rosterWindowKey(raw: string | null): string {
-  return raw === '1d' || raw === '7d' || raw === '1m' || raw === '2m' || raw === '6m' ? raw : 'all';
+  const milliseconds = parseSessionWindowMs(raw);
+  return milliseconds === undefined ? 'all' : `${milliseconds}ms`;
 }
 
 /** Age known rows locally; a wall-clock cutoff is not a reason to read native stores. */
@@ -2833,6 +2874,15 @@ async function discoverLocalRoster(
   now = attentionClock.now(),
   allowSweeping = true,
 ): Promise<RosterSweepAnswer<SessionInfo>> {
+  const release = retainRosterWindow(windowMs);
+  try {
+    return await discoverLocalRosterRetained(force, windowMs, now, allowSweeping);
+  } finally { release(); }
+}
+
+async function discoverLocalRosterRetained(
+  force: boolean, windowMs: number | undefined, now: number, allowSweeping: boolean,
+): Promise<RosterSweepAnswer<SessionInfo>> {
   piBridgeIds.canonicalizeAll();
   ompBridgeIds.canonicalizeAll();
   const swept = await discoverAllCached(force, windowMs, now, allowSweeping);
@@ -2913,9 +2963,10 @@ async function discoverLocalRoster(
       });
     }
   }
+  sessionVisibility.observe(sessions);
   const decorated = sessionMetadata
     .applyAll(sessions.map((s) => ({ ...s, machine: MACHINE })))
-    .map((session) => hub.projectSessionInfo(session));
+    .map((session) => sessionVisibility.apply(hub.projectSessionInfo(session)));
   for (const session of decorated) rememberLatestSessionInfo(session);
   decorated.sort((a, b) => statusRank(a) - statusRank(b) || (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
   // A sweep that is still RUNNING must not be journalled. `reconcile` treats its
@@ -6895,6 +6946,46 @@ server = Bun.serve<WsData>({
       }
     }
 
+    // Visibility is broker-authored metadata, never an adapter mutation or detach.
+    const visibilityMatch = path.match(/^\/api\/sessions\/([^/]+)\/([^/]+)\/visibility$/);
+    if (visibilityMatch && req.method === 'PATCH') {
+      const tool = decodeURIComponent(visibilityMatch[1]!);
+      const id = decodeURIComponent(visibilityMatch[2]!);
+      if (!registry.get(tool)) return json({ error: 'unknown tool' }, 404);
+      const body = await req.json().catch(() => null) as { hidden?: unknown } | null;
+      if (!body || typeof body.hidden !== 'boolean') return json({ error: 'hidden must be a boolean' }, 400);
+      const sessions = await discoverLocalSessions();
+      const info = sessions.find((s) => s.tool === tool && s.id === id) ?? await discoverSession(tool, id);
+      if (!info) return json({ error: 'session not found' }, 404);
+      try {
+        sessionVisibility.set(info, body.hidden);
+      } catch (error) {
+        if (error instanceof Error && error.message === 'HIDDEN_ANCESTOR') {
+          return json({ error: 'unhide the parent session first', code: 'HIDDEN_ANCESTOR' }, 409);
+        }
+        return json({ error: 'visibility could not be saved' }, 500);
+      }
+      const affected = new Map(sessions.map((s) => [latestSessionKey(s.tool, s.id), s]));
+      for (const s of latestSessionInfoByKey.values()) affected.set(latestSessionKey(s.tool, s.id), s);
+      affected.set(latestSessionKey(info.tool, info.id), info);
+      const updates: SessionInfo[] = [];
+      const updatedKeys = new Set<string>();
+      for (const previous of affected.values()) {
+        const next = decorateSession(previous);
+        if ((next.tool === tool && next.id === id)
+          || next.appHidden !== previous.appHidden
+          || next.appHiddenByAncestor !== previous.appHiddenByAncestor
+          || next.appVisibilityRevision !== previous.appVisibilityRevision) {
+          updates.push(next);
+          updatedKeys.add(latestSessionKey(next.tool, next.id));
+          rememberLatestSessionInfo(next);
+          observeRosterViews(next);
+        }
+      }
+      hub.broadcastSessionWhere((session) => updatedKeys.has(latestSessionKey(session.tool, session.id)), decorateSession);
+      return json({ ok: true, session: decorateSession(info), sessions: updates });
+    }
+
     // Generic session rename: native AgentBackend.renameSession when available, otherwise broker display alias.
     const renameSession = path.match(/^\/api\/sessions\/([^/]+)\/([^/]+)\/rename$/);
     if (renameSession && (req.method === 'PATCH' || req.method === 'POST')) {
@@ -8260,6 +8351,7 @@ server = Bun.serve<WsData>({
         // and from then on hold a row for an agent it was told does not exist.
         const deltaVisibility = rosterVisibility(registry.list(), parseAgentRosterClientRevision(url.searchParams));
         const deadline = performance.now() + Math.min(requestedWaitMs, 25_000);
+        const releaseWindow = retainRosterWindow(windowMs);
         const revisionStore = rosterRevisionForWindow(windowMs);
         const disconnect = requestedWaitMs > 0 ? connectRosterPoll(windowMs) : () => {};
         let batch;
@@ -8283,6 +8375,7 @@ server = Bun.serve<WsData>({
           }
         } finally {
           disconnect();
+          releaseWindow();
         }
         // The batch REVISION is deliberately not rewritten when deltas are
         // dropped. It is the roster's own counter, shared by every client, and
@@ -8315,79 +8408,84 @@ server = Bun.serve<WsData>({
       // representation cache is keyed by it — see `roster-visibility.ts` for why
       // all three have to agree.
       const visibility = rosterVisibility(registry.list(), parseAgentRosterClientRevision(url.searchParams));
-      const windowKey = rosterRepresentationKey(rosterWindowKey(rawWindow), visibility);
-      const windowMs = parseSessionWindowMs(rawWindow);
-      const requestNow = attentionClock.now();
-      const force = url.searchParams.get('refresh') === '1';
-      const cached = rosterRepresentations.get(windowKey);
-      const revisionStore = rosterRevisionForWindow(windowMs);
-      const cutoffExpired =
-        cached?.expiresAt !== undefined && requestNow >= cached.expiresAt;
-      if (
-        cached !== undefined &&
-        rosterRepresentationIsReusable(cached, {
-          force,
-          revision: revisionStore.revision,
-          now: requestNow,
-        }) &&
-        ifNoneMatchMatches(req.headers.get('if-none-match'), cached.etag)
-      ) {
-        return new Response(null, {
-          status: 304,
-          headers: {
-            etag: cached.etag,
-            'cache-control': 'no-cache',
-            vary: 'accept-encoding',
-          },
-        });
-      }
-      // Revision 23 introduced the completeness flag AND the early answer that
-      // makes it necessary. A caller that predates it reads every roster as an
-      // authoritative replacement, so serving it a mid-sweep partial would show
-      // the sessions a slow adapter has not reported yet as deleted ones. It
-      // waits for the sweep, which is what it did before any of this existed.
-      ageRosterWindow(windowMs, requestNow);
-      const roster = cutoffExpired && cached?.complete && !force
-        ? { rows: revisionStore.snapshot(), coverage: ROSTER_COVERAGE_COMPLETE }
-        : await discoverLocalRoster(
-          force,
+      let windowMs: number | undefined;
+      try { windowMs = parseSessionWindowMs(rawWindow); }
+      catch (error) { return json({ ok: false, code: 'BAD_PARAM', error: String(error) }, 400); }
+      const releaseWindow = retainRosterWindow(windowMs);
+      try {
+        const windowKey = rosterRepresentationKey(rosterWindowKey(rawWindow), visibility);
+        const requestNow = attentionClock.now();
+        const force = url.searchParams.get('refresh') === '1';
+        const cached = rosterRepresentations.get(windowKey);
+        const revisionStore = rosterRevisionForWindow(windowMs);
+        const cutoffExpired =
+          cached?.expiresAt !== undefined && requestNow >= cached.expiresAt;
+        if (
+          cached !== undefined &&
+          rosterRepresentationIsReusable(cached, {
+            force,
+            revision: revisionStore.revision,
+            now: requestNow,
+          }) &&
+          ifNoneMatchMatches(req.headers.get('if-none-match'), cached.etag)
+        ) {
+          return new Response(null, {
+            status: 304,
+            headers: {
+              etag: cached.etag,
+              'cache-control': 'no-cache',
+              vary: 'accept-encoding',
+            },
+          });
+        }
+        // Revision 23 introduced the completeness flag AND the early answer that
+        // makes it necessary. A caller that predates it reads every roster as an
+        // authoritative replacement, so serving it a mid-sweep partial would show
+        // the sessions a slow adapter has not reported yet as deleted ones. It
+        // waits for the sweep, which is what it did before any of this existed.
+        ageRosterWindow(windowMs, requestNow);
+        const roster = cutoffExpired && cached?.complete && !force
+          ? { rows: revisionStore.snapshot(), coverage: ROSTER_COVERAGE_COMPLETE }
+          : await discoverLocalRoster(
+            force,
+            windowMs,
+            requestNow,
+            parseAgentRosterClientRevision(url.searchParams) >= CLIENT_REVISION_WITH_ROSTER_COMPLETENESS,
+          );
+        const responseNow = attentionClock.now();
+        ageRosterWindow(windowMs, responseNow);
+        const sessions = filterSessionsByWindow(
+          visibleSessions(roster.rows, visibility),
           windowMs,
-          requestNow,
-          parseAgentRosterClientRevision(url.searchParams) >= CLIENT_REVISION_WITH_ROSTER_COMPLETENESS,
+          responseNow,
         );
-      const responseNow = attentionClock.now();
-      ageRosterWindow(windowMs, responseNow);
-      const sessions = filterSessionsByWindow(
-        visibleSessions(roster.rows, visibility),
-        windowMs,
-        responseNow,
-      );
-      const data: LocalRosterResponse = {
-        machine: MACHINE,
-        machineId: MACHINE,
-        generatedAt:
-          cutoffExpired
-            ? requestNow
-            : revisionStore.changedAt || cached?.data.generatedAt || requestNow,
-        revision: revisionStore.revision,
-        sessions,
-        // Coverage of the SWEEP, not of the window filter above. Rows dropped
-        // for being outside the requested window are exactly what the client
-        // asked for and say nothing about whether discovery finished.
-        complete: roster.coverage.kind === 'complete',
-      };
-      const response = jsonMaybe(req, data, { etag: true, cacheControl: 'no-cache' });
-      const etag = response.headers.get('etag');
-      if (etag) {
-        rosterRepresentations.set(windowKey, {
+        const data: LocalRosterResponse = {
+          machine: MACHINE,
+          machineId: MACHINE,
+          generatedAt:
+            cutoffExpired
+              ? requestNow
+              : revisionStore.changedAt || cached?.data.generatedAt || requestNow,
           revision: revisionStore.revision,
-          etag,
-          complete: data.complete,
-          expiresAt: sessionWindowRepresentationExpiry(sessions, windowMs),
-          data,
-        });
-      }
-      return response;
+          sessions,
+          // Coverage of the SWEEP, not of the window filter above. Rows dropped
+          // for being outside the requested window are exactly what the client
+          // asked for and say nothing about whether discovery finished.
+          complete: roster.coverage.kind === 'complete',
+        };
+        const response = jsonMaybe(req, data, { etag: true, cacheControl: 'no-cache' });
+        const etag = response.headers.get('etag');
+        if (etag) {
+          rosterRepresentations.set(windowKey, {
+            revision: revisionStore.revision,
+            etag,
+            complete: data.complete,
+            expiresAt: sessionWindowRepresentationExpiry(sessions, windowMs),
+            data,
+          });
+        }
+        return response;
+      } finally { releaseWindow(); }
     }
 
     // Static mounts. These sit BELOW every dynamic route above (first match wins), so they can never

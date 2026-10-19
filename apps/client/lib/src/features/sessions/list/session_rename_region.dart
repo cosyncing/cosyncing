@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
+import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_detail_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_detail_state.dart';
@@ -9,12 +10,14 @@ import 'package:cosyncing_client/src/features/sessions/list/open_sessions_contro
 import 'package:cosyncing_client/src/features/sessions/list/session_list_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_presentation.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_visibility_action.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_participants.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-/// Opens the rename dialog for session tabs and roster rows.
+/// Rename for tabs; Rename and Hide/Unhide actions for roster rows.
 class SessionRenameRegion extends StatelessWidget {
   /// Adds right-click, long-press and accessible rename to [child].
   const SessionRenameRegion({
@@ -22,6 +25,7 @@ class SessionRenameRegion extends StatelessWidget {
     required this.sessionId,
     required this.title,
     required this.child,
+    this.session,
     super.key,
   });
 
@@ -36,6 +40,9 @@ class SessionRenameRegion extends StatelessWidget {
 
   /// Navigation surface whose normal tap remains unchanged.
   final Widget child;
+
+  /// Roster context; tabs retain their existing rename-only behavior.
+  final SessionInfo? session;
 
   Future<void> _rename(BuildContext context) async {
     final ref = ProviderScope.containerOf(context, listen: false);
@@ -102,6 +109,64 @@ class SessionRenameRegion extends StatelessWidget {
     ).showSnackBar(SnackBar(content: Text(message)));
   }
 
+  Future<void> _actions(BuildContext context, [Offset? position]) async {
+    final info = session;
+    if (info == null) return _rename(context);
+    final l10n = AppLocalizations.of(context);
+    final container = ProviderScope.containerOf(context, listen: false);
+    final source = RosterSource.of(container.read(activeBrokerProfileProvider));
+    final roster = container.read(sessionListControllerProvider);
+    final reason = sessionVisibilityDisabledReason(
+      l10n,
+      info,
+      connected:
+          roster.status != SessionListStatus.error &&
+          container.read(brokerClientProvider).valueOrNull != null,
+    );
+    final overlay =
+        Overlay.of(context).context.findRenderObject()! as RenderBox;
+    final box = context.findRenderObject()! as RenderBox;
+    final point =
+        position ?? box.localToGlobal(Offset(box.size.width, box.size.height));
+    final selected = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        Rect.fromLTWH(point.dx, point.dy, 0, 0),
+        Offset.zero & overlay.size,
+      ),
+      items: [
+        PopupMenuItem(
+          value: 'rename',
+          child: Text(l10n.sessionDetailRenameTooltip),
+        ),
+        PopupMenuItem(
+          value: 'visibility',
+          enabled: reason == null,
+          child: Tooltip(
+            message: reason ?? '',
+            child: Text(
+              info.appHidden ?? false ? l10n.sessionUnhide : l10n.sessionHide,
+            ),
+          ),
+        ),
+      ],
+    );
+    if (!context.mounted ||
+        RosterSource.of(container.read(activeBrokerProfileProvider)) !=
+            source) {
+      return;
+    }
+    if (selected == 'rename') {
+      await _rename(context);
+    } else if (selected == 'visibility') {
+      await changeSessionVisibility(
+        context,
+        info,
+        hidden: info.appHidden != true,
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) => Semantics(
     customSemanticsActions: {
@@ -109,12 +174,46 @@ class SessionRenameRegion extends StatelessWidget {
         label: AppLocalizations.of(context).sessionDetailRenameTooltip,
       ): () =>
           unawaited(_rename(context)),
+      if (session != null)
+        CustomSemanticsAction(
+          label: AppLocalizations.of(context).sessionActionsMenu,
+        ): () =>
+            unawaited(_actions(context)),
     },
-    child: GestureDetector(
-      behavior: HitTestBehavior.translucent,
-      onSecondaryTap: () => unawaited(_rename(context)),
-      onLongPress: () => unawaited(_rename(context)),
-      child: child,
+    child: CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.contextMenu): () =>
+            unawaited(_actions(context)),
+        const SingleActivator(LogicalKeyboardKey.f10, shift: true): () =>
+            unawaited(_actions(context)),
+      },
+      child: GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onSecondaryTapUp: (details) =>
+            unawaited(_actions(context, details.globalPosition)),
+        onLongPress: () => unawaited(_actions(context)),
+        child: session == null
+            ? child
+            : Row(
+                children: [
+                  Expanded(child: child),
+                  IconButton(
+                    key: Key('session-actions-$tool-$sessionId'),
+                    tooltip: AppLocalizations.of(context).sessionActionsMenu,
+                    icon: const StrokeIcon(StrokeGlyph.more),
+                    constraints: const BoxConstraints.tightFor(
+                      width: 40,
+                      height: 40,
+                    ),
+                    padding: EdgeInsets.zero,
+                    style: IconButton.styleFrom(
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                    onPressed: () => unawaited(_actions(context)),
+                  ),
+                ],
+              ),
+      ),
     ),
   );
 }

@@ -13,7 +13,17 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Added
 
+- Hide and unhide chats from the roster or Status, with Undo. Visibility syncs
+  across devices on the same broker and includes a session's subagents. Open
+  tabs, agent activity, notifications and approval alerts keep working.
+- A compact roster filter panel includes Show hidden and custom activity
+  windows such as the last two or three days.
 - Settings → General → Storage now houses device-wide session cache cleanup.
+
+### Changed
+
+- Status removes Duplicate and Copy transcript and simplifies the session-cache
+  cleanup row. Per-message copy, Fork and transcript export remain available.
 
 ### Fixed
 

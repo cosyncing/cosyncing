@@ -527,9 +527,9 @@ void main() {
       );
     });
 
-    test('BROKER_ERROR_CODES has 106 entries and typed control failures', () {
+    test('BROKER_ERROR_CODES has 107 entries and typed control failures', () {
       final codes = _registryFromSnapshot(snapshotSource, 'BROKER_ERROR_CODES');
-      expect(codes, hasLength(106));
+      expect(codes, hasLength(107));
       expect(codes, isNot(contains('DUPLICATE_CLIENT_MESSAGE_ID')));
       expect(
         codes,
@@ -574,7 +574,7 @@ void main() {
           'SESSION_AGENT_OWNED',
         ]),
       );
-      expect(brokerErrorCodes, hasLength(106));
+      expect(brokerErrorCodes, hasLength(107));
     });
 
     test('ack and nack are typed wire frame and client message kinds', () {

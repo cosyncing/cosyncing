@@ -11,34 +11,7 @@ import 'package:flutter_test/flutter_test.dart';
 import '../../../../support/session_detail_page_test_harness.dart';
 
 void main() {
-  group('Session Detail transcript copy and cache actions', () {
-    test('retained transcript copy makes every history gap explicit', () {
-      final copied = buildRetainedTranscriptCopyText(
-        segments: [
-          [
-            AgentMessage.fromJson(const {
-              'type': 'user-message',
-              'text': 'Earlier exact text',
-            }),
-          ],
-          [
-            AgentMessage.fromJson(const {
-              'type': 'model-output',
-              'text': 'Later ```source``` text',
-            }),
-          ],
-        ],
-        omissionMarker: '[omitted]',
-        hasLeadingOmission: true,
-      );
-
-      expect(
-        copied,
-        '[omitted]\n\nEarlier exact text\n\n[omitted]\n\n'
-        'Later ```source``` text',
-      );
-    });
-
+  group('Session Detail cache actions', () {
     testWidgets('cache actions state scope and require confirmation', (
       tester,
     ) async {

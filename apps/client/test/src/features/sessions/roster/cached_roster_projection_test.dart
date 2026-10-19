@@ -19,6 +19,7 @@ void main() {
     SessionOrigin? origin,
     int? updatedAt,
     int? createdAt,
+    bool appHidden = false,
   }) => SessionRosterIdentity(
     tool: tool,
     sessionId: id,
@@ -31,6 +32,7 @@ void main() {
     origin: origin,
     updatedAt: updatedAt,
     createdAt: createdAt,
+    appHidden: appHidden,
   );
 
   const showAll = SessionVisibilityPreferences(showBackgroundSessions: true);
@@ -78,6 +80,23 @@ void main() {
       // subagent subtree only through one — emitting the child here would
       // flash a row the authoritative projection immediately folds away.
       expect(projection.rows.map((row) => row.identity.sessionId), ['parent']);
+
+      // A saved snapshot can stop after the parent's visibility delta. The
+      // child still has its old metadata: do not promote it into an orphan.
+      // This narrow cache-boundary case cannot be synchronized through HTTP.
+      final hidden = CachedRosterProjection.build(
+        rows: [
+          identity(id: 'parent', nativeId: 'n-parent', appHidden: true),
+          identity(
+            id: 'child',
+            nativeId: 'n-child',
+            parentThreadId: 'n-parent',
+            origin: SessionOrigin.subagent,
+          ),
+        ],
+        preferences: showAll,
+      );
+      expect(hidden.rows, isEmpty);
     });
 
     test('parent linkage never crosses a machine boundary', () {

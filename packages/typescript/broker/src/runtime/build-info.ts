@@ -38,12 +38,13 @@ export const PUBLISHED_SCHEMA_VERSIONS = Object.freeze({
     peers: 2,
     'wake-registrations': 2,
     artifacts: 1,
+    'session-visibility': 1,
   }),
   releaseManifest: 1,
   upgradeJournal: 1,
   // Kept equal to core's BROKER_CONTRACT_REVISION by BPC10/BPC13 acceptance. Importing the large
   // runtime contract here would make a read-only CLI import create Bun's transpilation cache.
-  brokerContract: 32,
+  brokerContract: 33,
 } as const);
 
 export type PublishedSchemaVersions = typeof PUBLISHED_SCHEMA_VERSIONS;

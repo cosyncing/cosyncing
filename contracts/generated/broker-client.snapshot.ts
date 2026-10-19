@@ -1640,6 +1640,7 @@ export const BROKER_ROUTES = [
   '/api/sessions/{id}/{id}/export/preflight',
   '/api/sessions/{id}/{id}/fork',
   '/api/sessions/{id}/{id}/rename',
+  '/api/sessions/{id}/{id}/visibility',
   '/api/sessions/{id}/{id}/stream',
   '/api/tokdash/usage',
   '/api/tokdash/quota',
@@ -1703,6 +1704,7 @@ export const BROKER_ERROR_CODES = [
   'EXPORT_FORMAT',
   'EXPORT_MISSING',
   'EXPORT_TOO_LARGE',
+  'HIDDEN_ANCESTOR',
   'HISTORY_CURSOR_DIVERGED',
   'HISTORY_CURSOR_GONE',
   'HISTORY_CURSOR_INVALID',
@@ -2156,9 +2158,9 @@ export type ClientMessageKind = (typeof BROKER_CLIENT_MESSAGE_KINDS)[number];
  * inside the window, so a revision-28-or-later client has to ship before a
  * revision-29 broker does.
  */
-/** Revision 32 adds revocable, media-only preview capabilities for native decoders.
- * Workspace gates and the minimum client revision are unchanged. */
-export const BROKER_CONTRACT_REVISION = 32 as const;
+/** Revision 33 adds broker-persisted session visibility and its mutation route.
+ * The optional metadata and route preserve the existing compatibility window. */
+export const BROKER_CONTRACT_REVISION = 33 as const;
 // Revision 17 removes public artifact bearer capabilities. The client-first
 // release sequence must complete before this broker ships; older clients do not
 // authenticate artifact downloads and therefore must fail closed as read-only.
@@ -2978,6 +2980,12 @@ export interface SessionInfo {
   control?: SessionControlState;
   /** Broker-derived session owner truth. Absence means unsupported/unknown; `none` is authoritative. */
   sessionOwner?: SessionOwnerProjection;
+  /** Cosyncing-only visibility; absence means this broker does not support hiding. */
+  appHidden?: boolean;
+  /** An owning subagent ancestor is hidden; unhide that ancestor first. */
+  appHiddenByAncestor?: boolean;
+  /** Monotonic broker visibility revision, independent of native activity. */
+  appVisibilityRevision?: number;
 }
 
 const SESSION_INFO_KEYS = new Set([
@@ -2985,6 +2993,7 @@ const SESSION_INFO_KEYS = new Set([
   'projectName', 'origin', 'parentThreadId', 'nativeId', 'status', 'launchSurface',
   'attachMode', 'model', 'currentModel', 'currentAgent', 'currentMode', 'createdAt',
   'updatedAt', 'terminalSyncHint', 'control', 'sessionOwner',
+  'appHidden', 'appHiddenByAncestor', 'appVisibilityRevision',
 ]);
 
 function sessionRecord(value: unknown): value is Record<string, unknown> {
@@ -3082,6 +3091,9 @@ export function decodeSessionInfo(value: unknown): SessionInfo | undefined {
   ]) if (!optionalSessionString(value[key])) return undefined;
   if (value.origin !== undefined && !['subagent', 'exec', 'vscode'].includes(String(value.origin))) return undefined;
   if (value.launchSurface !== undefined && !['app', 'terminal', 'ide', 'unknown'].includes(String(value.launchSurface))) return undefined;
+  if ((value.appHidden !== undefined && typeof value.appHidden !== 'boolean')
+    || (value.appHiddenByAncestor !== undefined && typeof value.appHiddenByAncestor !== 'boolean')
+    || (value.appVisibilityRevision !== undefined && (!Number.isSafeInteger(value.appVisibilityRevision) || Number(value.appVisibilityRevision) < 0))) return undefined;
   if (!finiteOptionalSessionNumber(value.createdAt) || !finiteOptionalSessionNumber(value.updatedAt)
     || !validSessionCurrentModel(value.currentModel)
     || !validSessionTerminalSyncHint(value.terminalSyncHint)

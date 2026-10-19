@@ -632,7 +632,10 @@ void main() {
               reason: reason,
             );
             expect(
-              find.text('${counterCase.statuses.length}'),
+              find.descendant(
+                of: find.byKey(const ValueKey('project-header-$projectKey')),
+                matching: find.text('${counterCase.statuses.length}'),
+              ),
               findsNothing,
               reason: reason,
             );

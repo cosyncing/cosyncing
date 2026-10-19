@@ -354,6 +354,9 @@ const SESSION_OPTIONAL_KEYS = [
   'terminalSyncHint',
   'control',
   'sessionOwner',
+  'appHidden',
+  'appHiddenByAncestor',
+  'appVisibilityRevision',
 ] as const;
 
 /**

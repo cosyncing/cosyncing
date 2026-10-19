@@ -197,7 +197,11 @@ export class CodexDriveFake {
 
   events(): CodexDriveEvent[] {
     if (!existsSync(this.#events)) return [];
-    return readFileSync(this.#events, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
+    const snapshot = readFileSync(this.#events, 'utf8');
+    // Another process may still be appending the final record. Only newline-
+    // terminated records are published; malformed complete records still fail.
+    return snapshot.slice(0, snapshot.lastIndexOf('\n') + 1)
+      .split('\n').filter(Boolean).map((line) => JSON.parse(line));
   }
 
   /** Resume owners for a thread (processes asked to `thread/resume` it), oldest first. */

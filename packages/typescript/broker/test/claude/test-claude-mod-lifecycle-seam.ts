@@ -907,6 +907,11 @@ async function unresponsiveBrokerSection(): Promise<void> {
   tune(spun, { ...bound, holdPollMs: 60_000 });
   await startTerminal(spun);
   await until(() => eager.registry.get(eagerSession) !== undefined);
+  // The server records the row before the registration reply reaches the mod.
+  // A poll proves the terminal adopted that reply; asking earlier can correctly
+  // fall back to Claude's own dialog without exercising the hold loop at all.
+  check('LH6 seam: the terminal adopted registration before the tool ask',
+    await until(() => spun.record.requests.some((r) => r.route === 'poll')));
   const holdsBefore = spun.record.requests.filter((r) => r.route === 'hold').length;
   const spinning = await timed(spun, 'tool.check', { tool: 'Bash', tool_use_id: 'tu-spin', input: { command: 'make' } }, 5000);
   const holdRequests = spun.record.requests.filter((r) => r.route === 'hold').length - holdsBefore;

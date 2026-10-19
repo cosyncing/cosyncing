@@ -330,7 +330,10 @@ class FakeBroker {
   };
 
   List<Map<String, Object?>> _inWindow(String? window) {
-    final span = _windows[window ?? 'all'];
+    final custom = RegExp(r'^(\d+)d$').firstMatch(window ?? '');
+    final span = custom == null
+        ? _windows[window ?? 'all']
+        : Duration(days: int.parse(custom.group(1)!));
     if (span == null) return List.of(sessions);
     final cutoff = DateTime.now().subtract(span).millisecondsSinceEpoch;
     return [
@@ -922,6 +925,24 @@ class FakeBroker {
             mode.toJson(),
         ],
         'refreshedAt': 1,
+      });
+    }
+    final visibility = RegExp(
+      r'^/api/sessions/([^/]+)/([^/]+)/visibility$',
+    ).firstMatch(path);
+    if (request.method == 'PATCH' && visibility != null) {
+      final id = Uri.decodeComponent(visibility.group(2)!);
+      final hidden = (request.body! as Map)['hidden'] as bool;
+      final row = sessions.firstWhere((s) => s['id'] == id);
+      final revision = ((row['appVisibilityRevision'] as int?) ?? 0) + 1;
+      updateSession(id, {
+        'appHidden': hidden,
+        'appVisibilityRevision': revision,
+      });
+      return FakeBrokerResponse(200, {
+        'ok': true,
+        'session': sessions.firstWhere((s) => s['id'] == id),
+        'sessions': sessions,
       });
     }
     final rename = RegExp(

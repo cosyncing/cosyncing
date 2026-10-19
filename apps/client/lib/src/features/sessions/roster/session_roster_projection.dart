@@ -27,6 +27,9 @@ final class SessionVisibilityPreferences {
 
 /// Activity-time preset matching the accepted PoC roster controls.
 enum SessionActivityWindow {
+  /// An explicit rolling number of days.
+  custom,
+
   /// No activity-time constraint.
   any,
 
@@ -55,6 +58,8 @@ final class SessionRosterFilters {
     this.tool,
     this.activity = SessionActivityWindow.any,
     this.olderThanDays,
+    this.customDays = 3,
+    this.showHidden = false,
   });
 
   /// Case-insensitive query across session/project metadata.
@@ -71,6 +76,12 @@ final class SessionRosterFilters {
 
   /// Optional custom minimum age in days.
   final int? olderThanDays;
+
+  /// Rolling custom activity window.
+  final int customDays;
+
+  /// Includes sessions hidden by the user or by a subagent ancestor.
+  final bool showHidden;
 
   /// Whether any search or filter narrows the authoritative roster.
   ///
@@ -103,7 +114,11 @@ final class SessionRosterFilters {
     SessionActivityWindow? activity,
     int? olderThanDays,
     bool clearOlderThanDays = false,
+    int? customDays,
+    bool? showHidden,
   }) => SessionRosterFilters(
+    customDays: customDays ?? this.customDays,
+    showHidden: showHidden ?? this.showHidden,
     query: query ?? this.query,
     status: clearStatus ? null : status ?? this.status,
     tool: clearTool ? null : tool ?? this.tool,
@@ -537,17 +552,33 @@ final class SessionRosterProjection {
     final tree = lineage ?? SessionRosterLineage.build(sessions);
     final resolvedNow = now ?? DateTime.now();
 
+    // Hiding is a presentation boundary, including while a parent's delta
+    // arrives before its descendants. Search and expansion cannot bypass it.
+    final hiddenKeys = <String>{};
+    if (!filters.showHidden) {
+      for (var depth = 0; depth <= tree.maxDepth; depth++) {
+        for (final key in tree.keysAtDepth(depth)) {
+          final session = tree.sessionForKey(key)!;
+          if ((session.appHidden ?? false) ||
+              (session.origin == SessionOrigin.subagent &&
+                  hiddenKeys.contains(tree.parentKeyOf(key)))) {
+            hiddenKeys.add(key);
+          }
+        }
+      }
+    }
     // Filter each row once, judging status by its display status.
     final matches = <String, bool>{};
     for (final key in tree.orderedKeys) {
       matches[key] =
-          navigationRevealKeys.contains(key) ||
-          _matchesFilters(
-            tree.sessionForKey(key)!,
-            filters,
-            resolvedNow,
-            tree.effectiveStatusOfKey(key),
-          );
+          !hiddenKeys.contains(key) &&
+          (navigationRevealKeys.contains(key) ||
+              _matchesFilters(
+                tree.sessionForKey(key)!,
+                filters,
+                resolvedNow,
+                tree.effectiveStatusOfKey(key),
+              ));
     }
     // A subtree survives narrowing when it or any descendant matches, so a
     // matching child never loses the parent it has to render beneath.
@@ -569,6 +600,7 @@ final class SessionRosterProjection {
 
     // Structural visibility decides *whether* a subtree shows, never where.
     bool shown(String key) {
+      if (hiddenKeys.contains(key)) return false;
       final session = tree.sessionForKey(key)!;
       final parentKey = tree.parentKeyOf(key);
       if (parentKey == null) {
@@ -657,7 +689,10 @@ final class SessionRosterProjection {
       rootKey: tree.rootKeyOf(key),
       depth: tree.depthOfKey(key),
       effectiveStatus: tree.effectiveStatusOfKey(key),
-      childCount: tree.childKeysOf(key).length,
+      childCount: tree
+          .childKeysOf(key)
+          .where((child) => !hiddenKeys.contains(child))
+          .length,
       childrenRevealed: childrenRevealed(key),
     );
 
@@ -964,6 +999,7 @@ bool _matchesFilters(
       ? const Duration(days: 365000)
       : now.difference(DateTime.fromMillisecondsSinceEpoch(timestamp));
   final activityMatches = switch (filters.activity) {
+    SessionActivityWindow.custom => age <= Duration(days: filters.customDays),
     SessionActivityWindow.any => true,
     SessionActivityWindow.today => age <= const Duration(days: 1),
     SessionActivityWindow.last7Days => age <= const Duration(days: 7),

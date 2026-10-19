@@ -130,7 +130,7 @@ void main() {
     });
 
     testWidgets(
-      'disables fork/clone actions when broker capabilities are unavailable',
+      'disables Fork when broker capabilities are unavailable',
       (tester) async {
         final brokerClient = FakeBrokerClient(
           agents: [
@@ -159,10 +159,7 @@ void main() {
           tester.widget<ListTile>(forkButton).enabled,
           isFalse,
         );
-        expect(
-          tester.widget<ListTile>(cloneButton).enabled,
-          isFalse,
-        );
+        expect(cloneButton, findsNothing);
       },
     );
 
@@ -198,49 +195,7 @@ void main() {
     );
 
     testWidgets(
-      'clone action shows error status when broker clone fails',
-      (tester) async {
-        final brokerClient =
-            FakeBrokerClient(
-                agents: [fakeAgentInfo(canFork: false)],
-              )
-              ..cloneError = const BrokerException(
-                message: 'Clone blocked',
-                statusCode: 500,
-              );
-        await tester.pumpWidget(
-          buildSessionDetailTestPage(
-            events: const [],
-            brokerClient: brokerClient,
-          ),
-        );
-        await tester.pumpAndSettle();
-        await openSessionDetailTestTab(tester, 'session-detail-tab-status');
-
-        await showSessionStatusTestItem(
-          tester,
-          const Key('session-detail-clone-button'),
-        );
-        final cloneButton = find.byKey(
-          const Key('session-detail-clone-button'),
-        );
-        await tester.tap(cloneButton);
-        await tester.pumpAndSettle();
-
-        expect(brokerClient.cloneSessionCount, 1);
-        final cloneStatusText = tester.widget<SelectableText>(
-          find.byKey(const Key('session-detail-clone-session-status')),
-        );
-        expect(
-          cloneStatusText.data,
-          contains("Couldn't duplicate this session."),
-        );
-        expect(cloneStatusText.data, isNot(contains('Clone blocked')));
-      },
-    );
-
-    testWidgets(
-      'disables fork and clone when no active broker profile is selected',
+      'disables Fork when no active broker profile is selected',
       (tester) async {
         await tester.pumpWidget(
           buildSessionDetailTestPage(
@@ -262,7 +217,7 @@ void main() {
           const Key('session-detail-fork-button'),
         );
         expect(tester.widget<ListTile>(forkButton).enabled, isFalse);
-        expect(tester.widget<ListTile>(cloneButton).enabled, isFalse);
+        expect(cloneButton, findsNothing);
       },
     );
 

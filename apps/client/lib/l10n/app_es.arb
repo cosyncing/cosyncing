@@ -1737,5 +1737,39 @@
   "storageCacheTitle": "Caché de sesiones",
   "storageDataTitle": "Datos de la aplicación",
   "storageDataDescription": "Los borradores, mensajes en cola, conexiones y preferencias se conservan al borrar la caché.",
-  "storageCacheScope": "En este dispositivo · Todas las conexiones"
+  "storageCacheScope": "En este dispositivo · Todas las conexiones",
+  "sessionHide": "Ocultar sesión",
+  "sessionUnhide": "Mostrar sesión",
+  "sessionHidden": "Sesión oculta",
+  "sessionUnhidden": "Sesión visible",
+  "sessionVisibilityUndo": "Deshacer",
+  "sessionVisibilityConnect": "Conéctate para cambiar la visibilidad",
+  "sessionVisibilityUnsupported": "Actualiza el broker para ocultar sesiones",
+  "sessionVisibilityParent": "Muestra primero la sesión principal",
+  "sessionVisibilityFailed": "No se pudo guardar la visibilidad",
+  "sessionActionsMenu": "Acciones de la sesión",
+  "sessionRosterShowHidden": "Mostrar sesiones ocultas",
+  "sessionRosterShowHiddenHelp": "Incluir las sesiones que has ocultado",
+  "sessionRosterResetFilters": "Restablecer filtros",
+  "sessionRosterLast24Hours": "Últimas 24 horas",
+  "sessionRosterCustom": "Personalizado…",
+  "sessionRosterLastPrefix": "Últimos",
+  "sessionRosterDaysSuffix": "días",
+  "sessionRosterInvalidDays": "Introduce un número entero entre 1 y 36.500.",
+  "sessionRosterLastDays": "{days, plural, =1{Último día} other{Últimos {days} días}}",
+  "@sessionRosterLastDays": {
+    "placeholders": {
+      "days": {
+        "type": "int"
+      }
+    }
+  },
+  "sessionRosterEmptyCustomDays": "{days, plural, =1{No hay sesiones activas en el último día.} other{No hay sesiones activas en los últimos {days} días.}}",
+  "@sessionRosterEmptyCustomDays": {
+    "placeholders": {
+      "days": {
+        "type": "int"
+      }
+    }
+  }
 }

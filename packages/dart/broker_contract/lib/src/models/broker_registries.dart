@@ -74,6 +74,7 @@ const List<String> brokerRoutes = <String>[
   '/api/sessions/{id}/{id}/export/preflight',
   '/api/sessions/{id}/{id}/fork',
   '/api/sessions/{id}/{id}/rename',
+  '/api/sessions/{id}/{id}/visibility',
   '/api/sessions/{id}/{id}/stream',
   '/api/tokdash/usage',
   '/api/tokdash/quota',
@@ -121,7 +122,7 @@ const List<String> brokerIntegrationRoutes = <String>[
 /// Mirrors the broker's `BROKER_ERROR_CODES` registry. The legacy
 /// `DUPLICATE_CLIENT_MESSAGE_ID` was removed; the broker now distinguishes
 /// malformed (`ACK_INVALID`) from unknown-scope (`ACK_UNKNOWN_TARGET`)
-/// receipts. The registry currently holds 99 codes.
+/// receipts.
 const List<String> brokerErrorCodes = <String>[
   'AUTH_REQUIRED',
   'BAD_PARAM',
@@ -143,6 +144,7 @@ const List<String> brokerErrorCodes = <String>[
   'EXPORT_FORMAT',
   'EXPORT_MISSING',
   'EXPORT_TOO_LARGE',
+  'HIDDEN_ANCESTOR',
   'HISTORY_CURSOR_DIVERGED',
   'HISTORY_CURSOR_GONE',
   'HISTORY_CURSOR_INVALID',

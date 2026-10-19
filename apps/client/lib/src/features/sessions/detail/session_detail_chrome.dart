@@ -551,7 +551,6 @@ class _StatusTabPanel extends ConsumerStatefulWidget {
     required this.onDetach,
     required this.onExportTranscript,
     required this.onForkSession,
-    required this.onCloneSession,
     super.key,
   });
 
@@ -564,7 +563,6 @@ class _StatusTabPanel extends ConsumerStatefulWidget {
   final VoidCallback onDetach;
   final VoidCallback onExportTranscript;
   final VoidCallback onForkSession;
-  final VoidCallback onCloneSession;
 
   @override
   ConsumerState<_StatusTabPanel> createState() => _StatusTabPanelState();
@@ -826,12 +824,6 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
         (state.agentActions?.canFork ?? false) &&
         !state.forkBlockedAsAgentOwned &&
         !state.forkSessionActionState.isBusy;
-    final canClone =
-        isConnected &&
-        compatibleControls &&
-        widget.hasActiveBrokerClient &&
-        (state.agentActions?.canClone ?? false) &&
-        !state.cloneSessionActionState.isBusy;
     final canExport =
         isConnected &&
         compatibleControls &&
@@ -1243,12 +1235,10 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
             state: state,
             canDetach: canDetach,
             canFork: canFork,
-            canClone: canClone,
             canExport: canExport,
             hasActiveBrokerClient: widget.hasActiveBrokerClient,
             onDetach: _detach,
             onForkSession: widget.onForkSession,
-            onCloneSession: widget.onCloneSession,
             onExportTranscript: widget.onExportTranscript,
           ),
           if (_transcriptExportStatusText(
@@ -1266,13 +1256,6 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
             SelectableText(
               message,
               key: const Key('session-detail-fork-session-status'),
-              style: theme.textTheme.bodySmall,
-            ),
-          if (_cloneActionStatusText(l10n, state.cloneSessionActionState)
-              case final message?)
-            SelectableText(
-              message,
-              key: const Key('session-detail-clone-session-status'),
               style: theme.textTheme.bodySmall,
             ),
           const SizedBox(height: 16),

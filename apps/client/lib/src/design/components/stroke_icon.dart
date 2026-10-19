@@ -55,6 +55,9 @@ enum StrokeGlyph {
   /// Drawer menu.
   menu,
 
+  /// More actions.
+  more,
+
   /// Go to (row trailing arrow).
   arrowRight,
 }
@@ -146,6 +149,7 @@ const Map<StrokeGlyph, List<String>> _outlines = {
   StrokeGlyph.plus: ['M12 5v14M5 12h14'],
   StrokeGlyph.filter: ['M4 6h16M7 12h10M10 18h4'],
   StrokeGlyph.menu: ['M4 7h16M4 12h16M4 17h16'],
+  StrokeGlyph.more: ['C5 12 1', 'C12 12 1', 'C19 12 1'],
   StrokeGlyph.arrowRight: ['M5 12h14m-6-6 6 6-6 6'],
 };
 

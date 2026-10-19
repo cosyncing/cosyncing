@@ -1978,7 +1978,7 @@ void main() {
     });
 
     testWidgets(
-      'shows fork and clone buttons enabled when capabilities are present',
+      'shows Fork when supported and omits Duplicate',
       (tester) async {
         final brokerClient = FakeBrokerClient();
         await tester.pumpWidget(
@@ -1997,9 +1997,9 @@ void main() {
           const Key('session-detail-clone-button'),
         );
         expect(forkButton, findsOneWidget);
-        expect(cloneButton, findsOneWidget);
+        expect(cloneButton, findsNothing);
         expect(tester.widget<ListTile>(forkButton).enabled, isTrue);
-        expect(tester.widget<ListTile>(cloneButton).enabled, isTrue);
+        expect(cloneButton, findsNothing);
         expect(find.text('Detach'), findsOneWidget);
         expect(
           find.text(
@@ -2013,10 +2013,8 @@ void main() {
     testWidgets(
       'status panel withholds fork for an agent-spawned session',
       (tester) async {
-        // CR4: the same per-session gate as the message menu, at the header
-        // entry point. Clone is the in-test positive control — it proves the
-        // whole panel was not disabled for some unrelated reason (connection,
-        // read-only compatibility, a missing broker client).
+        // The same per-session fork gate as the message menu. Duplicate is
+        // intentionally absent from Status.
         await tester.pumpWidget(
           buildSessionDetailTestPage(events: [agentOwnedSessionEvent()]),
         );
@@ -2028,7 +2026,7 @@ void main() {
           const Key('session-detail-clone-button'),
         );
         expect(tester.widget<ListTile>(forkButton).enabled, isFalse);
-        expect(tester.widget<ListTile>(cloneButton).enabled, isTrue);
+        expect(cloneButton, findsNothing);
       },
     );
 

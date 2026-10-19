@@ -30,6 +30,7 @@ String? sessionsEmptyWindowBody(
   SessionRosterQueryWindow.today => l10n.sessionsEmptyWindowToday,
   SessionRosterQueryWindow.last7Days => l10n.sessionsEmptyWindowLast7Days,
   SessionRosterQueryWindow.last30Days => l10n.sessionsEmptyWindowLast30Days,
+  final window => l10n.sessionRosterEmptyCustomDays(window.days!),
 };
 
 /// Broker-aware empty state shared by compact and expanded Sessions layouts.

@@ -2687,5 +2687,39 @@
   "storageCacheTitle": "会话缓存",
   "storageDataTitle": "应用数据",
   "storageDataDescription": "清除缓存时会保留草稿、待发送消息、连接和偏好设置。",
-  "storageCacheScope": "此设备 · 所有连接"
+  "storageCacheScope": "此设备 · 所有连接",
+  "sessionHide": "隐藏会话",
+  "sessionUnhide": "取消隐藏会话",
+  "sessionHidden": "已隐藏会话",
+  "sessionUnhidden": "已取消隐藏会话",
+  "sessionVisibilityUndo": "撤销",
+  "sessionVisibilityConnect": "连接后可更改可见性",
+  "sessionVisibilityUnsupported": "请更新代理服务以隐藏会话",
+  "sessionVisibilityParent": "请先取消隐藏父会话",
+  "sessionVisibilityFailed": "无法保存会话可见性",
+  "sessionActionsMenu": "会话操作",
+  "sessionRosterShowHidden": "显示隐藏的会话",
+  "sessionRosterShowHiddenHelp": "包含你已隐藏的会话",
+  "sessionRosterResetFilters": "重置筛选",
+  "sessionRosterLast24Hours": "最近 24 小时",
+  "sessionRosterCustom": "自定义…",
+  "sessionRosterLastPrefix": "最近",
+  "sessionRosterDaysSuffix": "天",
+  "sessionRosterInvalidDays": "请输入 1 至 36,500 的整数。",
+  "sessionRosterLastDays": "最近 {days} 天",
+  "@sessionRosterLastDays": {
+    "placeholders": {
+      "days": {
+        "type": "int"
+      }
+    }
+  },
+  "sessionRosterEmptyCustomDays": "最近 {days} 天没有活跃会话。",
+  "@sessionRosterEmptyCustomDays": {
+    "placeholders": {
+      "days": {
+        "type": "int"
+      }
+    }
+  }
 }

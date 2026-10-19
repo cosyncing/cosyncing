@@ -10,7 +10,6 @@ class _SidePanelBinding {
     required this.draft,
     required this.onExport,
     required this.onFork,
-    required this.onClone,
     required this.onDownloadArtifact,
     required this.onPreviewArtifact,
     required this.onPreviewFile,
@@ -22,7 +21,6 @@ class _SidePanelBinding {
   final TextEditingController draft;
   final VoidCallback onExport;
   final VoidCallback onFork;
-  final VoidCallback onClone;
   final Future<void> Function(SessionArtifactDescriptor) onDownloadArtifact;
   final Future<void> Function(SessionArtifactDescriptor) onPreviewArtifact;
   final Future<void> Function(FsDirEntry) onPreviewFile;
@@ -70,7 +68,6 @@ class SessionSidePanel extends ConsumerWidget {
           onDetach: () => unawaited(controller.disconnect()),
           onExportTranscript: binding.onExport,
           onForkSession: binding.onFork,
-          onCloneSession: binding.onClone,
         ),
       );
     }

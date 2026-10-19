@@ -449,6 +449,9 @@ class SessionInfo {
     this.terminalSyncHint,
     this.control,
     this.sessionOwner,
+    this.appHidden,
+    this.appHiddenByAncestor,
+    this.appVisibilityRevision,
   });
 
   /// Creates a [SessionInfo] from a JSON map.
@@ -538,6 +541,15 @@ class SessionInfo {
 
   /// Broker-selected session-level owner truth.
   final SessionOwnerProjection? sessionOwner;
+
+  /// Broker-owned cosyncing visibility. Null means hiding is unsupported.
+  final bool? appHidden;
+
+  /// True when this subagent inherits hiding from an ancestor.
+  final bool? appHiddenByAncestor;
+
+  /// Broker visibility revision for rejecting stale mutation responses.
+  final int? appVisibilityRevision;
 
   /// Converts this [SessionInfo] to a JSON map.
   Map<String, dynamic> toJson() => _$SessionInfoToJson(this);

@@ -12,6 +12,10 @@
  * with a scripted adapter whose attach the test holds.
  */
 import { describe, expect, test } from 'bun:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { SessionVisibilityStore } from '../../src/sessions/session-visibility-store.ts';
 import { Hub, type ManagedConn } from '../../src/sessions/hub.ts';
 import { filterSessionsByWindow, sessionWindowRepresentationExpiry } from '../../src/roster/roster-http.ts';
 import { RosterRevisionStore } from '../../src/roster/roster-revision.ts';
@@ -336,4 +340,54 @@ test('bounded publication expires at the first excluded millisecond, not the inc
   rows[3]!.status = 'idle';
   publish(now);
   expect(journal.snapshot().map((row) => row.id)).not.toContain('old-active');
+});
+
+// Narrow exception: valid native fixtures do not emit cyclic ancestry or change
+// an already-published identity from unknown to native while retaining children.
+// Exercise that malformed/late publication through the durable projection so it
+// cannot strand the user's Hide preference behind an impossible Unhide parent.
+test('late native identity carries hidden descendants, and cyclic publication never locks Unhide', () => {
+  const root = mkdtempSync(join(tmpdir(), 'cosyncing-visibility-publication-'));
+  try {
+    const store = new SessionVisibilityStore(root);
+    const parent = codexInfo('root', { nativeId: undefined });
+    const nativeParent = { ...parent, nativeId: 'thread-root' };
+    const child = codexInfo('child', { origin: 'subagent', parentThreadId: 'thread-root' });
+    const grandchild = codexInfo('grandchild', { origin: 'subagent', parentThreadId: 'thread-child' });
+    store.set(parent, true);
+    store.observe([grandchild, child, nativeParent]);
+    expect(store.apply(grandchild)).toMatchObject({ appHidden: true, appHiddenByAncestor: true, status: grandchild.status });
+    // Claude first identifies a transcript by session UUID, then by bridge
+    // lineage. A delayed snapshot of the former identity must not undo Hide.
+    const claude = { ...codexInfo('claude-path'), tool: 'claude', nativeId: 'claude-session:uuid' };
+    const bridged = { ...claude, nativeId: 'claude-bridge:lineage' };
+    const oldHandle = { ...claude, id: 'claude-old-path' };
+    const claudeChild = { ...codexInfo('claude-child'), tool: 'claude', origin: 'subagent' as const, parentThreadId: claude.nativeId };
+    store.observe([oldHandle, claudeChild]);
+    store.set(claude, true);
+    const hiddenRevision = store.apply(claude).appVisibilityRevision;
+    store.observe([bridged]);
+    expect(store.apply(bridged)).toMatchObject({ appHidden: true, appVisibilityRevision: hiddenRevision });
+    store.observe([oldHandle, claude]);
+    const replacement = { ...bridged, id: 'claude-new-path' };
+    store.observe([replacement]);
+    for (const row of [claude, bridged, oldHandle, replacement, claudeChild]) {
+      expect(store.apply(row)).toMatchObject({ appHidden: true, appVisibilityRevision: hiddenRevision });
+    }
+    const restored = new SessionVisibilityStore(root);
+    restored.observe([oldHandle, claude]);
+    expect(restored.apply(bridged)).toMatchObject({ appHidden: true, appVisibilityRevision: hiddenRevision });
+    restored.set(oldHandle, false);
+    for (const row of [claude, bridged, oldHandle, replacement, claudeChild]) {
+      expect(restored.apply(row).appHidden).toBe(false);
+      expect(restored.apply(row).appVisibilityRevision).toBeGreaterThan(hiddenRevision!);
+    }
+    store.set(nativeParent, false);
+    expect(store.apply(grandchild).appHidden).toBe(false);
+    store.set(child, true);
+    store.observe([{ ...nativeParent, origin: 'subagent', parentThreadId: child.nativeId }]);
+    expect(store.apply(child).appHiddenByAncestor).toBe(false);
+    store.set(child, false);
+    expect(new SessionVisibilityStore(root).apply(grandchild).appHidden).toBe(false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

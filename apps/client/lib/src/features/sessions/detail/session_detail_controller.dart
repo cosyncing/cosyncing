@@ -23,6 +23,7 @@ import 'package:cosyncing_client/src/features/sessions/detail/session_local_main
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_visibility_metadata.dart';
 import 'package:cosyncing_client/src/features/sessions/requests/session_command_args_codec.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_status_registry.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/session_draft_store.dart';
@@ -38,8 +39,8 @@ part '../requests/session_detail_request_coordinator.dart';
 part '../transcript/session_detail_draft_coordinator.dart';
 part '../transcript/session_detail_hidden_row_restore.dart';
 part '../transcript/session_detail_history_navigation_coordinator.dart';
-part '../transcript/session_detail_tool_slot_recovery.dart';
 part '../transcript/session_detail_messaging_coordinator.dart';
+part '../transcript/session_detail_tool_slot_recovery.dart';
 part '../transcript/session_detail_transcript_persistence.dart';
 part 'session_detail_bootstrap.dart';
 part 'session_detail_provider.dart';
@@ -1704,7 +1705,7 @@ class SessionDetailController
       final sessionInfo = switch (event) {
         SessionWireEvent(:final info) => _admitSessionOwnerProjection(
           state.sessionInfo,
-          info,
+          retainNewerSessionVisibility(info, state.sessionInfo),
         ),
         MessageWireEvent(:final message) => _foldStatusMessage(
           state.sessionInfo,
@@ -2650,6 +2651,27 @@ class SessionDetailController
     if (info == null) return;
     state = state.copyWith(
       sessionInfo: SessionInfo.fromJson({...info.toJson(), 'title': title}),
+    );
+  }
+
+  /// Accepts visibility without changing the connection or native activity.
+  void acceptSessionVisibility(RosterSource source, SessionInfo update) {
+    if (!_canPublishRenameFor(source)) return;
+    final info = state.sessionInfo;
+    if (info == null ||
+        info.tool != update.tool ||
+        info.id != update.id ||
+        (update.appVisibilityRevision ?? -1) <
+            (info.appVisibilityRevision ?? -1)) {
+      return;
+    }
+    state = state.copyWith(
+      sessionInfo: SessionInfo.fromJson({
+        ...info.toJson(),
+        'appHidden': update.appHidden,
+        'appHiddenByAncestor': update.appHiddenByAncestor,
+        'appVisibilityRevision': update.appVisibilityRevision,
+      }),
     );
   }
 

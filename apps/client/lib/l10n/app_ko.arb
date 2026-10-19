@@ -1737,5 +1737,39 @@
   "storageCacheTitle": "세션 캐시",
   "storageDataTitle": "앱 데이터",
   "storageDataDescription": "캐시를 지워도 초안, 대기 중인 메시지, 연결 및 환경설정은 유지됩니다.",
-  "storageCacheScope": "이 기기 · 모든 연결"
+  "storageCacheScope": "이 기기 · 모든 연결",
+  "sessionHide": "세션 숨기기",
+  "sessionUnhide": "세션 숨기기 해제",
+  "sessionHidden": "세션을 숨겼습니다",
+  "sessionUnhidden": "세션 숨기기를 해제했습니다",
+  "sessionVisibilityUndo": "실행 취소",
+  "sessionVisibilityConnect": "연결하여 표시 설정 변경",
+  "sessionVisibilityUnsupported": "세션을 숨기려면 브로커를 업데이트하세요",
+  "sessionVisibilityParent": "먼저 상위 세션의 숨기기를 해제하세요",
+  "sessionVisibilityFailed": "세션 표시 설정을 저장하지 못했습니다",
+  "sessionActionsMenu": "세션 작업",
+  "sessionRosterShowHidden": "숨긴 세션 표시",
+  "sessionRosterShowHiddenHelp": "숨긴 세션 포함",
+  "sessionRosterResetFilters": "필터 초기화",
+  "sessionRosterLast24Hours": "지난 24시간",
+  "sessionRosterCustom": "사용자 지정…",
+  "sessionRosterLastPrefix": "최근",
+  "sessionRosterDaysSuffix": "일",
+  "sessionRosterInvalidDays": "1에서 36,500 사이의 정수를 입력하세요.",
+  "sessionRosterLastDays": "최근 {days}일",
+  "@sessionRosterLastDays": {
+    "placeholders": {
+      "days": {
+        "type": "int"
+      }
+    }
+  },
+  "sessionRosterEmptyCustomDays": "최근 {days}일 동안 활성 세션이 없습니다.",
+  "@sessionRosterEmptyCustomDays": {
+    "placeholders": {
+      "days": {
+        "type": "int"
+      }
+    }
+  }
 }

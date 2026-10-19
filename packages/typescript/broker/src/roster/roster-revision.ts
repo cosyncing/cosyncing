@@ -19,6 +19,9 @@ export interface RosterDeltaBatch {
 
 const ROSTER_FIELDS = [
   'title',
+  'appHidden',
+  'appHiddenByAncestor',
+  'appVisibilityRevision',
   'status',
   'attachMode',
   'launchSurface',
@@ -72,7 +75,9 @@ export class RosterRevisionStore {
   private readonly journal: RosterDelta[] = [];
   private readonly waiters = new Set<() => void>();
 
-  constructor(private readonly maxJournal = 512) {}
+  constructor(private readonly maxJournal = 512, initialRevision = 0) {
+    this.revisionValue = initialRevision;
+  }
 
   get revision(): number {
     return this.revisionValue;
