@@ -29,16 +29,17 @@ export interface CliMessages {
     totals: (summary: Readonly<Record<SetupCheckStatus, number>>) => string;
     internalFailureSummary: string;
   };
+  /** Each line paints only its state words, so a plain render is the same text with no escapes. */
   status: {
-    headline: (report: LifecycleStatusReport) => string;
-    installation: (report: LifecycleStatusReport) => string;
-    service: (report: LifecycleStatusReport) => string;
-    listener: (report: LifecycleStatusReport) => string;
-    connectivity: (report: LifecycleStatusReport) => string;
-    agents: (report: LifecycleStatusReport) => string;
-    sessions: (report: LifecycleStatusReport) => string;
-    updates: (report: LifecycleStatusReport) => string;
-    fix: (detailCodes: readonly string[]) => string;
+    headline: (report: LifecycleStatusReport, paint: CliPaint) => string;
+    installation: (report: LifecycleStatusReport, paint: CliPaint) => string;
+    service: (report: LifecycleStatusReport, paint: CliPaint) => string;
+    listener: (report: LifecycleStatusReport, paint: CliPaint) => string;
+    connectivity: (report: LifecycleStatusReport, paint: CliPaint) => string;
+    agents: (report: LifecycleStatusReport, paint: CliPaint) => string;
+    sessions: (report: LifecycleStatusReport, paint: CliPaint) => string;
+    updates: (report: LifecycleStatusReport, paint: CliPaint) => string;
+    fix: (detailCodes: readonly string[], paint: CliPaint) => string;
   };
   uninstall: {
     planTitle: (count: number) => string;
@@ -51,6 +52,52 @@ export interface CliMessages {
     confirmPurge: string;
     resultSummary: (result: LifecycleCommandResult, facts: UninstallRenderFacts) => string;
   };
+}
+
+/** How a phrase in a human render reads: ok, warning, error, or info. The doctor marks use the same four. */
+export type CliTone = SetupCheckStatus;
+export type CliPaint = (tone: CliTone | undefined, text: string) => string;
+
+/** SGR foreground per tone: ok green, warning yellow, error red, info blue. */
+const TONE_SGR: Readonly<Record<CliTone, string>> = Object.freeze({
+  pass: '32',
+  warn: '33',
+  fail: '31',
+  skip: '34',
+});
+
+/**
+ * The painter for one render. Whether colour is allowed is the caller's decision (a real TTY, `NO_COLOR`,
+ * `TERM`); with it off every phrase passes through untouched, and an undefined tone always stays plain.
+ */
+export function cliPaint(color: boolean): CliPaint {
+  return (tone, text) => color && tone ? `\u001b[${TONE_SGR[tone]}m${text}\u001b[0m` : text;
+}
+
+/** A service state in a status line: running reads ok, stopped or failed reads as the problem it is. */
+function serviceStateTone(value: DurableServiceStatus['active'] | DurableServiceStatus['enabled']): CliTone | undefined {
+  switch (value) {
+    case 'active':
+    case 'enabled':
+      return 'pass';
+    case 'inactive':
+    case 'failed':
+      return 'fail';
+    case 'transitioning':
+    case 'disabled':
+      return 'warn';
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * A roster line with no answer is a warning, never the error itself: the listener and service lines are
+ * the ones that say whether the broker is down, and a roster read that timed out on a starting broker
+ * lands here too.
+ */
+function rosterReadTone(value: unknown): CliTone | undefined {
+  return value === null || value === 'unreadable' ? 'warn' : undefined;
 }
 
 export interface UninstallRenderFacts {
@@ -502,21 +549,27 @@ const en: CliMessages = {
     internalFailureSummary: 'Doctor could not complete its read-only inspection.',
   },
   status: {
-    headline: (report) => `${PRODUCT_IDENTITY.productName} ${report.version}: ${report.ok ? 'ready' : 'attention required'}`,
-    installation: (report) => `Installation: ${report.installation.committed ? 'committed' : report.installation.detailCode}`,
-    service: (report) => `Service: ${report.service.mode} / ${report.service.active} / ${report.service.enabled}`,
-    listener: (report) => `Broker listener: ${report.listener.url} / loopback only / ${report.listener.ready ? 'ready' : 'unreachable'}`,
+    headline: (report, paint) => `${PRODUCT_IDENTITY.productName} ${report.version}: ${report.ok
+      ? paint('pass', 'ready')
+      : paint('fail', 'attention required')}`,
+    installation: (report, paint) => `Installation: ${report.installation.committed
+      ? paint('pass', 'committed')
+      : paint('fail', report.installation.detailCode)}`,
+    service: (report, paint) => `Service: ${report.service.mode} / ${paint(serviceStateTone(report.service.active), report.service.active)} / ${paint(serviceStateTone(report.service.enabled), report.service.enabled)}`,
+    listener: (report, paint) => `Broker listener: ${report.listener.url} / loopback only / ${report.listener.ready
+      ? paint('pass', 'ready')
+      : paint('fail', 'unreachable')}`,
     connectivity: () => 'Connectivity: managed externally by the operator',
-    agents: (report) => `Agents (registered): ${report.agentsRead === null
-      ? 'broker unavailable'
+    agents: (report, paint) => `Agents (registered): ${report.agentsRead === null
+      ? paint(rosterReadTone(null), 'broker unavailable')
       : report.agentsRead === 'unreadable'
-        ? `broker answered but the agent roster could not be read; run ${PRODUCT_IDENTITY.primaryBinary} logs`
+        ? paint(rosterReadTone('unreadable'), `broker answered but the agent roster could not be read; run ${PRODUCT_IDENTITY.primaryBinary} logs`)
         : report.agents.length ? report.agents.map((agent) => {
       const readiness = agent.supportsCreateSession === false
         ? 'observe only'
         : agent.canCreateSession === true
-        ? 'create ready'
-        : agent.canCreateSession === false ? 'create unavailable' : 'create unknown';
+        ? paint('pass', 'create ready')
+        : agent.canCreateSession === false ? paint('warn', 'create unavailable') : 'create unknown';
       const sync = agent.syncEnabled === undefined ? '' : `; sync ${agent.syncEnabled ? 'enabled' : 'disabled'}`;
       return `${agent.displayName ?? agent.id} [${readiness}${sync}]`;
     }).join(', ') : 'none'}${report.agentsRead === 'ok' && report.agents.some((agent) =>
@@ -529,17 +582,17 @@ const en: CliMessages = {
     // It points at `logs`, not at `doctor`. Doctor reads fixed-size documents; nothing it does looks
     // at the roster, so it would report a healthy broker and leave this line unexplained. The broker's
     // own log covers the request that produced the response, which is where the answer actually is.
-    sessions: (report) => `Sessions: ${report.sessions === null
+    sessions: (report, paint) => `Sessions: ${paint(rosterReadTone(report.sessions), report.sessions === null
       ? 'broker unavailable'
       : report.sessions === 'unreadable'
         ? `broker answered but the roster could not be read; run ${PRODUCT_IDENTITY.primaryBinary} logs`
-        : `${report.sessions.active} active / ${report.sessions.total} total`}`,
-    updates: (report) => `Updates: ${report.updates === null
-      ? 'broker unavailable'
-      : report.updates === 'unreadable'
-        ? `broker answered but the update list could not be read; run ${PRODUCT_IDENTITY.primaryBinary} doctor`
-        : `${report.updates.pending} pending`}`,
-    fix: (detailCodes) => `Fix: ${detailCodes.join(', ')}; run ${PRODUCT_IDENTITY.primaryBinary} doctor.`,
+        : `${report.sessions.active} active / ${report.sessions.total} total`)}`,
+    updates: (report, paint) => `Updates: ${report.updates === null || report.updates === 'unreadable'
+      ? paint(rosterReadTone(report.updates), report.updates === null
+        ? 'broker unavailable'
+        : `broker answered but the update list could not be read; run ${PRODUCT_IDENTITY.primaryBinary} doctor`)
+      : paint(report.updates.pending > 0 ? 'warn' : undefined, `${report.updates.pending} pending`)}`,
+    fix: (detailCodes, paint) => `Fix: ${paint('fail', detailCodes.join(', '))}; run ${PRODUCT_IDENTITY.primaryBinary} doctor.`,
   },
   uninstall: {
     planTitle: (count) => `Uninstall plan (${count} owned actions):`,
@@ -658,38 +711,44 @@ const zhHans: CliMessages = {
     internalFailureSummary: 'Doctor 无法完成只读检查。',
   },
   status: {
-    headline: (report) => `${PRODUCT_IDENTITY.productName} ${report.version}：${report.ok ? '就绪' : '需要处理'}`,
-    installation: (report) => `安装：${report.installation.committed ? '已提交' : report.installation.detailCode}`,
-    service: (report) => `服务：${localizeCliStatusValue(report.service.mode, 'zh-Hans')} / ${localizeCliStatusValue(report.service.active, 'zh-Hans')} / ${localizeCliStatusValue(report.service.enabled, 'zh-Hans')}`,
-    listener: (report) => `Broker 监听：${report.listener.url} / 仅限回环 / ${report.listener.ready ? '就绪' : '无法连接'}`,
+    headline: (report, paint) => `${PRODUCT_IDENTITY.productName} ${report.version}：${report.ok
+      ? paint('pass', '就绪')
+      : paint('fail', '需要处理')}`,
+    installation: (report, paint) => `安装：${report.installation.committed
+      ? paint('pass', '已提交')
+      : paint('fail', report.installation.detailCode)}`,
+    service: (report, paint) => `服务：${localizeCliStatusValue(report.service.mode, 'zh-Hans')} / ${paint(serviceStateTone(report.service.active), localizeCliStatusValue(report.service.active, 'zh-Hans'))} / ${paint(serviceStateTone(report.service.enabled), localizeCliStatusValue(report.service.enabled, 'zh-Hans'))}`,
+    listener: (report, paint) => `Broker 监听：${report.listener.url} / 仅限回环 / ${report.listener.ready
+      ? paint('pass', '就绪')
+      : paint('fail', '无法连接')}`,
     connectivity: () => '连接：由操作者在 cosyncing 外部管理',
-    agents: (report) => `已注册智能体：${report.agentsRead === null
-      ? 'broker 不可用'
+    agents: (report, paint) => `已注册智能体：${report.agentsRead === null
+      ? paint(rosterReadTone(null), 'broker 不可用')
       : report.agentsRead === 'unreadable'
-        ? `broker 有响应，但智能体列表无法读取；请运行 ${PRODUCT_IDENTITY.primaryBinary} logs`
+        ? paint(rosterReadTone('unreadable'), `broker 有响应，但智能体列表无法读取；请运行 ${PRODUCT_IDENTITY.primaryBinary} logs`)
         : report.agents.length ? report.agents.map((agent) => {
       const readiness = agent.supportsCreateSession === false
         ? '仅观察'
         : agent.canCreateSession === true
-        ? '可创建会话'
-        : agent.canCreateSession === false ? '无法创建会话' : '创建状态未知';
+        ? paint('pass', '可创建会话')
+        : agent.canCreateSession === false ? paint('warn', '无法创建会话') : '创建状态未知';
       const sync = agent.syncEnabled === undefined ? '' : `；同步${agent.syncEnabled ? '已启用' : '已禁用'}`;
       return `${agent.displayName ?? agent.id} [${readiness}${sync}]`;
     }).join(', ') : '无'}${report.agentsRead === 'ok' && report.agents.some((agent) =>
       agent.supportsCreateSession !== false && agent.canCreateSession === false)
       ? `；会话创建配置请运行 ${PRODUCT_IDENTITY.primaryBinary} doctor 检查`
       : ''}`,
-    sessions: (report) => `会话：${report.sessions === null
+    sessions: (report, paint) => `会话：${paint(rosterReadTone(report.sessions), report.sessions === null
       ? 'broker 不可用'
       : report.sessions === 'unreadable'
         ? `broker 有响应，但会话列表无法读取；请运行 ${PRODUCT_IDENTITY.primaryBinary} logs`
-        : `${report.sessions.active} 个活跃 / 共 ${report.sessions.total} 个`}`,
-    updates: (report) => `更新：${report.updates === null
-      ? 'broker 不可用'
-      : report.updates === 'unreadable'
-        ? `broker 有响应，但更新列表无法读取；请运行 ${PRODUCT_IDENTITY.primaryBinary} doctor`
-        : `${report.updates.pending} 个待处理`}`,
-    fix: (detailCodes) => `处理：${detailCodes.join(', ')}；请运行 ${PRODUCT_IDENTITY.primaryBinary} doctor。`,
+        : `${report.sessions.active} 个活跃 / 共 ${report.sessions.total} 个`)}`,
+    updates: (report, paint) => `更新：${report.updates === null || report.updates === 'unreadable'
+      ? paint(rosterReadTone(report.updates), report.updates === null
+        ? 'broker 不可用'
+        : `broker 有响应，但更新列表无法读取；请运行 ${PRODUCT_IDENTITY.primaryBinary} doctor`)
+      : paint(report.updates.pending > 0 ? 'warn' : undefined, `${report.updates.pending} 个待处理`)}`,
+    fix: (detailCodes, paint) => `处理：${paint('fail', detailCodes.join(', '))}；请运行 ${PRODUCT_IDENTITY.primaryBinary} doctor。`,
   },
   uninstall: {
     planTitle: (count) => `卸载计划（${count} 个自有操作）：`,

@@ -62,6 +62,12 @@ import {
   type ReleaseBunRuntime,
 } from './bun-runtime-upgrade.ts';
 import type { BunRuntimeProbe } from '../runtime/application-identity.ts';
+import {
+  checkInstalledBroker,
+  type BrokerCheckOutcome,
+  type SetupCheckOutcome,
+  type UpgradeProgressEvent,
+} from './post-upgrade-check.ts';
 import { readSetupState } from '../installation/setup-state.ts';
 import { windowsServiceInstallPaths } from '../installation/windows-service-install.ts';
 import type {
@@ -259,7 +265,8 @@ export interface ReleaseUpdateCheckDependencies {
 }
 
 export interface UpgradeServiceController {
-  inspect(): Promise<{ active: boolean }>;
+  /** `enabled: false` only when the manager says disabled; absent means it is not known to be. */
+  inspect(): Promise<{ active: boolean; enabled?: boolean }>;
   stop(): Promise<void>;
   start(): Promise<void>;
   /**
@@ -303,6 +310,14 @@ export interface UpgradeCommandResult {
   claudeMod?: { status: 'installed' | 'refreshed' | 'current' | 'skipped' | 'failed'; detailCode: string };
   /** Independent desktop reconciliation, after the broker is committed and healthy. CLI only. */
   desktopClient?: { status: DesktopClientOutcome['status']; detailCode: string };
+  /**
+   * Whether the installed broker is running and answering at the end of the run, and what was done if it
+   * was stopped. Reported beside `status` for the same reason as the mod: an upgrade that committed is not
+   * undone by a service that will not start afterwards. Absent in foreground mode.
+   */
+  brokerCheck?: BrokerCheckOutcome;
+  /** Anything setup installed that the installed build now finds out of date, from its own doctor. */
+  setupCheck?: SetupCheckOutcome;
 }
 
 interface UpgradeJournal {
@@ -445,6 +460,8 @@ export interface UpgradeDependencies {
    */
   pinnedReleaseId?: string;
   service?: UpgradeServiceController;
+  /** Told as each long step starts, so a terminal can say what the run is waiting on. */
+  progress?: (event: UpgradeProgressEvent) => void;
   verifyBrokerVersion?: (config: BrokerConfig, expectedVersion: string) => Promise<boolean>;
   verifyWebVersion?: (config: BrokerConfig, expectedVersion: string) => Promise<boolean>;
   healthAttempts?: number;
@@ -1559,9 +1576,11 @@ async function refreshInstalledClaudeMod(options: {
   runtimePath?: string;
   runBinary: NonNullable<UpgradeDependencies['runBinary']>;
   env: Readonly<Record<string, string | undefined>>;
+  progress?: UpgradeDependencies['progress'];
 }): Promise<{ status: 'installed' | 'refreshed' | 'current' | 'skipped' | 'failed'; detailCode: string; clause: string }> {
   const requested = readSetupState(options.home).claudeModRequested === true;
   const clause = (text: string): string => requested ? text : '';
+  if (requested) options.progress?.({ step: 'refreshing-claude-mod' });
   // The same launch pair the self-check used: a JavaScript bundle carries no interpreter, so it goes to
   // the validated runtime rather than whatever `bun` PATH happens to resolve.
   const launch = options.javaScriptCandidate && options.runtimePath
@@ -1728,6 +1747,38 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
     });
   };
 
+  // A terminal that can no longer be written to must not change what the upgrade does, and a throw from
+  // inside the transaction would read as a failed candidate and roll a good one back.
+  const progress = (event: UpgradeProgressEvent): void => {
+    try { dependencies.progress?.(event); } catch { /* progress is commentary, never control flow */ }
+  };
+  /**
+   * Close a run that ends with a build installed by asking that build whether its broker is up, and whether
+   * setup has anything to refresh. Called with the installation lock released so the children can take it.
+   * Never throws: on the success path a throw would reach the rollback.
+   */
+  const withInstalledChecks = async (
+    outcome: UpgradeCommandResult,
+    installed: { runtimePath?: string; version: string; healthVerified: boolean },
+  ): Promise<UpgradeCommandResult> => {
+    try {
+      const config = inspectBrokerConfig(dependencies.home);
+      const checks = await checkInstalledBroker({
+        launch: javaScriptCandidate && installed.runtimePath ? [installed.runtimePath, targetPath] : [targetPath],
+        runBinary: dependencies.runBinary ?? defaultRunBinary,
+        env: dependencies.env ?? process.env,
+        ...(dependencies.service ? { service: dependencies.service } : {}),
+        healthVerified: installed.healthVerified,
+        version: installed.version,
+        ...(config.status === 'ok' ? { url: config.config.broker.internalUrl } : {}),
+        progress,
+      });
+      return { ...outcome, ...checks };
+    } catch {
+      return outcome;
+    }
+  };
+
   const acquire = dependencies.acquireLock ?? ((options) => acquireInstallationLock(options));
   let lock: InstallationLockHandle;
   try { lock = acquire({ command: 'upgrade', home: dependencies.home }); }
@@ -1826,10 +1877,14 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
       }
       if (compareVersions(candidate.manifest.version, fromVersion) === 0) {
         const client = await desktopOutcomeFor(candidate.manifest);
-        return result(client.status === 'updated' ? 'complete' : 'already-current', 0,
+        // "Already current" is exactly when an operator reruns update because something is broken, so this
+        // answer closes with the same checks as a real upgrade instead of returning before looking.
+        lock.release();
+        return await withInstalledChecks(result(client.status === 'updated' ? 'complete' : 'already-current', 0,
           client.status === 'updated' ? 'desktop-client-only-updated' : 'release-already-current',
           `cosyncing ${fromVersion} is already current.${client.clause}`, fromVersion, recovered, fromVersion,
-          undefined, client);
+          undefined, client), { ...(dependencies.runtimePath ? { runtimePath: dependencies.runtimePath } : {}),
+          version: fromVersion, healthVerified: false });
       }
       if (compareVersions(candidate.manifest.version, fromVersion) < 0) throw new Error('release-downgrade-refused');
       // The interpreter floor is checked BEFORE the download, and against the version the running runtime
@@ -1852,6 +1907,7 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
       if (runtimePlan.kind === 'refused') {
         return result('blocked', 1, runtimePlan.detailCode, runtimePlan.summary, fromVersion, recovered, candidate.manifest.version);
       }
+      progress({ step: 'downloading', version: candidate.manifest.version });
       artifactBytes = await boundedDownload(dependencies.fetch ?? fetch, candidate.url, MAX_RELEASE_ARTIFACT_BYTES);
       if (artifactBytes.byteLength !== candidate.size) throw new Error('release-artifact-size-mismatch');
       if (sha256(artifactBytes) !== candidate.sha256) throw new Error('release-artifact-checksum-mismatch');
@@ -2046,6 +2102,7 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
       serviceWasActive = dependencies.service ? (await dependencies.service.inspect()).active : false;
       journalAt('prepared');
       if (dependencies.faultAfter === 'journal-prepared') throw new Error('upgrade-fixture-interrupted');
+      if (serviceWasActive) progress({ step: 'restarting', version: toVersion });
       if (serviceWasActive && dependencies.service) await dependencies.service.stop();
       if (dependencies.faultAfter === 'service-stopped') throw new Error('upgrade-fixture-interrupted');
       atomicWriteOwnerOnly(previousPath, previousBytes, { mode: 0o700 });
@@ -2075,6 +2132,7 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
       const config = inspectBrokerConfig(dependencies.home);
       if (serviceWasActive) {
         if (config.status !== 'ok') throw new Error('upgrade-health-config-invalid');
+        progress({ step: 'verifying', version: toVersion });
         let healthy = false;
         for (let attempt = 0; attempt < Math.max(1, dependencies.healthAttempts ?? 30); attempt += 1) {
           healthy = dependencies.verifyBrokerVersion
@@ -2143,8 +2201,11 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
         ...(effectiveRuntimePath ? { runtimePath: effectiveRuntimePath } : {}),
         runBinary: dependencies.runBinary ?? defaultRunBinary,
         env: dependencies.env ?? process.env,
+        progress,
       });
-      return result(
+      // A service that was stopped before the update was switched but never started; the checks start it,
+      // through the new build's own `start`, and confirm it answers.
+      return await withInstalledChecks(result(
         'complete',
         0,
         'upgrade-complete',
@@ -2154,7 +2215,8 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
         toVersion,
         modOutcome,
         clientOutcome,
-      );
+      ), { ...(effectiveRuntimePath ? { runtimePath: effectiveRuntimePath } : {}),
+        version: toVersion, healthVerified: serviceWasActive });
     } catch (error) {
       if (!authorizationFenceWasActive
           && authorizationMigrationRollbackFenceActive(dependencies.home)) {

@@ -225,7 +225,7 @@ import {
   relinquishLegacyConnectivityReceipts,
   withoutLegacyConnectivityIntent,
 } from './legacy-connectivity-migration.ts';
-import { cliMessages } from '../cli/cli-i18n.ts';
+import { cliMessages, cliPaint } from '../cli/cli-i18n.ts';
 import type { SetupLanguage } from './setup-i18n.ts';
 
 export interface LifecycleBaseOptions {
@@ -3233,18 +3233,20 @@ export async function runUninstall(options: UninstallOptions): Promise<Lifecycle
 export function renderLifecycleStatus(
   report: LifecycleStatusReport,
   language: SetupLanguage = 'en',
+  options: { color?: boolean } = {},
 ): string {
   const text = cliMessages(language).status;
+  const paint = cliPaint(options.color === true);
   const lines = [
-    text.headline(report),
-    text.installation(report),
-    text.service(report),
-    text.listener(report),
-    text.connectivity(report),
-    text.agents(report),
-    text.sessions(report),
-    text.updates(report),
+    text.headline(report, paint),
+    text.installation(report, paint),
+    text.service(report, paint),
+    text.listener(report, paint),
+    text.connectivity(report, paint),
+    text.agents(report, paint),
+    text.sessions(report, paint),
+    text.updates(report, paint),
   ];
-  if (report.detailCodes.length) lines.push(text.fix(report.detailCodes));
+  if (report.detailCodes.length) lines.push(text.fix(report.detailCodes, paint));
   return `${lines.join('\n')}\n`;
 }

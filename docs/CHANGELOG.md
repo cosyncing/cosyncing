@@ -11,6 +11,24 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Added
+
+- `cosy update` ends by checking the installed broker, including when the
+  release is already current. A service that was stopped is started and
+  checked until it answers; a disabled service is left alone. Anything setup
+  installed that the new version finds out of date, such as an agent skill or
+  a Pi/omp bridge, is listed with the command that refreshes it. The update
+  prints a line as each long step starts, and `--json` carries the results as
+  `brokerCheck` and `setupCheck`. The check first runs on the update after the
+  one that installs this release, because the version already installed runs
+  the update.
+
+### Changed
+
+- `cosy status` and the end of `cosy update` use colour: green for ready and
+  running, red for stopped, failed or unreachable, yellow for warnings. Output
+  stays plain when piped, under `NO_COLOR`, and on a dumb terminal.
+
 ## 0.7.1 — 2026-10-19
 
 ### Added
