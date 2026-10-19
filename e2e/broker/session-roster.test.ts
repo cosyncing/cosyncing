@@ -425,6 +425,10 @@ describe('the session roster', () => {
     expect(aged.session).toBeUndefined();
     expect(aged.revision).toBeGreaterThan(admitted.revision);
 
+    // A forced refresh can join a sweep started by the preceding long poll.
+    // Drain that sweep before deleting, so its earlier read cannot mask removal.
+    const settled = await rosterSnapshot(client, { window, refresh: true });
+    expect(settled.body.complete).toBe(true);
     unlinkSync(pi.doomed!.path);
     const refreshed = await rosterSnapshot(client, { window, refresh: true });
     expect(ids(refreshed.body.sessions)).not.toContain(pi.doomed!.id);
