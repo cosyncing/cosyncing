@@ -23,6 +23,13 @@ class MainFlutterWindow: NSWindow {
         return
       }
       switch call.method {
+      case "updateOperation":
+        let prefix = "--cosyncing-update="
+        result(CommandLine.arguments.first(where: { $0.hasPrefix(prefix) })
+          .map { String($0.dropFirst(prefix.count)) })
+      case "quitForUpdate":
+        result(nil)
+        DispatchQueue.main.async { NSApp.terminate(nil) }
       case "raise":
         delegate.showMainWindow()
         result(true)

@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path';
 import {
   BROKER_CONTRACT_REVISION,
   BROKER_CONTRACT_SURFACE_HASH,
+  BROKER_CONTRACT_OVERLAP_REVISIONS,
   CLIENT_MINIMUM_BROKER_CONTRACT_REVISION,
 } from '../../packages/typescript/protocol/src/index.ts';
 import { renderClientContract } from './lib/client-contract.ts';
@@ -37,6 +38,8 @@ function renderDartIdentity(): string {
     + `const int cosyncingClientContractRevision = ${BROKER_CONTRACT_REVISION};\n\n`
     + `/// Oldest broker contract this client can safely drive.\n`
     + `const int cosyncingClientMinimumBrokerRevision = ${minimumBrokerRevision};\n\n`
+    + `/// Contract overlap policy shared with the broker update planner.\n`
+    + `const int cosyncingBrokerContractOverlapRevisions = ${BROKER_CONTRACT_OVERLAP_REVISIONS};\n\n`
     + `/// Deterministic identity of the public surface used by this client.\n`
     + `const String cosyncingClientContractSurfaceHash = '${BROKER_CONTRACT_SURFACE_HASH}';\n`;
 }

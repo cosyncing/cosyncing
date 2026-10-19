@@ -224,7 +224,7 @@ void main() {
       expect(runtime.hasError, isTrue);
       expect(runtime.isLoading, isFalse);
       expect(
-        find.byKey(const Key('settings-desktop-build-update')),
+        find.byKey(const Key('settings-desktop-updates-link')),
         findsNothing,
       );
       expect(
@@ -236,14 +236,14 @@ void main() {
     // Layer one is the whole point of the hierarchy: the hub lists categories
     // and carries no controls of its own.
 
-    testWidgets('General category shows an available-update dot', (
+    testWidgets('Updates category shows an available-update dot', (
       tester,
     ) async {
       final semantics = tester.ensureSemantics();
       await tester.pumpWidget(buildSubject(clientUpdateAvailable: true));
       await tester.pumpAndSettle();
 
-      final tile = find.byKey(const Key('settings-category-general'));
+      final tile = find.byKey(const Key('settings-category-updates'));
       expect(tile, findsOneWidget);
       expect(
         find.descendant(of: tile, matching: find.byType(StatusDot)),
@@ -761,7 +761,7 @@ void main() {
           reason: "A's equal version cannot display B's fallback",
         );
         expect(
-          find.byKey(const Key('settings-desktop-build-update')),
+          find.byKey(const Key('settings-desktop-updates-link')),
           findsNothing,
         );
 
@@ -776,7 +776,7 @@ void main() {
           RosterSource.ofProfile(betaProfile).storageKey,
         );
         expect(
-          find.byKey(const Key('settings-desktop-build-update')),
+          find.byKey(const Key('settings-desktop-updates-link')),
           findsOneWidget,
         );
         expect(

@@ -320,14 +320,62 @@ export function assertDesktopClientStopped(prepared: PreparedDesktopClient | und
   }
 }
 
-export function assertDesktopClientUnchanged(prepared: PreparedDesktopClient | undefined, context: DesktopClientContext): void {
+export function assertDesktopClientUnchanged(prepared: PreparedDesktopClient | undefined, context: DesktopClientContext, allowRunning = false): void {
   const current = inspectDesktopClient(context);
   if (!!current !== !!prepared || (current && prepared && (current.legacy !== prepared.legacy
       || JSON.stringify(current.receipt) !== JSON.stringify(prepared.receipt)
       || !current.legacy && !current.receiptBytes!.equals(prepared.receiptBytes!)))) {
     throw new Error('desktop-client-receipt-changed');
   }
-  assertDesktopClientStopped(current, context);
+  if (!allowRunning) assertDesktopClientStopped(current, context);
+}
+
+/** Download and authenticate without stopping the app or mutating its installed tree. */
+export async function stageDesktopClient(options: {
+  prepared: PreparedDesktopClient;
+  context: DesktopClientContext;
+  row: ReleaseDesktopClient;
+  download: (url: string, maximum: number) => Promise<Uint8Array>;
+}): Promise<{ stage: string; candidate: string }> {
+  const { prepared, context, row } = options;
+  assertDesktopClientUnchanged(prepared, context, true);
+  const previous = prepared.receipt;
+  const parent = dirname(previous.path);
+  assertNoSymlinkComponents(parent);
+  inspectClientNode(parent, lstatSync(parent), false, prepared.legacy);
+  const stage = mkdtempSync(join(parent, '.cosyncing-client.staging-'));
+  ensureOwnerOnlyDirectory(stage);
+  try {
+    const bytes = await options.download(row.url, 256 * 1024 * 1024);
+    if (bytes.length !== row.size || digest(bytes) !== row.sha256) throw new Error('desktop-client-digest-mismatch');
+    const archive = join(stage, 'client.archive');
+    atomicWriteOwnerOnly(archive, bytes);
+    const unpack = join(stage, 'unpack'); ensureOwnerOnlyDirectory(unpack);
+    await extractDesktopArchive(archive, unpack, previous.host);
+    const roots = readdirSync(unpack);
+    if (roots.length !== 1 || (previous.host === 'macos-arm64' && roots[0] !== 'Cosyncing.app')) {
+      throw new Error('desktop-client-archive-layout-invalid');
+    }
+    const candidate = join(unpack, roots[0]!);
+    validateDesktopClientTree(candidate, previous.host, true);
+    if (previous.host === 'windows-x64') {
+      const launcher = join(previous.path, 'cosyncing-launch.cmd');
+      if (existsSync(launcher)) {
+        if (prepared.legacy) {
+          assertNoSymlinkComponents(launcher);
+          const stat = lstatSync(launcher);
+          if (!stat.isFile()) throw new Error('desktop-client-launcher-unsafe');
+          inspectClientNode(launcher, stat, false, true);
+        } else if (inspectOwnerOnlyFile(launcher).status !== 'ok') throw new Error('desktop-client-launcher-unsafe');
+        atomicWriteOwnerOnly(join(candidate, 'cosyncing-launch.cmd'), readFileSync(launcher));
+      }
+    }
+    assertDesktopClientUnchanged(prepared, context, true);
+    return { stage, candidate };
+  } catch (error) {
+    rmSync(stage, { recursive: true });
+    throw error;
+  }
 }
 
 /** Desktop failure never escapes into the already committed broker's rollback handler. */
@@ -364,37 +412,11 @@ export async function reconcileDesktopClient(options: {
       if (row.sha256 !== previous.sha256) throw new Error('desktop-client-version-reused');
       return outcome('current', 'desktop-client-current', ' The installer-owned desktop client is current.');
     }
-    const parent = dirname(previous.path);
-    assertNoSymlinkComponents(parent);
-    inspectClientNode(parent, lstatSync(parent), false, prepared.legacy);
-    stage = mkdtempSync(join(parent, '.cosyncing-client.staging-'));
-    ensureOwnerOnlyDirectory(stage);
-    const bytes = await options.download(row.url, 256 * 1024 * 1024);
-    if (bytes.length !== row.size || digest(bytes) !== row.sha256) throw new Error('desktop-client-digest-mismatch');
-    const archive = join(stage, 'client.archive');
-    atomicWriteOwnerOnly(archive, bytes);
-    const unpack = join(stage, 'unpack'); ensureOwnerOnlyDirectory(unpack);
-    await extractDesktopArchive(archive, unpack, previous.host);
-    const roots = readdirSync(unpack);
-    if (roots.length !== 1 || (previous.host === 'macos-arm64' && roots[0] !== 'Cosyncing.app')) {
-      throw new Error('desktop-client-archive-layout-invalid');
-    }
-    const candidate = join(unpack, roots[0]!);
-    validateDesktopClientTree(candidate, previous.host, true);
-    if (previous.host === 'windows-x64') {
-      const launcher = join(previous.path, 'cosyncing-launch.cmd');
-      if (existsSync(launcher)) {
-        if (prepared.legacy) {
-          assertNoSymlinkComponents(launcher);
-          const stat = lstatSync(launcher);
-          if (!stat.isFile()) throw new Error('desktop-client-launcher-unsafe');
-          inspectClientNode(launcher, stat, false, true);
-        } else if (inspectOwnerOnlyFile(launcher).status !== 'ok') throw new Error('desktop-client-launcher-unsafe');
-        atomicWriteOwnerOnly(join(candidate, 'cosyncing-launch.cmd'), readFileSync(launcher));
-      }
-    }
+    const staged = await stageDesktopClient({ prepared, context, row, download: options.download });
+    stage = staged.stage;
+    const candidate = staged.candidate;
     assertDesktopClientUnchanged(prepared, context);
-    retired = join(parent, `.cosyncing-client.retired-${randomUUID()}`);
+    retired = join(dirname(previous.path), `.cosyncing-client.retired-${randomUUID()}`);
     move(previous.path, retired);
     move(candidate, previous.path);
     placed = true;

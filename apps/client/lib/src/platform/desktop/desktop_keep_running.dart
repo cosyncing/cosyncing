@@ -93,6 +93,11 @@ class DesktopWindowChannel {
     await _channel.invokeMethod<bool>('raise');
   }
 
+  /// Fully quits, including tray/Dock lifetime, after the update exit barrier.
+  Future<void> quitForUpdate() async {
+    await _channel.invokeMethod<void>('quitForUpdate');
+  }
+
   /// Sets whether closing the window keeps the app running, with the labels
   /// of the notification-area menu (Windows).
   Future<void> setKeepRunning({

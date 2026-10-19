@@ -3,6 +3,8 @@ import type { BuildInfo } from '../runtime/build-info.ts';
 import { PRODUCT_IDENTITY } from '@cosyncing/protocol';
 import type { BrokerServiceBoundary } from '../runtime/service-boundary.ts';
 import { settleWithDeadline } from '../installation/service-manager.ts';
+import { stageBrokerUpdateRunner, windowsBrokerUpdateCommand } from './broker-update-runner.ts';
+import { QUALIFIED_BROKER_UPDATE_PROVIDERS } from './desktop-updater-support.ts';
 import {
   checkReleaseUpdate,
   packageManagerUpdateGuidance,
@@ -87,6 +89,8 @@ export interface BrokerUpdateTriggerDependencies {
   cacheRoot?: string;
   userHome?: string;
   systemdRunPath?: string;
+  launchdPlistPath?: string;
+  windowsPowerShellPath?: string;
   manifestUrl?: string;
   /**
    * The immutable release the caller reviewed, spelled into the handoff.
@@ -96,6 +100,8 @@ export interface BrokerUpdateTriggerDependencies {
    * review and this process being replaced would be installed under a job that never saw it.
    */
   pinnedReleaseId?: string;
+  /** Durable broker-only preparation, consumed by the independent worker. */
+  preparedJobId?: string;
   /**
    * The authority answer for the moment the updater is actually scheduled.
    *
@@ -111,12 +117,16 @@ export interface BrokerUpdateTriggerDependencies {
 /**
  * Public for deterministic tests; argv-only, with any candidate URL bounded to credential-free HTTPS.
  *
- * Returns undefined whenever no handoff exists — including on every launchd host, where there is no
- * systemd-run equivalent that can run the replacement outside the service's own process tree. The caller
- * turns that into an explicit `broker-update-handoff-unavailable` block naming the `upgrade` CLI, which
- * remains the supported path there; it never falls back to replacing the binary from inside the service.
+ * A launcher runs outside the broker's lifetime: a transient systemd unit,
+ * a separate launchd job, or a per-user scheduler task. Native qualification is
+ * checked by the production trigger before it publishes an accepted handoff.
  */
 export function brokerUpdateHandoffCommand(dependencies: BrokerUpdateTriggerDependencies): string[] | undefined {
+  if (dependencies.service.provider === 'launchd') {
+    return dependencies.launchdPlistPath && isAbsolute(dependencies.launchdPlistPath)
+      && process.getuid ? ['/bin/launchctl', 'bootstrap', `gui/${process.getuid()}`, dependencies.launchdPlistPath] : undefined;
+  }
+  if (dependencies.service.provider === 'task-scheduler') return windowsBrokerUpdateCommand(dependencies);
   if (dependencies.service.provider !== 'systemd') return undefined;
   const systemdRun = dependencies.systemdRunPath ?? Bun.which('systemd-run') ?? undefined;
   if (!systemdRun || !isAbsolute(systemdRun) || !isAbsolute(dependencies.executablePath)
@@ -157,6 +167,7 @@ export function brokerUpdateHandoffCommand(dependencies: BrokerUpdateTriggerDepe
   // has to honour it, so a transient unit started in twenty seconds installs the reviewed
   // build or refuses, whatever the channel is serving by then.
   if (dependencies.pinnedReleaseId) command.push('--release', dependencies.pinnedReleaseId);
+  if (dependencies.preparedJobId) command.push('--prepared-job', dependencies.preparedJobId);
   if (dependencies.manifestUrl) command.push('--manifest', dependencies.manifestUrl);
   return command;
 }
@@ -217,10 +228,23 @@ export async function triggerBrokerUpdate(
   if (!dependencies.service.managed) {
     return { ...base, status: 'blocked', detailCode: 'broker-update-managed-service-required', message: 'App-triggered updates require an installed durable user service.' };
   }
-  const command = brokerUpdateHandoffCommand(dependencies);
+  if (dependencies.run === undefined && !QUALIFIED_BROKER_UPDATE_PROVIDERS.includes(dependencies.service.provider)) {
+    return { ...base, status: 'blocked', detailCode: 'broker-update-handoff-unavailable',
+      message: 'This platform has not completed native in-app update acceptance. Use the signed installer or cosy update.' };
+  }
+  let launchDependencies = dependencies;
+  try {
+    // Stubbed launches retain their explicit fixture; production pins the real
+    // signed bundle before scheduling it outside the service's lifetime.
+    if (dependencies.run === undefined) launchDependencies = stageBrokerUpdateRunner(dependencies);
+  } catch {
+    return { ...base, status: 'blocked', detailCode: 'broker-update-runner-untrusted',
+      message: 'The installed updater could not prove ownership of its runner.' };
+  }
+  const command = brokerUpdateHandoffCommand(launchDependencies);
   if (!command) {
-    // launchd hosts land here by design: no handoff exists, so the honest answer names the command the
-    // operator can run instead rather than implying the update was queued.
+    // Missing native service infrastructure is a supported manual path, never
+    // an accepted update that cannot actually be launched.
     return {
       ...base,
       status: 'blocked',

@@ -23,6 +23,7 @@ import {
 import { UpdateOperationStore } from './update-operation-store.ts';
 import type { InstalledComponentState } from './update-planner.ts';
 import { stagedPreparedDigest, type InstallerCommitProof, type UpdateManagementDependencies } from './update-management.ts';
+import { QUALIFIED_BROKER_UPDATE_PROVIDERS } from './desktop-updater-support.ts';
 import type { BuildInfo } from '../runtime/build-info.ts';
 
 export interface UpdateManagementHost {
@@ -215,7 +216,9 @@ export function openUpdateManagementHost(options: {
   const busy = options.busy ?? UNKNOWN_BUSY;
   const stagingRoot = join(options.home, 'updates', 'staging');
   const handoff = options.handoff
-    ?? (options.updater === undefined ? undefined : hostHandoff(options.updater, options.home, options.buildInfo));
+    ?? (options.updater === undefined || !options.updater.service.managed
+      || !QUALIFIED_BROKER_UPDATE_PROVIDERS.includes(options.updater.service.provider)
+      ? undefined : hostHandoff(options.updater, options.home, options.buildInfo));
   // Grants and reviews use the same live installation identity. The store refuses old
   // authority and binds newly issued grants to the receipt the host is currently serving.
   const dependencies: UpdateManagementDependencies = {
@@ -266,6 +269,7 @@ function hostHandoff(
     ...(options.cacheRoot === undefined ? {} : { cacheRoot: options.cacheRoot }),
     ...(options.userHome === undefined ? {} : { userHome: options.userHome }),
     pinnedReleaseId: job.releaseId,
+    preparedJobId: job.jobId,
     authorizeLaunch: mayLaunch,
   });
 }

@@ -318,6 +318,8 @@ export async function waitForBrokerHealth(
     timeoutMs?: number;
     intervalMs?: number;
     probeTimeoutMs?: number;
+    /** Prove this child has bound its listener before accepting HTTP health. */
+    childReady?: () => boolean;
   } = {},
 ): Promise<void> {
   const configured = Number(process.env.COSYNCING_FIXTURE_READY_TIMEOUT_MS);
@@ -343,6 +345,10 @@ export async function waitForBrokerHealth(
         throw new Error(`broker exited with code ${child.exitCode} before becoming healthy`);
       }
       try {
+        if (options.childReady && !options.childReady()) {
+          await Promise.race([Bun.sleep(intervalMs), cancelled]);
+          continue;
+        }
         const response = await fetch(healthUrl, {
           // Either bound ends the request: the per-probe one for a server that
           // accepts and says nothing, the shared one for a wait that is over.

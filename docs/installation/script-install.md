@@ -194,6 +194,32 @@ set, where a GUI is a package nothing can start.
 
 ### Updating the installer-owned desktop client
 
+Settings → Updates is the app's update entry point. It checks this device and
+saved servers independently; selecting a server does not change the active
+connection. Review the selected versions and interruptions, then choose
+**Update selected**. Downloads are prepared before an installation starts.
+Closing the app or losing a server response preserves the operation; reopen
+Updates and choose **Continue remaining updates** to recover the original jobs.
+
+Internal desktop installation is available only when both the installed helper
+and the signed release support this platform. The app saves drafts, quits
+completely, and reopens after replacement. Success requires startup from the
+installed build. A failed or unconfirmed startup retains recovery information;
+restoration is allowed only when the release declares compatible durable state
+and the candidate has stopped. Standalone apps keep the Download action.
+
+Existing desktop apps need one manual upgrade to acquire this UI. On macOS,
+run the new signed all-in-one installer once to register the independent user
+helper. The client retains App Sandbox; its helper uses a private capability
+in the client container and remains independent of the selected server. This
+does not grant a paired device permission to update any server.
+
+Each desktop platform must complete native lifecycle acceptance before releases
+advertise internal installation. Building its native adapter alone does not
+enable it. Missing support remains a manual download or setup requirement.
+
+The terminal update path remains available:
+
 `cosy update` updates the desktop client recorded by the all-in-one installer.
 Quit that client first, including its notification-area icon if its window is
 closed. A running recorded client stops the update before installation files

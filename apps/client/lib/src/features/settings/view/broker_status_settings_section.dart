@@ -2,47 +2,21 @@ import 'dart:async';
 
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
+import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/features/settings/controller/managed_runtime_controller.dart';
 import 'package:cosyncing_client/src/features/settings/view/settings_common.dart';
 import 'package:cosyncing_client/src/platform/update/desktop_client_update.dart';
 import 'package:cosyncing_client/src/platform/update/desktop_client_update_provider.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 /// Broker health, build compatibility, and signed-update controls.
 class BrokerStatusSettingsSection extends ConsumerWidget {
   /// Creates the broker status section.
   const BrokerStatusSettingsSection({super.key});
-
-  Future<void> _confirmUpdate(
-    BuildContext context,
-    WidgetRef ref,
-    BrokerUpdateSnapshot update,
-  ) async {
-    final l10n = AppLocalizations.of(context);
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(l10n.settingsUpdateBrokerConfirmTitle),
-        content: SelectionArea(
-          child: Text(
-            l10n.settingsUpdateBrokerConfirmBody(
-              update.latestVersion ?? l10n.settingsUpdateBrokerReleaseFallback,
-            ),
-          ),
-        ),
-        actions: [
-          const SettingsDialogCancelButton(),
-          SettingsDialogConfirmButton(label: l10n.settingsUpdateBrokerAction),
-        ],
-      ),
-    );
-    if (confirmed != true || !context.mounted) return;
-    await ref.read(managedRuntimeControllerProvider.notifier).updateBroker();
-  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -77,11 +51,11 @@ class BrokerStatusSettingsSection extends ConsumerWidget {
               _BrokerVersionRow(
                 health: data.productHealth,
                 update: data.brokerUpdate,
-                onUpdate: (update) => _confirmUpdate(context, ref, update),
+                onUpdate: (_) async {
+                  await context.push<void>(updatesRoute);
+                },
               ),
-              _DesktopBuildUpdateRow(
-                brokerVersion: data.productHealth?.version,
-              ),
+              const _DesktopUpdatesLink(),
             ],
           );
         },
@@ -194,57 +168,32 @@ class _BrokerHealthRow extends StatelessWidget {
   }
 }
 
-/// Points a native desktop build at its download page.
-///
-/// Renders nothing on the web and on mobile, and nothing while either version
-/// is unreadable — see [desktopClientUpdateAvailable].
-class _DesktopBuildUpdateRow extends ConsumerWidget {
-  const _DesktopBuildUpdateRow({required this.brokerVersion});
-
-  final String? brokerVersion;
-
-  Future<void> _openDownload(BuildContext context, WidgetRef ref) async {
-    var launched = false;
-    try {
-      launched = await ref.read(desktopDownloadLauncherProvider)(
-        Uri.parse(desktopClientDownloadUrl),
-      );
-    } on Object {
-      launched = false;
-    }
-    if (launched || !context.mounted) return;
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          AppLocalizations.of(context).settingsDesktopBuildUpdateLaunchFailed,
-          key: const Key('settings-desktop-build-download-failure'),
-        ),
-      ),
-    );
-  }
+/// The contextual version location opens the common update review.
+class _DesktopUpdatesLink extends ConsumerWidget {
+  const _DesktopUpdatesLink();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final available = desktopClientUpdateAvailable(
-      platform: Theme.of(context).platform,
-      isWeb: kIsWeb,
-      brokerVersion: brokerVersion,
-      clientVersion: ref.watch(desktopClientVersionProvider),
-    );
-    if (!available) return const SizedBox.shrink();
-    final l10n = AppLocalizations.of(context);
+    if (!isDesktopClientPlatform(
+      Theme.of(context).platform,
+      isWeb: ref.watch(clientIsWebProvider),
+    )) {
+      return const SizedBox.shrink();
+    }
+    final l = AppLocalizations.of(context);
     return SettingsRow(
-      key: const Key('settings-desktop-build-update'),
+      key: const Key('settings-desktop-updates-link'),
       stackTrailing: true,
-      title: SelectableText(l10n.settingsDesktopBuildUpdateTitle),
-      subtitle: SelectableText(
-        l10n.settingsDesktopBuildUpdateBody(brokerVersion!),
+      title: Text(
+        l.settingsAndroidAppUpdateTitle(
+          ref.watch(desktopClientVersionProvider),
+        ),
       ),
-      trailing: FilledButton.tonal(
-        key: const Key('settings-desktop-build-download'),
-        onPressed: () => unawaited(_openDownload(context, ref)),
-        child: Text(l10n.settingsDesktopBuildUpdateAction),
+      subtitle: Text(l.updatesSubtitle),
+      trailing: TextButton(
+        key: const Key('settings-open-updates'),
+        onPressed: () => context.push(updatesRoute),
+        child: Text(l.updatesTitle),
       ),
     );
   }

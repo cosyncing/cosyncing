@@ -255,7 +255,19 @@ test('an authorized caller takes this host from available to staged without stop
   expect(recorded).toMatchObject({ releaseId: R1_RELEASE_ID, name: artifact.name, digest: artifact.sha256, bytes: artifact.size });
   const bytes = readFileSync(join(staged, artifact.name));
   expect(createHash('sha256').update(bytes).digest('hex')).toBe(artifact.sha256);
-  expect(readdirSync(staged).sort()).toEqual(['prepared.json', artifact.name].sort());
+  expect(readdirSync(staged).sort()).toEqual(['manifest.json', 'prepared.json', artifact.name].sort());
+});
+
+test('an abandoned prepared review expires without installing and releases the reservation', async () => {
+  const h = openHost();
+  const job = await readyJob(h);
+  h.advance(16 * 60_000);
+  const expired = readUpdateJob(h.host.dependencies, OWNER, job.jobId);
+  expect(expired.ok && expired.value.phase).toBe('failed');
+  expect(expired.ok && expired.value.events.at(-1)?.detailCode).toBe('prepared-review-expired');
+  expect(h.handoffs).toHaveLength(0);
+  expect(h.host.dependencies.store.activeJobFor(['broker'], job.installationId)).toBeUndefined();
+  expect((await readyJob(h, OWNER, 'after-expiry')).phase).toBe('ready');
 });
 
 test('a host that cannot say it is idle asks before it restarts its own server', async () => {

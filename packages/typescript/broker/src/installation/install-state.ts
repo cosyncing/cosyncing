@@ -10,6 +10,7 @@ import {
 } from './legacy-connectivity-migration.ts';
 import { CLAUDE_MOD_RESOURCE_ID } from './claude-mod-ownership.ts';
 import { BUN_RUNTIMES_RESOURCE_ID } from './bun-runtime-receipt.ts';
+import { DESKTOP_HELPER_RESOURCE_ID } from '../updates/desktop-updater-support.ts';
 
 /** Every receipt id emitted by setup and handled by uninstall. */
 export const KNOWN_INSTALL_RESOURCE_IDS: ReadonlySet<string> = new Set<string>([
@@ -25,6 +26,7 @@ export const KNOWN_INSTALL_RESOURCE_IDS: ReadonlySet<string> = new Set<string>([
   'service-windows-active-install',
   'service-windows-version',
   'service-environment',
+  DESKTOP_HELPER_RESOURCE_ID,
   'service-systemd-linger',
   'pi-bridge',
   'omp-bridge',

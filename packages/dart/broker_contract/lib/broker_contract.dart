@@ -25,5 +25,6 @@ export 'src/models/schedule_models.dart';
 export 'src/models/session_info.dart';
 export 'src/models/stream_models.dart';
 export 'src/models/transport_pairing_models.dart';
+export 'src/models/update_management_models.dart';
 export 'src/models/usage_report_models.dart';
 export 'src/models/wire_event.dart';

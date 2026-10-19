@@ -38,6 +38,7 @@ import 'package:cosyncing_client/src/features/settings/view/settings_page.dart';
 import 'package:cosyncing_client/src/features/settings/view/storage_settings_page.dart';
 import 'package:cosyncing_client/src/features/settings/view/tool_display_settings_page.dart';
 import 'package:cosyncing_client/src/features/transfers/view/transfer_manager_page.dart';
+import 'package:cosyncing_client/src/features/updates/view/updates_page.dart';
 import 'package:cosyncing_client/src/features/usage/model/usage_period.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_report_page.dart';
 import 'package:flutter/gestures.dart';
@@ -341,6 +342,12 @@ GoRouter createGoRouter({String initialLocation = sessionsRoute}) {
                                 const StorageSettingsPage(),
                           ),
                         ],
+                      ),
+                      GoRoute(
+                        path: 'updates',
+                        builder: (context, state) => UpdatesPage(
+                          profileId: state.uri.queryParameters['server'],
+                        ),
                       ),
                       GoRoute(
                         path: 'usage',

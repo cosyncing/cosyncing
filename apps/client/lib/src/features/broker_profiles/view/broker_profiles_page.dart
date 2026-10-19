@@ -9,6 +9,7 @@ import 'package:cosyncing_client/src/features/broker_profiles/controller/broker_
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/provider/broker_profile_providers.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
+import 'package:cosyncing_client/src/features/updates/controller/updates_controller.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_participants.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -224,7 +225,7 @@ class _ProfileListSection extends StatelessWidget {
 
 /// One saved server: what it is called and where it lives, with its actions
 /// on the right. The server in use carries a check instead of a Use button.
-class _ProfileRow extends StatelessWidget {
+class _ProfileRow extends ConsumerWidget {
   const _ProfileRow({
     required this.profile,
     required this.isActive,
@@ -240,11 +241,21 @@ class _ProfileRow extends StatelessWidget {
   final VoidCallback onDelete;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final l10n = AppLocalizations.of(context);
     final theme = Theme.of(context);
     final tokens = context.tokens;
     final id = _sanitizeProfileId(profile.id);
+    final observation = ref
+        .watch(savedServerUpdateObservationsProvider)
+        .where(
+          (row) =>
+              row.profile.id == profile.id &&
+              row.profile.incarnationId == profile.incarnationId &&
+              row.profile.baseUri == profile.baseUri &&
+              row.profile.credentialKey == profile.credentialKey,
+        )
+        .firstOrNull;
     final iconStyle = IconButton.styleFrom(
       foregroundColor: tokens.textSecondary,
       hoverColor: tokens.surfaceHover,
@@ -278,7 +289,7 @@ class _ProfileRow extends StatelessWidget {
                       fontWeight: isActive ? FontWeight.w700 : null,
                     ),
                   ),
-                  const SizedBox(height: 2),
+                  const SizedBox(height: 4),
                   Text(
                     profile.displayAddress,
                     maxLines: 1,
@@ -286,6 +297,11 @@ class _ProfileRow extends StatelessWidget {
                     style: theme.textTheme.bodySmall?.copyWith(
                       color: tokens.textTertiary,
                     ),
+                  ),
+                  Text(
+                    observation?.inventory?.broker.running.version ??
+                        l10n.updatesUnknown,
+                    style: theme.textTheme.bodySmall,
                   ),
                 ],
               ),
@@ -315,6 +331,15 @@ class _ProfileRow extends StatelessWidget {
               onPressed: onActivate,
               child: Text(l10n.brokerProfileUse),
             ),
+          IconButton(
+            key: Key('broker-profile-updates-$id'),
+            style: iconStyle,
+            icon: const Icon(Icons.system_update_alt, size: 18),
+            onPressed: () => context.push(
+              '$updatesRoute?server=${Uri.encodeQueryComponent(profile.id)}',
+            ),
+            tooltip: l10n.updatesTitle,
+          ),
           IconButton(
             key: Key('broker-profile-edit-$id'),
             style: iconStyle,

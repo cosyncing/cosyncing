@@ -91,6 +91,10 @@ import {
   type UpgradeServiceController,
 } from '../../src/updates/release-upgrade.ts';
 import { renderPostUpgradeChecks } from '../../src/updates/post-upgrade-check.ts';
+import { preparedUpgradeInput, stageUpgradeArtifacts } from '../../src/updates/prepared-upgrade.ts';
+import { verifyUpgradeCandidate } from '../../src/updates/release-upgrade.ts';
+import { UpdateOperationStore } from '../../src/updates/update-operation-store.ts';
+import { openUpdateGrantStore } from '../../src/security/update-grants.ts';
 import {
   atomicWriteOwnerOnly,
   ensureOwnerOnlyDirectory,
@@ -3372,6 +3376,57 @@ try {
       writeInstallState(install.state, fixture.m.home);
       return { path, before, plist };
     };
+    // The independent runner uses the already authenticated broker AND web
+    // bytes. A revoked grant after staging must stop before service disruption.
+    for (const revokeDuringStaging of [false, true]) {
+      const fixture = upgradeMachine();
+      const options = jsUpgradeOptions(fixture);
+      const manifest = jsManifest();
+      const install = inspectInstallState(fixture.m.home);
+      if (!install.committed) throw new Error('missing fixture install');
+      install.state.installationId = 'fixture-prepared-install';
+      writeInstallState(install.state, fixture.m.home);
+      const generation = Math.max(1, Math.floor(Date.parse(install.state.setup.committedAt) / 1000) || 1);
+      const principal = { kind: 'peer' as const, id: 'fixture-phone' };
+      const grants = openUpdateGrantStore({ home: fixture.m.home, installationId: install.state.installationId });
+      grants.grant({ peerId: principal.id, grantedBy: 'owner' });
+      const store = new UpdateOperationStore(join(fixture.m.home, 'updates'));
+      const plan: import('@cosyncing/protocol').UpdatePlan = {
+        schemaVersion: 1, planId: 'plan-prepared', releaseId: 'rel-2.0.0+2222222',
+        installationId: install.state.installationId, installationGeneration: generation,
+        expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+        components: [{ component: 'broker', from: { version: BUILD.version }, to: { version: '2.0.0' }, order: 0, impacts: [] }],
+        order: ['broker'], requiredAcknowledgements: [], outstandingAcknowledgements: [], blockers: [],
+        excluded: [], compatibility: null, updateManagementVersion: 1,
+      };
+      store.putPlan(plan, principal);
+      const submission = store.submitJob({ planId: plan.planId, principal, idempotencyKey: 'prepared',
+        installationId: plan.installationId, installationGeneration: generation });
+      if (submission.status !== 'created') throw new Error('fixture submission failed');
+      const job = submission.job;
+      store.transition(job.jobId, principal, 'preparing', 'preparing');
+      await stageUpgradeArtifacts({ stagingRoot: join(fixture.m.home, 'updates', 'staging'), jobId: job.jobId,
+        candidate: verifyUpgradeCandidate({ value: manifest, buildInfo: jsBuild, trustedKeys: options.trustedKeys }),
+        download: async (url) => new Uint8Array(await (await options.fetch(url)).arrayBuffer()) });
+      store.transition(job.jobId, principal, 'ready', 'prepared');
+      store.acceptApply(job.jobId, principal);
+      store.transition(job.jobId, principal, 'applying', 'independent-runner');
+      const prepared = preparedUpgradeInput(fixture.m.home, job.jobId);
+      let stops = 0;
+      const stop = fixture.service.stop;
+      fixture.service.stop = async () => { stops++; await stop(); };
+      const upgraded = await runUpgrade({ ...options, ...prepared, components: ['broker'],
+        runBinary: async (...args) => {
+          const response = await options.runBinary(args[0], args[1]);
+          if (revokeDuringStaging) grants.revoke(principal.id);
+          return response;
+        } });
+      check(`prepared broker and web bytes ${revokeDuringStaging ? 'refuse a revoked grant before stopping' : 'install without another channel fetch'}`,
+        revokeDuringStaging
+          ? upgraded.status === 'blocked' && upgraded.detailCode === 'update-grant-revoked'
+            && stops === 0 && readFileSync(fixture.m.binary, 'utf8') === 'old-binary-v1'
+          : upgraded.status === 'complete' && stops === 1 && readFileSync(fixture.m.binary).equals(jsBundle), upgraded.detailCode);
+    }
     for (const reported of ['2.0.0', '1.0.0', undefined]) {
       const fixture = upgradeMachine();
       const server = Bun.serve({ hostname: '127.0.0.1', port: 0,

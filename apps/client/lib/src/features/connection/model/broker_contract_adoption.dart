@@ -51,54 +51,18 @@ const Map<String, BrokerContractAdoption> brokerRouteAdoption = {
     'The client exposes targeted runtime restart and confirmed restart-all.',
   ),
   '/api/broker/restart-all': _adopted,
-  // The in-app update surface. The broker serves it now; this client has no
-  // Updates screen or coordinator yet, so each entry is recorded as deferred
-  // rather than absent, which lets the contract test tell not-wired from
-  // forgotten.
-  '/api/broker/update-grants': BrokerContractAdoption(
-    BrokerContractAdoptionDisposition.deferred,
-    'Owner-side administration, shown with the Updates screen.',
-  ),
-  '/api/broker/update-grants/request': BrokerContractAdoption(
-    BrokerContractAdoptionDisposition.deferred,
-    'A peer asks for authority from the Updates screen.',
-  ),
-  '/api/broker/update-grants/{id}': BrokerContractAdoption(
-    BrokerContractAdoptionDisposition.deferred,
-    'Revocation is owner-side administration.',
-  ),
-  '/api/broker/updates': BrokerContractAdoption(
-    BrokerContractAdoptionDisposition.deferred,
-    'Inventory feeds the Updates screen.',
-  ),
-  '/api/broker/updates/check': BrokerContractAdoption(
-    BrokerContractAdoptionDisposition.deferred,
-    'Channel discovery for the Updates screen.',
-  ),
-  '/api/broker/updates/history': BrokerContractAdoption(
-    BrokerContractAdoptionDisposition.deferred,
-    'History is shown once the coordinator exists.',
-  ),
-  '/api/broker/updates/jobs': BrokerContractAdoption(
-    BrokerContractAdoptionDisposition.deferred,
-    'The durable coordinator submits these.',
-  ),
-  '/api/broker/updates/jobs/{id}': BrokerContractAdoption(
-    BrokerContractAdoptionDisposition.deferred,
-    'Job reads drive the progress view.',
-  ),
-  '/api/broker/updates/jobs/{id}/apply': BrokerContractAdoption(
-    BrokerContractAdoptionDisposition.deferred,
-    'Apply needs the consent UI that has not shipped.',
-  ),
-  '/api/broker/updates/jobs/{id}/cancel': BrokerContractAdoption(
-    BrokerContractAdoptionDisposition.deferred,
-    'Cancel stops work before commit.',
-  ),
-  '/api/broker/updates/plans': BrokerContractAdoption(
-    BrokerContractAdoptionDisposition.deferred,
-    'Plans are reviewed on the Updates screen.',
-  ),
+  // Typed management APIs are consumed by Settings → Updates.
+  '/api/broker/update-grants': _adopted,
+  '/api/broker/update-grants/request': _adopted,
+  '/api/broker/update-grants/{id}': _adopted,
+  '/api/broker/updates': _adopted,
+  '/api/broker/updates/check': _adopted,
+  '/api/broker/updates/history': _adopted,
+  '/api/broker/updates/jobs': _adopted,
+  '/api/broker/updates/jobs/{id}': _adopted,
+  '/api/broker/updates/jobs/{id}/apply': _adopted,
+  '/api/broker/updates/jobs/{id}/cancel': _adopted,
+  '/api/broker/updates/plans': _adopted,
   '/api/health': _adopted,
   '/api/machines': _adopted,
   '/api/machines/resolve': _adopted,

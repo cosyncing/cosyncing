@@ -130,9 +130,11 @@ export class Broker {
   }
 
   async start(): Promise<void> {
+    let spawnedPort = 0;
     const { child, port } = await startHealthyFixtureBroker<Bun.Subprocess>({
       reservePort: this.#port ? async () => this.#port : undefined,
       spawn: (port) => {
+        spawnedPort = port;
         const spawned = Bun.spawn(['bun', 'run', BROKER_ENTRY], {
           cwd: REPO_ROOT,
           // A pipe this process never writes: when it dies, however it dies, the broker reads end of
@@ -151,7 +153,15 @@ export class Broker {
         stale.kill('SIGKILL');
         await stale.exited.catch(() => undefined);
       },
-      healthOptions: { timeoutMs: scaled(90_000) },
+      healthOptions: {
+        timeoutMs: scaled(90_000),
+        // A port lease is released before the child can bind. A different
+        // fixture can win that race and answer public health with HTTP 200.
+        // Only this child's post-bind banner proves which listener is ready.
+        childReady: () => this.#capture?.read().includes(
+          `broker on http://127.0.0.1:${spawnedPort} `,
+        ) ?? false,
+      },
     });
     this.#child = child;
     this.#port = port;

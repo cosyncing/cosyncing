@@ -46,6 +46,9 @@ const String usageReportRoute = '$settingsRoute/usage';
 /// General settings category: shortcuts, scheduled sends, transfers.
 const String generalSettingsRoute = '$settingsRoute/general';
 
+/// App and saved-server updates, available without an active connection.
+const String updatesRoute = '$settingsRoute/updates';
+
 /// Appearance settings.
 const String appearanceSettingsRoute = '$settingsRoute/appearance';
 

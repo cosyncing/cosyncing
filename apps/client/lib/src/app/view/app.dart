@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:broker_contract/broker_contract.dart'
+    show cosyncingClientVersion;
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/app/router/router.dart';
@@ -30,12 +32,14 @@ import 'package:cosyncing_client/src/features/sessions/list/session_list_state.d
 import 'package:cosyncing_client/src/features/settings/controller/locale_controller.dart';
 import 'package:cosyncing_client/src/features/settings/controller/theme_controller.dart';
 import 'package:cosyncing_client/src/features/settings/controller/ui_scale_controller.dart';
+import 'package:cosyncing_client/src/local/app_database.dart';
 import 'package:cosyncing_client/src/platform/android/android_background_connection.dart';
 import 'package:cosyncing_client/src/platform/desktop/desktop_keep_running.dart';
 import 'package:cosyncing_client/src/platform/startup/browser_close_protection.dart';
 import 'package:cosyncing_client/src/platform/startup/startup_shell.dart';
 import 'package:cosyncing_client/src/platform/update/android_client_update.dart';
 import 'package:cosyncing_client/src/platform/update/desktop_client_update_provider.dart';
+import 'package:cosyncing_client/src/platform/update/local_desktop_updater_provider.dart';
 import 'package:cosyncing_client/src/platform/update/web_client_update_provider.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_bridge.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_freeze.dart';
@@ -99,7 +103,23 @@ class _AppState extends ConsumerState<App> {
       if (_announcedFirstFrame) return;
       _announcedFirstFrame = true;
       notifyStartupShellFirstFrame();
+      unawaited(_acknowledgeDesktopUpdate());
     });
+  }
+
+  Future<void> _acknowledgeDesktopUpdate() async {
+    try {
+      // App startup health is storage plus the rendered shell, independent of
+      // whether any saved broker is online.
+      await ref.read(appDatabaseProvider).customSelect('SELECT 1').get();
+      if (!mounted) return;
+      await ref
+          .read(localDesktopUpdaterProvider)
+          .acknowledgeStartup(cosyncingClientVersion);
+    } on Object {
+      // The independent runner records an unconfirmed startup; never claim it
+      // succeeded, and never turn a recovery launch into a startup dependency.
+    }
   }
 
   @override
@@ -193,6 +213,7 @@ class _AppState extends ConsumerState<App> {
           // app-level Overlay so selectable global notices and foreground
           // notifications have the lookup ancestor they require.
           child: _AppRootOverlay(
+            router: _router,
             onOpenAttention: () => _router.go(attentionRoute),
             onOpenAttentionEntry: _openForegroundAttention,
             child: child,
@@ -321,6 +342,7 @@ class _AppState extends ConsumerState<App> {
 
 class _AppRootOverlay extends StatefulWidget {
   const _AppRootOverlay({
+    required this.router,
     required this.onOpenAttention,
     required this.onOpenAttentionEntry,
     required this.child,
@@ -329,6 +351,7 @@ class _AppRootOverlay extends StatefulWidget {
   final VoidCallback onOpenAttention;
   final ValueChanged<AttentionInboxEntry?> onOpenAttentionEntry;
   final Widget? child;
+  final GoRouter router;
 
   @override
   State<_AppRootOverlay> createState() => _AppRootOverlayState();
@@ -359,7 +382,10 @@ class _AppRootOverlayState extends State<_AppRootOverlay> {
                     onOpen: widget.onOpenAttention,
                     onOpenEntry: widget.onOpenAttentionEntry,
                     child: InstallerPairingStartupBarrier(
-                      child: BrokerAuthBarrier(child: widget.child),
+                      child: BrokerAuthBarrier(
+                        router: widget.router,
+                        child: widget.child,
+                      ),
                     ),
                   ),
                   // A failed update handoff remains a transient overlay.

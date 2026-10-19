@@ -1,3 +1,6 @@
+import 'package:broker_contract/src/models/generated_contract_identity.dart'
+    show cosyncingBrokerContractOverlapRevisions;
+
 export 'package:broker_contract/src/models/generated_contract_identity.dart';
 
 /// Client semantic version advertised on broker WebSocket connections.
@@ -5,6 +8,31 @@ const String cosyncingClientVersion = String.fromEnvironment(
   'COSYNCING_CLIENT_VERSION',
   defaultValue: '0.0.0-dev',
 );
+
+/// The same two minimums, equal-surface rule and one-revision overlap used by
+/// `evaluateBrokerClientCompatibility` in the TypeScript protocol package.
+bool updatePairIsUsable(
+  ClientContractIdentity client,
+  BrokerContractIdentity broker,
+) {
+  if ([
+        client.revision,
+        client.minimumBrokerRevision,
+        broker.revision,
+        broker.minimumClientRevision,
+      ].any((value) => value < 0) ||
+      client.minimumBrokerRevision > client.revision ||
+      broker.minimumClientRevision > broker.revision ||
+      client.revision < broker.minimumClientRevision ||
+      broker.revision < client.minimumBrokerRevision ||
+      (client.revision - broker.revision).abs() >
+          cosyncingBrokerContractOverlapRevisions) {
+    return false;
+  }
+  return client.revision != broker.revision ||
+      client.surfaceHash == null ||
+      client.surfaceHash == broker.surfaceHash;
+}
 
 /// Broker-owned contract identity advertised on health, pairing, and streams.
 class BrokerContractIdentity {
