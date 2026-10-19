@@ -11,6 +11,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+## 0.7.2 — 2026-10-19
+
 ### Added
 
 - Settings → Updates checks this app and saved servers without changing the
