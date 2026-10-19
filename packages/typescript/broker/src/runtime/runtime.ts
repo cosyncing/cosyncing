@@ -1448,7 +1448,10 @@ const rosterWindowExpiresAt = new Map<number, number>();
 // user has tried. Tiny cursor floors survive eviction so old feeds reset safely.
 const rosterWindowCursorFloors = new Map<number, number>();
 const rosterWindowUsers = new Map<number, number>();
-const MAX_DORMANT_ROSTER_WINDOWS = 16;
+// A small source-fixture limit exercises eviction without repeated expensive
+// native discovery on Windows. Packaged brokers always retain the normal 16.
+const MAX_DORMANT_ROSTER_WINDOWS = BUILD_INFO.packaged ? 16
+  : Math.max(1, Math.min(16, Math.floor(envNumber('COSYNCING_TEST_ROSTER_WINDOW_LIMIT', 16))));
 
 function retainRosterWindow(windowMs: number | undefined): () => void {
   if (windowMs === undefined) return () => {};

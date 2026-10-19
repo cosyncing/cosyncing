@@ -54,9 +54,21 @@ export class SessionVisibilityStore {
       // An attach's sparse identity must not erase previously discovered ancestry.
       const parent = info.origin === 'subagent' && info.parentThreadId
         ? key(info.tool, info.parentThreadId) : previous?.parent;
-      const link = { native: info.nativeId ? native : previous?.native ?? native, ...(parent ? { parent } : {}) };
+      // Resolve already-known aliases before accepting a native identity: an
+      // old watcher frame must not reverse a completed identity refinement.
+      const resolved = next.get(native)?.native ?? native;
+      const link = { native: info.nativeId ? resolved : previous?.native ?? resolved, ...(parent ? { parent } : {}) };
       if (previous?.native !== link.native || previous?.parent !== link.parent) {
         if (!linksChanged) next = new Map(this.links);
+        if (previous && previous.native !== link.native) {
+          // The exact adapter handle ties the former identity to its refined
+          // one (for example Claude session UUID -> bridge lineage). Repoint
+          // all handles, including the former native key, before moving the
+          // authored preference and revision below. Keep child ancestry links.
+          for (const [alias, value] of next) {
+            if (value.native === previous.native) next.set(alias, { ...value, native: link.native });
+          }
+        }
         next.set(id, link);
         next.set(link.native, link);
         linksChanged = true;

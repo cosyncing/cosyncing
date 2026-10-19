@@ -180,6 +180,8 @@ describe('the session roster', () => {
         COSYNCING_ROSTER_COLD_PARTIAL_MS: '120000',
         // The smallest journal the broker allows, so a client can fall behind it.
         COSYNCING_ROSTER_DELTA_JOURNAL: '32',
+        // Exercise real window eviction with small fixtures on every platform.
+        COSYNCING_TEST_ROSTER_WINDOW_LIMIT: '3',
       }),
     });
     client = broker.client();
@@ -635,7 +637,14 @@ describe('the session roster', () => {
     expect(ids(again.body.sessions)).not.toContain(pi.days20!.id);
     // Trying many ranges evicts dormant snapshots; a prior cursor must reset,
     // never silently match a different journal that happens to reuse its number.
-    for (let days = 101; days <= 118; days++) await rosterSnapshot(client, { window: `${days}d` });
+    const retained = await client.get(`/api/session-roster-deltas?window=2d&after=${two.body.revision}`);
+    expect(retained.status).toBe(200);
+    expect(retained.body.resetRequired).not.toBe(true);
+    for (let days = 101; days <= 104; days++) {
+      const pressure = await rosterSnapshot(client, { window: `${days}d` });
+      expect(pressure.status).toBe(200);
+      expect(pressure.body.complete).toBe(true);
+    }
     const resumed = await client.get(`/api/session-roster-deltas?window=2d&after=${two.body.revision}`);
     expect(resumed.body.resetRequired).toBe(true);
     expect(ids((await rosterSnapshot(client, { window: '2d' })).body.sessions)).not.toContain(pi.days20!.id);

@@ -357,6 +357,31 @@ test('late native identity carries hidden descendants, and cyclic publication ne
     store.set(parent, true);
     store.observe([grandchild, child, nativeParent]);
     expect(store.apply(grandchild)).toMatchObject({ appHidden: true, appHiddenByAncestor: true, status: grandchild.status });
+    // Claude first identifies a transcript by session UUID, then by bridge
+    // lineage. A delayed snapshot of the former identity must not undo Hide.
+    const claude = { ...codexInfo('claude-path'), tool: 'claude', nativeId: 'claude-session:uuid' };
+    const bridged = { ...claude, nativeId: 'claude-bridge:lineage' };
+    const oldHandle = { ...claude, id: 'claude-old-path' };
+    const claudeChild = { ...codexInfo('claude-child'), tool: 'claude', origin: 'subagent' as const, parentThreadId: claude.nativeId };
+    store.observe([oldHandle, claudeChild]);
+    store.set(claude, true);
+    const hiddenRevision = store.apply(claude).appVisibilityRevision;
+    store.observe([bridged]);
+    expect(store.apply(bridged)).toMatchObject({ appHidden: true, appVisibilityRevision: hiddenRevision });
+    store.observe([oldHandle, claude]);
+    const replacement = { ...bridged, id: 'claude-new-path' };
+    store.observe([replacement]);
+    for (const row of [claude, bridged, oldHandle, replacement, claudeChild]) {
+      expect(store.apply(row)).toMatchObject({ appHidden: true, appVisibilityRevision: hiddenRevision });
+    }
+    const restored = new SessionVisibilityStore(root);
+    restored.observe([oldHandle, claude]);
+    expect(restored.apply(bridged)).toMatchObject({ appHidden: true, appVisibilityRevision: hiddenRevision });
+    restored.set(oldHandle, false);
+    for (const row of [claude, bridged, oldHandle, replacement, claudeChild]) {
+      expect(restored.apply(row).appHidden).toBe(false);
+      expect(restored.apply(row).appVisibilityRevision).toBeGreaterThan(hiddenRevision!);
+    }
     store.set(nativeParent, false);
     expect(store.apply(grandchild).appHidden).toBe(false);
     store.set(child, true);
