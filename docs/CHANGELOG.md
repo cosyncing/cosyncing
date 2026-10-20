@@ -30,6 +30,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Session hidden and unhidden notices dismiss automatically and include a close
+  button. Undo stays available until dismissed when a screen reader is active.
 - Android QR pairing preserves ML Kit initialization classes in optimized
   release builds, fixing a scanner error after camera permission is granted.
 - Approval cards show the outcome without naming the client that resolved them.

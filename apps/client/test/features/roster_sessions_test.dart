@@ -101,8 +101,8 @@ void main() {
   });
 
   featureTest(
-    'hiding retains its open tab, supports Undo and Unhide, '
-    'and custom days reach the broker',
+    'hiding retains its open tab, notices expire or close with accessible '
+    'Undo, and custom days reach the broker',
     (f) async {
       final studio = f.network.add('http://studio.test:7734')
         ..addSession(
@@ -133,6 +133,9 @@ void main() {
       await app.settle();
       await app.tap(find.text(en.sessionHide));
       await app.waitForAbsent(app.row('hide-me'));
+      await app.waitFor(find.text(en.sessionHidden));
+      await app.waitForAbsent(find.byType(SnackBar));
+      expect(app.tab('hide-me'), findsOneWidget);
       await app.tapKey('session-roster-filter-button');
       await app.tapKey('session-roster-show-hidden');
       await app.waitFor(app.row('hide-me'));
@@ -171,9 +174,26 @@ void main() {
         false,
       );
       expect(app.tab('hide-me'), findsOneWidget);
+      await app.waitFor(find.text(en.sessionUnhidden));
+      await app.waitForAbsent(find.byType(SnackBar));
       await app.openStatus();
       await app.tapKey('session-detail-hide-button');
       expect(app.tab('hide-me'), findsOneWidget);
+      expect(
+        studio.sessions.firstWhere((s) => s['id'] == 'hide-me')['appHidden'],
+        true,
+      );
+      await app.waitFor(find.text(en.sessionHidden));
+      final closeNotice = find.descendant(
+        of: find.byType(SnackBar),
+        matching: find.byTooltip(
+          MaterialLocalizations.of(
+            app.tester.element(find.byType(SnackBar)),
+          ).closeButtonTooltip,
+        ),
+      );
+      await app.tap(closeNotice);
+      await app.waitForAbsent(find.byType(SnackBar));
       expect(
         studio.sessions.firstWhere((s) => s['id'] == 'hide-me')['appHidden'],
         true,
@@ -183,6 +203,26 @@ void main() {
         studio.sessions.firstWhere((s) => s['id'] == 'hide-me')['appHidden'],
         false,
       );
+      await app.waitFor(find.text(en.sessionUnhidden));
+      await app.waitForAbsent(find.byType(SnackBar));
+
+      app.tester.platformDispatcher.accessibilityFeaturesTestValue =
+          const FakeAccessibilityFeatures(accessibleNavigation: true);
+      addTearDown(
+        app.tester.platformDispatcher.clearAccessibilityFeaturesTestValue,
+      );
+      await app.settle();
+      await app.tapKey('session-detail-hide-button');
+      await app.waitFor(find.text(en.sessionHidden));
+      await app.elapse(const Duration(seconds: 8));
+      expect(find.text(en.sessionHidden), findsOneWidget);
+      await app.tap(find.text(en.sessionVisibilityUndo));
+      expect(
+        studio.sessions.firstWhere((s) => s['id'] == 'hide-me')['appHidden'],
+        false,
+      );
+      await app.waitFor(find.text(en.sessionUnhidden));
+      await app.waitForAbsent(find.byType(SnackBar));
     },
   );
 
