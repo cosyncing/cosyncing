@@ -1,36 +1,21 @@
-import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
-import 'package:cosyncing_client/l10n/app_localizations.dart';
+import 'package:cosyncing_client/src/design/app_tokens.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/file_viewer_pane.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_file_service.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_preview_html_policy.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_preview_result.dart';
-import 'package:desktop_webview_window/desktop_webview_window.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/session_file_browser.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as path;
-import 'package:webview_flutter/webview_flutter.dart';
 
 /// Default stale preview retention window.
 const Duration sessionArtifactPreviewTempRetention = Duration(hours: 24);
 
 const String _sessionArtifactPreviewTempRootMarker = 'artifact_previews';
 const String _sessionArtifactPreviewScopePrefix = 'artifact_preview';
-
-/// Minimal desktop webview abstraction for request-callback and launch wiring.
-///
-/// A tiny abstraction is used so we can unit-test callback wiring and launch
-/// ordering without constructing real desktop webview windows in tests.
-abstract interface class SessionArtifactPreviewDesktopWebview {
-  /// Installs or clears the desktop URL request callback.
-  void setOnUrlRequestCallback(OnUrlRequestCallback? callback);
-
-  /// Launches [url] in the desktop webview.
-  void launch(
-    String url, {
-    bool triggerOnUrlRequestEvent = true,
-  });
-}
 
 /// Whether this target can present an HTML artifact preview.
 bool get isSessionArtifactPreviewAvailable => true;
@@ -42,35 +27,50 @@ Future<SessionArtifactPreviewPresentationResult> showSessionArtifactPreview(
   SessionArtifactUriLauncher? uriLauncher,
 }) async {
   final launcher = uriLauncher ?? const SessionArtifactPlatformUriLauncher();
-  final localizations = AppLocalizations.of(context);
-  final previewPath = await prepareSessionArtifactPreviewFilePath(
-    artifact: artifact,
-  );
-
-  if (Platform.isLinux || Platform.isWindows) {
-    return _openDesktopPreviewWindow(
-      artifact,
-      previewPath: previewPath,
-      launcher: launcher,
-      localizations: localizations,
-    );
-  }
-
-  if (Platform.isAndroid || Platform.isIOS || Platform.isMacOS) {
-    if (!context.mounted) {
-      return const SessionArtifactPreviewPresentationResult.unsupported();
+  try {
+    if (Platform.isLinux || Platform.isWindows) {
+      final previewPath = await prepareSessionArtifactPreviewFilePath(
+        artifact: artifact,
+      );
+      final uri = Uri.file(previewPath);
+      return openDesktopPreviewFallbackInBrowser(
+        launchCandidateUri: uri,
+        allowedLocalFileUri: uri,
+        uriLauncher: launcher,
+      );
     }
-    final result = await Navigator.of(context)
-        .push<SessionArtifactPreviewPresentationResult>(
-          MaterialPageRoute<SessionArtifactPreviewPresentationResult>(
-            builder: (_) => _SessionArtifactWebViewPage(
-              artifact: artifact,
-              previewFilePath: previewPath,
-              uriLauncher: launcher,
+    if (Platform.isAndroid || Platform.isIOS || Platform.isMacOS) {
+      final text = await _readCompleteHtml(File(artifact.cachedFilePath));
+      if (!context.mounted) {
+        return const SessionArtifactPreviewPresentationResult.unsupported();
+      }
+      await Navigator.of(context).push<void>(
+        MaterialPageRoute<void>(
+          builder: (context) => Scaffold(
+            appBar: AppBar(title: Text(artifact.fileName)),
+            body: FileViewerPane(
+              content: FileViewerSource(
+                preview: SessionFilePreview(
+                  path: artifact.fileName,
+                  displayName: artifact.fileName,
+                  mimeType: artifact.contentType,
+                  text: text,
+                  size: utf8.encode(text).length,
+                  limit: _cachedHtmlPreviewByteLimit,
+                  truncated: false,
+                ),
+              ),
+              sessionLabel: '',
+              toolColor: context.tokens.accent,
             ),
           ),
-        );
-    return result ?? const SessionArtifactPreviewPresentationResult.opened();
+        ),
+      );
+      return const SessionArtifactPreviewPresentationResult.opened();
+    }
+  } on Object {
+    // Never hand the original, unsandboxed file to a browser on prep failure.
+    return const SessionArtifactPreviewPresentationResult.unsupported();
   }
 
   return const SessionArtifactPreviewPresentationResult.unsupported();
@@ -94,8 +94,8 @@ openArtifactPreviewUriInBrowser(
         );
 }
 
-/// Opens the fallback URI in a desktop browser after applying the same preview
-/// navigation policy used for in-window desktop preview launch paths.
+/// Opens the prepared copy in a desktop browser after validating the launch
+/// against that exact local file.
 ///
 /// The caller must provide both the candidate URI and prepared local URI.
 ///
@@ -146,127 +146,23 @@ SessionArtifactPreviewNavigationDecision evaluateDesktopPreviewLaunchCandidate(
   );
 }
 
-/// Returns the callback decision for a desktop preview navigation request URL.
-bool evaluateDesktopPreviewRequestUrl(
-  String requestUrl, {
-  required Uri allowedLocalFileUri,
-  bool allowSameDirectoryLocalAssets = false,
-}) {
-  return evaluateDesktopPreviewLaunchCandidate(
-    requestUrl,
-    allowedLocalFileUri: allowedLocalFileUri,
-    allowSameDirectoryLocalAssets: allowSameDirectoryLocalAssets,
-  ).isAllowed;
-}
+const int _cachedHtmlPreviewByteLimit = 2 * 1024 * 1024;
 
-/// Launches a desktop preview using a preinstalled URL-request guard.
-///
-/// Exported mainly for test seams that can confirm callback installation
-/// happens before launch.
-/// Governing doc: docs/architecture/client-ui.md
-void launchDesktopArtifactPreview(
-  SessionArtifactPreviewDesktopWebview webview, {
-  required Uri allowedLocalFileUri,
-  bool allowSameDirectoryLocalAssets = false,
-}) {
-  installSessionArtifactPreviewUrlRequestGuard(
-    webview: webview,
-    allowedLocalFileUri: allowedLocalFileUri,
-    allowSameDirectoryLocalAssets: allowSameDirectoryLocalAssets,
-  );
-  webview.launch(allowedLocalFileUri.toString());
-}
-
-/// Installs the desktop URL request guard for preview navigation.
-///
-/// This guard applies the same policy evaluation used for launch candidate
-/// checks so preflight and in-window navigation checks stay aligned.
-void installSessionArtifactPreviewUrlRequestGuard({
-  required SessionArtifactPreviewDesktopWebview webview,
-  required Uri allowedLocalFileUri,
-  bool allowSameDirectoryLocalAssets = false,
-}) {
-  webview.setOnUrlRequestCallback(
-    (url) => evaluateDesktopPreviewRequestUrl(
-      url,
-      allowedLocalFileUri: allowedLocalFileUri,
-      allowSameDirectoryLocalAssets: allowSameDirectoryLocalAssets,
-    ),
-  );
-}
-
-Future<SessionArtifactPreviewPresentationResult> _openDesktopPreviewWindow(
-  SessionArtifactCachedFile artifact, {
-  required String previewPath,
-  required SessionArtifactUriLauncher launcher,
-  required AppLocalizations localizations,
-}) async {
-  final allowedLocalFileUri = Uri.file(previewPath);
-  final launchDecision = evaluateDesktopPreviewLaunchCandidate(
-    allowedLocalFileUri.toString(),
-    allowedLocalFileUri: allowedLocalFileUri,
-  );
-  if (!launchDecision.isAllowed) {
-    return launchDecision.result ??
-        SessionArtifactPreviewPresentationResult.blockedNavigation(
-          allowedLocalFileUri,
-          reason: 'candidate launch target failed policy evaluation',
-          blockReason:
-              SessionArtifactPreviewNavigationBlockReason.localFileDisallowed,
-        );
+Future<String> _readCompleteHtml(File file) async {
+  final bytes = BytesBuilder(copy: false);
+  await for (final chunk in file.openRead(0, _cachedHtmlPreviewByteLimit + 1)) {
+    bytes.add(chunk);
+    if (bytes.length > _cachedHtmlPreviewByteLimit) {
+      throw StateError('HTML preview exceeds the bounded read');
+    }
   }
-
-  final available = await WebviewWindow.isWebviewAvailable();
-  if (!available) {
-    return openDesktopPreviewFallbackInBrowser(
-      launchCandidateUri: allowedLocalFileUri,
-      allowedLocalFileUri: allowedLocalFileUri,
-      uriLauncher: launcher,
-    );
-  }
-
-  final webview = await WebviewWindow.create(
-    configuration: CreateConfiguration(
-      title: localizations.artifactPreviewWindowTitle(artifact.fileName),
-      windowWidth: 1100,
-      windowHeight: 760,
-    ),
-  );
-  launchDesktopArtifactPreview(
-    _DesktopWebviewAdapter(webview),
-    allowedLocalFileUri: allowedLocalFileUri,
-  );
-
-  return const SessionArtifactPreviewPresentationResult.opened();
-}
-
-class _DesktopWebviewAdapter implements SessionArtifactPreviewDesktopWebview {
-  const _DesktopWebviewAdapter(this._webview);
-
-  final Webview _webview;
-
-  @override
-  void setOnUrlRequestCallback(OnUrlRequestCallback? callback) {
-    _webview.setOnUrlRequestCallback(callback);
-  }
-
-  @override
-  void launch(
-    String url, {
-    bool triggerOnUrlRequestEvent = true,
-  }) {
-    _webview.launch(
-      url,
-      triggerOnUrlRequestEvent: triggerOnUrlRequestEvent,
-    );
-  }
+  return utf8.decode(bytes.takeBytes());
 }
 
 /// Builds a hardened local preview path for the supplied artifact.
 ///
 /// For HTML-like artifacts, this copies the cached file into a stable app temp
-/// directory and injects a restrictive Content-Security-Policy so preview loads
-/// in the app copy only.
+/// directory and wraps complete bounded bytes in an isolated interactive child.
 ///
 /// Non-HTML artifacts return their cached file path unchanged.
 Future<String> prepareSessionArtifactPreviewFilePath({
@@ -285,7 +181,7 @@ Future<String> prepareSessionArtifactPreviewFilePath({
 
   final sourceFile = File(artifact.cachedFilePath);
   if (!sourceFile.existsSync()) {
-    return artifact.cachedFilePath;
+    throw StateError('HTML preview source is unavailable');
   }
 
   final previewDirectory = sessionArtifactPreviewTempRootDirectory(
@@ -301,37 +197,24 @@ Future<String> prepareSessionArtifactPreviewFilePath({
     artifact: artifact,
     previewRootDirectory: previewDirectory,
   )..createSync(recursive: true);
-  late final String sourceHtml;
-  try {
-    final sourceContents = sourceFile.readAsBytesSync();
-    sourceHtml = utf8.decode(sourceContents, allowMalformed: true);
-  } on Object {
-    return artifact.cachedFilePath;
-  }
-  final hardenedHtml =
-      SessionArtifactPreviewHtmlPolicy.injectRestrictiveContentSecurityPolicy(
-        sourceHtml,
-      );
-  try {
-    final previewFile = File(
-      path.join(
-        scopedPreviewDirectory.path,
-        buildSessionArtifactPreviewFileName(artifact: artifact),
-      ),
-    );
-    await previewFile.writeAsString(
-      hardenedHtml,
-      flush: true,
-    );
-    return previewFile.path;
-  } on Object {
-    return artifact.cachedFilePath;
-  }
+  final sourceHtml = await _readCompleteHtml(sourceFile);
+  final previewFile = File(
+    path.join(
+      scopedPreviewDirectory.path,
+      buildSessionArtifactPreviewFileName(artifact: artifact),
+    ),
+  );
+  await previewFile.writeAsString(
+    prepareInteractiveHtmlDocument(sourceHtml),
+    flush: true,
+  );
+  return previewFile.path;
 }
 
 /// Returns the stable preview temp root directory for this platform/runtime.
 ///
-/// The directory is always under `systemTemp/cosyncing_client/artifact_previews`
+/// The directory is always under
+/// `systemTemp/cosyncing_client/artifact_previews`
 /// by default or under the same structure rooted by [rootDirectory] for tests.
 Directory sessionArtifactPreviewTempRootDirectory({
   Directory? rootDirectory,
@@ -540,227 +423,7 @@ String _previewArtifactCopySeed(SessionArtifactCachedFile artifact) {
   return parts.join('|');
 }
 
-String _previewArtifactExtension(SessionArtifactCachedFile artifact) {
-  final rawFileName = artifact.fileName
-      .split('?')
-      .first
-      .split('#')
-      .first
-      .trim();
-  final extension = path.extension(rawFileName).toLowerCase();
-  if (extension.isNotEmpty) {
-    return extension;
-  }
-
-  final contentType = artifact.contentType?.toLowerCase();
-  if (contentType != null) {
-    final mimeType = contentType.split(';').first.trim();
-    if (mimeType == 'text/html' || mimeType == 'application/xhtml+xml') {
-      return '.html';
-    }
-  }
-
-  return '.html';
-}
-
-class _SessionArtifactWebViewPage extends StatefulWidget {
-  const _SessionArtifactWebViewPage({
-    required this.artifact,
-    required this.previewFilePath,
-    required this.uriLauncher,
-  });
-
-  final SessionArtifactCachedFile artifact;
-  final String previewFilePath;
-  final SessionArtifactUriLauncher uriLauncher;
-
-  @override
-  State<_SessionArtifactWebViewPage> createState() =>
-      _SessionArtifactWebViewPageState();
-}
-
-class _SessionArtifactWebViewPageState
-    extends State<_SessionArtifactWebViewPage> {
-  late final WebViewController _controller;
-  late final Uri _cachedFileUri;
-  var _progress = 0;
-  Object? _loadError;
-  SessionArtifactPreviewPresentationResult? _blockedNavigationResult;
-  bool _isLaunchingBrowser = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _cachedFileUri = Uri.file(widget.previewFilePath);
-    _controller = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.disabled)
-      ..setNavigationDelegate(
-        NavigationDelegate(
-          onProgress: (progress) {
-            if (mounted) {
-              setState(() => _progress = progress);
-            }
-          },
-          onWebResourceError: (error) {
-            if (mounted) {
-              setState(() => _loadError = error.description);
-            }
-          },
-          onNavigationRequest: (request) {
-            final decision = _evaluateNavigationRequest(request.url);
-            if (!decision.isAllowed) {
-              if (mounted) {
-                setState(() => _blockedNavigationResult = decision.result);
-              }
-              return NavigationDecision.prevent;
-            }
-            return NavigationDecision.navigate;
-          },
-        ),
-      );
-    unawaited(_controller.loadFile(widget.previewFilePath));
-  }
-
-  SessionArtifactPreviewNavigationDecision _evaluateNavigationRequest(
-    String url,
-  ) {
-    return SessionArtifactPreviewNavigationPolicy.evaluate(
-      url: url,
-      allowedLocalFileUri: _cachedFileUri,
-    );
-  }
-
-  Future<void> _onOpenInBrowser() async {
-    final blockedNavigationResult = _blockedNavigationResult;
-    if (blockedNavigationResult == null || _isLaunchingBrowser) {
-      return;
-    }
-
-    setState(() => _isLaunchingBrowser = true);
-
-    final result = await openArtifactPreviewUriInBrowser(
-      _fallbackUri(blockedNavigationResult),
-      uriLauncher: widget.uriLauncher,
-    );
-
-    if (!mounted) {
-      return;
-    }
-
-    if (result.status ==
-        SessionArtifactPreviewPresentationStatus.externalOpenFallback) {
-      Navigator.of(context).pop(result);
-      return;
-    }
-
-    setState(() {
-      _blockedNavigationResult = result;
-      _isLaunchingBrowser = false;
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final l10n = AppLocalizations.of(context);
-    final loadError = _loadError;
-    final blockedNavigationResult = _blockedNavigationResult;
-
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(
-          widget.artifact.fileName,
-          overflow: TextOverflow.ellipsis,
-        ),
-      ),
-      body: Column(
-        children: [
-          if (_progress < 100) LinearProgressIndicator(value: _progress / 100),
-          if (loadError != null)
-            MaterialBanner(
-              content: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  SelectableText(l10n.artifactPreviewLoadFailed),
-                  ExpansionTile(
-                    tilePadding: EdgeInsets.zero,
-                    title: Text(l10n.technicalDetails),
-                    children: [SelectableText(loadError.toString())],
-                  ),
-                ],
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () {
-                    setState(() => _loadError = null);
-                    unawaited(
-                      _controller.loadFile(widget.previewFilePath),
-                    );
-                  },
-                  child: Text(l10n.retry),
-                ),
-              ],
-            ),
-          if (blockedNavigationResult != null)
-            MaterialBanner(
-              content: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  SelectableText(
-                    _artifactPreviewPresentationMessage(
-                      l10n,
-                      blockedNavigationResult,
-                    ),
-                  ),
-                  ExpansionTile(
-                    tilePadding: EdgeInsets.zero,
-                    title: Text(l10n.technicalDetails),
-                    children: [
-                      SelectableText(
-                        [
-                          blockedNavigationResult.message,
-                          if (blockedNavigationResult.technicalDetail
-                              case final detail?)
-                            detail,
-                        ].join('\n'),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () {
-                    setState(() => _blockedNavigationResult = null);
-                  },
-                  child: Text(l10n.dismiss),
-                ),
-                TextButton(
-                  onPressed: _isLaunchingBrowser ? null : _onOpenInBrowser,
-                  child: Text(
-                    _isLaunchingBrowser ? l10n.opening : l10n.openInBrowser,
-                  ),
-                ),
-              ],
-            ),
-          Expanded(child: WebViewWidget(controller: _controller)),
-        ],
-      ),
-    );
-  }
-
-  Uri _fallbackUri(SessionArtifactPreviewPresentationResult result) {
-    return result.uri ?? _cachedFileUri;
-  }
-}
-
-String _artifactPreviewPresentationMessage(
-  AppLocalizations l10n,
-  SessionArtifactPreviewPresentationResult result,
-) => switch (result.status) {
-  SessionArtifactPreviewPresentationStatus.externalOpenFailed =>
-    l10n.artifactPreviewBrowserFailed,
-  _ => l10n.artifactPreviewBlocked,
-};
+String _previewArtifactExtension(SessionArtifactCachedFile artifact) => '.html';
 
 /// Opens a URI with the platform's own handler.
 ///

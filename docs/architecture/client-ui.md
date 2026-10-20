@@ -68,6 +68,52 @@ stored per broker source and session; source/rendered scroll positions remain
 local to the running app. Supported documents default to Rendered; source-line
 links select Source. The wide split layout is unchanged.
 
+## Interactive HTML previews
+
+Complete self-contained HTML opens in Rendered by default; remembered Source
+choices and source-line links still win. Inline scripts, event handlers, canvas,
+embedded data assets and bundled libraries work without a new control or prompt.
+Truncated reads remain in Source with the existing truncation notice. CDN assets,
+network APIs, relative workspace resources, storage and dynamic evaluation are
+outside this contract.
+
+Each revision is prepared once into a trusted HTML envelope. Its CSP precedes
+all artifact bytes, which are attribute-escaped into a sandboxed `srcdoc` child.
+The child inherits policy before parsing, and its own CSP can only restrict it
+further. The containing document's `frame-src 'none'` blocks child navigation;
+the child's subresource policy alone would not do this. `allow-scripts` is the
+only sandbox grant: no same-origin access, forms, popups, downloads, app storage,
+broker credentials or privileged JavaScript channel. XHTML inputs use HTML
+parsing, including external wrappers saved with an `.html` suffix. The older
+restrictive policy remains separate and is not relaxed globally.
+
+One platform view per visible pane owns the wrapper. Transcript updates,
+resizing within the same layout, theme changes and focus changes retain the
+visible document; a content revision replaces it. TickerMode, route visibility,
+browser visibility and app background lifecycle destroy inactive documents.
+Selected-file hosts already dispose unselected files; retained session hosts
+supply TickerMode. Crossing compact/wide hosts can recreate the document. Closing,
+switching to Source, switching sessions/brokers or reopening resets unsaved HTML
+state; no arbitrary JavaScript persistence or hidden renderer pool is provided.
+Generation guards prevent late native setup or cleanup from changing a successor.
+
+Web removes its owned iframe subtree without removing Flutter's container.
+Android, iOS and macOS reuse `webview_flutter`, remove the sandbox child through
+the trusted outer document, disable scripts and blank the retiring controller.
+Native navigation delegates reject top-level navigation; subframe enforcement
+remains the wrapper policy (Android does not forward every subframe callback).
+Linux and Windows retain Source plus explicit browser opening; cached HTML
+handoffs use the same bounded, isolated wrapper and fail closed if preparation
+fails. External tabs
+belong to the browser and are outside the app's lifecycle control. Physical
+native measurements are required for native CPU, memory or battery claims.
+
+This policy restricts document/resource requests, not every browser networking
+API. Chromium 151 still permits WebRTC setup from an opaque sandbox and ignores
+the proposed CSP `webrtc` directive. Do not describe the preview as a universal
+network firewall; a strict no-network security guarantee remains unresolved on
+that engine. No permissive network source grants are added for compatibility.
+
 ## Session telemetry
 
 Token counts and context-usage metadata stream once per turn but are only ever

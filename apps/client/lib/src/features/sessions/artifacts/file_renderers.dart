@@ -63,8 +63,8 @@ enum FileRenderCapability {
   /// May ask the host to hand a URL to the platform browser.
   externalLink,
 
-  /// May render an embedded frame that runs no scripts.
-  passiveFrame,
+  /// May render a self-contained script document in an opaque-origin sandbox.
+  interactiveFrame,
 }
 
 /// Where a renderer came from.
@@ -123,7 +123,7 @@ final class FileRenderRequest {
   });
 
   /// Reports an unavailable rendered preview so the host can show source.
-  final VoidCallback? onRenderFailed;
+  final void Function({bool Function()? isCurrent})? onRenderFailed;
 
   /// Workspace-relative path.
   final String path;
@@ -230,12 +230,6 @@ final class FileSourceSurface {
 enum FileRenderNotice {
   /// Highlighting was declined, and the text is nonetheless complete.
   highlightingOff,
-
-  /// The rendered face is a frame that runs nothing.
-  ///
-  /// Shown on the rendered face only. The host decides that, not the renderer:
-  /// preparation runs per file, not per face.
-  passivePreview,
 
   /// This platform has no embeddable browser view, so there is only source.
   ///

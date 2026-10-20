@@ -1,83 +1,129 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:cosyncing_client/src/features/sessions/artifacts/html_document_lifetime.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
-/// Whether this platform can composite an HTML view inside the pane.
-///
-/// Android, iOS and macOS can: `WebViewWidget` is an ordinary widget, so only
-/// its host changes. Linux and Windows cannot, and this is not a "not yet":
-/// `desktop_webview_window`'s only entry point creates a separate top-level OS
-/// window, which by construction cannot be composited into a pane.
-bool get canRenderHtmlInPane =>
-    Platform.isAndroid || Platform.isIOS || Platform.isMacOS;
+/// Linux and Windows retain Source and the explicit external-browser handoff.
+bool get canRenderHtmlInPane => switch (debugDefaultTargetPlatformOverride ??
+    (Platform.isAndroid
+        ? TargetPlatform.android
+        : Platform.isIOS
+        ? TargetPlatform.iOS
+        : Platform.isMacOS
+        ? TargetPlatform.macOS
+        : TargetPlatform.linux)) {
+  TargetPlatform.android || TargetPlatform.iOS || TargetPlatform.macOS => true,
+  _ => false,
+};
 
-/// Shows [html] in a WebView with scripts disabled.
-Widget buildPassiveHtmlView({
+/// [html] is a trusted wrapper with an opaque-origin sandboxed child. No file
+/// URL, authenticated base URL or JavaScript channel is installed here.
+Widget buildInteractiveHtmlView({
   required String html,
-  VoidCallback? onError,
+  void Function({bool Function()? isCurrent})? onError,
   Key? key,
-}) => _PassiveHtmlView(key: key, html: html, onError: onError);
+}) => _HtmlView(key: key, html: html, onError: onError);
 
-class _PassiveHtmlView extends StatefulWidget {
-  const _PassiveHtmlView({required this.html, this.onError, super.key});
-
+class _HtmlView extends StatefulWidget {
+  const _HtmlView({required this.html, this.onError, super.key});
   final String html;
-  final VoidCallback? onError;
+  final void Function({bool Function()? isCurrent})? onError;
 
   @override
-  State<_PassiveHtmlView> createState() => _PassiveHtmlViewState();
+  State<_HtmlView> createState() => _HtmlViewState();
 }
 
-class _PassiveHtmlViewState extends State<_PassiveHtmlView> {
+class _HtmlViewState extends HtmlDocumentState<_HtmlView> {
   WebViewController? _controller;
+  WebViewController? _initializing;
 
   @override
-  void initState() {
-    super.initState();
-    unawaited(_initialize());
-  }
+  void startDocument(int generation) => unawaited(_initialize(generation));
 
-  Future<void> _initialize() async {
+  Future<void> _initialize(int generation) async {
+    WebViewController? controller;
     try {
-      final controller = WebViewController();
-      await controller.setJavaScriptMode(JavaScriptMode.disabled);
-      await controller.setBackgroundColor(const Color(0x00000000));
+      controller = WebViewController();
+      _initializing = controller;
       await controller.setNavigationDelegate(
         NavigationDelegate(
+          onNavigationRequest: (request) =>
+              isCurrentDocument(generation) &&
+                  (request.url == 'about:blank' ||
+                      request.url == 'about:srcdoc')
+              ? NavigationDecision.navigate
+              : NavigationDecision.prevent,
           onWebResourceError: (error) {
-            if (mounted && (error.isForMainFrame ?? true)) {
-              widget.onError?.call();
+            if (isCurrentDocument(generation) &&
+                (error.isForMainFrame ?? false)) {
+              widget.onError?.call(
+                isCurrent: () => isCurrentDocument(generation),
+              );
             }
           },
         ),
       );
+      if (!isCurrentDocument(generation)) return;
+      await controller.setJavaScriptMode(JavaScriptMode.unrestricted);
+      if (!isCurrentDocument(generation)) return;
       await controller.loadHtmlString(widget.html);
-      if (mounted) setState(() => _controller = controller);
+      if (!isCurrentDocument(generation)) return;
+      setState(() => _controller = controller);
     } on Object {
-      if (mounted) widget.onError?.call();
+      if (isCurrentDocument(generation)) {
+        widget.onError?.call(isCurrent: () => isCurrentDocument(generation));
+      }
+    } finally {
+      if (identical(_initializing, controller)) _initializing = null;
+      // A controller belongs to one generation only. Late setup/cleanup can
+      // never load into, blank, or publish a replacement controller.
+      if (controller != null && !identical(_controller, controller)) {
+        await _unload(controller);
+      }
     }
   }
 
-  Future<void> _reload() async {
+  Future<void> _unload(WebViewController controller) async {
     try {
-      await _controller?.loadHtmlString(widget.html);
+      // Executes only in our trusted outer document. Await removal of the
+      // sandbox child before dropping the controller, rather than relying on
+      // platform-widget detachment or stopLoading to stop artifact timers.
+      await controller.runJavaScript(
+        "document.querySelector('iframe')?.remove();",
+      );
     } on Object {
-      if (mounted) widget.onError?.call();
+      // Setup may not have reached a document yet. Blanking still follows.
+    }
+    try {
+      await controller.setJavaScriptMode(JavaScriptMode.disabled);
+      await controller.loadHtmlString('<!doctype html><title></title>');
+    } on Object {
+      // The platform may already have disposed its view.
     }
   }
 
   @override
-  void didUpdateWidget(covariant _PassiveHtmlView oldWidget) {
+  void stopDocument() {
+    final controller = _controller ?? _initializing;
+    _controller = null;
+    _initializing = null;
+    if (controller != null) unawaited(_unload(controller));
+  }
+
+  @override
+  void didUpdateWidget(covariant _HtmlView oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.html != widget.html) {
-      unawaited(_reload());
-    }
+    if (oldWidget.html != widget.html) replaceDocument();
   }
 
   @override
-  Widget build(BuildContext context) => _controller == null
+  Widget build(BuildContext context) => _controller == null || !documentActive
       ? const SizedBox.expand()
-      : WebViewWidget(controller: _controller!);
+      : WebViewWidget(
+          key: ValueKey(documentGeneration),
+          controller: _controller!,
+        );
 }
