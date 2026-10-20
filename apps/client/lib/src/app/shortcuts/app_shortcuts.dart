@@ -49,7 +49,7 @@ enum AppShortcutId {
   /// Activate the previous open session, wrapping past the start.
   previousSession,
 
-  /// Close the active session view (working set only).
+  /// Close selected tabs in the focused pane, or its active tab.
   closeSession,
 
   /// Open the new-session sheet.

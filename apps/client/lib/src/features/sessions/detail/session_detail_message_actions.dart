@@ -123,6 +123,23 @@ class _MessageRow extends StatelessWidget {
           resolvedAttribution: isResolved
               ? resolvedRequestAttributions[requestId]
               : null,
+          onRecover:
+              message.requestIsReadOnly &&
+                  !message.questionRequestAnswerInTerminal &&
+                  message.raw['blocking'] == false &&
+                  requestId.startsWith('codex:aq:') &&
+                  isConnected &&
+                  canMutate &&
+                  !isResolved &&
+                  !isWithdrawn
+              ? (answers) => controller.sendQuestionFollowUp(
+                  [
+                    for (final (index, question)
+                        in message.questionRequestQuestions.indexed)
+                      '> ${question.question}\n\n${answers[index].join(', ')}',
+                  ].join('\n\n'),
+                )
+              : null,
           onSubmit: (answers) => controller.sendQuestionAnswer(
             requestId: requestId,
             answers: answers,
@@ -1228,6 +1245,7 @@ class _QuestionRequestActions extends StatefulWidget {
     required this.isResolved,
     required this.onSubmit,
     required this.onReject,
+    this.onRecover,
     this.isWithdrawn = false,
     this.answerInTerminal = false,
     this.settledAnswers,
@@ -1264,6 +1282,7 @@ class _QuestionRequestActions extends StatefulWidget {
   final ResolvedRequestAttribution? resolvedAttribution;
   final Future<bool> Function(List<List<String>> answers) onSubmit;
   final Future<bool> Function() onReject;
+  final Future<bool> Function(List<List<String>> answers)? onRecover;
 
   @override
   State<_QuestionRequestActions> createState() =>
@@ -1275,7 +1294,12 @@ class _QuestionRequestActionsState extends State<_QuestionRequestActions>
   late List<TextEditingController> _answerControllers;
   late List<Set<String>> _selectedAnswers;
   bool _isSubmitting = false;
+  bool _recovering = false;
+  bool _sentAsFollowUp = false;
+  bool get _readOnly => widget.isReadOnly && !_recovering;
   _RequestActionOutcomeState _outcome = _RequestActionOutcomeState.pending;
+  bool get _followUpSent =>
+      _sentAsFollowUp && _outcome == _RequestActionOutcomeState.sent;
   String? _failureMessage;
 
   /// The settled answer for question [index], when the card is settled and
@@ -1307,6 +1331,7 @@ class _QuestionRequestActionsState extends State<_QuestionRequestActions>
   /// blank card with the question still open.
   @override
   bool webHandoffHasContent() {
+    if (_outcome == _RequestActionOutcomeState.sent) return false;
     for (final selection in _selectedAnswers) {
       if (selection.isNotEmpty) return true;
     }
@@ -1327,6 +1352,25 @@ class _QuestionRequestActionsState extends State<_QuestionRequestActions>
   @override
   void didUpdateWidget(covariant _QuestionRequestActions oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.requestId != widget.requestId || widget.onRecover == null) {
+      _recovering = false;
+    }
+    if (oldWidget.requestId != widget.requestId) {
+      for (final controller in _answerControllers) {
+        controller.dispose();
+      }
+      _answerControllers = List.generate(
+        _requiredInputCount,
+        (_) => TextEditingController(),
+      );
+      _selectedAnswers = List.generate(_requiredInputCount, (_) => <String>{});
+      _outcome = _RequestActionOutcomeState.pending;
+      _sentAsFollowUp = false;
+      _isSubmitting = false;
+      _failureMessage = null;
+      refreshWebHandoffHold();
+      return;
+    }
     // The outer _MessageRow is unkeyed in a positional ListView, so a
     // re-pair onto a different question-request at the same slot is possible
     // (history prepend, reorder). Resize the per-question state to match the
@@ -1380,7 +1424,7 @@ class _QuestionRequestActionsState extends State<_QuestionRequestActions>
   bool get _canSend {
     final answers = _buildAnswers();
     return widget.isEnabled &&
-        !widget.isReadOnly &&
+        !_readOnly &&
         !widget.isResolved &&
         !_isSubmitting &&
         _outcome != _RequestActionOutcomeState.sent &&
@@ -1407,7 +1451,7 @@ class _QuestionRequestActionsState extends State<_QuestionRequestActions>
 
   Future<bool> _setOutcome(Future<bool> Function() action) async {
     if (!widget.isEnabled ||
-        widget.isReadOnly ||
+        _readOnly ||
         _isSubmitting ||
         _outcome == _RequestActionOutcomeState.sent) {
       return false;
@@ -1419,8 +1463,9 @@ class _QuestionRequestActionsState extends State<_QuestionRequestActions>
       _failureMessage = null;
     });
 
+    final requestId = widget.requestId;
     final success = await action();
-    if (!mounted) {
+    if (!mounted || widget.requestId != requestId) {
       return false;
     }
 
@@ -1445,16 +1490,26 @@ class _QuestionRequestActionsState extends State<_QuestionRequestActions>
       return;
     }
 
-    final success = await _setOutcome(() => widget.onSubmit(answers));
+    final recover = _recovering ? widget.onRecover : null;
+    final success = await _setOutcome(
+      () => recover != null ? recover(answers) : widget.onSubmit(answers),
+    );
     if (!mounted) {
       return;
     }
     if (success) {
-      for (final controller in _answerControllers) {
-        controller.clear();
-      }
-      for (final selection in _selectedAnswers) {
-        selection.clear();
+      if (recover != null) {
+        setState(() {
+          _sentAsFollowUp = true;
+          _recovering = false;
+        });
+      } else {
+        for (final controller in _answerControllers) {
+          controller.clear();
+        }
+        for (final selection in _selectedAnswers) {
+          selection.clear();
+        }
       }
       webHandoffContentChanged();
     }
@@ -1521,20 +1576,39 @@ class _QuestionRequestActionsState extends State<_QuestionRequestActions>
               color: tokens.textSecondary,
             ),
           )
-        else if (widget.isReadOnly)
+        else if (_readOnly && !_followUpSent)
           Text(
-            l10n.sessionRequestReadOnlyReply,
+            widget.onRecover != null
+                ? l10n.sessionQuestionHistorical
+                : l10n.sessionRequestReadOnlyReply,
             style: theme.textTheme.labelSmall?.copyWith(
               color: tokens.textSecondary,
             ),
           )
-        else if (!widget.isEnabled)
+        else if (!widget.isEnabled && !_followUpSent)
           Text(
             l10n.sessionRequestConnectToReply,
             style: theme.textTheme.labelSmall?.copyWith(
               color: tokens.statusError,
             ),
           ),
+        if (widget.onRecover != null &&
+            !widget.isResolved &&
+            !_followUpSent) ...[
+          const SizedBox(height: 8),
+          Text(
+            l10n.sessionQuestionRecoveryHint,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: tokens.textSecondary,
+            ),
+          ),
+          if (!_recovering)
+            TextButton(
+              key: ValueKey('session-question-recover-${widget.requestId}'),
+              onPressed: () => setState(() => _recovering = true),
+              child: Text(l10n.sessionQuestionRecover),
+            ),
+        ],
         const SizedBox(height: 8),
         if (widget.questions.isEmpty) ...[
           if (!widget.answerInTerminal)
@@ -1547,51 +1621,58 @@ class _QuestionRequestActionsState extends State<_QuestionRequestActions>
         // Nothing to send from here: the answer is the terminal's to give.
         if (!widget.answerInTerminal) ...[
           const SizedBox(height: 8),
-          Wrap(
-            alignment: WrapAlignment.end,
-            spacing: 8,
-            runSpacing: 4,
-            children: [
-              TextButton(
-                key: ValueKey(
-                  'session-detail-question-reject-${widget.requestId}',
+          if (!_followUpSent)
+            Wrap(
+              alignment: WrapAlignment.end,
+              spacing: 8,
+              runSpacing: 4,
+              children: [
+                TextButton(
+                  key: ValueKey(
+                    'session-detail-question-reject-${widget.requestId}',
+                  ),
+                  style: _transcriptActionButtonStyle(context),
+                  onPressed:
+                      widget.isEnabled &&
+                          !_readOnly &&
+                          !widget.isResolved &&
+                          !_isSubmitting &&
+                          _outcome != _RequestActionOutcomeState.sent
+                      ? _recovering
+                            ? () => setState(() => _recovering = false)
+                            : _reject
+                      : null,
+                  child: Text(
+                    _recovering ? l10n.cancel : l10n.sessionRequestDismiss,
+                  ),
                 ),
-                style: _transcriptActionButtonStyle(context),
-                onPressed:
-                    widget.isEnabled &&
-                        !widget.isReadOnly &&
-                        !widget.isResolved &&
-                        !_isSubmitting &&
-                        _outcome != _RequestActionOutcomeState.sent
-                    ? _reject
-                    : null,
-                child: Text(l10n.sessionRequestDismiss),
-              ),
-              FilledButton(
-                key: ValueKey(
-                  'session-detail-question-answer-button-${widget.requestId}',
+                FilledButton(
+                  key: ValueKey(
+                    'session-detail-question-answer-button-${widget.requestId}',
+                  ),
+                  style: _transcriptActionButtonStyle(context),
+                  onPressed: _canSend ? _send : null,
+                  child: _isSubmitting
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : Text(l10n.sessionRequestSubmit),
                 ),
-                style: _transcriptActionButtonStyle(context),
-                onPressed: _canSend ? _send : null,
-                child: _isSubmitting
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : Text(l10n.sessionRequestSubmit),
-              ),
-            ],
-          ),
+              ],
+            ),
           // Same contradiction as the permission card: "Answered elsewhere"
           // above and "Pending" below, or "Pending" on a card this seat
           // cannot answer at all.
-          if (!((widget.isResolved || widget.isReadOnly) &&
+          if (!((widget.isResolved || _readOnly) &&
               _outcome == _RequestActionOutcomeState.pending)) ...[
             const SizedBox(height: 8),
             _RequestOutcomeBadge(
               state: _outcome,
-              label: _requestOutcomeLabel(l10n, _outcome),
+              label: _followUpSent
+                  ? l10n.sessionQuestionFollowUpSent
+                  : _requestOutcomeLabel(l10n, _outcome),
             ),
           ],
           if (_failureMessage != null && _failureMessage!.isNotEmpty) ...[
@@ -1731,7 +1812,7 @@ class _QuestionRequestActionsState extends State<_QuestionRequestActions>
             .contains(option.label);
     final enabled =
         widget.isEnabled &&
-        !widget.isReadOnly &&
+        !_readOnly &&
         !widget.isResolved &&
         !_isSubmitting &&
         _outcome != _RequestActionOutcomeState.sent;
@@ -1780,6 +1861,9 @@ class _QuestionRequestActionsState extends State<_QuestionRequestActions>
     required int index,
     required bool legacy,
   }) {
+    if (_followUpSent && _answerControllers[index].text.trim().isEmpty) {
+      return const SizedBox.shrink();
+    }
     final l10n = AppLocalizations.of(context);
     final tokens = context.tokens;
     final question = legacy ? null : widget.questions[index];
@@ -1797,7 +1881,7 @@ class _QuestionRequestActionsState extends State<_QuestionRequestActions>
       maxLines: legacy ? 4 : 2,
       enabled:
           widget.isEnabled &&
-          !widget.isReadOnly &&
+          !_readOnly &&
           !widget.isResolved &&
           !_isSubmitting &&
           _outcome != _RequestActionOutcomeState.sent,
@@ -1844,7 +1928,7 @@ class _QuestionRequestActionsState extends State<_QuestionRequestActions>
       ),
       enabled:
           widget.isEnabled &&
-          !widget.isReadOnly &&
+          !_readOnly &&
           !widget.isResolved &&
           !_isSubmitting &&
           _outcome != _RequestActionOutcomeState.sent,

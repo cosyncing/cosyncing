@@ -56,14 +56,8 @@ Future<void> closeWorkspacePanes(
                 container.read(activeBrokerProfileProvider),
               )?.storageKey ==
               source) {
-            for (final pane in panes) {
-              unawaited(
-                controller.reopen(
-                  pane,
-                  pinned: state?.pinned.contains(pane.key) ?? false,
-                  mode: state?.modes[pane.key],
-                ),
-              );
+            if (state != null) {
+              unawaited(controller.restoreClosed(panes, state));
             }
           }
         },

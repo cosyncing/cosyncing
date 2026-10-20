@@ -49,6 +49,9 @@ enum StrokeGlyph {
   /// Add.
   plus,
 
+  /// Refresh a reading.
+  refresh,
+
   /// Filters.
   filter,
 
@@ -121,6 +124,7 @@ class StrokeIcon extends StatelessWidget {
 /// Glyph outlines on a 24-unit grid. `R` is a rounded rect (x y w h radius),
 /// `C` a circle (cx cy r); anything else is SVG path data.
 const Map<StrokeGlyph, List<String>> _outlines = {
+  StrokeGlyph.refresh: ['M20 7v5h-5', 'M19 12a7 7 0 1 0-2 5', 'M20 7l-2-2'],
   StrokeGlyph.panel: ['R3 4 18 16 3', 'M9 4v16'],
   StrokeGlyph.compose: [
     'M12 4H6a3 3 0 0 0-3 3v11a3 3 0 0 0 3 3h11a3 3 0 0 0 3-3v-6M14 5l5 5M10 14l-1 4 4-1 9-9a2 2 0 0 0-5-5z',

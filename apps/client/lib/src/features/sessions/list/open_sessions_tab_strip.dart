@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
@@ -7,8 +9,12 @@ import 'package:cosyncing_client/src/features/sessions/list/session_harness_logo
 import 'package:cosyncing_client/src/features/sessions/list/session_list_presentation.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_rename_region.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_focus.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_tab_actions.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_tab_selection.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 /// Persistent strip of open sessions, including a single tab.
 ///
@@ -16,7 +22,7 @@ import 'package:flutter/material.dart';
 /// selection/close via callbacks. Original harness artwork carries identity;
 /// a separate amber marker identifies sessions that need input.
 /// See `docs/architecture/client-ui.md`.
-class OpenSessionsTabStrip extends StatefulWidget {
+class OpenSessionsTabStrip extends ConsumerStatefulWidget {
   /// Creates an opened-sessions tab strip.
   const OpenSessionsTabStrip({
     required this.refs,
@@ -28,6 +34,7 @@ class OpenSessionsTabStrip extends StatefulWidget {
     this.hideWhenSingle = false,
     this.onOverview,
     this.onCloseAll,
+    this.onCloseSelected,
     this.onOpenRoster,
     this.showLiveStatus = true,
     this.unreadCompletionKeys = const {},
@@ -79,6 +86,9 @@ class OpenSessionsTabStrip extends StatefulWidget {
   /// Closes the working set while leaving sessions running.
   final VoidCallback? onCloseAll;
 
+  /// Optional route-aware close for a standalone compact session page.
+  final VoidCallback? onCloseSelected;
+
   /// Drawer affordance for compact and medium layouts.
   final VoidCallback? onOpenRoster;
 
@@ -89,10 +99,11 @@ class OpenSessionsTabStrip extends StatefulWidget {
   final Set<String> unreadCompletionKeys;
 
   @override
-  State<OpenSessionsTabStrip> createState() => _OpenSessionsTabStripState();
+  ConsumerState<OpenSessionsTabStrip> createState() =>
+      _OpenSessionsTabStripState();
 }
 
-class _OpenSessionsTabStripState extends State<OpenSessionsTabStrip> {
+class _OpenSessionsTabStripState extends ConsumerState<OpenSessionsTabStrip> {
   /// Owned so the wheel handler and the bottom scrollbar can drive the same
   /// position the list scrolls.
   final ScrollController _controller = ScrollController();
@@ -108,6 +119,20 @@ class _OpenSessionsTabStripState extends State<OpenSessionsTabStrip> {
   void dispose() {
     _controller.dispose();
     super.dispose();
+  }
+
+  void _selectTab(String key) {
+    final activate = ref
+        .read(workspaceTabSelectionProvider('sessions').notifier)
+        .select(
+          key,
+          widget.refs.map((entry) => entry.key).toList(),
+          widget.activeKey,
+        );
+    ref.read(focusedPaneProvider.notifier).state = activate
+        ? key
+        : widget.activeKey;
+    if (activate) widget.onSelect(key);
   }
 
   bool _rebuildScheduled = false;
@@ -173,176 +198,186 @@ class _OpenSessionsTabStripState extends State<OpenSessionsTabStrip> {
     // separator-colored line, but with a draggable VS Code-style thumb overlaid
     // when the tabs overflow. It lives *inside* the strip (bottom-anchored in a
     // Stack), so the swap adds no height.
-    return Container(
-      height: compact
-          ? OpenSessionsTabStrip.compactHeight
-          : OpenSessionsTabStrip.height,
-      color: tokens.canvas,
-      padding: EdgeInsets.symmetric(horizontal: compact ? 0 : 16),
-      child: Row(
-        children: [
-          if (widget.onOpenRoster != null)
-            IconButton(
-              key: const Key('workspace-open-drawer'),
-              style: compact
-                  ? IconButton.styleFrom(
-                      fixedSize: const Size(40, 40),
-                      minimumSize: const Size(40, 40),
-                      padding: EdgeInsets.zero,
-                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    )
-                  : null,
-              tooltip: l10n.workspaceShowSessionsTooltip,
-              onPressed: widget.onOpenRoster,
-              icon: const StrokeIcon(StrokeGlyph.menu),
-            ),
-          if (widget.onOverview != null)
-            _OverviewTab(
-              key: const Key('workspace-overview-tab'),
-              label: l10n.workspaceOverview,
-              selected: widget.activeKey == null,
-              iconOnly: compact,
-              onPressed: widget.onOverview!,
-            ),
-          Expanded(
-            child: Stack(
-              children: [
-                Positioned.fill(
-                  child: Listener(
-                    onPointerSignal: _onPointerSignal,
-                    child: NotificationListener<ScrollMetricsNotification>(
-                      onNotification: (notification) =>
-                          _syncScrollGeometry(notification.metrics),
-                      child: NotificationListener<ScrollNotification>(
+    return WorkspaceTabSelectionRegion(
+      region: 'sessions',
+      activeKey: widget.activeKey,
+      child: Container(
+        height: compact
+            ? OpenSessionsTabStrip.compactHeight
+            : OpenSessionsTabStrip.height,
+        color: tokens.canvas,
+        padding: EdgeInsets.symmetric(horizontal: compact ? 0 : 16),
+        child: Row(
+          children: [
+            if (widget.onOpenRoster != null)
+              IconButton(
+                key: const Key('workspace-open-drawer'),
+                style: compact
+                    ? IconButton.styleFrom(
+                        fixedSize: const Size(40, 40),
+                        minimumSize: const Size(40, 40),
+                        padding: EdgeInsets.zero,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      )
+                    : null,
+                tooltip: l10n.workspaceShowSessionsTooltip,
+                onPressed: widget.onOpenRoster,
+                icon: const StrokeIcon(StrokeGlyph.menu),
+              ),
+            if (widget.onOverview != null)
+              _OverviewTab(
+                key: const Key('workspace-overview-tab'),
+                label: l10n.workspaceOverview,
+                selected: widget.activeKey == null,
+                iconOnly: compact,
+                onPressed: widget.onOverview!,
+              ),
+            Expanded(
+              child: Stack(
+                children: [
+                  Positioned.fill(
+                    child: Listener(
+                      onPointerSignal: _onPointerSignal,
+                      child: NotificationListener<ScrollMetricsNotification>(
                         onNotification: (notification) =>
                             _syncScrollGeometry(notification.metrics),
-                        child: reorder == null
-                            ? ListView.builder(
-                                controller: _controller,
-                                scrollDirection: Axis.horizontal,
-                                padding: EdgeInsets.symmetric(
-                                  horizontal: compact ? 0 : 4,
-                                ),
-                                itemCount: refs.length,
-                                itemBuilder: (context, index) {
-                                  final ref = refs[index];
-                                  return _Tab(
-                                    key: Key('open-session-tab-${ref.key}'),
-                                    ref: ref,
-                                    selected: ref.key == widget.activeKey,
-                                    promptTarget:
-                                        ref.key == widget.promptTargetKey,
-                                    showLiveStatus: widget.showLiveStatus,
-                                    unreadCompletion: widget
-                                        .unreadCompletionKeys
-                                        .contains(ref.key),
-                                    onSelect: () => widget.onSelect(ref.key),
-                                    onClose: () => widget.onClose(ref.key),
-                                  );
-                                },
-                              )
-                            : ReorderableListView.builder(
-                                scrollController: _controller,
-                                scrollDirection: Axis.horizontal,
-                                buildDefaultDragHandles: false,
-                                padding: EdgeInsets.symmetric(
-                                  horizontal: compact ? 0 : 4,
-                                ),
-                                itemCount: refs.length,
-                                onReorderItem: reorder,
-                                proxyDecorator: (child, index, animation) =>
-                                    child,
-                                itemBuilder: (context, index) {
-                                  final ref = refs[index];
-                                  return _TabReorderListener(
-                                    key: Key('open-session-tab-${ref.key}'),
-                                    index: index,
-                                    child: _Tab(
+                        child: NotificationListener<ScrollNotification>(
+                          onNotification: (notification) =>
+                              _syncScrollGeometry(notification.metrics),
+                          child: reorder == null
+                              ? ListView.builder(
+                                  controller: _controller,
+                                  scrollDirection: Axis.horizontal,
+                                  padding: EdgeInsets.symmetric(
+                                    horizontal: compact ? 0 : 4,
+                                  ),
+                                  itemCount: refs.length,
+                                  itemBuilder: (context, index) {
+                                    final ref = refs[index];
+                                    return _Tab(
+                                      key: Key('open-session-tab-${ref.key}'),
                                       ref: ref,
                                       selected: ref.key == widget.activeKey,
+                                      grouped: this.ref
+                                          .watch(
+                                            workspaceTabSelectionProvider(
+                                              'sessions',
+                                            ),
+                                          )
+                                          .keys
+                                          .contains(ref.key),
                                       promptTarget:
                                           ref.key == widget.promptTargetKey,
                                       showLiveStatus: widget.showLiveStatus,
                                       unreadCompletion: widget
                                           .unreadCompletionKeys
                                           .contains(ref.key),
-                                      onSelect: () => widget.onSelect(ref.key),
+                                      onSelect: () => _selectTab(ref.key),
                                       onClose: () => widget.onClose(ref.key),
-                                    ),
-                                  );
-                                },
-                              ),
+                                    );
+                                  },
+                                )
+                              : ReorderableListView.builder(
+                                  scrollController: _controller,
+                                  scrollDirection: Axis.horizontal,
+                                  buildDefaultDragHandles: false,
+                                  padding: EdgeInsets.symmetric(
+                                    horizontal: compact ? 0 : 4,
+                                  ),
+                                  itemCount: refs.length,
+                                  onReorderItem: reorder,
+                                  proxyDecorator: (child, index, animation) =>
+                                      child,
+                                  itemBuilder: (context, index) {
+                                    final ref = refs[index];
+                                    return WorkspaceTabReorderListener(
+                                      key: Key('open-session-tab-${ref.key}'),
+                                      index: index,
+                                      child: _Tab(
+                                        ref: ref,
+                                        selected: ref.key == widget.activeKey,
+                                        grouped: this.ref
+                                            .watch(
+                                              workspaceTabSelectionProvider(
+                                                'sessions',
+                                              ),
+                                            )
+                                            .keys
+                                            .contains(ref.key),
+                                        promptTarget:
+                                            ref.key == widget.promptTargetKey,
+                                        showLiveStatus: widget.showLiveStatus,
+                                        unreadCompletion: widget
+                                            .unreadCompletionKeys
+                                            .contains(ref.key),
+                                        onSelect: () => _selectTab(ref.key),
+                                        onClose: () => widget.onClose(ref.key),
+                                      ),
+                                    );
+                                  },
+                                ),
+                        ),
                       ),
                     ),
                   ),
-                ),
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  child: _StripScrollbar(
-                    key: const Key('open-sessions-tab-scrollbar'),
-                    controller: _controller,
-                    geometry: _scrollGeometry,
-                    trackColor: tokens.canvas.withValues(alpha: 0),
-                    thumbColor: tokens.textTertiary,
-                    activeThumbColor: tokens.textSecondary,
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    child: _StripScrollbar(
+                      key: const Key('open-sessions-tab-scrollbar'),
+                      controller: _controller,
+                      geometry: _scrollGeometry,
+                      trackColor: tokens.canvas.withValues(alpha: 0),
+                      thumbColor: tokens.textTertiary,
+                      activeThumbColor: tokens.textSecondary,
+                    ),
                   ),
+                ],
+              ),
+            ),
+            if (ref
+                    .watch(workspaceTabSelectionProvider('sessions'))
+                    .keys
+                    .intersection(refs.map((entry) => entry.key).toSet())
+                    .length >
+                1)
+              Semantics(
+                liveRegion: true,
+                child: IconButton(
+                  key: const Key('workspace-close-selected-tabs'),
+                  tooltip: l10n.workspaceCloseSelectedTabs(
+                    ref
+                        .watch(workspaceTabSelectionProvider('sessions'))
+                        .keys
+                        .length,
+                  ),
+                  onPressed:
+                      widget.onCloseSelected ??
+                      () => unawaited(closeWorkspaceTabSelection(context, ref)),
+                  icon: const StrokeIcon(StrokeGlyph.close),
                 ),
-              ],
-            ),
-          ),
-          if (refs.isNotEmpty && widget.onCloseAll != null)
-            IconButton(
-              key: const Key('workspace-close-all-tabs'),
-              style: compact
-                  ? IconButton.styleFrom(
-                      fixedSize: const Size(40, 40),
-                      minimumSize: const Size(40, 40),
-                      padding: EdgeInsets.zero,
-                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    )
-                  : null,
-              tooltip: l10n.workspaceCloseAllTabs,
-              onPressed: widget.onCloseAll,
-              icon: const StrokeIcon(StrokeGlyph.closeAll),
-            ),
-        ],
+              ),
+            if (refs.isNotEmpty && widget.onCloseAll != null)
+              IconButton(
+                key: const Key('workspace-close-all-tabs'),
+                style: compact
+                    ? IconButton.styleFrom(
+                        fixedSize: const Size(40, 40),
+                        minimumSize: const Size(40, 40),
+                        padding: EdgeInsets.zero,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      )
+                    : null,
+                tooltip: l10n.workspaceCloseAllTabs,
+                onPressed: widget.onCloseAll,
+                icon: const StrokeIcon(StrokeGlyph.closeAll),
+              ),
+          ],
+        ),
       ),
     );
   }
-}
-
-/// Finger/stylus drags scroll; a deliberate hold opens the session menu.
-/// Pointer kind, rather than platform or viewport, also handles touch laptops
-/// and a mouse connected to a phone correctly.
-class _TabReorderListener extends StatelessWidget {
-  const _TabReorderListener({
-    required this.index,
-    required this.child,
-    super.key,
-  });
-
-  final int index;
-  final Widget child;
-
-  @override
-  Widget build(BuildContext context) => Listener(
-    onPointerDown: (event) {
-      if (event.kind != PointerDeviceKind.mouse ||
-          event.buttons != kPrimaryMouseButton) {
-        return;
-      }
-      final recognizer = ImmediateMultiDragGestureRecognizer(debugOwner: this);
-      SliverReorderableList.of(context).startItemDragReorder(
-        index: index,
-        event: event,
-        recognizer: recognizer
-          ..gestureSettings = MediaQuery.maybeGestureSettingsOf(context),
-      );
-    },
-    child: child,
-  );
 }
 
 /// The strip's bottom hairline, doubling as a horizontal scrollbar.
@@ -555,6 +590,7 @@ class _Tab extends StatelessWidget {
     required this.selected,
     required this.onSelect,
     required this.onClose,
+    this.grouped = false,
     this.promptTarget = false,
     this.showLiveStatus = true,
     this.unreadCompletion = false,
@@ -563,6 +599,7 @@ class _Tab extends StatelessWidget {
 
   final SessionRef ref;
   final bool selected;
+  final bool grouped;
   final bool showLiveStatus;
   final bool unreadCompletion;
 
@@ -621,10 +658,17 @@ class _Tab extends StatelessWidget {
             onClose();
           },
           child: Material(
-            color: selected ? tokens.surface2 : tokens.canvas,
+            color: selected
+                ? tokens.surface2
+                : grouped
+                ? tokens.surfaceHover
+                : tokens.canvas,
             borderRadius: radius,
             child: InkWell(
-              onTap: onSelect,
+              onTap: () {
+                focusWorkspaceTabSelection(context);
+                onSelect();
+              },
               borderRadius: radius,
               hoverColor: tokens.surface2,
               child: Container(
@@ -729,8 +773,16 @@ class _Tab extends StatelessWidget {
         ),
       ),
     );
-    if (!promptTarget) return tab;
-    return Tooltip(message: l10n.workspacePromptTargetTooltip, child: tab);
+    final accessible = Semantics(
+      selected: grouped,
+      value: selected ? l10n.workspaceActiveTab : null,
+      child: tab,
+    );
+    if (!promptTarget) return accessible;
+    return Tooltip(
+      message: l10n.workspacePromptTargetTooltip,
+      child: accessible,
+    );
   }
 }
 

@@ -19,6 +19,7 @@ import { type Broker, eventually } from '../harness/index.ts';
 import { collectBrowserErrors, launchBrowser, newScenarioContext, waitForFlutter } from '../harness/browser.ts';
 import { startWebBroker } from '../harness/web-scenario.ts';
 import { writeMediaFixtures } from '../harness/media-fixtures.ts';
+import { startFakeTokdash } from '../harness/fakes/tokdash.ts';
 
 const REPORT_BYTES = Buffer.from('exact browser download bytes\n', 'utf8');
 
@@ -45,9 +46,10 @@ async function startFixture(): Promise<Fixture> {
   for (const [name, file] of Object.entries(files)) {
     writeFileSync(file, `${JSON.stringify({ type: 'session', id: name, cwd: workspace })}\n`);
   }
+  const tokdash = startFakeTokdash();
   const [a, b] = await Promise.all([
-    startWebBroker({ name: 'web-art-a', env: { COSYNCING_FS_REMOTE_ENABLED: '1' } }),
-    startWebBroker({ name: 'web-art-b', env: { COSYNCING_FS_REMOTE_ENABLED: '1' } }),
+    startWebBroker({ name: 'web-art-a', env: { COSYNCING_FS_REMOTE_ENABLED: '1', COSYNCING_TOKDASH_URL: tokdash.url } }),
+    startWebBroker({ name: 'web-art-b', env: { COSYNCING_FS_REMOTE_ENABLED: '1', COSYNCING_TOKDASH_URL: tokdash.url } }),
   ]);
   const hello = async (broker: Broker, file: string, title: string, row: string): Promise<string> => {
     const response = await broker.client().post('/pi/bridge/hello', {
@@ -73,6 +75,7 @@ async function startFixture(): Promise<Fixture> {
     },
     async dispose() {
       await Promise.all([a.stop(), b.stop()]);
+      await tokdash.stop();
       rmSync(root, { recursive: true, force: true });
     },
   };

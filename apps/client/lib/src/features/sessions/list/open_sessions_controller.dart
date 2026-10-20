@@ -59,13 +59,20 @@ final workspaceOverviewVisibleProvider = StateProvider<bool>((ref) {
 /// Source-qualified undo snapshot; never reopens tabs on another machine.
 final class ClosedSessionTabs {
   /// Captures closed tabs and their exact source.
-  const ClosedSessionTabs(this.sourceKey, this.snapshot);
+  const ClosedSessionTabs(
+    this.sourceKey,
+    this.snapshot, {
+    this.order = const [],
+  });
 
   /// Profile, endpoint, and incarnation of the owning broker.
   final String? sourceKey;
 
-  /// Membership before close, in strip order.
+  /// Closed entries in their original strip order.
   final OpenSessionsState snapshot;
+
+  /// Original strip order, used to insert only restored tabs beside survivors.
+  final List<String> order;
 }
 
 /// Owns the opened-sessions working set for the active broker profile.
@@ -442,8 +449,22 @@ class OpenSessionsController extends AsyncNotifier<OpenSessionsState> {
 
   /// Closes a snapshot of the working set, flushing each staged draft first.
   /// New tabs opened during the barrier and other broker sources are untouched.
-  Future<ClosedSessionTabs?> closeAll() async {
-    final snapshot = _current;
+  Future<ClosedSessionTabs?> closeAll() =>
+      closeSelected(_current.refs.map((entry) => entry.key));
+
+  /// Closes a fixed set, with the same draft/source fences as Close all.
+  Future<ClosedSessionTabs?> closeSelected(Iterable<String> keys) async {
+    if (state.isLoading || state.hasError) return null;
+    final requested = keys.toSet();
+    final original = _current;
+    final snapshot = OpenSessionsState(
+      refs: original.refs
+          .where((entry) => requested.contains(entry.key))
+          .toList(),
+      activeKey: requested.contains(original.activeKey)
+          ? original.activeKey
+          : null,
+    );
     final sourceKey = _sourceKey;
     final generation = _membershipGeneration;
     if (snapshot.refs.isEmpty) return null;
@@ -460,9 +481,23 @@ class OpenSessionsController extends AsyncNotifier<OpenSessionsState> {
     final kept = _current.refs
         .where((entry) => !closingKeys.contains(entry.key))
         .toList();
+    final oldIndex = original.refs.indexWhere(
+      (entry) => entry.key == original.activeKey,
+    );
+    final neighbors = [
+      ...original.refs.skip(oldIndex < 0 ? 0 : oldIndex + 1),
+      ...original.refs.take(oldIndex < 0 ? 0 : oldIndex).toList().reversed,
+    ];
     final activeKey = kept.any((entry) => entry.key == _current.activeKey)
         ? _current.activeKey
-        : kept.firstOrNull?.key;
+        : neighbors
+                  .where(
+                    (entry) =>
+                        kept.any((candidate) => candidate.key == entry.key),
+                  )
+                  .firstOrNull
+                  ?.key ??
+              kept.firstOrNull?.key;
     final next = OpenSessionsState(refs: kept, activeKey: activeKey);
     if (_store case final LosslessOpenSessionsStore _) {
       _setLocal(next);
@@ -474,12 +509,17 @@ class OpenSessionsController extends AsyncNotifier<OpenSessionsState> {
     } else {
       _commitLegacy(next);
     }
-    return ClosedSessionTabs(sourceKey, snapshot);
+    return ClosedSessionTabs(
+      sourceKey,
+      snapshot,
+      order: original.refs.map((entry) => entry.key).toList(),
+    );
   }
 
   /// Merges back only the closed tabs, retaining any newer open metadata.
   void restoreClosedTabs(ClosedSessionTabs closed) {
     if (closed.sourceKey == null || closed.sourceKey != _sourceKey) return;
+    final previousActive = _current.activeKey;
     final existing = _current.refs.map((entry) => entry.key).toSet();
     for (final entry in closed.snapshot.refs) {
       if (!existing.contains(entry.key)) {
@@ -492,7 +532,23 @@ class OpenSessionsController extends AsyncNotifier<OpenSessionsState> {
         );
       }
     }
-    final activeKey = closed.snapshot.activeKey;
+    for (final entry in closed.snapshot.refs.reversed) {
+      if (existing.contains(entry.key)) {
+        continue;
+      }
+      final ordinal = closed.order.indexOf(entry.key);
+      if (ordinal < 0) continue;
+      final order = _current.refs.map((entry) => entry.key).toList();
+      final following = closed.order
+          .skip(ordinal + 1)
+          .where(order.contains)
+          .firstOrNull;
+      if (following == null) continue;
+      final from = order.indexOf(entry.key);
+      final to = order.indexOf(following);
+      if (from >= 0 && from != to) reorder(from, from < to ? to - 1 : to);
+    }
+    final activeKey = closed.snapshot.activeKey ?? previousActive;
     if (activeKey != null) activate(activeKey);
   }
 

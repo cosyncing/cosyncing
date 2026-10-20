@@ -24,7 +24,7 @@ class UsageReportPage extends ConsumerStatefulWidget {
   /// Creates the usage report page.
   const UsageReportPage({this.initialPeriod, super.key});
 
-  /// The period to open on. Defaults to the month.
+  /// The period to open on. Defaults to the current day.
   ///
   /// Set from the route's `?period=` so a link can name the period it means —
   /// a month-end notification opening on the month it is about, rather than on
@@ -36,7 +36,7 @@ class UsageReportPage extends ConsumerStatefulWidget {
 }
 
 class _UsageReportPageState extends ConsumerState<UsageReportPage> {
-  late UsagePeriod _period = widget.initialPeriod ?? UsagePeriod.month;
+  late UsagePeriod _period = widget.initialPeriod ?? UsagePeriod.today;
 
   /// How many complete periods back the page is looking. Switching the period
   /// segment always lands back on the period in progress.
@@ -414,7 +414,6 @@ class _UsageReportBodyState extends State<_UsageReportBody> {
               key: sections[3],
               tools: report.tools,
               locale: locale,
-              range: report.range,
             ),
           ),
           const SizedBox(height: 24),

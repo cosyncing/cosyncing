@@ -10,7 +10,9 @@ import 'package:cosyncing_client/src/features/sessions/list/session_list_control
 import 'package:cosyncing_client/src/features/sessions/list/session_list_repository.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/overview_quota_preferences.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_overview.dart';
+import 'package:cosyncing_client/src/features/settings/data/managed_runtime_api.dart';
 import 'package:cosyncing_client/src/features/usage/data/usage_report_api.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -70,6 +72,8 @@ void main() {
     ValueChanged<SessionRef>? onOpen,
   }) => ProviderScope(
     overrides: [
+      overviewQuotaPreferencesProvider.overrideWith(_NoQuotaChoices.new),
+      managedRuntimeQuotaProvider.overrideWith((ref) async => null),
       activeBrokerProfileProvider.overrideWith((ref) => source),
       sessionListControllerProvider.overrideWith(() => _LoadedList(status)),
       workspaceOverviewRosterProvider.overrideWith(
@@ -354,4 +358,9 @@ class _LoadedList extends SessionListController {
       _session('child', SessionStatus.needsInput, parent: 'parent'),
     ],
   );
+}
+
+class _NoQuotaChoices extends OverviewQuotaPreferences {
+  @override
+  Future<List<String>> build() async => const [];
 }

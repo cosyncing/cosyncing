@@ -960,7 +960,17 @@ void main() {
         findsOneWidget,
       );
 
-      await toggleSessionDetailViewOption(tester, 'report');
+      await openSessionDetailViewMenu(tester);
+      await tester.tap(find.byKey(const Key('session-tool-visibility')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Hide tool calls').last);
+      await tester.pumpAndSettle();
+      final toolRow = find.byKey(
+        const ValueKey('session-message-context-tool-1'),
+      );
+      for (var step = 0; step < 50 && toolRow.evaluate().isNotEmpty; step++) {
+        await tester.pump(const Duration(milliseconds: 20));
+      }
       expect(
         find.byKey(const ValueKey('session-message-context-user-1')),
         findsOneWidget,
@@ -980,7 +990,7 @@ void main() {
         findsNothing,
       );
       expect(
-        find.byKey(const ValueKey('session-message-context-tool-1')),
+        toolRow,
         findsNothing,
       );
     });

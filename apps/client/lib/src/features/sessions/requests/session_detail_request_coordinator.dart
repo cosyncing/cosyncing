@@ -17,6 +17,39 @@ extension SessionDetailAgentControl on SessionDetailController {
   Future<bool> setAgent(String agent) => _setAgentCoordinated(agent);
 }
 
+/// Replies to a historical question without borrowing the composer's draft.
+extension SessionDetailQuestionFollowUp on SessionDetailController {
+  /// Sends an explicit follow-up through the durable prompt outbox. Attachments
+  /// and the unsent composer draft stay with the composer.
+  Future<bool> sendQuestionFollowUp(String text) async {
+    final connection = _connection;
+    final prompt = text.trim();
+    if (prompt.isEmpty ||
+        connection == null ||
+        state.connectionStatus != SessionDetailConnectionStatus.connected ||
+        state.compatibilityReadOnly ||
+        !SessionControlView.fromSessionDetailState(state).canPrompt) {
+      return false;
+    }
+    try {
+      await _sendOutboxMessage(
+        kind: SessionOutboxMessageKind.prompt,
+        // This reply carries no composer draft. Omitting the revision means
+        // a legacy unconditional clear; zero protects a newer shared draft.
+        payload: {'text': prompt, 'draftRevision': 0},
+        send: (clientMessageId) => connection.sendPrompt(
+          prompt,
+          clientMessageId: clientMessageId,
+          draftRevision: 0,
+        ),
+      );
+      return true;
+    } on Object {
+      return false;
+    }
+  }
+}
+
 extension _SessionDetailRequestActions on SessionDetailController {
   Future<bool> _sendPermissionDecisionCoordinated({
     required String requestId,

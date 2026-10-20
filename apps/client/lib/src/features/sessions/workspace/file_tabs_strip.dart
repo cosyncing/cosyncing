@@ -1,8 +1,14 @@
+import 'dart:async';
+
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/components.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_focus.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_pane_key.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_tab_actions.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_tab_selection.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 /// Height of the file pane's own tab strip.
 const double fileTabStripHeight = 32;
@@ -13,7 +19,7 @@ const double workspaceDocumentRailWidth = 44;
 /// The right panel's tabs: files, delivered artifacts, and session views.
 /// Session tabs remain in the main strip. File previews carry a read-only
 /// marker; Status and Files keep their own available actions.
-class FileTabsStrip extends StatelessWidget {
+class FileTabsStrip extends ConsumerWidget {
   /// Creates the strip for one session's open files.
   const FileTabsStrip({
     required this.panes,
@@ -43,57 +49,94 @@ class FileTabsStrip extends StatelessWidget {
   final void Function(int oldIndex, int newIndex) onReorder;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final sessionKey = panes.isEmpty
+        ? ''
+        : workspacePaneSessionKey(panes.first.key);
+    final region = 'files:$sessionKey';
+    final selected = ref.watch(workspaceTabSelectionProvider(region)).keys;
     final tokens = context.tokens;
     final l10n = AppLocalizations.of(context);
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: tokens.surface,
-        border: Border(bottom: BorderSide(color: tokens.separator)),
-      ),
-      child: SizedBox(
-        height: fileTabStripHeight,
-        child: Row(
-          children: [
-            Expanded(
-              child: ReorderableListView.builder(
-                key: const Key('file-tabs-strip'),
-                scrollDirection: Axis.horizontal,
-                buildDefaultDragHandles: false,
-                itemCount: panes.length,
-                onReorderItem: onReorder,
-                proxyDecorator: (child, index, animation) => child,
-                itemBuilder: (context, index) {
-                  final pane = panes[index];
-                  return ReorderableDragStartListener(
-                    key: ValueKey<String>(pane.key),
-                    index: index,
-                    child: _FileTab(
-                      pane: pane,
-                      selected: pane.key == activeKey,
-                      tokens: tokens,
-                      onSelect: () => onSelect(pane),
-                      onClose: () => onClose(pane),
-                    ),
-                  );
-                },
-              ),
-            ),
-            if (!panes.any(
-              (pane) => pane.key == activeKey && pane is SessionPanelKey,
-            ))
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12),
-                child: Text(
-                  l10n.fileViewerReadOnly,
-                  key: const Key('file-tabs-read-only'),
-                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    color: tokens.textTertiary,
-                    letterSpacing: 0.6,
-                  ),
+    return WorkspaceTabSelectionRegion(
+      region: region,
+      activeKey: activeKey,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: tokens.surface,
+          border: Border(bottom: BorderSide(color: tokens.separator)),
+        ),
+        child: SizedBox(
+          height: fileTabStripHeight,
+          child: Row(
+            children: [
+              Expanded(
+                child: ReorderableListView.builder(
+                  key: const Key('file-tabs-strip'),
+                  scrollDirection: Axis.horizontal,
+                  buildDefaultDragHandles: false,
+                  itemCount: panes.length,
+                  onReorderItem: onReorder,
+                  proxyDecorator: (child, index, animation) => child,
+                  itemBuilder: (context, index) {
+                    final pane = panes[index];
+                    return WorkspaceTabReorderListener(
+                      key: ValueKey<String>(pane.key),
+                      index: index,
+                      child: _FileTab(
+                        pane: pane,
+                        selected: pane.key == activeKey,
+                        grouped: selected.contains(pane.key),
+                        tokens: tokens,
+                        onSelect: () {
+                          final activate = ref
+                              .read(
+                                workspaceTabSelectionProvider(region).notifier,
+                              )
+                              .select(
+                                pane.key,
+                                panes.map((pane) => pane.key).toList(),
+                                activeKey,
+                              );
+                          ref.read(focusedPaneProvider.notifier).state =
+                              activate ? pane.key : activeKey ?? pane.key;
+                          if (activate) onSelect(pane);
+                        },
+                        onClose: () => onClose(pane),
+                      ),
+                    );
+                  },
                 ),
               ),
-          ],
+              if (selected
+                      .intersection(panes.map((pane) => pane.key).toSet())
+                      .length >
+                  1)
+                Semantics(
+                  liveRegion: true,
+                  child: IconButton(
+                    key: const Key('file-close-selected-tabs'),
+                    tooltip: l10n.workspaceCloseSelectedTabs(selected.length),
+                    onPressed: () =>
+                        unawaited(closeWorkspaceTabSelection(context, ref)),
+                    icon: const StrokeIcon(StrokeGlyph.close, size: 16),
+                  ),
+                ),
+              if (!panes.any(
+                (pane) => pane.key == activeKey && pane is SessionPanelKey,
+              ))
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  child: Text(
+                    l10n.fileViewerReadOnly,
+                    key: const Key('file-tabs-read-only'),
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: tokens.textTertiary,
+                      letterSpacing: 0.6,
+                    ),
+                  ),
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -107,10 +150,12 @@ class _FileTab extends StatelessWidget {
     required this.tokens,
     required this.onSelect,
     required this.onClose,
+    this.grouped = false,
   });
 
   final SidePaneKey pane;
   final bool selected;
+  final bool grouped;
   final AppTokens tokens;
   final VoidCallback onSelect;
   final VoidCallback onClose;
@@ -120,68 +165,83 @@ class _FileTab extends StatelessWidget {
     final theme = Theme.of(context);
     final l10n = AppLocalizations.of(context);
     final name = sidePaneLabel(pane, l10n);
-    return InkWell(
-      onTap: onSelect,
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: selected ? tokens.surface2 : null,
-          border: Border(
-            bottom: BorderSide(
-              color: selected
-                  ? tokens.accent
-                  : tokens.surface.withValues(alpha: 0),
-              width: 2,
+    return Semantics(
+      selected: grouped,
+      value: selected ? l10n.workspaceActiveTab : null,
+      child: InkWell(
+        onTap: () {
+          focusWorkspaceTabSelection(context);
+          onSelect();
+        },
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: selected
+                ? tokens.surface2
+                : grouped
+                ? tokens.surfaceHover
+                : null,
+            border: Border(
+              bottom: BorderSide(
+                color: selected
+                    ? tokens.accent
+                    : tokens.surface.withValues(alpha: 0),
+                width: 2,
+              ),
             ),
           ),
-        ),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // Neutral ink, never the tool colour: the owning session is
-              // named once in the pane header, not colour-coded per tab.
-              if (pane case SessionPanelKey(:final kind))
-                StrokeIcon(
-                  kind == SessionPanelKind.files
-                      ? StrokeGlyph.folder
-                      : StrokeGlyph.overview,
-                  size: 16,
-                  color: tokens.textSecondary,
-                )
-              else
-                FileMarkGlyph(
-                  color: tokens.textSecondary,
-                  foldColor: selected ? tokens.surface2 : tokens.surface,
-                  height: 11,
-                ),
-              const SizedBox(width: 8),
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 160),
-                child: Text(
-                  name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.labelSmall?.copyWith(
-                    color: selected ? tokens.textPrimary : tokens.textSecondary,
-                    fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Neutral ink, never the tool colour: the owning session is
+                // named once in the pane header, not colour-coded per tab.
+                if (pane case SessionPanelKey(:final kind))
+                  StrokeIcon(
+                    kind == SessionPanelKind.files
+                        ? StrokeGlyph.folder
+                        : StrokeGlyph.overview,
+                    size: 16,
+                    color: tokens.textSecondary,
+                  )
+                else
+                  FileMarkGlyph(
+                    color: tokens.textSecondary,
+                    foldColor: selected ? tokens.surface2 : tokens.surface,
+                    height: 11,
+                  ),
+                const SizedBox(width: 8),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 160),
+                  child: Text(
+                    name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: selected
+                          ? tokens.textPrimary
+                          : tokens.textSecondary,
+                      fontWeight: selected
+                          ? FontWeight.w600
+                          : FontWeight.normal,
+                    ),
                   ),
                 ),
-              ),
-              const SizedBox(width: 4),
-              InkWell(
-                key: Key('file-tab-close-${pane.key}'),
-                onTap: onClose,
-                child: Padding(
-                  padding: const EdgeInsets.all(4),
-                  child: Icon(
-                    Icons.close,
-                    size: 12,
-                    color: tokens.textTertiary,
+                const SizedBox(width: 4),
+                InkWell(
+                  key: Key('file-tab-close-${pane.key}'),
+                  onTap: onClose,
+                  child: Padding(
+                    padding: const EdgeInsets.all(4),
+                    child: Icon(
+                      Icons.close,
+                      size: 12,
+                      color: tokens.textTertiary,
+                    ),
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),

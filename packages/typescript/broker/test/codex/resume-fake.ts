@@ -2467,93 +2467,92 @@ for await (const chunk of Bun.stdin.stream()) {
 });
 
 await test('R0c exact resumed turn ignores weak idle/replay sources until one authoritative completion', async () => {
-  return await withFakeCodex(`#!/usr/bin/env bun
-const enc = new TextDecoder();
-let buf = '';
-const send = (o) => console.log(JSON.stringify(o));
-for await (const chunk of Bun.stdin.stream()) {
-  buf += enc.decode(chunk, { stream: true });
-  let nl;
-  while ((nl = buf.indexOf(String.fromCharCode(10))) !== -1) {
-    const raw = buf.slice(0, nl);
-    buf = buf.slice(nl + 1);
-    if (!raw.trim()) continue;
-    const msg = JSON.parse(raw);
-    if (msg.method === 'initialize') send({ id: msg.id, result: {} });
-    else if (msg.method === 'thread/loaded/list') send({ id: msg.id, result: { data: [], nextCursor: null } });
-    else if (msg.method === 'thread/settings/update') send({ id: msg.id, result: {} });
-    else if (msg.method === 'thread/goal/get') send({ id: msg.id, result: { goal: null } });
-    else if (msg.method === 'thread/resume') {
-      // Bootstrap replay can deliver weak session-level frames on either side of the exact resume.
-      send({ method: 'thread/status/changed', params: { threadId: 'fake-thread', status: { type: 'idle' } } });
-      send({ method: 'thread/status/changed', params: { threadId: 'fake-thread', status: { type: 'notLoaded' } } });
-      send({ id: msg.id, result: {
-        thread: {
-          name: 'fake',
-          status: { type: 'active' },
-          turns: [{ id: 'turn-coherent', status: 'in-progress', startedAt: '2026-07-31T12:00:00.000Z' }],
-        },
-        initialTurnsPage: { data: [{ id: 'turn-coherent', status: 'in-progress', startedAt: '2026-07-31T12:00:00.000Z' }] },
-        model: 'fake-model',
-        modelProvider: 'fake-provider',
-      } });
-      setTimeout(() => send({ method: 'turn/started', params: { threadId: 'fake-thread', turn: { id: 'turn-coherent' } } }), 30);
-      setTimeout(() => send({ method: 'thread/status/changed', params: { threadId: 'fake-thread', status: { type: 'idle' } } }), 50);
-      setTimeout(() => send({ method: 'thread/status/changed', params: { threadId: 'fake-thread', status: { type: 'notLoaded' } } }), 70);
-      setTimeout(() => send({ method: 'thread/status/changed', params: { threadId: 'fake-thread', status: { type: 'active', activeFlags: ['waitingOnApproval'] } } }), 90);
-      setTimeout(() => send({ method: 'turn/completed', params: { threadId: 'fake-thread', turn: { id: 'retired-turn', status: 'completed', completedAt: '2026-07-31T12:00:03.000Z' } } }), 105);
-      setTimeout(() => send({ method: 'thread/status/changed', params: { threadId: 'fake-thread', turnId: 'retired-turn', status: { type: 'systemError' } } }), 115);
-      setTimeout(() => send({ method: 'thread/status/changed', params: { threadId: 'fake-thread', status: { type: 'idle' } } }), 130);
-      setTimeout(() => send({ method: 'item/completed', params: { turnId: 'turn-coherent', item: { type: 'agentMessage', id: 'still-running', text: 'STILL_RUNNING_AFTER_WEAK_IDLE' } } }), 160);
-      setTimeout(() => send({ method: 'turn/completed', params: { threadId: 'fake-thread', turn: { id: 'turn-coherent', status: 'completed', createdAt: '2026-07-31T12:00:00.000Z', completedAt: '2026-07-31T12:00:08.000Z' } } }), 260);
-      setTimeout(() => send({ method: 'turn/completed', params: { threadId: 'fake-thread', turn: { id: 'turn-coherent', status: 'completed', createdAt: '2026-07-31T12:00:00.000Z', completedAt: '2026-07-31T12:00:08.000Z' } } }), 280);
-      setTimeout(() => send({ method: 'thread/status/changed', params: { threadId: 'fake-thread', status: { type: 'idle' } } }), 300);
-    }
-  }
-}
-`, async (rollout) => {
+  return withFakeCodex(`#!/usr/bin/env bun
+throw new Error('This scenario must use its fixture daemon');
+`, async (rollout, dir) => {
     appendFileSync(rollout, JSON.stringify({ type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-coherent' } }) + '\n');
-    const conn = await new CodexAdapter().attach(Buffer.from(rollout, 'utf8').toString('base64url'), 'resume');
-    const managed = new ManagedConn(conn);
-    const frames: any[] = [];
-    managed.addClient((frame: any) => frames.push(
-      frame.kind === 'session' ? { ...frame, info: { ...frame.info } } : frame,
-    ));
+    const socket = join(dir, 'coherent-turn.sock');
+    const daemon = new SharedAppDaemon(socket, {
+      loadedThreadIds: ['fake-thread'],
+      resumeResult: () => {
+        // Exercise weak bootstrap evidence before the exact resumed turn.
+        daemon.notify('thread/status/changed', { threadId: 'fake-thread', status: { type: 'idle' } });
+        daemon.notify('thread/status/changed', { threadId: 'fake-thread', status: { type: 'notLoaded' } });
+        return {
+          thread: {
+            id: 'fake-thread', name: 'fake', status: { type: 'active' },
+            turns: [{ id: 'turn-coherent', status: 'in-progress', startedAt: '2026-07-31T12:00:00.000Z' }],
+          },
+          initialTurnsPage: { data: [{ id: 'turn-coherent', status: 'in-progress', startedAt: '2026-07-31T12:00:00.000Z' }] },
+          model: 'fake-model', modelProvider: 'fake-provider',
+        };
+      },
+    });
+    await daemon.start();
+    const oldSock = process.env.COSYNCING_CODEX_APP_SERVER_SOCK;
+    process.env.COSYNCING_CODEX_APP_SERVER_SOCK = socket;
     try {
-      const resumedWorking = conn.info.status === 'working' && managed.status === 'working';
-      const replayOne = await conn.getHistory();
-      const replayTwo = await conn.getHistory();
-      const replayStayedOpen = [replayOne, replayTwo].every((history) =>
-        history.some((message: any) => message.type === 'run-summary' && message.turnId === 'turn-coherent' && message.status === 'running')
-        && !history.some((message: any) => message.type === 'run-summary' && message.turnId === 'turn-coherent' && message.status !== 'running'));
-      await waitFor(() => frames.some((frame) => frame.kind === 'message' && frame.message?.text === 'STILL_RUNNING_AFTER_WEAK_IDLE'), 3000);
-      const beforeCompletion = frames.filter((frame) => frame.kind === 'message');
-      const weakSourcesDidNotIdle = managed.status === 'needs-input'
-        && beforeCompletion.some((frame) => frame.message?.type === 'permission-request')
-        && beforeCompletion.filter((frame) => frame.message?.type === 'status' && frame.message?.status === 'idle').length === 0;
-      await waitFor(() => managed.status === 'idle', 3000);
-      await sleep(100);
-      const messages = frames.filter((frame) => frame.kind === 'message').map((frame) => frame.message);
-      const idle = messages.filter((message) => message?.type === 'status' && message.status === 'idle');
-      const done = messages.filter((message) => message?.type === 'run-summary' && message.turnId === 'turn-coherent' && message.status === 'done');
-      const retired = messages.filter((message) => message?.type === 'run-summary' && message.turnId === 'retired-turn');
-      const staleErrors = messages.filter((message) => message?.type === 'error');
-      const projectedIdle = frames.filter((frame) => frame.kind === 'session' && frame.info?.status === 'idle');
-      return [
-        resumedWorking
-          && replayStayedOpen
-          && weakSourcesDidNotIdle
-          && idle.length === 1
-          && done.length === 1
-          && done[0]?.completedAt === Date.parse('2026-07-31T12:00:08.000Z')
-          && retired.length === 1
-          && staleErrors.length === 0
-          && projectedIdle.length === 1
-          && managed.status === 'idle',
-        `resumed=${resumedWorking} replay=${replayStayedOpen} weak=${weakSourcesDidNotIdle} idle=${idle.length} done=${JSON.stringify(done)} retired=${retired.length} staleErrors=${staleErrors.length} projectedIdle=${projectedIdle.length}`,
-      ];
+      const conn = await new CodexAdapter({ scanCodexTuiPresence: async () => fakeTuiScan() })
+        .attach(Buffer.from(rollout, 'utf8').toString('base64url'), 'resume');
+      const managed = new ManagedConn(conn);
+      const frames: any[] = [];
+      managed.addClient((frame: any) => frames.push(
+        frame.kind === 'session' ? { ...frame, info: { ...frame.info } } : frame,
+      ));
+      try {
+        const resumedWorking = conn.info.status === 'working' && managed.status === 'working';
+        const replayOne = await conn.getHistory();
+        const replayTwo = await conn.getHistory();
+        const replayStayedOpen = [replayOne, replayTwo].every((history) =>
+          history.some((message: any) => message.type === 'run-summary' && message.turnId === 'turn-coherent' && message.status === 'running')
+          && !history.some((message: any) => message.type === 'run-summary' && message.turnId === 'turn-coherent' && message.status !== 'running'));
+        // The parent controls each phase. Machine load cannot let the final
+        // completion overtake the assertion about these weak notifications.
+        daemon.notify('turn/started', { threadId: 'fake-thread', turn: { id: 'turn-coherent' } });
+        daemon.notify('thread/status/changed', { threadId: 'fake-thread', status: { type: 'idle' } });
+        daemon.notify('thread/status/changed', { threadId: 'fake-thread', status: { type: 'notLoaded' } });
+        daemon.notify('thread/status/changed', { threadId: 'fake-thread', status: { type: 'active', activeFlags: ['waitingOnApproval'] } });
+        daemon.notify('turn/completed', { threadId: 'fake-thread', turn: { id: 'retired-turn', status: 'completed', completedAt: '2026-07-31T12:00:03.000Z' } });
+        daemon.notify('thread/status/changed', { threadId: 'fake-thread', turnId: 'retired-turn', status: { type: 'systemError' } });
+        daemon.notify('thread/status/changed', { threadId: 'fake-thread', status: { type: 'idle' } });
+        daemon.notify('item/completed', { turnId: 'turn-coherent', item: { type: 'agentMessage', id: 'still-running', text: 'STILL_RUNNING_AFTER_WEAK_IDLE' } });
+        await waitFor(() => frames.some((frame) => frame.kind === 'message' && frame.message?.text === 'STILL_RUNNING_AFTER_WEAK_IDLE'), 3000);
+        const beforeCompletion = frames.filter((frame) => frame.kind === 'message');
+        const weakSourcesDidNotIdle = managed.status === 'needs-input'
+          && beforeCompletion.some((frame) => frame.message?.type === 'permission-request')
+          && beforeCompletion.filter((frame) => frame.message?.type === 'status' && frame.message?.status === 'idle').length === 0;
+        const completed = { threadId: 'fake-thread', turn: { id: 'turn-coherent', status: 'completed', createdAt: '2026-07-31T12:00:00.000Z', completedAt: '2026-07-31T12:00:08.000Z' } };
+        daemon.notify('turn/completed', completed);
+        daemon.notify('turn/completed', completed);
+        daemon.notify('thread/status/changed', { threadId: 'fake-thread', status: { type: 'idle' } });
+        daemon.notify('item/completed', { turnId: 'turn-coherent', item: { type: 'agentMessage', id: 'completion-barrier', text: 'AFTER_DUPLICATE_COMPLETION' } });
+        await waitFor(() => frames.some((frame) => frame.kind === 'message' && frame.message?.text === 'AFTER_DUPLICATE_COMPLETION'), 3000);
+        const messages = frames.filter((frame) => frame.kind === 'message').map((frame) => frame.message);
+        const idle = messages.filter((message) => message?.type === 'status' && message.status === 'idle');
+        const done = messages.filter((message) => message?.type === 'run-summary' && message.turnId === 'turn-coherent' && message.status === 'done');
+        const retired = messages.filter((message) => message?.type === 'run-summary' && message.turnId === 'retired-turn');
+        const staleErrors = messages.filter((message) => message?.type === 'error');
+        const projectedIdle = frames.filter((frame) => frame.kind === 'session' && frame.info?.status === 'idle');
+        return [
+          resumedWorking
+            && replayStayedOpen
+            && weakSourcesDidNotIdle
+            && idle.length === 1
+            && done.length === 1
+            && done[0]?.completedAt === Date.parse('2026-07-31T12:00:08.000Z')
+            && retired.length === 1
+            && staleErrors.length === 0
+            && projectedIdle.length === 1
+            && managed.status === 'idle',
+          `resumed=${resumedWorking} replay=${replayStayedOpen} weak=${weakSourcesDidNotIdle} idle=${idle.length} done=${JSON.stringify(done)} retired=${retired.length} staleErrors=${staleErrors.length} projectedIdle=${projectedIdle.length}`,
+        ];
+      } finally {
+        await managed.dispose().catch(() => {});
+      }
     } finally {
-      await managed.dispose().catch(() => {});
+      if (oldSock === undefined) delete process.env.COSYNCING_CODEX_APP_SERVER_SOCK;
+      else process.env.COSYNCING_CODEX_APP_SERVER_SOCK = oldSock;
+      await daemon.stop();
     }
   });
 });
@@ -3516,6 +3515,77 @@ for (const mode of ['queue-settled', 'queue-idle', 'queue-pending', 'recovery-ac
     });
   });
 }
+
+await test('async native structured replies settle exact question identities live and after reload', async () => {
+  return withFakeCodex(`#!/usr/bin/env bun
+const send = (o) => console.log(JSON.stringify(o));
+const decoder = new TextDecoder();
+let buf = '';
+const question = { type: 'agentMessage', id: 'native-reply', delivery: 'async', questions: [
+  { title: 'Which provider?', options: ['Codex', 'Claude Code'] },
+  { title: 'Which windows?', options: ['Both', 'Weekly'] },
+] };
+for await (const chunk of Bun.stdin.stream()) {
+  buf += decoder.decode(chunk, { stream: true });
+  let nl;
+  while ((nl = buf.indexOf(String.fromCharCode(10))) >= 0) {
+    const raw = buf.slice(0, nl); buf = buf.slice(nl + 1);
+    if (!raw.trim()) continue;
+    const msg = JSON.parse(raw);
+    if (msg.method === 'initialize') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/loaded/list') send({ id: msg.id, result: { data: [], nextCursor: null } });
+    else if (msg.method === 'thread/resume') send({ id: msg.id, result: { thread: { name: 'fake' }, model: 'fake-model', modelProvider: 'fake-provider' } });
+    else if (msg.method === 'turn/start') {
+      send({ id: msg.id, result: { turn: { id: 'ask' } } });
+      send({ method: 'turn/started', params: { threadId: 'fake-thread', turn: { id: 'ask' } } });
+      send({ method: 'item/completed', params: { threadId: 'fake-thread', turnId: 'ask', item: question } });
+    } else if (msg.method === 'fixture/reply') {
+      send({ method: 'item/started', params: { threadId: 'fake-thread', turnId: 'ask', item: { type: 'userMessage', id: msg.params.id, content: [{ type: 'text', text: msg.params.text }] } } });
+      send({ id: msg.id, result: {} });
+    }
+  }
+}
+`, async (rollout) => {
+    const question = { type: 'AgentMessage', id: 'native-reply', delivery: 'async', questions: [
+      { title: 'Which provider?', options: ['Codex', 'Claude Code'] },
+      { title: 'Which windows?', options: ['Both', 'Weekly'] },
+    ] };
+    const reply = (id: string, index: number, title: string, answer: string) =>
+      '<send_user_message_question_reply>\n' + JSON.stringify([{ answer, question: title,
+        questionItemId: JSON.stringify(['request_user_input_async', id, index]),
+      }]) + '\n</send_user_message_question_reply>';
+    const first = reply('native-reply', 0, 'Which provider?', 'Codex');
+    const second = reply('native-reply', 1, 'Which windows?', 'Both');
+    const row = (item: unknown) => JSON.stringify({ type: 'event_msg', payload: { type: 'item_completed', turn_id: 'ask', item } }) + '\n';
+    appendFileSync(rollout, row(question));
+    const conn: any = await new CodexAdapter().attach(Buffer.from(rollout).toString('base64url'), 'resume');
+    const events: any[] = [];
+    conn.subscribe((message: any) => events.push(message));
+    try {
+      const before = await conn.getHistory();
+      assert.equal(before.find((m: any) => m.type === 'question-request')?.readOnly, true);
+      assert.deepEqual(await conn.getPending(), [], 'history alone cannot assert native pending authority');
+      await conn.sendPrompt({ text: 'ask' });
+      assert.ok(await waitFor(() => events.some((m) => m.type === 'question-request'), 5000));
+      await conn.rpc('fixture/reply', { id: 'wrong-id', text: reply('other-item', 0, 'Which provider?', 'Codex') });
+      assert.equal((await conn.getPending()).length, 1, 'same title on a different native item does not settle');
+      await conn.rpc('fixture/reply', { id: 'native-first', text: first });
+      assert.equal((await conn.getPending()).length, 1, 'partial answers keep the card open');
+      await conn.rpc('fixture/reply', { id: 'native-second', text: second });
+      assert.ok(await waitFor(() => events.some((m) => m.type === 'question-resolved'), 5000));
+      assert.deepEqual(events.find((m) => m.type === 'question-resolved')?.answers, [['Codex'], ['Both']]);
+      assert.deepEqual(await conn.getPending(), []);
+      appendFileSync(rollout, row({ type: 'UserMessage', id: 'native-first', content: [{ type: 'text', text: first }] }));
+      appendFileSync(rollout, row({ type: 'UserMessage', id: 'native-second', content: [{ type: 'text', text: second }] }));
+      for (const history of [await conn.getHistory(), await conn.getHistory()]) {
+        const resolutions = history.filter((m: any) => m.type === 'question-resolved');
+        assert.equal(resolutions.length, 1);
+        assert.deepEqual(resolutions[0].answers, [['Codex'], ['Both']]);
+      }
+      return [true, 'historical authority stays read-only; exact native replies settle live and replayed cards'];
+    } finally { await conn.close(); }
+  });
+});
 
 await test('async question renders one nonblocking card and steers the measured answer text', async () => {
   return await withFakeCodex(`#!/usr/bin/env bun

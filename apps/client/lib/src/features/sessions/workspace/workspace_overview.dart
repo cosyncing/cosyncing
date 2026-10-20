@@ -13,6 +13,7 @@ import 'package:cosyncing_client/src/features/sessions/list/session_list_present
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_status_registry.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/overview_quota.dart';
 import 'package:cosyncing_client/src/features/usage/data/usage_report_api.dart';
 import 'package:cosyncing_client/src/features/usage/model/usage_format.dart';
 import 'package:cosyncing_client/src/features/usage/model/usage_period.dart';
@@ -328,6 +329,8 @@ class _WorkspaceOverviewState extends ConsumerState<WorkspaceOverview> {
                 _Note(text: l10n.workspacePartialRoster),
               const SizedBox(height: 32),
               const _TodayUsage(),
+              const SizedBox(height: 32),
+              const OverviewQuota(),
               const SizedBox(height: 36),
               Row(
                 children: [

@@ -8,9 +8,11 @@ import 'package:cosyncing_client/src/features/sessions/sessions.dart';
 import 'package:cosyncing_client/src/local/app_database.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import '../support/feature/composer_driver.dart';
 import '../support/feature/cosyncing_app.dart';
 import '../support/feature/fake_broker.dart';
 import '../support/feature/roster_driver.dart';
@@ -25,6 +27,90 @@ FakeBroker studioWithThree(FeatureContext f) =>
 
 void main() {
   group('opening and closing', () {
+    featureTest(
+      'modifier selection closes a disjoint group or range with one Undo',
+      (f) async {
+        final studio = studioWithThree(f);
+        await f.storage.seedServer(studio);
+        final app = await f.launch();
+        await app.openFromRoster('s1', cwd: '/work/studio');
+        await app.openFromRoster('s2');
+        await app.openFromRoster('s3');
+        await app.tap(app.tab('s1'));
+        await app.tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+        await app.tap(app.tab('s3'));
+        await app.tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+        expect(app.activeTabKey, 'codex/s1');
+        expect(
+          find.byKey(const Key('workspace-close-selected-tabs')),
+          findsOneWidget,
+        );
+        await app.tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+        await app.tap(app.tab('s1'));
+        await app.tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+        await app.chord(LogicalKeyboardKey.escape);
+        expect(
+          find.byKey(const Key('workspace-close-selected-tabs')),
+          findsNothing,
+        );
+        await app.chord(
+          LogicalKeyboardKey.keyW,
+          modifiers: [
+            LogicalKeyboardKey.controlLeft,
+            LogicalKeyboardKey.altLeft,
+          ],
+        );
+        expect(app.openTabKeys, ['codex/s2', 'codex/s3']);
+        await app.tap(find.text(en.workspaceUndoCloseTabs));
+        expect(app.openTabKeys, ['codex/s1', 'codex/s2', 'codex/s3']);
+        expect(app.activeTabKey, 'codex/s1');
+        await app.tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+        await app.tap(app.tab('s3'));
+        await app.tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+        await app.chord(
+          LogicalKeyboardKey.keyW,
+          modifiers: [
+            LogicalKeyboardKey.controlLeft,
+            LogicalKeyboardKey.altLeft,
+          ],
+        );
+        expect(app.openTabKeys, ['codex/s2']);
+        expect(app.activeTabKey, 'codex/s2');
+        await app.tap(find.text(en.workspaceUndoCloseTabs));
+        expect(app.openTabKeys, ['codex/s1', 'codex/s2', 'codex/s3']);
+        expect(app.activeTabKey, 'codex/s1');
+        await app.tap(app.tab('s1'));
+        await app.tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+        await app.tap(app.tab('s3'));
+        await app.tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+        expect(app.activeTabKey, 'codex/s1');
+        await app.tapKey('workspace-close-selected-tabs');
+        expect(app.openTabKeys, isEmpty);
+        await app.tap(find.text(en.workspaceUndoCloseTabs));
+        expect(app.openTabKeys, ['codex/s1', 'codex/s2', 'codex/s3']);
+        await app.tap(app.tab('s1'));
+        await app.tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+        await app.tap(app.tab('s3'));
+        await app.tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+        await app.tapKey('open-session-tab-close-codex/s1');
+        expect(app.openTabKeys, ['codex/s2', 'codex/s3']);
+        await app.tap(app.tab('s2'));
+        await app.tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+        await app.tap(app.tab('s3'));
+        await app.tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+        await app.tapKey('workspace-close-selected-tabs');
+        await app.openFromRoster('s3');
+        await app.openFromRoster('s2');
+        await app.tap(find.text(en.workspaceUndoCloseTabs));
+        expect(app.openTabKeys, ['codex/s3', 'codex/s2']);
+        expect(
+          studio.requests.where(
+            (r) => r.method == 'DELETE' || r.path.endsWith('/end'),
+          ),
+          isEmpty,
+        );
+      },
+    );
     featureTest(
       'a roster row opens one tab; opening it again only activates it; '
       'tabs keep the order they were opened in',

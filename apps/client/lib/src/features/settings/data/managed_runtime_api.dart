@@ -121,8 +121,9 @@ final class ManagedRuntimeApiContext {
 /// proxy call failed with a [BrokerException] (Tokdash down, broker 502).
 /// Programming/decoding errors are not swallowed.
 ///
-/// Auto-disposed: once Settings is closed, the last listener leaves and the
-/// subscription drops, so later broker switches trigger no off-screen reads.
+/// Auto-disposed when the final consumer unsubscribes. Overview releases its
+/// subscription while offstage. Retained Settings consumers may stay
+/// subscribed.
 final AutoDisposeFutureProvider<TokdashQuotaResponse?>
 managedRuntimeQuotaProvider = FutureProvider.autoDispose<TokdashQuotaResponse?>(
   (ref) async {

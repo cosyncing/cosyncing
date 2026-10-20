@@ -5890,7 +5890,7 @@ class CodexResumeConnection implements SessionConnection {
       // fresh user item; replaying an old answer cannot settle a later question with the same title.
       if (text && item.id) {
         for (const requestId of this.asyncQuestions.resolveFromUserText(text, `${turnId}:${item.id}`)) {
-          this.emit({ type: 'question-resolved', requestId });
+          this.emit({ type: 'question-resolved', requestId, answers: this.asyncQuestions.answersFor(requestId) });
         }
       }
       return;
@@ -6964,6 +6964,15 @@ function rememberRecentLiveItem(recent: Map<string, string>, itemId: string, key
 }
 
 class CodexRuntimeTracker {
+  constructor(
+    /** Bounded content-only history settlements; never grants live authority. */
+    readonly asyncQuestionHistory = new CodexAsyncQuestionTracker(256),
+  ) {}
+  asyncQuestionResolutions(text: string, key: string): AgentMessage[] {
+    return this.asyncQuestionHistory.resolveFromUserText(text, key, true).map((requestId) => ({
+      type: 'question-resolved', requestId, answers: this.asyncQuestionHistory.answersFor(requestId),
+    }));
+  }
   private readonly active = new Map<string, ActiveRun>();
   private readonly order: string[] = [];
   private lastUserMessageKey: string | undefined;
@@ -7092,7 +7101,7 @@ class CodexRuntimeTracker {
    * added to this class and left out here would silently reset across that boundary.
    */
   clone(): CodexRuntimeTracker {
-    const copy = new CodexRuntimeTracker();
+    const copy = new CodexRuntimeTracker(this.asyncQuestionHistory.cloneForHistory());
     for (const [turnId, run] of this.active) copy.active.set(turnId, { ...run });
     copy.order.push(...this.order);
     copy.lastUserMessageKey = this.lastUserMessageKey;
@@ -7545,7 +7554,7 @@ export function mapLine(
         const userKey = published ? published.adopt(lineIndex, decided) : decided;
         runtime.recordUser(userKey);
         runtime.expectUserDualEmission('legacy', String(p.message), turnId);
-        return [{ type: 'user-message', text: String(p.message), key: userKey, turnId, sentAt: ts }];
+        return [{ type: 'user-message', text: String(p.message), key: userKey, turnId, sentAt: ts }, ...runtime.asyncQuestionResolutions(String(p.message), userKey)];
       }
       case 'item_completed': {
         // Codex 0.147 stopped writing `event_msg/user_message`: a prompt's only durable event is
@@ -7562,6 +7571,7 @@ export function mapLine(
         if (item?.type === 'AgentMessage') {
           const questions = asyncQuestionsFromAgentItem(item);
           if (questions && typeof item.id === 'string' && item.id) {
+            runtime.asyncQuestionHistory.observe(item, String(p.turn_id ?? runtime.currentTurnId ?? ''));
             return [asyncQuestionCard(asyncQuestionRequestId(item.id), questions, true)];
           }
           return [];
@@ -7603,7 +7613,7 @@ export function mapLine(
           turnId,
           sentAt: ts ?? timestampToMs(p.started_at_ms),
           ...(imageCount ? { imageCount } : {}),
-        }];
+        }, ...runtime.asyncQuestionResolutions(text, userKey)];
       }
       case 'agent_message': {
         if (!p.message) return [];

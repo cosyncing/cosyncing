@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
-import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_detail_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_detail_state.dart';
@@ -192,27 +191,7 @@ class SessionRenameRegion extends StatelessWidget {
         onSecondaryTapUp: (details) =>
             unawaited(_actions(context, details.globalPosition)),
         onLongPress: () => unawaited(_actions(context)),
-        child: session == null
-            ? child
-            : Row(
-                children: [
-                  Expanded(child: child),
-                  IconButton(
-                    key: Key('session-actions-$tool-$sessionId'),
-                    tooltip: AppLocalizations.of(context).sessionActionsMenu,
-                    icon: const StrokeIcon(StrokeGlyph.more),
-                    constraints: const BoxConstraints.tightFor(
-                      width: 40,
-                      height: 40,
-                    ),
-                    padding: EdgeInsets.zero,
-                    style: IconButton.styleFrom(
-                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    ),
-                    onPressed: () => unawaited(_actions(context)),
-                  ),
-                ],
-              ),
+        child: child,
       ),
     ),
   );

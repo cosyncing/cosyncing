@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_media_source.dart';
@@ -9,14 +8,17 @@ import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifac
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_file_browser.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_detail_state.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_controller.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_pane_key.dart';
 import 'package:cosyncing_client/src/features/transfers/data/local_transfer_file_opener.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 import 'package:video_player_platform_interface/video_player_platform_interface.dart'
     as video;
 
+import '../support/feature/composer_driver.dart';
 import '../support/feature/cosyncing_app.dart';
 import '../support/feature/fake_os_notifications.dart';
 import '../support/feature/roster_driver.dart';
@@ -120,6 +122,46 @@ void main() {
           .requireValue;
       expect(panes.pinned, hasLength(2));
       expect(panes.modes.values, contains('source'));
+      app.tester.view.physicalSize = const Size(1440, 900);
+      await app.settle();
+      final tabs = find.byKey(const Key('file-tabs-strip'));
+      Finder fileTab(String name) =>
+          find.descendant(of: tabs, matching: find.text(name));
+      await app.tap(fileTab('plan.md'));
+      await app.tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await app.tap(fileTab('notes.md'));
+      await app.tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      expect(find.byKey(const Key('file-close-selected-tabs')), findsOneWidget);
+      await app.chord(
+        LogicalKeyboardKey.keyW,
+        modifiers: [LogicalKeyboardKey.controlLeft],
+      );
+      expect(
+        app.container
+            .read(filePanesControllerProvider)
+            .requireValue
+            .panes
+            .map((pane) => pane.key),
+        [
+          const SessionPanelKey(
+            session: SessionDetailKey(tool: 'codex', sessionId: 's1'),
+            kind: SessionPanelKind.files,
+          ).key,
+        ],
+      );
+      expect(app.openTabKeys, ['codex/s1']);
+      await app.tap(find.text('Undo'));
+      final restored = app.container
+          .read(filePanesControllerProvider)
+          .requireValue;
+      expect(
+        restored.panes.whereType<FilePaneKey>().map((pane) => pane.key),
+        panes.panes.map((pane) => pane.key),
+      );
+      expect(restored.pinned, panes.pinned);
+      expect(restored.modes, panes.modes);
+      app.tester.view.physicalSize = FeatureViewport.phone.size;
+      await app.settle();
       app = await f.restart();
       await app.tapKey('workspace-open-drawer');
       await app.openFromRoster('s1', cwd: '/work/studio');
@@ -139,7 +181,11 @@ void main() {
       await app.tapKey('compact-file-actions');
       await app.tap(find.text('Close all unpinned files'));
       expect(
-        app.container.read(filePanesControllerProvider).requireValue.panes,
+        app.container
+            .read(filePanesControllerProvider)
+            .requireValue
+            .panes
+            .whereType<FilePaneKey>(),
         hasLength(1),
       );
       expect(
@@ -148,7 +194,11 @@ void main() {
       );
       await app.tap(find.text('Undo'));
       expect(
-        app.container.read(filePanesControllerProvider).requireValue.panes,
+        app.container
+            .read(filePanesControllerProvider)
+            .requireValue
+            .panes
+            .whereType<FilePaneKey>(),
         hasLength(2),
       );
       // System Back returns to the retained view before leaving the session.

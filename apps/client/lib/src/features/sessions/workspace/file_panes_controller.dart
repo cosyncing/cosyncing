@@ -103,14 +103,48 @@ class FilePanesController extends AsyncNotifier<FilePanesState> {
     _releaseFocus(pane.key);
   }
 
-  /// Restores a deliberately closed document without replacing newer tabs.
-  Future<void> reopen(SidePaneKey pane, {required bool pinned, String? mode}) =>
+  /// Restores a closed group in its prior order, retaining newer open tabs.
+  Future<void> restoreClosed(List<SidePaneKey> closed, FilePanesState before) =>
       _mutate((current) {
-        final next = current.openedPane(pane);
-        if (!next.panes.any((p) => p.key == pane.key)) return current;
+        var next = current;
+        final restored = <String>{};
+        for (final pane in closed) {
+          if (next.panes.any((entry) => entry.key == pane.key)) continue;
+          next = next.openedPane(pane);
+          if (!next.panes.any((entry) => entry.key == pane.key)) continue;
+          restored.add(pane.key);
+          next = next.copyWith(
+            pinned: before.pinned.contains(pane.key)
+                ? {...next.pinned, pane.key}
+                : next.pinned,
+            modes: {
+              ...next.modes,
+              if (before.modes[pane.key] case final String mode) pane.key: mode,
+            },
+          );
+        }
+        final ordered = next.panes
+            .where((pane) => !restored.contains(pane.key))
+            .toList();
+        for (var index = before.panes.length - 1; index >= 0; index--) {
+          final pane = before.panes[index];
+          if (!restored.contains(pane.key)) continue;
+          final later = before.panes
+              .skip(index + 1)
+              .map((entry) => entry.key)
+              .toSet();
+          final insert = ordered.indexWhere(
+            (entry) => later.contains(entry.key),
+          );
+          ordered.insert(insert < 0 ? ordered.length : insert, pane);
+        }
         return next.copyWith(
-          pinned: pinned ? {...next.pinned, pane.key} : next.pinned,
-          modes: mode == null ? next.modes : {...next.modes, pane.key: mode},
+          panes: ordered,
+          activeBySession: {
+            ...current.activeBySession,
+            for (final entry in before.activeBySession.entries)
+              if (restored.contains(entry.value)) entry.key: entry.value,
+          },
         );
       });
 

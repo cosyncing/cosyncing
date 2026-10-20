@@ -12,7 +12,8 @@
  * - The agent keeps working without waiting. A client answer arrives "as a new user message"
  *   (native tool description): mid-turn via `turn/steer` (accepted with the SAME turn id and
  *   consumed at the next input boundary), after turn end as an ordinary new turn. The durable
- *   answer text the native TUI writes is one `> <title>\n\n<answer>` block per question.
+ *   answer text used `> <title>\n\n<answer>` blocks; Codex 0.163 also writes a structured
+ *   `send_user_message_question_reply` envelope carrying the tool-call id and question index.
  * - The durable rollout stores the question as `event_msg/item_completed` with a PascalCase
  *   `AgentMessage` item carrying the same `delivery`/`questions`, plus a
  *   `response_item/function_call` named `request_user_input_async` whose arguments carry the same
@@ -128,6 +129,39 @@ export function isAsyncAnswerText(title: string, userText: string): boolean {
   return userText.startsWith(prefix) && userText.slice(prefix.length).trim().length > 0;
 }
 
+/** A native reply names the exact tool-call item and question index (Codex 0.163). */
+export interface CodexStructuredQuestionAnswer {
+  itemId: string;
+  index: number;
+  title: string;
+  answer: string;
+}
+
+/** Parses only the complete native envelope, never quoted prose or embedded examples. */
+export function structuredAsyncAnswers(text: string): CodexStructuredQuestionAnswer[] | undefined {
+  const match = /^<send_user_message_question_reply>\s*([\s\S]*?)\s*<\/send_user_message_question_reply>$/.exec(text.trim());
+  if (!match || text.length > 262144) return undefined;
+  try {
+    const rows = JSON.parse(match[1]!);
+    if (!Array.isArray(rows) || !rows.length || rows.length > 128) return undefined;
+    const out: CodexStructuredQuestionAnswer[] = [];
+    const seen = new Set<string>();
+    for (const row of rows) {
+      if (typeof row?.questionItemId !== 'string' || typeof row.answer !== 'string'
+        || !row.answer.trim() || typeof row.question !== 'string') return undefined;
+      const identity = JSON.parse(row.questionItemId);
+      if (!Array.isArray(identity) || identity.length !== 3 || identity[0] !== 'request_user_input_async'
+        || typeof identity[1] !== 'string' || !identity[1] || identity[1].length > 256
+        || !Number.isSafeInteger(identity[2]) || identity[2] < 0 || identity[2] >= 128) return undefined;
+      const key = JSON.stringify(identity);
+      if (seen.has(key)) return undefined;
+      seen.add(key);
+      out.push({ itemId: identity[1], index: identity[2], title: row.question, answer: row.answer });
+    }
+    return out;
+  } catch { return undefined; }
+}
+
 /**
  * Connection-local pending registry for async questions. Lifecycle is deliberately separate from
  * the RPC `pendingQuestions` map: an async question survives the turn that asked it (a late answer
@@ -136,6 +170,12 @@ export function isAsyncAnswerText(title: string, userText: string): boolean {
  * echo, or when the connection closes.
  */
 export class CodexAsyncQuestionTracker {
+  constructor(private readonly budget = Number.POSITIVE_INFINITY) {}
+  private readonly answerValues = new Map<string, Map<number, string[]>>();
+  private readonly settlements = new Map<string, string[][]>();
+
+  /** Selected answers retained briefly for live/history resolution frames. */
+  answersFor(requestId: string): string[][] | undefined { return this.settlements.get(requestId); }
   private readonly pending = new Map<string, CodexAsyncQuestionEntry>();
   // Keep native identities after settlement: a delayed item/completed cannot reopen a card.
   private readonly seen = new Set<string>();
@@ -146,6 +186,26 @@ export class CodexAsyncQuestionTracker {
   // evidence settles the card, including earlier attempts when a user retries with new answers.
   private readonly submittedTexts = new Map<string, Set<string>>();
 
+  /** Independent history evidence at a rollout boundary. Live submissions and their uncertain
+   * acceptance never transfer into a history reader. */
+  cloneForHistory(): CodexAsyncQuestionTracker {
+    const copy = new CodexAsyncQuestionTracker(this.budget);
+    for (const [id, entry] of this.pending) copy.pending.set(id, {
+      ...entry,
+      questions: entry.questions.map((question) => ({
+        ...question, options: question.options ? [...question.options] : null,
+      })),
+    });
+    for (const id of this.seen) copy.seen.add(id);
+    for (const key of this.seenUserMessages) copy.seenUserMessages.add(key);
+    for (const [id, indices] of this.answered) copy.answered.set(id, new Set(indices));
+    for (const [id, values] of this.answerValues) copy.answerValues.set(id,
+      new Map([...values].map(([index, answers]) => [index, [...answers]])));
+    for (const [id, answers] of this.settlements) copy.settlements.set(id,
+      answers.map((values) => [...values]));
+    return copy;
+  }
+
   observe(item: any, turnId: string): AgentMessage | undefined {
     const questions = asyncQuestionsFromAgentItem(item);
     if (!questions) return undefined;
@@ -155,14 +215,37 @@ export class CodexAsyncQuestionTracker {
     if (this.seen.has(requestId)) return undefined;
     this.seen.add(requestId);
     this.pending.set(requestId, { requestId, itemId, turnId, questions });
+    while (this.seen.size > this.budget) {
+      const oldest = this.seen.values().next().value!;
+      this.seen.delete(oldest);
+      this.settle(oldest);
+    }
     return asyncQuestionCard(requestId, questions);
   }
 
-  /** The TUI sends each question's answer separately. Require a unique title match and keep
-   *  the card until every question is answered. Native messages carry no question request id. */
-  resolveFromUserText(text: string, messageKey: string): string[] {
+  /** Native structured answers carry exact identities; older quote blocks require a unique
+   *  title match. Keep the card open until every question has an answer. */
+  resolveFromUserText(text: string, messageKey: string, acceptedHistory = false): string[] {
     if (this.seenUserMessages.has(messageKey)) return [];
     this.seenUserMessages.add(messageKey);
+    while (this.seenUserMessages.size > this.budget * 4) this.seenUserMessages.delete(this.seenUserMessages.values().next().value!);
+    const structured = structuredAsyncAnswers(text);
+    if (structured) {
+      const resolved: string[] = [];
+      for (const reply of structured) {
+        const requestId = asyncQuestionRequestId(reply.itemId);
+        const entry = this.pending.get(requestId);
+        if (!entry || entry.questions[reply.index]?.title !== reply.title) continue;
+        const answered = this.answered.get(requestId) ?? new Set<number>();
+        const values = this.answerValues.get(requestId) ?? new Map<number, string[]>();
+        answered.add(reply.index);
+        values.set(reply.index, [reply.answer]);
+        this.answered.set(requestId, answered);
+        this.answerValues.set(requestId, values);
+        if (answered.size === entry.questions.length && this.settle(requestId)) resolved.push(requestId);
+      }
+      return resolved;
+    }
     // An exact echo of this connection's submitted text also covers compound card answers.
     const submitted = [...this.submittedTexts].filter(([id, texts]) =>
       this.pending.has(id) && texts.has(text));
@@ -170,6 +253,31 @@ export class CodexAsyncQuestionTracker {
       const requestId = submitted[0]![0];
       this.settle(requestId);
       return [requestId];
+    }
+    // A durable accepted follow-up can contain the whole set. Never use that inferred
+    // correlation to settle LIVE authority after a rejected/uncertain submission.
+    const compound: { entry: CodexAsyncQuestionEntry; values: string[] }[] = [];
+    for (const entry of this.pending.values()) {
+      if (!acceptedHistory || entry.questions.length < 2) continue;
+      let rest = text;
+      const values: string[] = [];
+      for (let index = 0; index < entry.questions.length; index++) {
+        const prefix = `> ${entry.questions[index]!.title}\n\n`;
+        if (!rest.startsWith(prefix)) break;
+        rest = rest.slice(prefix.length);
+        const next = entry.questions[index + 1];
+        const boundary = next ? rest.indexOf(`\n\n> ${next.title}\n\n`) : rest.length;
+        if (boundary < 0 || !rest.slice(0, boundary).trim()) break;
+        values.push(rest.slice(0, boundary).trim());
+        rest = rest.slice(boundary + (next ? 2 : 0));
+      }
+      if (values.length === entry.questions.length && !rest) compound.push({ entry, values });
+    }
+    if (compound.length === 1) {
+      const { entry, values } = compound[0]!;
+      this.answerValues.set(entry.requestId, new Map(values.map((value, index) => [index, [value]])));
+      this.settle(entry.requestId);
+      return [entry.requestId];
     }
     const matches: { entry: CodexAsyncQuestionEntry; index: number }[] = [];
     for (const entry of this.pending.values()) {
@@ -182,6 +290,9 @@ export class CodexAsyncQuestionTracker {
     const { entry, index } = matches[0]!;
     const answered = this.answered.get(entry.requestId) ?? new Set<number>();
     answered.add(index);
+    const values = this.answerValues.get(entry.requestId) ?? new Map<number, string[]>();
+    values.set(index, [text.slice(`> ${entry.questions[index]!.title}\n\n`.length).trim()]);
+    this.answerValues.set(entry.requestId, values);
     this.answered.set(entry.requestId, answered);
     if (answered.size !== entry.questions.length) return [];
     this.settle(entry.requestId);
@@ -245,6 +356,13 @@ export class CodexAsyncQuestionTracker {
   }
 
   private settle(requestId: string): boolean {
+    const entry = this.pending.get(requestId);
+    const values = this.answerValues.get(requestId);
+    if (entry && values?.size === entry.questions.length) {
+      this.settlements.set(requestId, entry.questions.map((_, index) => values.get(index) ?? []));
+      while (this.settlements.size > Math.min(this.budget, 256)) this.settlements.delete(this.settlements.keys().next().value!);
+    }
+    this.answerValues.delete(requestId);
     this.answered.delete(requestId);
     this.submittedTexts.delete(requestId);
     return this.pending.delete(requestId);
@@ -256,6 +374,8 @@ export class CodexAsyncQuestionTracker {
 
   clear(): void {
     this.pending.clear();
+    this.answerValues.clear();
+    this.settlements.clear();
     this.seen.clear();
     this.answered.clear();
     this.seenUserMessages.clear();

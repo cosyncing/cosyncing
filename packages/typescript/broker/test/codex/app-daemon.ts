@@ -144,8 +144,22 @@ for await (const chunk of Bun.stdin.stream()) {
     conn.info.control!.terminalSync.active = true;
     conn.info.control!.terminalSync.presence = 'shared';
     await hub.refreshExternalSession(structuredClone(conn.info));
-    await daemon.stop();
-    await new Promise((resolve)=>setTimeout(resolve,30));
+    let disconnectDeadline: ReturnType<typeof setTimeout> | undefined;
+    let unsubscribeDisconnect = () => {};
+    const disconnected = new Promise<void>((resolve, reject) => {
+      disconnectDeadline = setTimeout(() => reject(new Error('daemon loss did not clear the active run')), 2000);
+      unsubscribeDisconnect = conn.subscribe((message) => {
+        if (message.type === 'metadata-update' && message.key === 'sessionInfo'
+          && conn.info.status === 'idle' && conn.info.control?.terminalSync.presence === 'absent') resolve();
+      });
+    });
+    try {
+      await daemon.stop();
+      await disconnected;
+    } finally {
+      clearTimeout(disconnectDeadline);
+      unsubscribeDisconnect();
+    }
     assert.equal(conn.info.status,'idle','restart leaves Working');
     const interrupted = messages.filter((m)=>m.type==='run-summary' && m.status==='cancelled');
     assert.equal(interrupted.length,1,'restart closes the open run exactly once');

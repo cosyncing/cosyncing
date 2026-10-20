@@ -4,6 +4,7 @@ import 'package:cosyncing_client/src/design/app_theme.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
+import 'package:cosyncing_client/src/features/sessions/list/open_sessions_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_tab_strip.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
 import 'package:flutter/gestures.dart' show PointerDeviceKind;
@@ -28,7 +29,10 @@ void main() {
   // needs the app's delegates like any other localized surface.
   Widget host(Widget child, {Locale? locale, BrokerProfile? profile}) =>
       ProviderScope(
-        overrides: [activeBrokerProfileProvider.overrideWith((ref) => profile)],
+        overrides: [
+          activeBrokerProfileProvider.overrideWith((ref) => profile),
+          openSessionsControllerProvider.overrideWith(_EmptyTabs.new),
+        ],
         child: MaterialApp(
           localizationsDelegates: AppLocalizations.localizationsDelegates,
           supportedLocales: AppLocalizations.supportedLocales,
@@ -342,4 +346,9 @@ void main() {
       expect(position.pixels, position.maxScrollExtent);
     });
   });
+}
+
+class _EmptyTabs extends OpenSessionsController {
+  @override
+  Future<OpenSessionsState> build() async => const OpenSessionsState();
 }

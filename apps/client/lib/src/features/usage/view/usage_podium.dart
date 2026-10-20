@@ -64,6 +64,7 @@ class UsagePodium extends StatelessWidget {
                 name: usageSourceDisplayName(tool.tool, tool.label),
                 tool: tool.tool,
                 tokens: tool.tokens,
+                cost: tool.cost,
                 share: tool.tokens / total,
                 onTap: () => showUsageDetailDialog(
                   context,
@@ -92,6 +93,7 @@ class UsagePodium extends StatelessWidget {
                 name: model.name,
                 tool: null,
                 tokens: model.tokens,
+                cost: model.cost,
                 share: model.tokens / total,
                 onTap: () => showUsageDetailDialog(
                   context,
@@ -106,11 +108,6 @@ class UsagePodium extends StatelessWidget {
                 ),
               ),
           ],
-          detail: formatUsageCost(
-            models.first.cost,
-            locale: locale,
-            compact: true,
-          ),
           locale: locale,
         ),
       if (projectRows.isNotEmpty)
@@ -122,6 +119,7 @@ class UsagePodium extends StatelessWidget {
                 name: project.project,
                 tool: null,
                 tokens: project.tokens,
+                cost: project.cost,
                 // Against the period total, not against the facet's own sum:
                 // the facet is a subset, and a share of a subset would
                 // overstate it.
@@ -212,6 +210,7 @@ typedef _PodiumEntry = ({
   String name,
   String? tool,
   double tokens,
+  double? cost,
   double share,
   VoidCallback onTap,
 });
@@ -331,15 +330,22 @@ class _PodiumRow extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: 8),
-                Text(
-                  formatUsageCountWithShare(
-                    entry.tokens,
-                    entry.share,
-                    locale: locale,
-                  ),
-                  style: valueStyle,
-                ),
               ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              AppLocalizations.of(context).usageRankingMetrics(
+                formatCompactCount(entry.tokens, locale: locale),
+                entry.cost == null
+                    ? '—'
+                    : formatUsageCost(
+                        entry.cost!,
+                        locale: locale,
+                        compact: true,
+                      ),
+                formatUsageShare(entry.share, locale: locale),
+              ),
+              style: valueStyle,
             ),
             const SizedBox(height: 4),
             UsageShareBar(fraction: entry.tokens / leader, height: 4),

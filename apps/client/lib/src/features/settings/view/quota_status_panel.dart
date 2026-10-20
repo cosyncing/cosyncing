@@ -41,6 +41,8 @@ class QuotaStatusPanel extends StatelessWidget {
     this.quota,
     this.loading = false,
     this.now,
+    this.selectedProviders,
+    this.embedded = false,
     super.key,
   });
 
@@ -53,6 +55,12 @@ class QuotaStatusPanel extends StatelessWidget {
   /// Reference clock for relative reset copy.
   final DateTime? now;
 
+  /// Optional ordered subset for the workspace Overview.
+  final List<String>? selectedProviders;
+
+  /// Omits the Settings wrapper on an already titled reading surface.
+  final bool embedded;
+
   /// Content width from which providers sit two to a row.
   static const double twoColumnWidth = 600;
 
@@ -60,6 +68,12 @@ class QuotaStatusPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
     final now = this.now ?? DateTime.now();
+
+    if (embedded) {
+      return loading
+          ? InlineNotice(text: l10n.settingsQuotaLoading, showSpinner: true)
+          : _buildContent(context, l10n, now);
+    }
 
     // Everything below is REMAINING allowance in rolling windows, never a sum
     // of what was used; the usage report owns that figure.
@@ -99,19 +113,16 @@ class QuotaStatusPanel extends StatelessWidget {
     }
 
     final groups = <Widget>[];
-    final providerIds = data.providers.keys.toList()..sort();
+    final providerIds =
+        selectedProviders ?? (data.providers.keys.toList()..sort());
     for (final providerId in providerIds) {
-      final provider = data.providers[providerId]!;
-      // Tokdash always ships a shell per provider; a genuine unconfigured
-      // shell (status "unavailable", no buckets, no failure detail) is not
-      // stale — skip it. Any other empty provider records a real failure
-      // (e.g. fetch_error with no detail) and must stay visible.
-      final hasFailureDetail = provider.statusDetail?.isNotEmpty ?? false;
-      final isUnconfiguredShell =
-          provider.buckets.isEmpty &&
-          provider.status == 'unavailable' &&
-          !hasFailureDetail;
-      if (isUnconfiguredShell) continue;
+      final provider =
+          data.providers[providerId] ??
+          TokdashQuotaProvider.empty(provider: providerId);
+      if (selectedProviders == null &&
+          !quotaProviderHasPresentation(provider)) {
+        continue;
+      }
       groups.add(
         _QuotaProviderGroup(
           providerId: providerId,
@@ -128,12 +139,13 @@ class QuotaStatusPanel extends StatelessWidget {
     }
     return LayoutBuilder(
       builder: (context, constraints) {
-        final columns = constraints.maxWidth >= twoColumnWidth ? 2 : 1;
+        final columns =
+            constraints.maxWidth >= (embedded ? 720 : twoColumnWidth) ? 2 : 1;
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             for (var start = 0; start < groups.length; start += columns) ...[
-              if (start > 0) const SizedBox(height: 24),
+              if (start > 0) SizedBox(height: embedded ? 16 : 24),
               if (columns == 1)
                 groups[start]
               else
@@ -141,7 +153,7 @@ class QuotaStatusPanel extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Expanded(child: groups[start]),
-                    const SizedBox(width: 32),
+                    SizedBox(width: embedded ? 24 : 32),
                     Expanded(
                       child: start + 1 < groups.length
                           ? groups[start + 1]
@@ -156,6 +168,12 @@ class QuotaStatusPanel extends StatelessWidget {
     );
   }
 }
+
+/// Readings and meaningful failures, excluding empty provider shells.
+bool quotaProviderHasPresentation(TokdashQuotaProvider provider) =>
+    !(provider.buckets.isEmpty &&
+        provider.status == 'unavailable' &&
+        !(provider.statusDetail?.isNotEmpty ?? false));
 
 /// One provider's quota rows: a header with freshness and status pills, then
 /// its display-level bucket groups. Most providers retain generic window
