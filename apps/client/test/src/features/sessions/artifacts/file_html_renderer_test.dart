@@ -64,45 +64,16 @@ void main() {
       final descriptor = htmlFileRenderer();
       if (canRenderHtmlInPane) {
         expect(descriptor.modes, contains(FileViewMode.rendered));
-        expect(descriptor.granted, contains(FileRenderCapability.passiveFrame));
+        expect(
+          descriptor.granted,
+          contains(FileRenderCapability.interactiveFrame),
+        );
       } else {
         // Absent, not disabled: no control should suggest an affordance the
         // platform cannot deliver.
         expect(descriptor.modes, {FileViewMode.source});
         expect(descriptor.granted, isEmpty);
       }
-    });
-
-    test('the frame never receives the file own policy, or none', () {
-      const hostile =
-          '<html><head> '
-          '<meta http-equiv="Content-Security-Policy" content="default-src *"> '
-          '</head><body> '
-          '<img src="https://tracker.example/p.gif"> '
-          '</body></html>';
-      final hardened = hardenHtmlForPassiveFrame(hostile);
-
-      // The sandbox and JavaScriptMode.disabled stop scripts, forms and
-      // navigation. They do not stop subresource loads, so without this the
-      // `<img>` above would fetch — sending the reader's IP to a URL chosen by
-      // whoever wrote the file, on a workspace the reader may not control.
-      expect(hardened, contains('Content-Security-Policy'));
-      expect(hardened, contains("default-src 'none'"));
-      expect(hardened, contains("connect-src 'none'"));
-      expect(hardened, contains("script-src 'none'"));
-      // And the file cannot relax it by declaring its own.
-      expect(hardened, isNot(contains('default-src *')));
-      // The markup itself is untouched; the policy is what stops the fetch.
-      expect(hardened, contains('tracker.example'));
-    });
-
-    test('a file with no head still gets the policy', () {
-      // The reader can open any bytes the workspace holds, including a
-      // fragment that never declares a document.
-      final hardened = hardenHtmlForPassiveFrame('<p>fragment</p>');
-
-      expect(hardened, contains("default-src 'none'"));
-      expect(hardened, contains('fragment'));
     });
 
     testWidgets('an HTML file opens on source', (tester) async {

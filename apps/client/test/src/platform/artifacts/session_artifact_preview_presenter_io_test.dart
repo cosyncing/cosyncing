@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_file_service.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_preview_html_policy.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_preview_result.dart';
 import 'package:cosyncing_client/src/platform/artifacts/session_artifact_preview_presenter_io.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -51,18 +52,8 @@ void main() {
       final hardened = await File(preparedPath).readAsString();
       expect(
         hardened,
-        contains(
-          "default-src 'none'; script-src 'none'; form-action 'none'; "
-          "object-src 'none';",
-        ),
+        prepareInteractiveHtmlDocument(await File(sourcePath).readAsString()),
       );
-      expect(hardened, isNot(contains('content="default-src *"')));
-      expect(hardened, isNot(contains('target=""')));
-      expect(hardened, isNot(contains('TARGET=_self')));
-      expect(hardened, isNot(contains('download=""')));
-      expect(hardened, isNot(contains('Download>frame')));
-      expect(hardened, isNot(contains('TARGET=_self Download>')));
-      expect(hardened, contains('href="report.html"'));
     });
 
     test(
@@ -430,119 +421,6 @@ void main() {
       },
     );
   });
-
-  group('desktop webview URL-request guard', () {
-    late Directory tempDir;
-
-    setUp(() {
-      tempDir = Directory.systemTemp.createTempSync(
-        'session-artifact-desktop-preview-guard-test',
-      );
-    });
-
-    tearDown(() {
-      if (tempDir.existsSync()) {
-        tempDir.deleteSync(recursive: true);
-      }
-    });
-
-    test('allows exact prepared local file requests through callback', () {
-      final allowedLocalFileUri = Uri.file('${tempDir.path}/preview.html');
-      final fakeWebview = _FakeSessionArtifactDesktopWebview();
-
-      installSessionArtifactPreviewUrlRequestGuard(
-        webview: fakeWebview,
-        allowedLocalFileUri: allowedLocalFileUri,
-      );
-
-      expect(
-        fakeWebview.allowanceForRequest(allowedLocalFileUri.toString()),
-        isTrue,
-      );
-      expect(fakeWebview.events, contains('callback-installed'));
-    });
-
-    test('blocks external http URLs through callback policy', () {
-      final allowedLocalFileUri = Uri.file('${tempDir.path}/preview.html');
-      final fakeWebview = _FakeSessionArtifactDesktopWebview();
-
-      installSessionArtifactPreviewUrlRequestGuard(
-        webview: fakeWebview,
-        allowedLocalFileUri: allowedLocalFileUri,
-      );
-
-      expect(
-        fakeWebview.allowanceForRequest('https://example.com/report.html'),
-        isFalse,
-      );
-    });
-
-    test('blocks download-like URLs through callback policy', () {
-      final allowedLocalFileUri = Uri.file('${tempDir.path}/preview.html');
-      final fakeWebview = _FakeSessionArtifactDesktopWebview();
-
-      installSessionArtifactPreviewUrlRequestGuard(
-        webview: fakeWebview,
-        allowedLocalFileUri: allowedLocalFileUri,
-      );
-
-      expect(
-        fakeWebview.allowanceForRequest('https://example.com/report.zip'),
-        isFalse,
-      );
-    });
-
-    test('blocks popup-like URLs through callback policy', () {
-      final allowedLocalFileUri = Uri.file('${tempDir.path}/preview.html');
-      final fakeWebview = _FakeSessionArtifactDesktopWebview();
-
-      installSessionArtifactPreviewUrlRequestGuard(
-        webview: fakeWebview,
-        allowedLocalFileUri: allowedLocalFileUri,
-      );
-
-      expect(
-        fakeWebview.allowanceForRequest('javascript:alert(1)'),
-        isFalse,
-      );
-    });
-
-    test('blocks sibling local file requests through callback policy', () {
-      final allowedLocalFileUri = Uri.file('${tempDir.path}/report.html');
-      final blockedLocalFileUri = Uri.file('${tempDir.path}/sibling.html');
-      final fakeWebview = _FakeSessionArtifactDesktopWebview();
-
-      installSessionArtifactPreviewUrlRequestGuard(
-        webview: fakeWebview,
-        allowedLocalFileUri: allowedLocalFileUri,
-      );
-
-      expect(
-        fakeWebview.allowanceForRequest(blockedLocalFileUri.toString()),
-        isFalse,
-      );
-    });
-
-    test('installs callback before launch on the desktop launch path', () {
-      final allowedLocalFileUri = Uri.file('${tempDir.path}/preview.html');
-      final fakeWebview = _FakeSessionArtifactDesktopWebview();
-
-      launchDesktopArtifactPreview(
-        fakeWebview,
-        allowedLocalFileUri: allowedLocalFileUri,
-      );
-
-      expect(
-        fakeWebview.events,
-        equals(<String>[
-          'callback-installed',
-          'launch-started:$allowedLocalFileUri',
-          'callback-was-present-for-launch',
-          'callback-evaluated:$allowedLocalFileUri',
-        ]),
-      );
-    });
-  });
 }
 
 SessionArtifactCachedFile _fakeCachedFile(
@@ -587,47 +465,5 @@ class _FakeArtifactUriLauncher implements SessionArtifactUriLauncher {
               errorMessage ?? 'rejected by fake launcher',
             ),
     );
-  }
-}
-
-class _FakeSessionArtifactDesktopWebview
-    implements SessionArtifactPreviewDesktopWebview {
-  bool Function(String)? callback;
-  final events = <String>[];
-
-  bool allowanceForRequest(String requestUrl) {
-    final callbackToUse = callback;
-    if (callbackToUse == null) {
-      fail('URL-request callback was not installed.');
-    }
-    return callbackToUse(requestUrl);
-  }
-
-  @override
-  void setOnUrlRequestCallback(bool Function(String)? callback) {
-    events.add('callback-installed');
-    this.callback = callback;
-  }
-
-  @override
-  void launch(
-    String url, {
-    bool triggerOnUrlRequestEvent = true,
-  }) {
-    events.add('launch-started:$url');
-    final isCallbackInstalled = callback != null;
-    events.add(
-      isCallbackInstalled
-          ? 'callback-was-present-for-launch'
-          : 'callback-missing-for-launch',
-    );
-    if (!isCallbackInstalled) {
-      return;
-    }
-    final requestAllowed = callback!(url);
-    events.add('callback-evaluated:$url');
-    if (!requestAllowed) {
-      fail('Prepared local file launch was unexpectedly blocked by callback.');
-    }
   }
 }

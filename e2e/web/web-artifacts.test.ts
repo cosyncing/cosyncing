@@ -13,6 +13,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import type { Browser, Download, Locator, Page } from 'playwright-core';
 import { type Broker, eventually } from '../harness/index.ts';
@@ -162,6 +163,142 @@ describe('delivered files in the web client', () => {
       await fixture.dispose();
     }
   }
+
+  test.concurrent('HTML is interactive by default, stable while visible, and destroyed by pane lifecycle', async () => {
+    await scenario(async (f, page) => {
+      writeFileSync(join(f.workspace, 'dashboard.html'), `<!doctype html><title>Dashboard</title>
+        <button onclick="count.textContent=++window.clicks">Increment</button><output id="count">0</output>
+        <canvas id="chart" width="20" height="20"></canvas><script>
+        window.clicks=0; window.ticks=0; window.identity=Math.random();
+        setInterval(()=>window.ticks++, 10);
+        chart.getContext('2d').fillRect(0,0,20,20); document.body.dataset.ready='yes';
+        </script>`);
+      await openFromRoster(page, f.a.url, 'Artifact peer');
+      await openFromRoster(page, f.a.url, 'Artifact owner');
+      expect(page.frames()).toHaveLength(1);
+      await openView(page, 'Files');
+      await page.getByRole('button', { name: 'Preview file', exact: true }).first().click();
+      const child = () => page.frameLocator('iframe').frameLocator('iframe');
+      await child().locator('body[data-ready="yes"]').waitFor();
+      const frame = page.frames().find((frame) => frame.parentFrame()?.parentFrame())!;
+      const identity = await frame.evaluate<number>('window.identity');
+      await child().getByRole('button', { name: 'Increment' }).click();
+      expect(await child().locator('output').innerText()).toBe('1');
+      expect(await frame.evaluate<number>("document.querySelector('canvas').getContext('2d').getImageData(0,0,1,1).data[3]")).toBe(255);
+      await page.setViewportSize({ width: 1480, height: 960 });
+      await page.emulateMedia({ colorScheme: 'dark' });
+      await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+      const sent = await f.a.client().post('/pi/bridge/send-file', { id: f.ownerId, path: join(f.workspace, 'report.txt') });
+      expect(sent.status).toBe(200);
+      await page.getByRole('button', { name: 'Download', exact: true }).first().waitFor();
+      expect(await frame.evaluate<number>('window.identity')).toBe(identity);
+      expect(await child().locator('output').innerText()).toBe('1');
+      await page.getByRole('button', { name: 'Source', exact: true }).click();
+      await eventually(() => page.frames().length === 1, { what: 'Source removes all HTML contexts' });
+      expect(frame.isDetached()).toBe(true);
+      await page.getByRole('button', { name: 'Rendered', exact: true }).click();
+      await child().locator('body[data-ready="yes"]').waitFor();
+      expect(await child().locator('output').innerText()).toBe('0');
+      await selectTab(page, 'Artifact peer');
+      await eventually(() => page.frames().length === 1, { what: 'hidden retained session removes frames' });
+      await selectTab(page, 'Artifact owner');
+      await child().locator('body[data-ready="yes"]').waitFor();
+      // Browser visibility delivery is controlled; native lifecycle is exercised
+      // through the app driver in file_previews_test.dart.
+      await page.evaluate(() => {
+        Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
+      await eventually(() => page.frames().length === 1, { what: 'background destroys document synchronously' });
+      await page.evaluate(() => {
+        delete (document as any).hidden;
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
+      await child().locator('body[data-ready="yes"]').waitFor();
+      await page.setViewportSize({ width: 390, height: 844 });
+      await child().locator('body[data-ready="yes"]').waitFor();
+      expect(page.frames()).toHaveLength(3);
+      await page.getByRole('button', { name: 'Close', exact: true }).last().click();
+      await eventually(() => page.frames().length === 1, { what: 'close removes every frame' });
+      await page.setViewportSize({ width: 1440, height: 1000 });
+      await openView(page, 'Files');
+      await page.getByRole('button', { name: 'Preview file', exact: true }).first().click();
+      await child().locator('body[data-ready="yes"]').waitFor();
+      await openFromRoster(page, f.b.url, 'Artifact owner');
+      expect(page.frames()).toHaveLength(1);
+    });
+  });
+
+  test.concurrent('HTML policy precedes malformed bytes and isolates embedded and external documents', async () => {
+    const requests: string[] = [];
+    const recorder = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch(request) {
+      requests.push(new URL(request.url).pathname);
+      return new Response('unexpected resource', { headers: { 'access-control-allow-origin': '*' } });
+    } });
+    try {
+      expect((await fetch(recorder.url)).status).toBe(200);
+      expect(requests).toHaveLength(1);
+      requests.length = 0;
+      await scenario(async (f, page) => {
+        const target = recorder.url.toString();
+        // Executable bytes precede the apparent head; the existing policy and
+        // malformed metadata must never precede or relax the containing policy.
+        writeFileSync(join(f.workspace, 'attack.xhtml'), `<script>
+          window.checks={}; const check=(name, fn)=>{try{fn();checks[name]=false}catch{checks[name]=true}};
+          check('parent',()=>parent.document.body); check('top',()=>top.document.body);
+          check('storage',()=>localStorage.getItem('token')); check('cookie',()=>document.cookie);
+          check('eval',()=>eval('1')); check('worker',()=>new Worker('${target}worker'));
+          checks.bridge = !window.webkit?.messageHandlers && !window.flutter_inappwebview;
+          fetch('${target}fetch').catch(()=>{}); new WebSocket('${target.replace('http:', 'ws:')}socket');
+          </script><html xmlns="http://www.w3.org/1999/xhtml"><head><meta content='broken >'>
+          <meta http-equiv="Content-Security-Policy" content="default-src * 'unsafe-inline' 'unsafe-eval'">
+          <link rel="stylesheet" href="${target}style"><script src="${target}script"></script></head>
+          <body><img src="${target}image"><img src="relative.png"><svg onload="this.dataset.ready='yes'" id="svg"></svg>
+          <button onclick="this.textContent='Worked'">Interact</button>
+          <button onclick="location.replace('${target}navigate')">Navigate</button>
+          <button onclick="top.location.href='${target}top'">Top</button>
+          <a href="${target}popup" target="_blank">Popup</a>
+          <form action="${target}form"><button>Submit</button></form>
+          <script>document.body.dataset.ready='yes'</script></body></html>`);
+        await openFromRoster(page, f.a.url, 'Artifact owner');
+        await openView(page, 'Files');
+        await page.getByRole('button', { name: 'Preview file', exact: true }).first().click();
+        const inner = page.frameLocator('iframe').frameLocator('iframe');
+        await inner.locator('body[data-ready="yes"]').waitFor();
+        const frame = page.frames().find((frame) => frame.parentFrame()?.parentFrame())!;
+        expect(await frame.evaluate<Record<string, boolean>>('window.checks')).toEqual({ parent: true, top: true, storage: true, cookie: true, eval: true, worker: true, bridge: true });
+        await inner.locator('#svg[data-ready="yes"]').waitFor();
+        await inner.getByRole('button', { name: 'Interact' }).click();
+        await inner.getByRole('button', { name: 'Worked' }).waitFor();
+        await inner.getByRole('button', { name: 'Top' }).click();
+        expect(page.url()).toContain('/cosy/');
+        await inner.getByRole('link', { name: 'Popup' }).click();
+        await inner.getByRole('button', { name: 'Submit' }).click();
+        expect(page.context().pages()).toHaveLength(1);
+        const wrapper = await page.locator('iframe').evaluate((frame: HTMLIFrameElement) => frame.srcdoc);
+        const navigated = page.waitForEvent('framenavigated', { predicate: (changed) => changed === frame });
+        await inner.getByRole('button', { name: 'Navigate' }).click();
+        await navigated;
+        expect(page.url()).toContain('/cosy/');
+        expect(requests).toEqual([]);
+        // file:// has different privileges and must be tested independently.
+        const staged = join(f.workspace, 'staged.html');
+        writeFileSync(staged, wrapper);
+        const external = await page.context().newPage();
+        try {
+          await external.goto(pathToFileURL(staged).toString());
+          const document = external.frameLocator('iframe');
+          await document.getByRole('button', { name: 'Interact' }).click();
+          await document.getByRole('button', { name: 'Worked' }).waitFor();
+          const child = external.frames()[1]!;
+          const nav = external.waitForEvent('framenavigated', { predicate: (changed) => changed === child });
+          await document.getByRole('button', { name: 'Navigate' }).click();
+          await nav;
+          expect(requests).toEqual([]);
+        } finally { await external.close(); }
+      });
+    } finally { recorder.stop(true); }
+  });
 
   test.concurrent('media stays lazy, images and PDFs render, videos play, and close revokes access', async () => {
     await scenario(async (f, page) => {

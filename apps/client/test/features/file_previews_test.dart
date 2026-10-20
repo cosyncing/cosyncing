@@ -8,6 +8,7 @@ import 'package:cosyncing_client/src/features/sessions/artifacts/file_media_sour
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_file_service.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_file_browser.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_detail_state.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_body.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_pane_key.dart';
 import 'package:cosyncing_client/src/features/transfers/data/local_transfer_file_opener.dart';
@@ -18,6 +19,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 import 'package:video_player_platform_interface/video_player_platform_interface.dart'
     as video;
+import 'package:webview_flutter_platform_interface/webview_flutter_platform_interface.dart'
+    as html;
 
 import '../support/feature/composer_driver.dart';
 import '../support/feature/cosyncing_app.dart';
@@ -294,6 +297,248 @@ void main() {
       expect(app.tester.takeException(), isNull);
     },
   );
+
+  for (final outcome in [
+    'ready',
+    'late setup',
+    'late cleanup',
+    'stale error',
+    'failure',
+    'truncated',
+  ]) {
+    featureTest(
+      'HTML owns only the visible native document ($outcome)',
+      (f) async {
+        final platform = _HtmlPlatform();
+        final previous = html.WebViewPlatform.instance;
+        html.WebViewPlatform.instance = platform;
+        addTearDown(() {
+          if (previous != null) html.WebViewPlatform.instance = previous;
+        });
+        final broker = f.network.add('http://studio.test:7734')
+          ..addSession('s1', 'HTML review')
+          ..addSession('s2', 'Other work');
+        final files = _HtmlWorkspace()..truncated = outcome == 'truncated';
+        await f.storage.seedServer(broker);
+        final app = await f.launch(
+          overrides: [
+            sessionFileBrowserRepositoryProvider.overrideWith(
+              (ref) async => files,
+            ),
+          ],
+        );
+        await app.openFromRoster('s1', cwd: '/work/studio');
+        expect(platform.controllers, isEmpty);
+        await app.tapKey('session-detail-view-menu');
+        await app.tapKey('session-detail-view-item-files');
+        if (outcome == 'late setup') platform.pending = Completer<void>();
+        platform.fail = outcome == 'failure';
+        await app.tapKey('session-detail-files-preview-report.html');
+        if (outcome == 'truncated') {
+          await app.waitFor(find.byKey(const Key('file-viewer-truncated')));
+          expect(platform.controllers, isEmpty);
+          expect(
+            find.byKey(const Key('file-viewer-mode-rendered')),
+            findsNothing,
+          );
+          expect(find.byKey(const Key('file-viewer-lines')), findsOneWidget);
+          return;
+        }
+        await app.pumpUntil(
+          () => platform.controllers.isNotEmpty,
+          reason: 'native initialization begins',
+        );
+        final first = platform.controllers.single;
+        if (outcome == 'failure') {
+          await app.waitFor(find.byKey(const Key('file-viewer-render-failed')));
+          expect(find.byKey(const Key('file-viewer-lines')), findsOneWidget);
+          expect(
+            platform.controllers,
+            hasLength(1),
+            reason: 'no initialization retry loop',
+          );
+          return;
+        }
+        if (outcome == 'late setup') {
+          await app.tapKey('file-viewer-mode-source');
+          platform.pending = null;
+          await app.tapKey('file-viewer-mode-rendered');
+          await app.pumpUntil(
+            () =>
+                platform.controllers.length == 2 &&
+                platform.controllers.last.running,
+            reason: 'replacement document opens',
+          );
+          final replacement = platform.controllers.last;
+          first.pending!.complete();
+          await app.pumpUntil(
+            () => first.blanked,
+            reason: 'late initialization is retired',
+          );
+          expect(first.documentLoads, 0);
+          expect(
+            replacement.running,
+            isTrue,
+            reason: 'stale cleanup cannot blank replacement',
+          );
+          await app.tapKey('file-viewer-close');
+          await app.pumpUntil(
+            () => replacement.blanked,
+            reason: 'close destroys document',
+          );
+          return;
+        }
+        await app.pumpUntil(
+          () => first.running,
+          reason: 'HTML opens in Rendered',
+        );
+        expect(first.documentLoads, 1);
+        if (outcome == 'stale error') {
+          first.delegate!.failed!(
+            const html.WebResourceError(
+              errorCode: -1,
+              description: 'fixture failure',
+              isForMainFrame: true,
+            ),
+          );
+          for (final state in [
+            AppLifecycleState.inactive,
+            AppLifecycleState.hidden,
+            AppLifecycleState.inactive,
+            AppLifecycleState.resumed,
+          ]) {
+            app.tester.binding.handleAppLifecycleStateChanged(state);
+          }
+          await app.pumpUntil(
+            () =>
+                platform.controllers.last != first &&
+                platform.controllers.last.running,
+            reason: 'successor survives an old deferred render failure',
+          );
+          expect(
+            find.byKey(const Key('file-viewer-render-failed')),
+            findsNothing,
+          );
+          await app.tapKey('file-viewer-close');
+          return;
+        }
+
+        if (outcome == 'late cleanup') {
+          first.cleanup = Completer<void>();
+          await app.tapKey('file-viewer-mode-source');
+          await app.tapKey('file-viewer-mode-rendered');
+          await app.pumpUntil(
+            () =>
+                platform.controllers.last != first &&
+                platform.controllers.last.running,
+            reason: 'reopen before teardown completes',
+          );
+          final replacement = platform.controllers.last;
+          first.cleanup!.complete();
+          await app.pumpUntil(
+            () => first.blanked,
+            reason: 'retired controller finishes teardown',
+          );
+          expect(replacement.running, isTrue);
+          await app.tapKey('file-viewer-close');
+          return;
+        }
+
+        expect(
+          await first.delegate!.navigate!(
+            const html.NavigationRequest(
+              url: 'https://example.test/',
+              isMainFrame: false,
+            ),
+          ),
+          html.NavigationDecision.prevent,
+        );
+        app.tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.inactive,
+        );
+        await app.settle();
+        app.tester.view.physicalSize = const Size(1500, 920);
+        await app.settle();
+        expect(
+          platform.controllers,
+          hasLength(1),
+          reason: 'focus and resize retain document',
+        );
+        files.text = files.text.replaceAll('Run', 'New');
+        final pane = app.container
+            .read(filePanesControllerProvider)
+            .requireValue
+            .panes
+            .whereType<FilePaneKey>()
+            .single;
+        app.container.invalidate(filePaneReadProvider(pane));
+        await app.pumpUntil(
+          () =>
+              platform.controllers.length == 2 &&
+              platform.controllers.last.running,
+          reason: 'actual content revision replaces the document once',
+        );
+        expect(first.blanked, isTrue);
+        await app.settle();
+        expect(platform.controllers, hasLength(2));
+        final revised = platform.controllers.last;
+        await app.tapKey('file-viewer-mode-source');
+        await app.pumpUntil(
+          () => revised.blanked,
+          reason: 'Source destroys execution',
+        );
+        await app.tapKey('file-viewer-mode-rendered');
+        await app.pumpUntil(
+          () => platform.controllers.last.running,
+          reason: 'Rendered recreates',
+        );
+        final second = platform.controllers.last;
+        app.tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.hidden,
+        );
+        app.tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.paused,
+        );
+        await app.pumpUntil(
+          () => second.blanked,
+          reason: 'background destroys execution',
+        );
+        for (final state in [
+          AppLifecycleState.hidden,
+          AppLifecycleState.inactive,
+          AppLifecycleState.resumed,
+        ]) {
+          app.tester.binding.handleAppLifecycleStateChanged(state);
+        }
+        await app.pumpUntil(
+          () =>
+              platform.controllers.last != second &&
+              platform.controllers.last.running,
+          reason: 'foreground recreates',
+        );
+        final third = platform.controllers.last;
+        await app.openFromRoster('s2');
+        await app.pumpUntil(
+          () => third.blanked,
+          reason: 'retained hidden session owns no document',
+        );
+        await app.tap(app.tab('s1'));
+        await app.pumpUntil(
+          () =>
+              platform.controllers.last != third &&
+              platform.controllers.last.running,
+          reason: 'returning recreates',
+        );
+        await app.tapKey('file-viewer-close');
+        await app.pumpUntil(
+          () => platform.controllers.every((c) => c.blanked),
+          reason: 'all owned documents retired',
+        );
+        expect(app.tester.takeException(), isNull);
+      },
+      platform: TargetPlatform.android,
+    );
+  }
 
   for (final (theme, outcome) in [
     ('light', 'playback'),
@@ -632,7 +877,8 @@ Future<void> _pumpNativeIoUntil(
   bool Function() condition,
 ) async {
   for (var turn = 0; turn < 100 && !condition(); turn++) {
-    // Intentional async I/O: a synchronous probe cannot yield to file callbacks.
+    // Intentional async I/O: a synchronous probe cannot yield to file
+    // callbacks.
     // ignore: avoid_slow_async_io
     await tester.runAsync(() => Directory.systemTemp.exists());
     await tester.pump();
@@ -859,5 +1105,130 @@ class _TextWorkspace extends _MediaWorkspace {
         'Review section $i. Keep this file reachable.',
     ].join('\n\n'),
     mimeType: 'text/markdown',
+  );
+}
+
+// Fake only the native plugin boundary: navigation, pane state, source fallback
+// and generation races still pass through the real app. Device timing is
+// separate.
+class _HtmlPlatform extends html.WebViewPlatform {
+  final controllers = <_HtmlController>[];
+  Completer<void>? pending;
+  bool fail = false;
+  @override
+  html.PlatformWebViewController createPlatformWebViewController(
+    html.PlatformWebViewControllerCreationParams params,
+  ) {
+    final controller = _HtmlController(params, pending, fail: fail);
+    controllers.add(controller);
+    return controller;
+  }
+
+  @override
+  html.PlatformNavigationDelegate createPlatformNavigationDelegate(
+    html.PlatformNavigationDelegateCreationParams params,
+  ) => _HtmlDelegate(params);
+  @override
+  html.PlatformWebViewWidget createPlatformWebViewWidget(
+    html.PlatformWebViewWidgetCreationParams params,
+  ) => _HtmlWidget(params);
+}
+
+class _HtmlController extends html.PlatformWebViewController {
+  _HtmlController(super.params, this.pending, {required this.fail})
+    : super.implementation();
+  final Completer<void>? pending;
+  final bool fail;
+  _HtmlDelegate? delegate;
+  bool running = false;
+  bool blanked = false;
+  int documentLoads = 0;
+  Completer<void>? cleanup;
+  @override
+  Future<void> setPlatformNavigationDelegate(
+    html.PlatformNavigationDelegate handler,
+  ) async {
+    delegate = handler as _HtmlDelegate;
+    await pending?.future;
+    if (fail) throw StateError('fixture unavailable');
+  }
+
+  @override
+  Future<void> setJavaScriptMode(html.JavaScriptMode mode) async {}
+  @override
+  Future<void> loadHtmlString(String text, {String? baseUrl}) async {
+    expect(baseUrl, isNull);
+    running = text.contains('<iframe');
+    if (running) {
+      documentLoads++;
+    } else {
+      blanked = true;
+    }
+  }
+
+  @override
+  Future<void> runJavaScript(String script) async {
+    running = false;
+    await cleanup?.future;
+  }
+}
+
+class _HtmlDelegate extends html.PlatformNavigationDelegate {
+  _HtmlDelegate(super.params) : super.implementation();
+  html.NavigationRequestCallback? navigate;
+  html.WebResourceErrorCallback? failed;
+  @override
+  Future<void> setOnNavigationRequest(
+    html.NavigationRequestCallback callback,
+  ) async => navigate = callback;
+  @override
+  Future<void> setOnWebResourceError(
+    html.WebResourceErrorCallback callback,
+  ) async => failed = callback;
+}
+
+class _HtmlWidget extends html.PlatformWebViewWidget {
+  _HtmlWidget(super.params) : super.implementation();
+  @override
+  Widget build(BuildContext context) => const SizedBox.expand();
+}
+
+class _HtmlWorkspace extends _TextWorkspace {
+  bool truncated = false;
+  String text = '<button onclick="this.textContent=42">Run</button>';
+  @override
+  Future<FsDirectoryResult> listPath(
+    SessionDetailKey sessionKey, {
+    String path = '',
+  }) async {
+    final base = await super.listPath(sessionKey, path: path);
+    return FsDirectoryResult(
+      path: base.path,
+      stat: base.stat,
+      entries: const [
+        FsDirEntry(
+          name: 'report.html',
+          path: 'report.html',
+          type: 'file',
+          size: 60,
+          mtimeMs: 0,
+        ),
+      ],
+    );
+  }
+
+  @override
+  Future<FsReadResult> readFile(
+    SessionDetailKey sessionKey, {
+    required String path,
+    int maxBytes = sessionFilePreviewDefaultMaxBytes,
+  }) async => FsReadResult(
+    path: path,
+    size: 60,
+    limit: maxBytes,
+    truncated: truncated,
+    encoding: 'utf8',
+    data: text,
+    mimeType: 'text/html',
   );
 }

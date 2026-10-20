@@ -5193,10 +5193,6 @@
   "@fileViewerNoFilesBody": {
     "description": "How to fill the empty file pane."
   },
-  "fileViewerPassivePreview": "Passive preview — scripts disabled",
-  "@fileViewerPassivePreview": {
-    "description": "Badge on the rendered face of an HTML file. States what the frame will not do; on web the browser enforces it through the sandbox attribute, natively the WebView has JavaScript disabled."
-  },
   "fileViewerHtmlSourceOnly": "Rendered preview is unavailable on this platform — no embeddable browser view exists. Showing source.",
   "@fileViewerHtmlSourceOnly": {
     "description": "Why an HTML file has no Rendered face on Linux and Windows. The limit is that the available WebView opens a detached OS window, which cannot be composited into a pane."

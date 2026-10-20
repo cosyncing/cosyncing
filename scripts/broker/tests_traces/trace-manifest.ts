@@ -160,7 +160,7 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
         fn: 'F16',
         level: 'L1',
         agents: 'all',
-        note: 'real browser proves the injected policy blocks stylesheet, font and image loads from a rendered workspace HTML file, with an unpolicied control frame that does load them',
+        note: 'real app checks interactive HTML lifetime and opaque-origin isolation, plus server-recorded subresource and child-navigation blocking in embedded and file-browser contexts',
       },
     ],
   },

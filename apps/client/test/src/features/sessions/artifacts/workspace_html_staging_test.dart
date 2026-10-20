@@ -1,5 +1,7 @@
 import 'dart:io';
 
+import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_preview_html_policy.dart';
+
 import 'package:cosyncing_client/src/platform/artifacts/workspace_html_staging.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
@@ -50,7 +52,7 @@ void main() {
     });
 
     test(
-      'a staged copy carries the restrictive policy, not the file own',
+      'a staged copy uses the same isolated document as the pane',
       () async {
         final root = _root();
         final file = await stageWorkspaceHtmlFile(
@@ -63,18 +65,17 @@ void main() {
         );
         final staged = await file.readAsString();
 
-        // The browser runs a file:// page with full local privileges, so the
-        // policy the file declared for itself is exactly what must not survive.
-        expect(staged, isNot(contains('default-src *')));
-        expect(staged, contains("script-src 'none'"));
-        expect(staged, contains('hi'));
+        expect(
+          staged,
+          prepareInteractiveHtmlDocument(_pageDeclaringItsOwnPolicy),
+        );
         expect(file.path, endsWith('.html'));
       },
     );
 
     test('an HTML extension the file already has is not doubled', () async {
       final root = _root();
-      for (final name in ['report.htm', 'page.XHTML', 'index.html']) {
+      for (final name in ['report.htm', 'index.html']) {
         final file = await stageWorkspaceHtmlFile(
           sessionKey: 'codex/a',
           workspacePath: 'docs/$name',
@@ -88,6 +89,33 @@ void main() {
         expect(p.basename(file.path), name);
       }
     });
+
+    test(
+      'XHTML handoff is an HTML wrapper; incomplete bytes cannot open',
+      () async {
+        final root = _root();
+        final file = await stageWorkspaceHtmlFile(
+          sessionKey: 'codex/a',
+          workspacePath: 'report.xhtml',
+          html: '<p>hi</p>',
+          size: 9,
+          truncated: false,
+          rootDirectory: root,
+        );
+        expect(p.basename(file.path), 'report.xhtml.html');
+        await expectLater(
+          stageWorkspaceHtmlFile(
+            sessionKey: 'codex/a',
+            workspacePath: 'report.html',
+            html: '<script>',
+            size: 9000,
+            truncated: true,
+            rootDirectory: root,
+          ),
+          throwsStateError,
+        );
+      },
+    );
 
     test('a name with no HTML extension gets one', () async {
       final root = _root();
