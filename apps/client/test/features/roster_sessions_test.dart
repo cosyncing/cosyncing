@@ -100,88 +100,131 @@ void main() {
     );
   });
 
-  featureTest('hiding retains its open tab, supports Undo and Unhide, '
-      'and custom days reach the broker', (f) async {
-    final studio = f.network.add('http://studio.test:7734')
-      ..addSession(
-        'hide-me',
-        'Keep this conversation',
-        extra: {
-          'appHidden': false,
-          'appHiddenByAncestor': false,
-          'appVisibilityRevision': 0,
-        },
-      )
-      ..addSession('other', 'Another conversation');
-    await f.storage.seedServer(studio);
-    final app = await f.launch();
-    await app.openFromRoster('hide-me', cwd: '/work/studio');
-    expect(
-      find.byKey(const Key('session-actions-codex-hide-me')),
-      findsNothing,
-    );
-    await app.tester.longPress(app.row('hide-me'));
-    await app.settle();
-    await app.tap(find.text(en.sessionHide));
-    await app.waitForAbsent(app.row('hide-me'));
-    expect(app.tab('hide-me'), findsOneWidget);
-    await app.tap(find.text(en.sessionVisibilityUndo));
-    await app.waitFor(app.row('hide-me'));
-    await app.tester.longPress(app.row('hide-me'));
-    await app.settle();
-    await app.tap(find.text(en.sessionHide));
-    await app.waitForAbsent(app.row('hide-me'));
-    await app.tapKey('session-roster-filter-button');
-    await app.tapKey('session-roster-show-hidden');
-    await app.waitFor(app.row('hide-me'));
-    await app.choose(
-      find.byKey(const Key('session-roster-filter-activity')),
-      en.sessionRosterCustom,
-    );
-    await app.enterText(
-      find.byKey(const Key('session-roster-custom-days')),
-      '0',
-    );
-    await app.tap(find.text(en.done));
-    expect(find.text(en.sessionRosterInvalidDays), findsOneWidget);
-    expect(app.rosterReads(studio).map(windowOf), isNot(contains('0d')));
-    await app.enterText(
-      find.byKey(const Key('session-roster-custom-days')),
-      '2',
-    );
-    await app.tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
-    await app.settle();
-    expect(app.rosterReads(studio).map(windowOf), contains('3d'));
-    await app.tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
-    await app.tester.testTextInput.receiveAction(TextInputAction.done);
-    await app.settle();
-    expect(app.rosterReads(studio).map(windowOf), contains('2d'));
-    await app.tap(find.text(en.done));
-    expect(
-      find.byKey(const Key('session-actions-codex-hide-me')),
-      findsNothing,
-    );
-    await app.tester.longPress(app.row('hide-me'));
-    await app.settle();
-    await app.tap(find.text(en.sessionUnhide));
-    expect(
-      studio.sessions.firstWhere((s) => s['id'] == 'hide-me')['appHidden'],
-      false,
-    );
-    expect(app.tab('hide-me'), findsOneWidget);
-    await app.openStatus();
-    await app.tapKey('session-detail-hide-button');
-    expect(app.tab('hide-me'), findsOneWidget);
-    expect(
-      studio.sessions.firstWhere((s) => s['id'] == 'hide-me')['appHidden'],
-      true,
-    );
-    await app.tapKey('session-detail-hide-button');
-    expect(
-      studio.sessions.firstWhere((s) => s['id'] == 'hide-me')['appHidden'],
-      false,
-    );
-  });
+  featureTest(
+    'hiding retains its open tab, notices expire or close with accessible '
+    'Undo, and custom days reach the broker',
+    (f) async {
+      final studio = f.network.add('http://studio.test:7734')
+        ..addSession(
+          'hide-me',
+          'Keep this conversation',
+          extra: {
+            'appHidden': false,
+            'appHiddenByAncestor': false,
+            'appVisibilityRevision': 0,
+          },
+        )
+        ..addSession('other', 'Another conversation');
+      await f.storage.seedServer(studio);
+      final app = await f.launch();
+      await app.openFromRoster('hide-me', cwd: '/work/studio');
+      expect(
+        find.byKey(const Key('session-actions-codex-hide-me')),
+        findsNothing,
+      );
+      await app.tester.longPress(app.row('hide-me'));
+      await app.settle();
+      await app.tap(find.text(en.sessionHide));
+      await app.waitForAbsent(app.row('hide-me'));
+      expect(app.tab('hide-me'), findsOneWidget);
+      await app.tap(find.text(en.sessionVisibilityUndo));
+      await app.waitFor(app.row('hide-me'));
+      await app.tester.longPress(app.row('hide-me'));
+      await app.settle();
+      await app.tap(find.text(en.sessionHide));
+      await app.waitForAbsent(app.row('hide-me'));
+      await app.waitFor(find.text(en.sessionHidden));
+      await app.waitForAbsent(find.byType(SnackBar));
+      expect(app.tab('hide-me'), findsOneWidget);
+      await app.tapKey('session-roster-filter-button');
+      await app.tapKey('session-roster-show-hidden');
+      await app.waitFor(app.row('hide-me'));
+      await app.choose(
+        find.byKey(const Key('session-roster-filter-activity')),
+        en.sessionRosterCustom,
+      );
+      await app.enterText(
+        find.byKey(const Key('session-roster-custom-days')),
+        '0',
+      );
+      await app.tap(find.text(en.done));
+      expect(find.text(en.sessionRosterInvalidDays), findsOneWidget);
+      expect(app.rosterReads(studio).map(windowOf), isNot(contains('0d')));
+      await app.enterText(
+        find.byKey(const Key('session-roster-custom-days')),
+        '2',
+      );
+      await app.tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+      await app.settle();
+      expect(app.rosterReads(studio).map(windowOf), contains('3d'));
+      await app.tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await app.tester.testTextInput.receiveAction(TextInputAction.done);
+      await app.settle();
+      expect(app.rosterReads(studio).map(windowOf), contains('2d'));
+      await app.tap(find.text(en.done));
+      expect(
+        find.byKey(const Key('session-actions-codex-hide-me')),
+        findsNothing,
+      );
+      await app.tester.longPress(app.row('hide-me'));
+      await app.settle();
+      await app.tap(find.text(en.sessionUnhide));
+      expect(
+        studio.sessions.firstWhere((s) => s['id'] == 'hide-me')['appHidden'],
+        false,
+      );
+      expect(app.tab('hide-me'), findsOneWidget);
+      await app.waitFor(find.text(en.sessionUnhidden));
+      await app.waitForAbsent(find.byType(SnackBar));
+      await app.openStatus();
+      await app.tapKey('session-detail-hide-button');
+      expect(app.tab('hide-me'), findsOneWidget);
+      expect(
+        studio.sessions.firstWhere((s) => s['id'] == 'hide-me')['appHidden'],
+        true,
+      );
+      await app.waitFor(find.text(en.sessionHidden));
+      final closeNotice = find.descendant(
+        of: find.byType(SnackBar),
+        matching: find.byTooltip(
+          MaterialLocalizations.of(
+            app.tester.element(find.byType(SnackBar)),
+          ).closeButtonTooltip,
+        ),
+      );
+      await app.tap(closeNotice);
+      await app.waitForAbsent(find.byType(SnackBar));
+      expect(
+        studio.sessions.firstWhere((s) => s['id'] == 'hide-me')['appHidden'],
+        true,
+      );
+      await app.tapKey('session-detail-hide-button');
+      expect(
+        studio.sessions.firstWhere((s) => s['id'] == 'hide-me')['appHidden'],
+        false,
+      );
+      await app.waitFor(find.text(en.sessionUnhidden));
+      await app.waitForAbsent(find.byType(SnackBar));
+
+      app.tester.platformDispatcher.accessibilityFeaturesTestValue =
+          const FakeAccessibilityFeatures(accessibleNavigation: true);
+      addTearDown(
+        app.tester.platformDispatcher.clearAccessibilityFeaturesTestValue,
+      );
+      await app.settle();
+      await app.tapKey('session-detail-hide-button');
+      await app.waitFor(find.text(en.sessionHidden));
+      await app.elapse(const Duration(seconds: 8));
+      expect(find.text(en.sessionHidden), findsOneWidget);
+      await app.tap(find.text(en.sessionVisibilityUndo));
+      expect(
+        studio.sessions.firstWhere((s) => s['id'] == 'hide-me')['appHidden'],
+        false,
+      );
+      await app.waitFor(find.text(en.sessionUnhidden));
+      await app.waitForAbsent(find.byType(SnackBar));
+    },
+  );
 
   featureTest(
     'Home excludes subagents, counts old active sessions before filters '

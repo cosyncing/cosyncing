@@ -43,6 +43,7 @@ Future<void> changeSessionVisibility(
   final messenger = ScaffoldMessenger.of(context);
   final actionContext = Navigator.of(context).context;
   final l10n = AppLocalizations.of(context);
+  final accessibleNavigation = MediaQuery.accessibleNavigationOf(context);
   bool current() =>
       RosterSource.of(container.read(activeBrokerProfileProvider)) == source;
   container.read(sessionVisibilityPendingProvider.notifier).state = {
@@ -77,6 +78,8 @@ Future<void> changeSessionVisibility(
       ..showSnackBar(
         SnackBar(
           content: Text(hidden ? l10n.sessionHidden : l10n.sessionUnhidden),
+          persist: offerUndo && accessibleNavigation,
+          showCloseIcon: true,
           action: offerUndo
               ? SnackBarAction(
                   label: l10n.sessionVisibilityUndo,
