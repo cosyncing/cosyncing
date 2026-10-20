@@ -4,6 +4,7 @@ import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/design/window_size_class.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/file_html_renderer.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_media_view.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_renderers.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_renderers_builtin.dart';
@@ -226,6 +227,7 @@ class _FileViewerPaneState extends State<FileViewerPane> {
   /// code renderer's carry pass over a 1 MB payload must not run again every
   /// time the wrap toggle flips.
   String? _preparedKey;
+  String? _preparedText;
   Object? _preparedState;
   FileRenderNotice? _preparedNotice;
   List<String> _lines = const [];
@@ -290,15 +292,18 @@ class _FileViewerPaneState extends State<FileViewerPane> {
 
   /// Records the current face and offset for a possible width crossing.
   void _reportView() {
-    if (!_vertical.hasClients || _renderFailed) return;
-    _modeOffsets[_mode] = _vertical.offset;
+    if (_renderFailed) return;
+    final offset = _vertical.hasClients
+        ? _vertical.offset
+        : (_modeOffsets[_mode] ?? 0.0);
+    _modeOffsets[_mode] = offset;
     if (!_explicitMode &&
         !_anchorHandled &&
         widget.content is FileViewerSource &&
         (widget.content as FileViewerSource).preview.anchorLine != null) {
       return;
     }
-    widget.onViewChanged?.call((mode: _mode, offset: _vertical.offset));
+    widget.onViewChanged?.call((mode: _mode, offset: offset));
   }
 
   /// Restores a handed-over offset once the body has a viewport.
@@ -505,13 +510,18 @@ class _FileViewerPaneState extends State<FileViewerPane> {
                           });
                           widget.onModeChanged?.call(mode);
                           WidgetsBinding.instance.addPostFrameCallback((_) {
-                            if (!mounted || !_vertical.hasClients) return;
-                            _vertical.jumpTo(
-                              offset.clamp(
-                                0,
-                                _vertical.position.maxScrollExtent,
-                              ),
-                            );
+                            if (!mounted) return;
+                            if (_vertical.hasClients) {
+                              _vertical.jumpTo(
+                                offset.clamp(
+                                  0,
+                                  _vertical.position.maxScrollExtent,
+                                ),
+                              );
+                            }
+                            // HTML owns its scroll inside the document, but its
+                            // explicit mode must still replace old Source
+                            // memory.
                             _reportView();
                           });
                         },
@@ -644,16 +654,6 @@ class _FileViewerPaneState extends State<FileViewerPane> {
             formatFileSize(l10n, preview.size),
           ),
         ),
-      // Placement is the host's, and it is per-face: preparation runs once per
-      // file, so the renderer cannot know which face is showing. A badge about
-      // the frame belongs on the face that has one.
-      if (_preparedNotice == FileRenderNotice.passivePreview &&
-          _mode == FileViewMode.rendered)
-        _Notice(
-          noticeKey: const Key('file-viewer-passive-preview'),
-          tokens: tokens,
-          message: l10n.fileViewerPassivePreview,
-        ),
       if (_preparedNotice == FileRenderNotice.htmlSourceOnly)
         _Notice(
           noticeKey: const Key('file-viewer-html-source-only'),
@@ -661,7 +661,7 @@ class _FileViewerPaneState extends State<FileViewerPane> {
           message: l10n.fileViewerHtmlSourceOnly,
           // A dead end on two of six platforms does not serve the reader, and
           // the escape hatch has to be labelled rather than implied.
-          action: widget.onOpenExternally == null
+          action: widget.onOpenExternally == null || preview.truncated
               ? null
               : _HandoffAction(
                   actionKey: const Key('file-viewer-open-in-browser'),
@@ -842,19 +842,28 @@ class _FileViewerPaneState extends State<FileViewerPane> {
     AppTokens tokens,
     SessionFilePreview preview,
   ) {
-    final descriptor = resolveFileRenderer(
+    var descriptor = resolveFileRenderer(
       builtInFileRenderers(),
       path: preview.path,
       fallbackId: plainFileRendererId,
       mimeType: preview.mimeType,
     );
+    if (descriptor.id == htmlFileRendererId && preview.truncated) {
+      descriptor = FileRendererDescriptor(
+        id: descriptor.id,
+        source: descriptor.source,
+        build: descriptor.build,
+        prepare: descriptor.prepare,
+      );
+    }
     final key =
-        '${preview.path}\u0000${preview.text.length}'
-        '\u0000${preview.text.hashCode}\u0000${descriptor.id}';
-    if (_preparedKey != key) {
+        '${preview.path}\u0000${descriptor.id}\u0000${preview.truncated}';
+    if (_preparedKey != key || _preparedText != preview.text) {
       _displayAnchor = preview.anchorLine;
       _renderFailed = false;
-      _lines = preview.text.isEmpty ? const [] : preview.text.split('\n');
+      _lines = descriptor.id == htmlFileRendererId || preview.text.isEmpty
+          ? const []
+          : preview.text.split('\n');
       // Explicit source-line navigation wins over a remembered reader mode.
       // Fresh documents prefer their rendered capability when one exists.
       _mode = preview.anchorLine != null
@@ -868,6 +877,7 @@ class _FileViewerPaneState extends State<FileViewerPane> {
         _request(context, tokens, descriptor, preview, prepared: null),
       );
       _preparedKey = key;
+      _preparedText = preview.text;
       _preparedState = prepared?.state;
       _preparedNotice = prepared?.notice;
     }
@@ -881,6 +891,11 @@ class _FileViewerPaneState extends State<FileViewerPane> {
     SessionFilePreview preview, {
     required Object? prepared,
   }) {
+    if (_lines.isEmpty &&
+        preview.text.isNotEmpty &&
+        (_mode == FileViewMode.source || descriptor.id != htmlFileRendererId)) {
+      _lines = preview.text.split('\n');
+    }
     return FileRenderRequest(
       path: preview.path,
       displayName: preview.displayName,
@@ -911,9 +926,14 @@ class _FileViewerPaneState extends State<FileViewerPane> {
           : null,
       anchorColumn: preview.anchorColumn,
       onCopy: (text) => unawaited(_copy(context, text)),
-      onRenderFailed: () {
+      onRenderFailed: ({isCurrent}) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted || widget.content.path != preview.path) return;
+          if (!mounted ||
+              (isCurrent != null && !isCurrent()) ||
+              widget.content.path != preview.path ||
+              _preparedText != preview.text) {
+            return;
+          }
           setState(() {
             _renderFailed = true;
             _mode = FileViewMode.source;
@@ -1246,16 +1266,20 @@ class _ModeToggle extends StatelessWidget {
     final theme = Theme.of(context);
     Widget segment(FileViewMode value, String label, Key key) {
       final selected = value == mode;
-      return InkWell(
-        key: key,
-        onTap: selected ? null : () => onChanged(value),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-          child: Text(
-            label,
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: selected ? tokens.accent : tokens.textTertiary,
-              fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
+      return Semantics(
+        button: true,
+        selected: selected,
+        child: InkWell(
+          key: key,
+          onTap: selected ? null : () => onChanged(value),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            child: Text(
+              label,
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: selected ? tokens.accent : tokens.textTertiary,
+                fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
+              ),
             ),
           ),
         ),
