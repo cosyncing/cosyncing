@@ -1,9 +1,12 @@
+import 'dart:convert';
+
 import 'package:path/path.dart' as path;
 
 /// Restrictive CSP for broker-independent HTML preview hardening.
 ///
 /// This policy intentionally prioritizes runtime safety over permissiveness:
-/// scripts are disabled, most navigation/cross-document primitives are disabled,
+/// scripts are disabled, most navigation/cross-document primitives are
+/// disabled,
 /// and only static assets needed for local previews are allowed from local/data
 /// schemes.
 const String sessionArtifactPreviewRestrictiveContentSecurityPolicy =
@@ -14,6 +17,41 @@ const String sessionArtifactPreviewRestrictiveContentSecurityPolicy =
     "style-src 'self' 'unsafe-inline' data: file:; "
     "font-src 'self' data: file:; "
     "manifest-src 'none'; base-uri 'none';";
+
+/// Self-contained interactive documents only. Deliberately separate from the
+/// legacy restrictive local-file policy: no file:, self or network source
+/// grants, evaluation or workers. This is not a universal network firewall.
+const String sessionArtifactPreviewInteractiveContentSecurityPolicy =
+    "default-src 'none'; script-src 'unsafe-inline'; "
+    "style-src 'unsafe-inline'; img-src data:; "
+    'font-src data:; media-src data:; '
+    "connect-src 'none'; frame-src 'none'; child-src 'none'; "
+    "worker-src 'none'; "
+    "object-src 'none'; base-uri 'none'; "
+    "form-action 'none'; manifest-src 'none';";
+
+/// A trusted containing document establishes CSP BEFORE parsing any artifact
+/// bytes. srcdoc inherits that policy, including when the artifact has
+/// malformed metadata or its own additional CSP. The parent's frame-src
+/// also denies the child's self-navigation before a request can be sent.
+///
+/// Every path (embedded, native and staged external HTML) uses this envelope.
+/// The child has an opaque origin and cannot edit its parent or access storage.
+/// XHTML inputs are intentionally interpreted as HTML, like all srcdoc inputs;
+/// staged wrappers must therefore always be served/opened as text/html.
+String prepareInteractiveHtmlDocument(String html) {
+  final source = const HtmlEscape().convert(html);
+  return '''
+<!doctype html><html><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy"
+content="$sessionArtifactPreviewInteractiveContentSecurityPolicy">
+<meta name="referrer" content="no-referrer">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HTML</title></head><body style="margin:0">
+<iframe sandbox="allow-scripts" referrerpolicy="no-referrer" title="HTML"
+style="border:0;position:fixed;inset:0;width:100%;height:100%"
+srcdoc="$source"></iframe></body></html>''';
+}
 
 /// Helpers for detecting and hardening cached HTML artifact previews.
 ///

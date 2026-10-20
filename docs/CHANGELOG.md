@@ -21,6 +21,11 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Changed
 
+- HTML previews run self-contained scripts by default, retaining visible state
+  across ordinary updates and releasing execution when hidden or backgrounded.
+  Source/Rendered controls remain; reopening resets document state. Remote
+  resource dependencies remain blocked, and incomplete HTML stays in Source.
+
 - Usage overview opens on Day, includes cost beside tokens and share in every
   ranking, and removes the integrations catalog and CSV export.
 - Send shows its keyboard shortcut in the tooltip. Background activity and

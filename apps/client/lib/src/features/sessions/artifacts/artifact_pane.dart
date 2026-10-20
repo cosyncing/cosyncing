@@ -267,6 +267,7 @@ class ArtifactPaneBody extends ConsumerWidget {
         '${RosterSource.of(ref.watch(activeBrokerProfileProvider))?.storageKey}'
         '\u0000${pane.key}';
     return FileViewerPane(
+      key: ValueKey(memoryKey),
       content: content,
       onOpenWith: kIsWeb
           ? null

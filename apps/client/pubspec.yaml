@@ -69,6 +69,7 @@ dev_dependencies:
   path_provider_platform_interface: ^2.1.3
   very_good_analysis: ^9.0.0
   video_player_platform_interface: ^6.9.0
+  webview_flutter_platform_interface: 2.15.1
 
 # Vendored fork: clears an unpackaged app's delivered toasts, reads the per-app
 # toast setting, and registers cold-start activation. See its README-fork.md.
