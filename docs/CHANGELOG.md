@@ -30,6 +30,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Settings choice controls highlight only the selected value, leaving labels
+  and descriptions clear. Dropdowns match the button width and omit repeated
+  headings. Fixed settings choices such as themes no longer show a search field.
 - Hide and unhide sessions respond immediately while the broker saves the
   change. Undo also responds while saving; failed changes restore the current
   broker state and show an error.

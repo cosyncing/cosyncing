@@ -109,16 +109,19 @@ void main() {
       expect(app.theme.brightness, Brightness.light);
       expect(app.textScale, 1);
 
-      // At phone width the label and value share a full-width picker trigger.
+      // At phone width only the value control activates the picker.
       final density = find.byKey(const Key('appearance-density'));
       await app.reveal(density);
-      expect(app.tester.getSize(density).width, greaterThan(300));
       expect(
-        app.tester.getTopLeft(density).dy,
-        lessThanOrEqualTo(app.tester.getTopLeft(find.text(en.densityLabel)).dy),
+        app.tester
+            .getRect(density)
+            .overlaps(
+              app.tester.getRect(find.text(en.densityLabel)),
+            ),
+        isFalse,
       );
 
-      // The popup stays aligned to the phone row and dismisses without
+      // The popup stays aligned to the value control and dismisses without
       // changing the value. Keyboard choice commits only when activated.
       await app.tapKey('appearance-theme-mode');
       final popup = find.byKey(const Key('adaptive-picker-popup'));
@@ -128,8 +131,8 @@ void main() {
         closeTo(app.tester.getSize(trigger).width, 1),
       );
       expect(
-        app.tester.getTopLeft(popup).dx,
-        closeTo(app.tester.getTopLeft(trigger).dx, 1),
+        app.tester.getRect(popup).right,
+        closeTo(app.tester.getRect(trigger).right, 1),
       );
       await app.tester.sendKeyEvent(LogicalKeyboardKey.escape);
       await app.settle();
@@ -199,6 +202,95 @@ void main() {
       await app.pick('appearance-language', en.languageSpanish);
       expect(app.locale.languageCode, 'es');
     });
+
+    for (final viewport in [
+      FeatureViewport.narrowPhone,
+      FeatureViewport.phone,
+      FeatureViewport.desktop,
+    ]) {
+      featureTest(
+        'choice popups preserve settings labels at ${viewport.name}',
+        (
+          f,
+        ) async {
+          await studioSeeded(f);
+          await f.storage.preferences.setThemeId('soft-minimalist');
+          final app = await f.launch(
+            viewport: viewport,
+            initialLocation: displaySettingsRoute,
+          );
+          final popup = find.byKey(const Key('adaptive-picker-popup'));
+          final trigger = find.byKey(const Key('appearance-theme'));
+          addTearDown(
+            app.tester.platformDispatcher.clearTextScaleFactorTestValue,
+          );
+
+          for (final mode in [en.themeModeLight, en.themeModeDark]) {
+            if (viewport == FeatureViewport.narrowPhone &&
+                mode == en.themeModeDark) {
+              app.tester.platformDispatcher.textScaleFactorTestValue = 2;
+              await app.settle();
+            }
+            await app.pick('appearance-theme-mode', mode);
+            await app.reveal(trigger);
+            final controlBounds = app.tester.getRect(trigger);
+            final title = find.text(en.themeLabel);
+            final description = find.text(en.themeSoftMinimalistDescription);
+            expect(controlBounds.overlaps(app.tester.getRect(title)), isFalse);
+            expect(
+              controlBounds.overlaps(app.tester.getRect(description)),
+              isFalse,
+            );
+
+            // Labels and descriptions remain readable, outside the active fill.
+            await app.tap(title);
+            expect(popup, findsNothing);
+            await app.tap(description);
+            expect(popup, findsNothing);
+            await app.tapKey('appearance-theme');
+            expect(popup, findsOneWidget);
+            expect(
+              find.descendant(of: popup, matching: find.text(en.themeLabel)),
+              findsNothing,
+            );
+            expect(
+              find.descendant(of: popup, matching: find.byType(TextField)),
+              findsNothing,
+            );
+            final popupBounds = app.tester.getRect(popup);
+            expect(
+              popupBounds.width,
+              closeTo(controlBounds.width, 1),
+            );
+            expect(popupBounds.right, closeTo(controlBounds.right, 1));
+            expect(popupBounds.left, greaterThanOrEqualTo(0));
+            expect(popupBounds.right, lessThanOrEqualTo(viewport.size.width));
+            expect(popupBounds.overlaps(controlBounds), isFalse);
+            expect(popupBounds.overlaps(app.tester.getRect(title)), isFalse);
+            expect(
+              popupBounds.overlaps(app.tester.getRect(description)),
+              isFalse,
+            );
+
+            // Outside taps and Escape both cancel. The existing appearance
+            // journey covers choosing and persisting a theme from this list.
+            if (mode == en.themeModeLight) {
+              await app.tester.tapAt(app.tester.getCenter(title));
+            } else {
+              await app.tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+              await app.tester.sendKeyEvent(LogicalKeyboardKey.escape);
+            }
+            await app.settle();
+            expect(popup, findsNothing);
+            expect(
+              app.selected('appearance-theme'),
+              en.themeSoftMinimalistName,
+            );
+            expect(app.tester.takeException(), isNull);
+          }
+        },
+      );
+    }
 
     featureTest('the text size steps along the ladder and stops at its ends', (
       f,
