@@ -960,11 +960,7 @@ void main() {
         findsOneWidget,
       );
 
-      await openSessionDetailViewMenu(tester);
-      await tester.tap(find.byKey(const Key('session-tool-visibility')));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Hide tool calls').last);
-      await tester.pumpAndSettle();
+      await toggleSessionDetailViewOption(tester, 'report');
       final toolRow = find.byKey(
         const ValueKey('session-message-context-tool-1'),
       );

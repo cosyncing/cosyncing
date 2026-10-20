@@ -751,6 +751,54 @@ void main() {
   });
 
   group('question cards', () {
+    for (final tool in ['codex', 'claude', 'opencode']) {
+      featureTest(
+        'phone question entry preserves the draft without raising the main '
+        'composer ($tool)',
+        (f) async {
+          late FakeBroker broker;
+          final app = await openTranscript(
+            f,
+            [
+              questionRequest('q-phone', [askQuestion('Which phone?')]),
+            ],
+            tool: tool,
+            viewport: FeatureViewport.phone,
+            setup: (value) => broker = value,
+          );
+          await app.type('Keep this separate draft');
+          final composer = find.byKey(const Key('session-detail-composer'));
+          final answer = app.questionControl('custom', 'q-phone', '-0');
+          await app.enterText(answer, 'OnePlus');
+          for (final inset in [96.0, 300.0, 0.0, 320.0]) {
+            f.tester.view.viewInsets = FakeViewPadding(bottom: inset);
+            await app.settle();
+            expect(composer, inset == 0 ? findsOneWidget : findsNothing);
+            expect(answer.hitTestable(), findsOneWidget);
+            expect(f.tester.takeException(), isNull);
+          }
+          await app.sendAnswer('q-phone');
+          expect(app.decisionsSent(broker).single['answers'], [
+            ['OnePlus'],
+          ]);
+          f.tester.view.viewInsets = FakeViewPadding.zero;
+          await app.settle();
+          expect(composer, findsOneWidget);
+          expect(app.composerText, 'Keep this separate draft');
+          await app.type('Normal prompt typing still works');
+          f.tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+          await app.settle();
+          expect(composer.hitTestable(), findsOneWidget);
+          expect(app.composerText, 'Normal prompt typing still works');
+          expect(
+            f.tester.getRect(composer).bottom,
+            closeTo(FeatureViewport.phone.size.height - 300 - 8, 1),
+          );
+        },
+        platform: TargetPlatform.android,
+      );
+    }
+
     featureTest(
       'an earlier Codex question offers an explicit follow-up while live '
       'questions keep their answer channel',

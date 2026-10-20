@@ -12,6 +12,7 @@ import 'package:cosyncing_client/src/features/schedules/platform/device_time_zon
 import 'package:cosyncing_client/src/features/schedules/view/schedule_date_time_field.dart';
 import 'package:cosyncing_client/src/features/sessions/list/new_session_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/new_session_launch_controller.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_harness_logo.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_model_preference_store.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_participants.dart';
@@ -574,6 +575,16 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
               key: const Key('new-session-agent'),
               child: AdaptivePickerFormField<String>(
                 key: ValueKey(effectiveTool),
+                searchable: false,
+                leadingBuilder: (tool) => tool == null
+                    ? null
+                    : ExcludeSemantics(
+                        child: SessionHarnessLogo(
+                          tool: tool,
+                          size: 20,
+                          tooltip: false,
+                        ),
+                      ),
                 initialValue: effectiveTool,
                 decoration: InputDecoration(
                   labelText: l10n.newSessionAgentLabel,

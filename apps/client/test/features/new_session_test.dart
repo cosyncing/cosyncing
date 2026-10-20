@@ -1,12 +1,14 @@
 // F02 — Starting a new session, through the real App.
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_harness_logo.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../support/feature/cosyncing_app.dart';
 import '../support/feature/fake_broker.dart';
 import '../support/feature/roster_driver.dart';
+import '../support/feature/session_driver.dart';
 
 final AppLocalizations en = lookupAppLocalizations(const Locale('en'));
 
@@ -46,14 +48,48 @@ void main() {
       'offers only agents that can create sessions, with the exact model '
       'and mode catalogs of the chosen one',
       (f) async {
-        studioWithAgents(f);
+        final studio = studioWithAgents(f);
+        final extraAgents = [
+          'opencode',
+          'pi',
+          'omp',
+          'reasonix',
+          'grok',
+          'kilo',
+        ];
+        studio.agents!.addAll([
+          for (final tool in extraAgents)
+            fakeAgent(id: tool, displayName: tool),
+        ]);
         await f.storage.seedServer(
           f.network.brokerFor(Uri.parse('http://studio.test:7734'))!,
         );
         final app = await f.launch();
         await app.openNewSession();
 
-        expect(app.optionsOf(app.agentPicker), ['Codex', 'Claude']);
+        expect(app.optionsOf(app.agentPicker), [
+          'Codex',
+          'Claude',
+          ...extraAgents,
+        ]);
+        expect(
+          find.descendant(
+            of: app.agentPicker,
+            matching: find.byType(SessionHarnessLogo),
+          ),
+          findsOneWidget,
+        );
+        await app.tap(app.agentPicker);
+        final popup = find.byKey(const Key('adaptive-picker-popup'));
+        expect(
+          find.descendant(of: popup, matching: find.byType(TextField)),
+          findsNothing,
+        );
+        expect(
+          find.descendant(of: popup, matching: find.byType(SessionHarnessLogo)),
+          findsWidgets,
+        );
+        await app.dismissModal();
         expect(app.optionsOf(app.modelPicker), [
           en.newSessionModelDefault,
           'GPT Test',

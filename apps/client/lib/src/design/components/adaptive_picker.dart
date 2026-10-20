@@ -495,6 +495,8 @@ class AdaptivePickerFormField<T> extends FormField<T> {
     required this.onChanged,
     this.decoration = const InputDecoration(),
     Widget? hint,
+    bool? searchable,
+    Widget? Function(T? value)? leadingBuilder,
     super.initialValue,
     super.validator,
     super.onSaved,
@@ -510,6 +512,7 @@ class AdaptivePickerFormField<T> extends FormField<T> {
            ),
            isEmpty: state.value == null,
            child: AdaptivePicker<T?>(
+             searchable: searchable,
              value: state.value,
              title: decoration.labelText,
              placeholder: _pickerText(hint),
@@ -518,6 +521,7 @@ class AdaptivePickerFormField<T> extends FormField<T> {
                  PickerOption(
                    value: item.value,
                    label: _pickerText(item.child),
+                   leading: leadingBuilder?.call(item.value),
                    enabled: item.enabled,
                    key: item.key,
                    description: item.child is Tooltip

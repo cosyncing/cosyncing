@@ -7,6 +7,7 @@ enum _SessionViewMenuAction {
   terminal,
   files,
   debug,
+  toggleToolCalls,
 }
 
 /// Row height for every entry in the ⋮ menu.
@@ -79,6 +80,10 @@ class _SessionViewMenu extends StatelessWidget {
     final tokens = context.tokens;
     final scale = MediaQuery.textScalerOf(context);
     final pending = _pendingSignals(l10n);
+    final compact = MediaQuery.sizeOf(context).width < 600;
+    final toolsHidden =
+        toolVisibility == ToolVisibility.hide ||
+        (toolVisibility == ToolVisibility.inherit && defaultHidden);
 
     return SizedBox(
       width: MediaQuery.sizeOf(context).width < 600 ? 40 : 32,
@@ -132,6 +137,10 @@ class _SessionViewMenu extends StatelessWidget {
               onSelectView(_SessionDetailView.files);
             case _SessionViewMenuAction.debug:
               onSelectView(_SessionDetailView.debug);
+            case _SessionViewMenuAction.toggleToolCalls:
+              onToolVisibilityChanged?.call(
+                toolsHidden ? ToolVisibility.show : ToolVisibility.hide,
+              );
           }
         },
         itemBuilder: (context) => [
@@ -179,38 +188,52 @@ class _SessionViewMenu extends StatelessWidget {
           // destinations from toggles, not open a gap in the middle of a
           // six-row menu.
           const PopupMenuDivider(height: 8),
-          _SessionPickerEntry(
-            child: SizedBox(
-              width: 240,
-              child: SettingsSelect<ToolVisibility>(
-                key: const Key('session-tool-visibility'),
-                title: l10n.toolsVisibility,
-                value: toolVisibility,
-                options: [
-                  SettingsSelectOption(
-                    value: ToolVisibility.inherit,
-                    label: l10n.toolsUseDefault(
-                      defaultHidden ? l10n.toolsHidden : l10n.toolsShown,
+          if (compact)
+            CheckedPopupMenuItem(
+              key: const Key('session-tool-visibility-toggle'),
+              value: _SessionViewMenuAction.toggleToolCalls,
+              checked: toolsHidden,
+              enabled: onToolVisibilityChanged != null,
+              height: 40,
+              padding: _menuItemPadding,
+              child: Text(
+                l10n.toolsHide,
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            )
+          else
+            _SessionPickerEntry(
+              child: SizedBox(
+                width: 240,
+                child: SettingsSelect<ToolVisibility>(
+                  key: const Key('session-tool-visibility'),
+                  title: l10n.toolsVisibility,
+                  value: toolVisibility,
+                  options: [
+                    SettingsSelectOption(
+                      value: ToolVisibility.inherit,
+                      label: l10n.toolsUseDefault(
+                        defaultHidden ? l10n.toolsHidden : l10n.toolsShown,
+                      ),
                     ),
-                  ),
-                  SettingsSelectOption(
-                    value: ToolVisibility.show,
-                    label: l10n.toolsShow,
-                  ),
-                  SettingsSelectOption(
-                    value: ToolVisibility.hide,
-                    label: l10n.toolsHide,
-                  ),
-                ],
-                onChanged: onToolVisibilityChanged == null
-                    ? null
-                    : (value) {
-                        onToolVisibilityChanged!(value);
-                        Navigator.pop(context);
-                      },
+                    SettingsSelectOption(
+                      value: ToolVisibility.show,
+                      label: l10n.toolsShow,
+                    ),
+                    SettingsSelectOption(
+                      value: ToolVisibility.hide,
+                      label: l10n.toolsHide,
+                    ),
+                  ],
+                  onChanged: onToolVisibilityChanged == null
+                      ? null
+                      : (value) {
+                          onToolVisibilityChanged!(value);
+                          Navigator.pop(context);
+                        },
+                ),
               ),
             ),
-          ),
         ],
       ),
     );

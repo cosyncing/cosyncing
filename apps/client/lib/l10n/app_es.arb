@@ -1901,5 +1901,21 @@
   "sessionQuestionHistorical": "Pregunta anterior · estado de respuesta no disponible",
   "@workspaceCloseSelectedTabs": {"placeholders": {"count": {"type": "int"}}},
   "workspaceActiveTab": "Pestaña activa",
-  "sessionQuestionFollowUpSent": "Respuesta de seguimiento enviada"
+  "sessionQuestionFollowUpSent": "Respuesta de seguimiento enviada",
+  "updatesUpdateApp": "Actualizar aplicación",
+  "updatesUpdateServer": "Actualizar servidor",
+  "updatesUpdateServers": "{count, plural, =1{Actualizar 1 servidor} other{Actualizar {count} servidores}}",
+  "updatesIncludeApp": "Actualizar también esta aplicación",
+  "updatesInstall": "Instalar actualizaciones",
+  "updatesDownload": "Descargar actualización",
+  "updatesCheckAgain": "Volver a comprobar",
+  "updatesAndroidInstallerNotice": "Primero se descargará la actualización. Después, Android te pedirá que la instales con el instalador del sistema.",
+  "updatesDownloadNotice": "Descarga la actualización e instálala manualmente. Esta aplicación no se reemplazará automáticamente.",
+  "@updatesUpdateServers": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  }
 }

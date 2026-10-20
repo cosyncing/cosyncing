@@ -8,6 +8,63 @@ import 'package:cosyncing_client/src/platform/update/desktop_client_update_provi
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+Future<bool> _confirmAppDownload(
+  BuildContext context, {
+  required String installedVersion,
+  required String targetVersion,
+  required bool android,
+}) async {
+  final l = AppLocalizations.of(context);
+  return await showModalBottomSheet<bool>(
+        context: context,
+        showDragHandle: true,
+        isScrollControlled: true,
+        builder: (context) => SafeArea(
+          child: SingleChildScrollView(
+            child: Padding(
+              key: const Key('settings-native-client-update-confirmation'),
+              padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    l.updatesUpdateApp,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 16),
+                  Text(l.updatesVersionChange(installedVersion, targetVersion)),
+                  const SizedBox(height: 8),
+                  Text(
+                    android
+                        ? l.updatesAndroidInstallerNotice
+                        : l.updatesDownloadNotice,
+                  ),
+                  const SizedBox(height: 24),
+                  Wrap(
+                    alignment: WrapAlignment.end,
+                    spacing: 8,
+                    children: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(context, false),
+                        child: Text(l.cancel),
+                      ),
+                      FilledButton(
+                        key: const Key('settings-native-client-update-confirm'),
+                        onPressed: () => Navigator.pop(context, true),
+                        child: Text(l.updatesDownload),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ) ??
+      false;
+}
+
 /// Native client version and manual update controls.
 class NativeClientUpdateSettingsSection extends ConsumerWidget {
   /// Creates the native client update settings section.
@@ -89,8 +146,16 @@ class _DesktopUpdateRow extends ConsumerWidget {
       trailing: candidate != null
           ? FilledButton.tonal(
               key: const Key('settings-native-client-update-download'),
-              onPressed: () => unawaited(onOpen(candidate.url)),
-              child: Text(l10n.settingsDesktopBuildUpdateAction),
+              onPressed: () async {
+                final accepted = await _confirmAppDownload(
+                  context,
+                  installedVersion: installedVersion,
+                  targetVersion: candidate.version,
+                  android: false,
+                );
+                if (accepted && context.mounted) await onOpen(candidate.url);
+              },
+              child: Text(l10n.updatesUpdateApp),
             )
           : TextButton(
               key: const Key('settings-native-client-update-check'),
@@ -99,7 +164,11 @@ class _DesktopUpdateRow extends ConsumerWidget {
                     .read(desktopClientUpdateControllerProvider.notifier)
                     .check(),
               ),
-              child: Text(l10n.settingsAndroidAppUpdateCheckAction),
+              child: Text(
+                state?.status == DesktopClientUpdateStatus.failed
+                    ? l10n.retry
+                    : l10n.updatesCheckAgain,
+              ),
             ),
     );
   }
@@ -167,15 +236,26 @@ class _AndroidUpdateRow extends ConsumerWidget {
       trailing: canInstall
           ? FilledButton.tonal(
               key: const Key('settings-native-client-update-install'),
-              onPressed: () => unawaited(
-                ref
+              onPressed: () async {
+                if (status == AndroidClientUpdateStatus.available) {
+                  final accepted = await _confirmAppDownload(
+                    context,
+                    installedVersion: installedVersion,
+                    targetVersion: candidate!.version,
+                    android: true,
+                  );
+                  if (!accepted || !context.mounted) return;
+                }
+                await ref
                     .read(androidClientUpdateControllerProvider.notifier)
-                    .downloadAndInstall(),
-              ),
+                    .downloadAndInstall();
+              },
               child: Text(
                 permission
                     ? l10n.androidUpdatePermissionAction
-                    : l10n.androidUpdateAction,
+                    : retryInstall
+                    ? l10n.retry
+                    : l10n.updatesUpdateApp,
               ),
             )
           : TextButton(
@@ -185,7 +265,11 @@ class _AndroidUpdateRow extends ConsumerWidget {
                     .read(androidClientUpdateControllerProvider.notifier)
                     .check(),
               ),
-              child: Text(l10n.settingsAndroidAppUpdateCheckAction),
+              child: Text(
+                status == AndroidClientUpdateStatus.failed
+                    ? l10n.retry
+                    : l10n.updatesCheckAgain,
+              ),
             ),
     );
   }
@@ -209,12 +293,7 @@ class _UpdateSectionShell extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
-    final action = checking
-        ? const SizedBox.square(
-            dimension: 20,
-            child: CircularProgressIndicator(strokeWidth: 2),
-          )
-        : trailing;
+    final action = checking ? const SizedBox.shrink() : trailing;
     final details = Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,

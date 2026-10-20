@@ -107,7 +107,7 @@ void main() {
         await tester.pumpAndSettle();
         final sourceOffset = tester.widget<ListView>(source).controller!.offset;
         expect(sourceOffset, greaterThan(anchoredOffset));
-        await tester.tap(find.text('Chat').first);
+        await tester.tap(find.byKey(const Key('compact-chat')));
         await tester.pumpAndSettle();
         await tester.tap(find.text('a.md').first);
         await tester.pumpAndSettle();
@@ -124,7 +124,7 @@ void main() {
             .widget<ListView>(rendered)
             .controller!
             .offset;
-        await tester.tap(find.text('Chat').first);
+        await tester.tap(find.byKey(const Key('compact-chat')));
         await tester.pumpAndSettle();
         await tester.tap(find.text('a.md').first);
         await tester.pumpAndSettle();
@@ -134,7 +134,7 @@ void main() {
         );
 
         // A new click on the same line is a fresh navigation request.
-        await tester.tap(find.text('Chat').first);
+        await tester.tap(find.byKey(const Key('compact-chat')));
         await tester.pumpAndSettle();
         if (find.byKey(const Key('tool-read-path')).evaluate().isEmpty) {
           await tester.tap(find.byKey(const Key('tool-r1-details')));

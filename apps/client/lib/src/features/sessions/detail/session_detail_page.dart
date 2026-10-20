@@ -218,6 +218,11 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
   late final TextEditingController _promptController;
   late final TextEditingController _commandArgsController;
   late final FocusNode _promptFocusNode;
+  final _transcriptFocusNode = FocusNode(
+    debugLabel: 'session-detail-transcript',
+    canRequestFocus: false,
+    skipTraversal: true,
+  );
   bool _isSendingPrompt = false;
   bool _isSendingCommand = false;
   bool _isPickingAttachments = false;
@@ -657,6 +662,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
     _promptFocusNode
       ..removeListener(_onPromptFocusChanged)
       ..dispose();
+    _transcriptFocusNode.dispose();
     super.dispose();
   }
 
@@ -2839,6 +2845,9 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                     chatSelected:
                         !readingFile &&
                         effectiveView == _SessionDetailView.chat,
+                    filesSelected:
+                        !readingFile &&
+                        effectiveView == _SessionDetailView.files,
                     onChat: () => _selectView(_SessionDetailView.chat),
                     onRead: () =>
                         ref
@@ -2932,6 +2941,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                                   _attachmentIntakeLeases.isNotEmpty,
                               promptController: _promptController,
                               promptFocusNode: _promptFocusNode,
+                              transcriptFocusNode: _transcriptFocusNode,
                               stagedAttachments: state.stagedAttachments,
                               archivedLiveState: archivedLiveState,
                               onArchiveLiveState: _archiveLiveStateItems,

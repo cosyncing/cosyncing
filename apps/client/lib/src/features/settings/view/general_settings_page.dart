@@ -6,6 +6,7 @@ import 'package:cosyncing_client/src/features/settings/controller/debug_views_co
 import 'package:cosyncing_client/src/features/settings/view/settings_common.dart';
 import 'package:cosyncing_client/src/features/voice/controller/read_aloud_rate_controller.dart';
 import 'package:cosyncing_client/src/platform/update/desktop_client_update_provider.dart';
+import 'package:cosyncing_client/src/platform/update/native_client_update.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -41,6 +42,9 @@ class GeneralSettingsPage extends ConsumerWidget {
                         cosyncingClientVersion,
                       ),
                 subtitle: l10n.updatesSubtitle,
+                showAttentionDot: ref.watch(
+                  nativeClientUpdateAvailableProvider,
+                ),
                 onTap: () => context.push(updatesRoute),
               ),
             ],
