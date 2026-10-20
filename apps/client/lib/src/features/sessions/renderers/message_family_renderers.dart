@@ -158,6 +158,7 @@ Widget _permissionRequestMessageRenderer(
   BuildContext context,
   AgentMessage message, {
   Widget? action,
+  bool settled = false,
 }) {
   final l10n = AppLocalizations.of(context);
   // A released prompt is not a request this app can answer. The broker let it
@@ -211,7 +212,7 @@ Widget _permissionRequestMessageRenderer(
     // A released card's title already says the terminal has it. "Awaiting
     // permission response" beside it was a third account of the same prompt,
     // and the one that stayed wrong after the terminal settled it.
-    readOnlyHint: message.requestIsReadOnly && !released
+    readOnlyHint: message.requestIsReadOnly && !released && !settled
         ? l10n.sessionRequestAwaitingPermission
         : null,
     payloadAsChips: true,
@@ -256,8 +257,7 @@ Widget _permissionResolvedMessageRenderer(
     PermissionResolutionDecision.approveRule =>
       l10n.sessionRequestOutcomeApprovedRule,
     PermissionResolutionDecision.reject => l10n.permissionRejected,
-    PermissionResolutionDecision.external =>
-      l10n.sessionRequestResolvedElsewhere,
+    PermissionResolutionDecision.external => l10n.sessionRequestResolved,
     PermissionResolutionDecision.unknown || null => null,
   };
   return _TranscriptBubble(

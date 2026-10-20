@@ -1038,8 +1038,9 @@ export type AgentMessage =
   | {
       type: 'permission-resolved';
       requestId: string;
-      /** 'external' = settled by another client of the shared owner (e.g. approved in a synced
-       *  terminal): the decision itself is not broadcast, only that the request is no longer open. */
+      /** 'external' = native state says this request is no longer open, without reporting a
+       *  decision or decider. Also used for synthetic waiting cards; it does not prove that
+       *  another client answered. */
       decision: PermissionDecision | 'external';
       /** Who settled it, when the broker can say. Additive; an older client ignores it and the
        *  card still closes. */

@@ -1404,7 +1404,7 @@ List<_TypedMessageFixture> get _renderedFixtures => const [
         'decision': 'external',
       },
     ),
-    expectedText: ['Resolved in another client.', 'external'],
+    expectedText: ['Resolved.', 'external'],
   ),
   _TypedMessageFixture(
     caseName: 'question request',

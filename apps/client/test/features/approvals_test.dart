@@ -314,8 +314,8 @@ void main() {
     );
 
     featureTest(
-      'a settled card says who settled it, never claims the app answered what '
-      'the terminal did, and a card left to the terminal says so once',
+      'a settled approval shows its outcome without naming the client, '
+      'including native waiting placeholders',
       (f) async {
         const releasedReason =
             'Claude was bypassing permission checks, and cosyncing leaves any '
@@ -326,7 +326,12 @@ void main() {
         final app = await openTranscript(
           f,
           [
-            permissionRequest('p-ext'),
+            permissionRequest(
+              'p-ext',
+              title: 'Codex is waiting for approval',
+              readOnly: true,
+            ),
+            permissionRequest('p-codex', title: 'Approve command'),
             permissionRequest('p-race'),
             permissionRequest('p-own'),
             permissionRequest('p-own2'),
@@ -400,6 +405,14 @@ void main() {
 
         Finder open(String id) => cardOf(app.permissionButton(id, 'approve'));
 
+        expect(
+          inside(
+            cardOf(find.text('Codex is waiting for approval')),
+            find.textContaining(en.sessionRequestAwaitingPermission),
+          ),
+          findsOneWidget,
+        );
+
         // Request plus resolution is one disabled card with its outcome, no
         // standalone resolution row, and nothing beside it says "Pending".
         expect(find.text('Permission resolved'), findsNothing);
@@ -471,10 +484,12 @@ void main() {
         await app.answerPermission('p-race', 'approve');
         await app.answerPermission('p-own', 'approve');
         await app.answerPermission('p-own2', 'approve');
-        expect(find.text('Sent'), findsNWidgets(3));
+        await app.answerPermission('p-codex', 'approve');
+        expect(find.text('Sent'), findsNWidgets(4));
         await app.liveAll(studio, [
           questionResolved('ghost-q'),
           permissionResolved('p-ext', decision: 'external'),
+          permissionResolved('p-codex', decision: 'approve', decidedBy: 'app'),
           permissionResolved('p-race', decision: 'reject', decidedBy: 'band'),
           permissionResolved('p-own', decision: 'external'),
           permissionResolved('p-own2', decision: 'external', decidedBy: 'band'),
@@ -499,6 +514,7 @@ void main() {
         ]);
         for (final id in const [
           'p-ext',
+          'p-codex',
           'p-race',
           'p-own',
           'p-own2',
@@ -510,40 +526,59 @@ void main() {
           expect(app.permissionAnswerable(id), isFalse, reason: id);
         }
         // Nothing the app did not press was sent on its behalf.
-        expect(app.decisionsSent(studio), hasLength(3));
+        expect(app.decisionsSent(studio), hasLength(4));
 
-        // "external" with nobody named: another client for a card the app
-        // never answered; for one it did, its own Sent stays the truest line.
+        // An external resolution names no decider. The request may be a native
+        // waiting placeholder closed by an app approval; it only says Resolved.
+        // The same neutral fallback applies after this seat sent an answer.
         expect(
-          inside(card('p-ext'), find.text('Resolved in another client.')),
+          inside(card('p-ext'), find.text('Resolved.')),
           findsOneWidget,
         );
-        expect(inside(card('p-own'), find.text('Sent')), findsOneWidget);
+        expect(
+          inside(
+            card('p-ext'),
+            find.textContaining(en.sessionRequestAwaitingPermission),
+          ),
+          findsNothing,
+        );
+        expect(
+          inside(card('p-ext'), find.text('Resolved in another client.')),
+          findsNothing,
+        );
+        expect(inside(card('p-codex'), find.text('Approved')), findsOneWidget);
+        expect(
+          inside(card('p-codex'), find.text(en.sessionRequestDecidedByApp)),
+          findsNothing,
+        );
+        expect(inside(card('p-own'), find.text('Resolved.')), findsOneWidget);
+        expect(inside(card('p-own'), find.text('Sent')), findsNothing);
         expect(
           inside(card('p-own'), find.text('Resolved in another client.')),
           findsNothing,
         );
-        // A named seat wins over this seat's badge.
+        // The canonical decision wins over this seat's submission.
         expect(inside(card('p-race'), find.text('Sent')), findsNothing);
         expect(inside(card('p-race'), find.text('Rejected')), findsOneWidget);
         expect(
           inside(card('p-race'), find.text('Answered in your terminal')),
-          findsOneWidget,
+          findsNothing,
         );
         expect(
           find.byKey(const Key('session-detail-permission-decided-by-p-race')),
-          findsOneWidget,
+          findsNothing,
         );
         expect(inside(card('p-own2'), find.text('Sent')), findsNothing);
+        expect(inside(card('p-own2'), find.text('Resolved.')), findsOneWidget);
         expect(
           inside(card('p-own2'), find.text('Answered in your terminal')),
-          findsOneWidget,
+          findsNothing,
         );
-        // Escape and "Show Claude's dialog" are the terminal; the app's Stop
-        // is the app; no word is another client.
+        // Attribution and release provenance do not appear in the outcome.
+        expect(inside(card('p-esc'), find.text('Resolved.')), findsOneWidget);
         expect(
           inside(card('p-esc'), find.text('You answered it in your terminal.')),
-          findsOneWidget,
+          findsNothing,
         );
         expect(
           inside(card('p-esc'), find.text('Resolved in another client.')),
@@ -551,20 +586,24 @@ void main() {
         );
         expect(
           inside(card('p-stop'), find.text(en.sessionRequestDecidedByApp)),
-          findsOneWidget,
+          findsNothing,
         );
+        expect(inside(card('p-stop'), find.text('Resolved.')), findsOneWidget);
         expect(
-          inside(card('p-none'), find.text(en.sessionRequestResolvedElsewhere)),
+          inside(card('p-none'), find.text(en.sessionRequestResolved)),
           findsOneWidget,
         );
-        // A retired released card says its reason once and that the terminal
-        // settled it, even when the wire carries a decision on it.
+        // A retired released card keeps its reason and a neutral outcome.
         for (final id in const ['cm-1@a1', 'cm-1@a2']) {
           final released = card(id);
           expect(inside(released, find.text(releasedReason)), findsOneWidget);
           expect(
-            inside(released, find.text('Settled in your terminal.')),
+            inside(released, find.text('Resolved.')),
             findsOneWidget,
+          );
+          expect(
+            inside(released, find.text('Settled in your terminal.')),
+            findsNothing,
           );
           expect(inside(released, find.text(readOnlyNote)), findsNothing);
           expect(inside(released, find.text('Pending')), findsNothing);

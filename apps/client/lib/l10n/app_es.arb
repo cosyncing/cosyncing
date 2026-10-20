@@ -975,7 +975,7 @@
   "sessionRequestSubmitting": "Enviando",
   "sessionRequestSent": "Enviado",
   "sessionRequestFailed": "Falló",
-  "sessionRequestResolvedElsewhere": "Se resolvió en otro cliente.",
+  "sessionRequestResolved": "Resuelto.",
   "sessionRequestNoLongerWaiting": "Ya no espera respuesta.",
   "sessionRequestSettledInTerminal": "Se resolvió en tu terminal.",
   "sessionQuestionSettledElsewhere": "Se resolvió en tu terminal o en otra aplicación.",

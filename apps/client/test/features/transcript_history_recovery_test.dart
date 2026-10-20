@@ -724,7 +724,7 @@ void main() {
       );
       expect(answerable('p2'), isFalse);
       expect(
-        app.shown('Resolved in another client.'),
+        app.shown('Resolved.'),
         1,
         reason: 'p3 was answered while the stream was down',
       );

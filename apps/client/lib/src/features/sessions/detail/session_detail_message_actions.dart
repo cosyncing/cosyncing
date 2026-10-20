@@ -103,7 +103,6 @@ class _MessageRow extends StatelessWidget {
           isResolved: isResolved || isWithdrawn,
           isWithdrawn: isWithdrawn,
           resolvedDecision: resolvedRequestDecisions[requestId],
-          resolvedAttribution: resolvedRequestAttributions[requestId],
           releaseReason: message.requestIsReadOnly
               ? message.permissionReleaseReason
               : null,
@@ -864,7 +863,6 @@ class _PermissionRequestActions extends StatefulWidget {
     required this.isResolved,
     this.isWithdrawn = false,
     this.resolvedDecision,
-    this.resolvedAttribution,
     this.releaseReason,
   });
 
@@ -893,12 +891,6 @@ class _PermissionRequestActions extends StatefulWidget {
   /// compact outcome.
   final String? resolvedDecision;
 
-  /// Whose answer closed this card, when the broker said. The decision
-  /// alone cannot carry it: `external` covers an app answer the terminal
-  /// confirmed, a terminal answer the app never made, and nobody answering
-  /// at all, and those are three different things to tell the user.
-  final ResolvedRequestAttribution? resolvedAttribution;
-
   /// Why the broker left this read-only card to the terminal, when it did.
   /// The card leads with that sentence, so the outcome must not repeat it.
   final PermissionReleaseReason? releaseReason;
@@ -909,8 +901,8 @@ class _PermissionRequestActions extends StatefulWidget {
 }
 
 /// Which seat settled a card, in the app's own words, or null when the broker
-/// did not say. A permission card and an answered question card say it the
-/// same way; a question closed unanswered says so instead
+/// did not say. An answered question card uses this attribution; a question
+/// closed unanswered says so instead
 /// ([_questionClosedUnansweredLine]).
 ///
 /// A release reason wins over a decider where both arrived, because the pair
@@ -983,11 +975,6 @@ String? _questionClosedUnansweredLine(
 }
 
 class _PermissionRequestActionsState extends State<_PermissionRequestActions> {
-  /// Which seat answered, in the app's own words, or null when the broker
-  /// did not say.
-  String? _settledWhereLine(AppLocalizations l10n) =>
-      _requestSettledWhereLine(l10n, widget.resolvedAttribution);
-
   bool _isSubmitting = false;
   _RequestActionOutcomeState _outcome = _RequestActionOutcomeState.pending;
   String? _failureMessage;
@@ -1091,15 +1078,9 @@ class _PermissionRequestActionsState extends State<_PermissionRequestActions> {
         !widget.isResolved &&
         !_isSubmitting &&
         _outcome != _RequestActionOutcomeState.sent;
-    // The broker's resolution outranks this seat's own submission: a tap that
-    // lost the race is still a tap the user made, and the card has to say who
-    // answered the call. What it may NOT do is claim another client answered
-    // when this one did. `external` is the broker's word for "somebody else
-    // settled it", and it is also what it sends when THIS seat's answer
-    // reached the terminal, so the sentence needs a decision value, a seat, or
-    // this seat's own send to stand on -- and says nothing when none of the
-    // three does. A withdrawn card is not settled at all: nobody answered
-    // it, and no resolution for it arrived.
+    // Show the canonical outcome without attributing it to a client. A native
+    // waiting placeholder can close when the app answers the real request;
+    // 'external' only establishes that it closed, not a decision or decider.
     final resolvedByBroker = widget.isResolved && !widget.isWithdrawn;
     final decisionLine = switch (widget.resolvedDecision) {
       'approve' => l10n.sessionRequestOutcomeApproved,
@@ -1109,24 +1090,17 @@ class _PermissionRequestActionsState extends State<_PermissionRequestActions> {
       _ => null,
     };
     // A card that explains why the terminal has the prompt is closed by the
-    // broker with that same reason attached, and the card already leads with
-    // it: printed again as the outcome, the card said one thing twice. Only
-    // the terminal could have settled it, so that is the outcome.
+    // broker with that same reason attached. It establishes closure, not an
+    // approval decision, so keep its outcome neutral.
     final explainsItself =
         widget.isReadOnly &&
         widget.releaseReason != null &&
         widget.releaseReason != PermissionReleaseReason.unknown;
-    final seatLine = resolvedByBroker && !explainsItself
-        ? _settledWhereLine(l10n)
-        : null;
-    final settledHere = _outcome == _RequestActionOutcomeState.sent;
     final outcomeLine = !resolvedByBroker
         ? null
         : explainsItself
-        ? l10n.sessionRequestSettledInTerminal
-        : (decisionLine ??
-              seatLine ??
-              (settledHere ? null : l10n.sessionRequestResolvedElsewhere));
+        ? l10n.sessionRequestResolved
+        : (decisionLine ?? l10n.sessionRequestResolved);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1152,22 +1126,6 @@ class _PermissionRequestActionsState extends State<_PermissionRequestActions> {
               color: tokens.textSecondary,
             ),
           ),
-          // The seat, under the decision. Two people with one session can each
-          // answer from a different place, and "Resolved in another client"
-          // over their own keyboard is the confusion this line exists to end.
-          // It is the headline only when there was no decision value to show,
-          // and never printed twice.
-          if (decisionLine != null && seatLine != null) ...[
-            Text(
-              seatLine,
-              key: ValueKey(
-                'session-detail-permission-decided-by-${widget.requestId}',
-              ),
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: tokens.textSecondary,
-              ),
-            ),
-          ],
           const SizedBox(height: 4),
         ] else if (widget.isReadOnly) ...[
           Text(
