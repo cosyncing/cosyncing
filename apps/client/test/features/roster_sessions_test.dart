@@ -101,8 +101,8 @@ void main() {
   });
 
   featureTest(
-    'hiding retains its open tab, notices expire or close with accessible Undo, '
-    'and custom days reach the broker',
+    'hiding retains its open tab, notices expire or close with accessible '
+    'Undo, and custom days reach the broker',
     (f) async {
       final studio = f.network.add('http://studio.test:7734')
         ..addSession(
@@ -207,7 +207,7 @@ void main() {
       await app.waitForAbsent(find.byType(SnackBar));
 
       app.tester.platformDispatcher.accessibilityFeaturesTestValue =
-          FakeAccessibilityFeatures(accessibleNavigation: true);
+          const FakeAccessibilityFeatures(accessibleNavigation: true);
       addTearDown(
         app.tester.platformDispatcher.clearAccessibilityFeaturesTestValue,
       );
