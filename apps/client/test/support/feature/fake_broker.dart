@@ -305,6 +305,10 @@ class FakeBroker {
   /// Roster revision served with [sessions].
   int rosterRevision = 1;
 
+  // Keep authored visibility separate from the inherited wire fields, as the
+  // broker does: hiding a parent must not erase a child's own hidden choice.
+  Set<(String, String)>? _hiddenSessionPreferences;
+
   /// What `complete` says on roster answers: false models a broker that
   /// answered ahead of a still-running discovery sweep.
   bool rosterComplete = true;
@@ -931,18 +935,75 @@ class FakeBroker {
       r'^/api/sessions/([^/]+)/([^/]+)/visibility$',
     ).firstMatch(path);
     if (request.method == 'PATCH' && visibility != null) {
+      final tool = Uri.decodeComponent(visibility.group(1)!);
       final id = Uri.decodeComponent(visibility.group(2)!);
       final hidden = (request.body! as Map)['hidden'] as bool;
-      final row = sessions.firstWhere((s) => s['id'] == id);
-      final revision = ((row['appVisibilityRevision'] as int?) ?? 0) + 1;
-      updateSession(id, {
-        'appHidden': hidden,
-        'appVisibilityRevision': revision,
-      });
+      final row = sessions.firstWhere(
+        (s) => s['tool'] == tool && s['id'] == id,
+      );
+      if (row['appHiddenByAncestor'] == true) {
+        return FakeBrokerResponse.error(
+          409,
+          'HIDDEN_ANCESTOR',
+          'Unhide the parent',
+        );
+      }
+      final preferences = _hiddenSessionPreferences ??= {
+        for (final session in sessions)
+          if (session['appHidden'] == true &&
+              session['appHiddenByAncestor'] != true)
+            (session['tool']! as String, session['id']! as String),
+      };
+      final target = (tool, id);
+      hidden ? preferences.add(target) : preferences.remove(target);
+      var revision = 0;
+      for (final session in sessions) {
+        final known = (session['appVisibilityRevision'] as int?) ?? 0;
+        if (known >= revision) revision = known + 1;
+      }
+      final byNativeId = {
+        for (final session in sessions)
+          (session['tool'], session['nativeId'] ?? session['id']): session,
+      };
+      final updates = <Map<String, Object?>>[];
+      for (final session in List.of(sessions)) {
+        final ownKey = (session['tool']! as String, session['id']! as String);
+        var affected = ownKey == target;
+        var inherited = false;
+        var ancestor = session;
+        final seen = {ownKey};
+        while (ancestor['origin'] == 'subagent') {
+          final parent =
+              byNativeId[(ancestor['tool'], ancestor['parentThreadId'])];
+          if (parent == null) break;
+          final parentKey = (
+            parent['tool']! as String,
+            parent['id']! as String,
+          );
+          if (!seen.add(parentKey)) {
+            inherited = false;
+            break;
+          }
+          inherited |= preferences.contains(parentKey);
+          affected |= parentKey == target;
+          ancestor = parent;
+        }
+        if (!affected) continue;
+        final update = {
+          ...session,
+          'appHidden': inherited || preferences.contains(ownKey),
+          'appHiddenByAncestor': inherited,
+          'appVisibilityRevision': revision,
+        };
+        upsertSession(update);
+        updates.add(update);
+      }
       return FakeBrokerResponse(200, {
         'ok': true,
-        'session': sessions.firstWhere((s) => s['id'] == id),
-        'sessions': sessions,
+        'session': sessions.firstWhere(
+          (s) => s['tool'] == tool && s['id'] == id,
+        ),
+        'sessions': updates,
       });
     }
     final rename = RegExp(
