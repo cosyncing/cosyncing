@@ -126,7 +126,12 @@ class _WorkspaceOverviewState extends ConsumerState<WorkspaceOverview> {
         (state) => state.status == SessionListStatus.loading,
       ),
     );
-    final sessions = response?.sessions;
+    // Subagents report to their parent. Roster visibility preferences can
+    // expose their rows, but Home tracks sessions that need the user's
+    // attention.
+    final sessions = response?.sessions
+        .where((session) => session.origin != SessionOrigin.subagent)
+        .toList();
     final inbox = ref.watch(attentionInboxProvider);
     final completions = inbox.isLoading || inbox.hasError
         ? null
@@ -229,10 +234,7 @@ class _WorkspaceOverviewState extends ConsumerState<WorkspaceOverview> {
                             color: tokens.textSecondary,
                           ),
                         ),
-                        if (narrow) ...[
-                          const SizedBox(height: 8),
-                          machine,
-                        ],
+                        if (narrow) ...[const SizedBox(height: 8), machine],
                       ],
                     ),
                   ),
@@ -337,11 +339,7 @@ class _WorkspaceOverviewState extends ConsumerState<WorkspaceOverview> {
                   Expanded(
                     child: Row(
                       children: [
-                        Flexible(
-                          child: _Heading(
-                            filterLabels[_filter]!,
-                          ),
-                        ),
+                        Flexible(child: _Heading(filterLabels[_filter]!)),
                         if (sessions != null) ...[
                           const SizedBox(width: 8),
                           Text(

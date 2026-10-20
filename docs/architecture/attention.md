@@ -39,6 +39,12 @@ feed pages and cursors together, persists local read/dismiss intent before the
 network mutation, and retries pending mutations. The durable feed is the only
 source of local notifications; live session events never post one.
 
+Sessions with `origin: 'subagent'`, including Codex Guardian reviews, raise no
+attention events. Their requests and outcomes belong to the parent agent.
+They retain live status in the roster and transcript, but Overview excludes
+them from its running and waiting counts and lists. Roster visibility settings
+do not change this attention policy.
+
 ## Client notifications
 
 Each event kind maps to one user-configurable notification type, in three

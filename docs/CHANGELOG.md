@@ -30,6 +30,10 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Subagent sessions, including Codex Guardian reviews, no longer raise
+  notifications or count as running or waiting work on Home. Their activity
+  remains available in the session roster and transcript.
+
 - Android QR pairing preserves ML Kit initialization classes in optimized
   release builds, fixing a scanner error after camera permission is granted.
 - Approval cards show the outcome without naming the client that resolved them.
