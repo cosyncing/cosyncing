@@ -710,6 +710,7 @@ try {
   const firstSignals: Array<NodeJS.Signals | number | undefined> = [];
   const liveProcessesBeforeSpawn: number[] = [];
   let spawnCount = 0;
+  let clock = 0;
   try {
     const session = await launchCandidateParityBrowser({
       executable: '/test/chromium-headless-shell',
@@ -733,6 +734,8 @@ try {
         });
       },
       connect: async () => fakeSocket(),
+      now: () => clock,
+      sleep: async (milliseconds) => { clock += milliseconds; },
       reportFailure: (failure) => failures.push(failure),
     });
     assert.equal(spawnCount, 2);
