@@ -35,6 +35,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Hide and unhide sessions respond immediately while the broker saves the
+  change. Undo also responds while saving; failed changes restore the current
+  broker state and show an error.
 - Subagent sessions, including Codex Guardian reviews, no longer raise
   notifications or count as running or waiting work on Home. Their activity
   remains available in the session roster and transcript.
