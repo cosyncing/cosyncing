@@ -6708,5 +6708,21 @@
   "sessionQuestionHistorical": "Earlier question · live answer state unavailable",
   "@workspaceCloseSelectedTabs": {"placeholders": {"count": {"type": "int"}}},
   "workspaceActiveTab": "Active tab",
-  "sessionQuestionFollowUpSent": "Follow-up reply sent"
+  "sessionQuestionFollowUpSent": "Follow-up reply sent",
+  "updatesUpdateApp": "Update app",
+  "updatesUpdateServer": "Update server",
+  "updatesUpdateServers": "{count, plural, =1{Update 1 server} other{Update {count} servers}}",
+  "updatesIncludeApp": "Also update this app",
+  "updatesInstall": "Install updates",
+  "updatesDownload": "Download update",
+  "updatesCheckAgain": "Check again",
+  "updatesAndroidInstallerNotice": "The update will download first. Android will then ask you to install it in the system installer.",
+  "updatesDownloadNotice": "Download the update and install it manually. This app will not be replaced automatically.",
+  "@updatesUpdateServers": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  }
 }

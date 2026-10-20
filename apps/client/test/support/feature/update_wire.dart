@@ -21,6 +21,7 @@ class UpdateDesk {
   bool revoked = false;
   bool contractKnown = true;
   bool canApply = true;
+  bool updateAvailable = true;
   static const manualBlocker =
       'This service has no qualified independent in-app update runner.';
   static const manualGuidance =
@@ -102,13 +103,13 @@ class UpdateDesk {
         'ok': true,
         'check': {
           'schemaVersion': 1,
-          'status': 'update-available',
-          'detailCode': 'available',
+          'status': updateAvailable ? 'update-available' : 'current',
+          'detailCode': updateAvailable ? 'available' : 'current',
           'components': [
             {
               'component': 'broker',
               'running': _running,
-              'available': _target,
+              if (updateAvailable) 'available': _target,
               'releaseCheckedAt': now().toIso8601String(),
             },
           ],

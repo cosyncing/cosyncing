@@ -24,9 +24,7 @@ class UpdatesPage extends ConsumerStatefulWidget {
 
 class _UpdatesPageState extends ConsumerState<UpdatesPage> {
   final _selected = <String>{};
-  final _acknowledged = <String>{};
   final _serverKeys = <String, GlobalKey>{};
-  bool _app = false;
   bool _initializedSelection = false;
 
   @override
@@ -61,6 +59,151 @@ class _UpdatesPageState extends ConsumerState<UpdatesPage> {
     }
   }
 
+  Future<void> _openReview({
+    Set<String> servers = const {},
+    bool app = false,
+  }) async {
+    final controller = ref.read(updatesControllerProvider.notifier);
+    final targets = Set<String>.of(servers);
+    var includeApp = app;
+    final acknowledged = <String>{};
+    unawaited(_run(() => controller.review(targets, app: includeApp)));
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (context, setSheetState) => Consumer(
+          builder: (context, ref, _) {
+            final l = AppLocalizations.of(context);
+            final data = ref.watch(updatesControllerProvider).valueOrNull;
+            if (data == null) {
+              return Padding(
+                padding: const EdgeInsets.all(24),
+                child: Text(l.updatesPreparing),
+              );
+            }
+            final required = data.review
+                .expand((step) => step.acknowledgements)
+                .toSet();
+            return SafeArea(
+              child: SingleChildScrollView(
+                key: const Key('updates-confirmation'),
+                padding: EdgeInsets.fromLTRB(
+                  24,
+                  8,
+                  24,
+                  24 + MediaQuery.viewInsetsOf(context).bottom,
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Text(
+                      app
+                          ? l.updatesUpdateApp
+                          : l.updatesUpdateServers(targets.length),
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    const SizedBox(height: 16),
+                    if (!app && data.appAvailable)
+                      CheckboxListTile(
+                        key: const Key('updates-include-app'),
+                        contentPadding: EdgeInsets.zero,
+                        value: includeApp,
+                        title: Text(l.updatesIncludeApp),
+                        onChanged: data.working
+                            ? null
+                            : (value) {
+                                if (ref
+                                        .read(updatesControllerProvider)
+                                        .valueOrNull
+                                        ?.working ??
+                                    true) {
+                                  return;
+                                }
+                                final next = value!;
+                                setSheetState(() {
+                                  includeApp = next;
+                                  acknowledged.clear();
+                                });
+                                unawaited(
+                                  _run(
+                                    () => controller.review(
+                                      targets,
+                                      app: next,
+                                    ),
+                                  ),
+                                );
+                              },
+                      ),
+                    if (data.working) Text(l.updatesPreparing),
+                    if (data.error != null) Text(_errorMessage(l, data.error!)),
+                    for (final step in data.review)
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: Text(step.label),
+                        subtitle: Text(
+                          l.updatesVersionChange(
+                            step.from ?? l.updatesUnknown,
+                            step.to,
+                          ),
+                        ),
+                      ),
+                    for (final ack in required)
+                      CheckboxListTile(
+                        key: Key('updates-ack-$ack'),
+                        contentPadding: EdgeInsets.zero,
+                        title: Text(_acknowledgement(l, ack)),
+                        value: acknowledged.contains(ack),
+                        onChanged: data.working
+                            ? null
+                            : (value) => setSheetState(() {
+                                if (value!) {
+                                  acknowledged.add(ack);
+                                } else {
+                                  acknowledged.remove(ack);
+                                }
+                              }),
+                      ),
+                    const SizedBox(height: 16),
+                    Wrap(
+                      alignment: WrapAlignment.end,
+                      spacing: 8,
+                      children: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(sheetContext),
+                          child: Text(l.cancel),
+                        ),
+                        FilledButton(
+                          key: const Key('updates-apply'),
+                          onPressed:
+                              data.working ||
+                                  data.error != null ||
+                                  data.review.isEmpty ||
+                                  !acknowledged.containsAll(required)
+                              ? null
+                              : () {
+                                  final consent = Set<String>.of(acknowledged);
+                                  Navigator.pop(sheetContext);
+                                  unawaited(
+                                    _run(() => controller.confirm(consent)),
+                                  );
+                                },
+                          child: Text(l.updatesInstall),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final l = AppLocalizations.of(context);
@@ -70,15 +213,21 @@ class _UpdatesPageState extends ConsumerState<UpdatesPage> {
     return Scaffold(
       appBar: AppBar(title: Text(l.updatesTitle)),
       body: value.when(
-        loading: () => const Center(child: CircularProgressIndicator()),
+        loading: () => Center(child: Text(l.settingsAndroidAppUpdateChecking)),
         error: (_, _) => Center(child: Text(l.updatesNeedsAttention)),
         data: (data) {
+          if (!data.checking) {
+            final available = data.servers
+                .where((row) => row.available)
+                .map((row) => row.profile.id)
+                .toSet();
+            _selected.retainAll(available);
+          }
           if (!_initializedSelection &&
               !data.checking &&
               (data.manifest != null ||
                   data.servers.any((r) => r.check != null))) {
             _initializedSelection = true;
-            _app = data.appAvailable;
             for (final row in data.servers) {
               if (row.profile.id == active && row.available) {
                 _selected.add(row.profile.id);
@@ -89,6 +238,11 @@ class _UpdatesPageState extends ConsumerState<UpdatesPage> {
             ref.watch(clientTargetPlatformProvider),
             isWeb: ref.watch(clientIsWebProvider),
           );
+          final stackServerActions =
+              MediaQuery.sizeOf(context).width < 600 ||
+              MediaQuery.textScalerOf(context).scale(1) > 1.3;
+          final updatesEnabled =
+              !data.working && !data.unfinished && !data.checking;
           return SettingsPageBody(
             children: [
               LayoutBuilder(
@@ -116,7 +270,14 @@ class _UpdatesPageState extends ConsumerState<UpdatesPage> {
                   ],
                 ),
               ),
-              if (data.checking) const LinearProgressIndicator(),
+              if (data.checking)
+                Semantics(
+                  liveRegion: true,
+                  child: Text(
+                    l.settingsAndroidAppUpdateChecking,
+                    key: const Key('updates-checking'),
+                  ),
+                ),
               const SizedBox(height: 16),
               if (native) ...[
                 SettingsSection(
@@ -125,16 +286,9 @@ class _UpdatesPageState extends ConsumerState<UpdatesPage> {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       if (data.appAvailable)
-                        CheckboxListTile(
-                          key: const Key('updates-select-app'),
-                          contentPadding: EdgeInsets.zero,
-                          value: _app,
-                          onChanged: data.working || data.unfinished
-                              ? null
-                              : (v) {
-                                  controller.discardReview();
-                                  setState(() => _app = v!);
-                                },
+                        SettingsRow(
+                          key: const Key('updates-app-available'),
+                          stackTrailing: true,
                           title: Text(
                             l.updatesAppVersions(
                               '${data.local?['version']}',
@@ -142,6 +296,14 @@ class _UpdatesPageState extends ConsumerState<UpdatesPage> {
                             ),
                           ),
                           subtitle: Text(l.updatesAppCloses),
+                          trailing: FilledButton.tonal(
+                            key: const Key('updates-update-app'),
+                            onPressed:
+                                data.working || data.unfinished || data.checking
+                                ? null
+                                : () => unawaited(_openReview(app: true)),
+                            child: Text(l.updatesUpdateApp),
+                          ),
                         )
                       else ...[
                         const NativeClientUpdateSettingsSection(),
@@ -176,36 +338,60 @@ class _UpdatesPageState extends ConsumerState<UpdatesPage> {
                           row.profile.id,
                           GlobalKey.new,
                         ),
-                        child: CheckboxListTile(
-                          key: Key('updates-server-${row.profile.id}'),
-                          contentPadding: EdgeInsets.zero,
-                          value: _selected.contains(row.profile.id),
-                          onChanged:
-                              row.available && !data.working && !data.unfinished
-                              ? (v) {
-                                  controller.discardReview();
-                                  setState(() {
-                                    if (v!) {
-                                      _selected.add(row.profile.id);
-                                    } else {
-                                      _selected.remove(row.profile.id);
-                                    }
-                                  });
-                                }
-                              : null,
-                          title: Text(
-                            row.profile.id == active
-                                ? '${row.profile.displayName} · '
-                                      '${l.brokerProfileActive}'
-                                : row.profile.displayName,
-                          ),
-                          subtitle: Text(
-                            l.updatesServerDetails(
-                              row.profile.displayAddress,
-                              _serverStatus(l, row),
-                            ),
-                          ),
-                        ),
+                        child: row.available
+                            ? CheckboxListTile(
+                                key: Key('updates-server-${row.profile.id}'),
+                                contentPadding: EdgeInsets.zero,
+                                controlAffinity:
+                                    ListTileControlAffinity.leading,
+                                secondary: stackServerActions
+                                    ? null
+                                    : _serverAction(l, row, updatesEnabled),
+                                value: _selected.contains(row.profile.id),
+                                onChanged:
+                                    row.available &&
+                                        !data.working &&
+                                        !data.unfinished
+                                    ? (v) {
+                                        controller.discardReview();
+                                        setState(() {
+                                          if (v!) {
+                                            _selected.add(row.profile.id);
+                                          } else {
+                                            _selected.remove(row.profile.id);
+                                          }
+                                        });
+                                      }
+                                    : null,
+                                title: Text(
+                                  row.profile.id == active
+                                      ? '${row.profile.displayName} · '
+                                            '${l.brokerProfileActive}'
+                                      : row.profile.displayName,
+                                ),
+                                subtitle: Text(
+                                  l.updatesServerDetails(
+                                    row.profile.displayAddress,
+                                    _serverStatus(l, row),
+                                  ),
+                                ),
+                              )
+                            : ListTile(
+                                key: Key('updates-server-${row.profile.id}'),
+                                contentPadding: EdgeInsets.zero,
+                                title: Text(
+                                  row.profile.id == active
+                                      ? '${row.profile.displayName} · '
+                                            '${l.brokerProfileActive}'
+                                      : row.profile.displayName,
+                                ),
+                                subtitle: Text(
+                                  l.updatesServerDetails(
+                                    row.profile.displayAddress,
+                                    _serverStatus(l, row),
+                                  ),
+                                ),
+                              ),
                       ),
                       if (row.error == null &&
                           row.check?.status == 'update-available' &&
@@ -219,14 +405,26 @@ class _UpdatesPageState extends ConsumerState<UpdatesPage> {
                           if (blocker.guidance != null) Text(blocker.guidance!),
                         ],
                       ],
-                      if (row.lastSeen != null)
-                        Text(
-                          l.updatesLastChecked(
-                            MaterialLocalizations.of(
-                              context,
-                            ).formatMediumDate(row.lastSeen!.toLocal()),
-                          ),
-                          style: Theme.of(context).textTheme.bodySmall,
+                      if (row.lastSeen != null ||
+                          (stackServerActions && row.available))
+                        Wrap(
+                          alignment: WrapAlignment.spaceBetween,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          spacing: 8,
+                          runSpacing: 4,
+                          children: [
+                            if (row.lastSeen != null)
+                              Text(
+                                l.updatesLastChecked(
+                                  MaterialLocalizations.of(
+                                    context,
+                                  ).formatMediumDate(row.lastSeen!.toLocal()),
+                                ),
+                                style: Theme.of(context).textTheme.bodySmall,
+                              ),
+                            if (stackServerActions && row.available)
+                              _serverAction(l, row, updatesEnabled),
+                          ],
                         ),
                       if (row.grants == null &&
                           (row.error == 'permission-required' || row.available))
@@ -328,11 +526,7 @@ class _UpdatesPageState extends ConsumerState<UpdatesPage> {
               if (data.error != null) ...[
                 const SizedBox(height: 16),
                 Text(
-                  data.error == 'update-status-unknown'
-                      ? l.updatesStatusUnknown
-                      : data.error == 'UPDATE_PERMISSION_REQUIRED'
-                      ? l.updatesPermission
-                      : l.updatesReviewChanged,
+                  _errorMessage(l, data.error!),
                 ),
                 ExpansionTile(
                   title: Text(l.updatesDetails),
@@ -391,86 +585,18 @@ class _UpdatesPageState extends ConsumerState<UpdatesPage> {
                 ),
               ],
               const SizedBox(height: 16),
-              if (data.review.isEmpty)
+              if (_selected.isNotEmpty)
                 Align(
                   alignment: Alignment.centerLeft,
                   child: FilledButton(
                     key: const Key('updates-review'),
-                    onPressed:
-                        data.working ||
-                            data.unfinished ||
-                            data.checking ||
-                            (_selected.isEmpty && !_app)
+                    onPressed: data.working || data.unfinished || data.checking
                         ? null
-                        : () {
-                            _acknowledged.clear();
-                            unawaited(
-                              _run(
-                                () => controller.review(_selected, app: _app),
-                              ),
-                            );
-                          },
-                    child: Text(l.updatesReview),
-                  ),
-                )
-              else
-                SettingsSection(
-                  title: l.updatesReview,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      for (final step in data.review)
-                        ListTile(
-                          contentPadding: EdgeInsets.zero,
-                          title: Text(step.label),
-                          subtitle: Text(
-                            l.updatesVersionChange(
-                              step.from ?? l.updatesUnknown,
-                              step.to,
-                            ),
-                          ),
-                        ),
-                      for (final ack
-                          in data.review
-                              .expand((s) => s.acknowledgements)
-                              .toSet())
-                        CheckboxListTile(
-                          key: Key('updates-ack-$ack'),
-                          contentPadding: EdgeInsets.zero,
-                          title: Text(_acknowledgement(l, ack)),
-                          value: _acknowledged.contains(ack),
-                          onChanged: data.working
-                              ? null
-                              : (v) => setState(() {
-                                  if (v!) {
-                                    _acknowledged.add(ack);
-                                  } else {
-                                    _acknowledged.remove(ack);
-                                  }
-                                }),
-                        ),
-                      Align(
-                        alignment: Alignment.centerLeft,
-                        child: FilledButton(
-                          key: const Key('updates-apply'),
-                          onPressed:
-                              data.working ||
-                                  !_acknowledged.containsAll(
-                                    data.review.expand(
-                                      (s) => s.acknowledgements,
-                                    ),
-                                  )
-                              ? null
-                              : () => unawaited(
-                                  _run(() => controller.confirm(_acknowledged)),
-                                ),
-                          child: Text(l.updatesApply),
-                        ),
-                      ),
-                    ],
+                        : () => unawaited(_openReview(servers: _selected)),
+                    child: Text(l.updatesUpdateServers(_selected.length)),
                   ),
                 ),
-              if (data.working) ...[
+              if (data.working && data.unfinished) ...[
                 const SizedBox(height: 16),
                 const LinearProgressIndicator(),
               ],
@@ -503,6 +629,24 @@ class _UpdatesPageState extends ConsumerState<UpdatesPage> {
         ? l.updatesCurrent
         : l.updatesCheckFailed;
   }
+
+  String _errorMessage(AppLocalizations l, String code) => switch (code) {
+    'update-status-unknown' => l.updatesStatusUnknown,
+    'UPDATE_PERMISSION_REQUIRED' => l.updatesPermission,
+    _ => l.updatesReviewChanged,
+  };
+
+  Widget _serverAction(
+    AppLocalizations l,
+    UpdateServerRow row,
+    bool enabled,
+  ) => TextButton(
+    key: Key('updates-update-server-${row.profile.id}'),
+    onPressed: enabled
+        ? () => unawaited(_openReview(servers: {row.profile.id}))
+        : null,
+    child: Text(l.updatesUpdateServer),
+  );
 
   String _acknowledgement(AppLocalizations l, String ack) => switch (ack) {
     'app-will-close' => l.updatesAppCloses,

@@ -211,6 +211,50 @@ class _UpdateWindow extends DesktopWindowChannel {
 
 void main() {
   Finder key(String k) => find.byKey(Key(k));
+  featureTest(
+    'Updates checks with text, keeps current servers readable and lives '
+    'under General',
+    (f) async {
+      final studio = f.network.add('http://studio.test:7734');
+      final desk = UpdateDesk(studio, now: f.now)
+        ..updateAvailable = false
+        ..checkHeld = Completer<void>();
+      final profile = await f.storage.seedServer(studio, ownerToken: 'owner');
+      final app = await f.launch(
+        initialLocation: settingsRoute,
+        viewport: FeatureViewport.phone,
+        overrides: [clientIsWebProvider.overrideWithValue(true)],
+      );
+      expect(key('settings-category-updates'), findsNothing);
+      await app.tapKey('settings-category-general');
+      await app.tapKey('settings-general-updates');
+      await app.waitFor(key('updates-checking'));
+      expect(find.byType(LinearProgressIndicator), findsNothing);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      expect(desk.preparations, isEmpty);
+      expect(desk.applies, isEmpty);
+      desk.checkHeld!.complete();
+      await app.waitForAbsent(key('updates-checking'));
+      expect(find.textContaining(en.updatesCurrent), findsOneWidget);
+      expect(key('updates-review'), findsNothing);
+      expect(key('updates-server-${profile.id}'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: key('updates-server-${profile.id}'),
+          matching: find.byType(Checkbox),
+        ),
+        findsNothing,
+      );
+      desk.checkHeld = Completer<void>();
+      await app.tapKey('updates-check');
+      await app.waitFor(key('updates-checking'));
+      expect(find.byType(LinearProgressIndicator), findsNothing);
+      desk.checkHeld!.complete();
+      await app.waitForAbsent(key('updates-checking'));
+      expect(desk.preparations, isEmpty);
+      expect(desk.applies, isEmpty);
+    },
+  );
   featureTest('the desktop app saves its draft before a full quit and resumes '
       'only unfinished updates after relaunch', (f) async {
     final studio = f.network.add('http://studio.test:7734')
@@ -265,10 +309,10 @@ void main() {
     await app.type('keep this exact draft');
     await app.go(updatesRoute);
     await app.pumpUntil(
-      () => key('updates-select-app').evaluate().isNotEmpty,
+      () => key('updates-app-available').evaluate().isNotEmpty,
       reason: 'the owned app update is selectable',
     );
-    await app.tapKey('updates-review');
+    await app.tapKey('updates-update-app');
     await app.tapKey('updates-ack-app-will-close');
     await app.tapKey('updates-ack-compatibility-unconfirmed');
     expect(quits, 0);
@@ -331,11 +375,13 @@ void main() {
       expect(find.text(en.updatesServerManual), findsOneWidget);
       expect(find.text(en.updatesCheckFailed), findsNothing);
       expect(
-        app.tester
-            .widget<CheckboxListTile>(key('updates-server-${profile.id}'))
-            .onChanged,
-        isNull,
+        find.descendant(
+          of: key('updates-server-${profile.id}'),
+          matching: find.byType(CheckboxListTile),
+        ),
+        findsNothing,
       );
+      expect(key('updates-review'), findsNothing);
       expect(desk.preparations, isEmpty);
       expect(desk.applies, isEmpty);
       expect(app.tester.takeException(), isNull);
@@ -386,22 +432,26 @@ void main() {
         ),
       ],
     );
-    await app.waitFor(key('updates-select-app'));
+    await app.waitFor(key('updates-app-available'));
     await app.pumpUntil(
       () =>
+          key('updates-review').evaluate().isNotEmpty &&
           app.tester.widget<FilledButton>(key('updates-review')).onPressed !=
-          null,
+              null,
       reason: 'app and server checks finish before review',
     );
     await app.tapKey('updates-review');
+    await app.tapKey('updates-include-app');
     await app.waitFor(find.text(en.updatesReviewChanged));
     expect(desk.preparations, isEmpty);
     expect(helper.jobs, isEmpty);
     desk
       ..contractKnown = true
       ..targetRevision = cosyncingClientContractRevision + 2;
+    await app.tap(find.text(en.cancel).last);
     await app.tapKey('updates-check');
     await app.tapKey('updates-review');
+    await app.tapKey('updates-include-app');
     await app.waitFor(key('updates-ack-app-will-close'));
     await app.tapKey('updates-ack-app-will-close');
     await app.tapKey('updates-ack-server-will-disconnect');
@@ -462,14 +512,16 @@ void main() {
         ),
       ],
     );
-    await app.waitFor(key('updates-select-app'));
+    await app.waitFor(key('updates-app-available'));
     await app.pumpUntil(
       () =>
+          key('updates-review').evaluate().isNotEmpty &&
           app.tester.widget<FilledButton>(key('updates-review')).onPressed !=
-          null,
+              null,
       reason: 'app and server checks have finished',
     );
     await app.tapKey('updates-review');
+    await app.tapKey('updates-include-app');
     await app.tapKey('updates-ack-app-will-close');
     await app.tapKey('updates-ack-server-will-disconnect');
     await app.tapKey('updates-apply');
@@ -531,6 +583,15 @@ void main() {
         reason: 'saved-server update availability has been checked',
       );
       await app.tapKey('updates-server-${second.id}');
+      expect(
+        app.tester
+            .widget<CheckboxListTile>(
+              key('updates-server-${second.id}'),
+            )
+            .value,
+        isTrue,
+        reason: 'Selecting a server must not invoke its separate update action',
+      );
       await app.tapKey('updates-review');
       await app.waitFor(key('updates-ack-server-will-disconnect'));
       expect(a.preparations, isEmpty);
@@ -572,8 +633,11 @@ void main() {
     await app.pumpUntil(
       () =>
           key('updates-review').evaluate().isNotEmpty &&
-          app.tester.widget<FilledButton>(key('updates-review')).onPressed !=
-              null,
+          (key('updates-review').evaluate().isNotEmpty &&
+              app.tester
+                      .widget<FilledButton>(key('updates-review'))
+                      .onPressed !=
+                  null),
       reason: 'the server is eligible for review',
     );
     await app.tapKey('updates-review');
@@ -594,8 +658,9 @@ void main() {
     await app.tapKey('updates-cancel');
     await app.pumpUntil(
       () =>
+          key('updates-review').evaluate().isNotEmpty &&
           app.tester.widget<FilledButton>(key('updates-review')).onPressed !=
-          null,
+              null,
       reason: 'inaccessible old work does not lock all future reviews',
     );
     expect(find.textContaining(en.updatesNeedsAttention), findsWidgets);
@@ -615,8 +680,9 @@ void main() {
       );
       await app.pumpUntil(
         () =>
+            key('updates-review').evaluate().isNotEmpty &&
             app.tester.widget<FilledButton>(key('updates-review')).onPressed !=
-            null,
+                null,
         reason: 'the active server has an actionable update',
       );
       await app.tapKey('updates-review');
@@ -656,11 +722,23 @@ void main() {
       expect(desk.grants, isEmpty);
       await app.waitForAbsent(find.byType(SnackBar));
       await app.tapKey('updates-review');
+      expect(
+        find.descendant(
+          of: key('updates-confirmation'),
+          matching: find.text(en.updatesPermission),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        app.tester.widget<FilledButton>(key('updates-apply')).onPressed,
+        isNull,
+      );
       expect(desk.preparations, isEmpty);
       expect(desk.applies, isEmpty);
+      await app.tap(find.text(en.cancel).last);
       desk.allowed = true;
       await app.tapKey('updates-check');
-      await app.tapKey('updates-review');
+      await app.tapKey('updates-update-server-${profile.id}');
       await app.tapKey('updates-ack-server-will-disconnect');
       desk.preparationHeld = Completer<void>();
       await app.tapKey('updates-apply');
@@ -839,6 +917,14 @@ void main() {
       expect(find.text('Version 1.8.0 is ready to download.'), findsOneWidget);
       expect(key('settings-native-client-update-install'), findsOneWidget);
       expect(platform.installCalls, 3, reason: 'offering is not installing');
+      final beforeManualOffer = downloads;
+      await app.tapKey('settings-native-client-update-install');
+      await app.waitFor(key('settings-native-client-update-confirmation'));
+      expect(find.text(en.updatesAndroidInstallerNotice), findsOneWidget);
+      expect(downloads, beforeManualOffer);
+      await app.tap(find.text(en.cancel).last);
+      expect(downloads, beforeManualOffer);
+      expect(platform.installCalls, 3);
 
       // No build pointer for a desktop on a phone: only desktops download.
       await app.go(brokerDevicesSettingsRoute);
@@ -917,9 +1003,11 @@ void main() {
     await app.waitFor(key('settings-native-client-update-section'));
     expect(find.text('Version 0.5.9 is ready to download.'), findsOneWidget);
     await app.tapKey('settings-native-client-update-download');
+    await app.tapKey('settings-native-client-update-confirm');
     expect(launched.single.path, contains('client-v0.5.9/'));
     launcher = 'refuses';
     await app.tapKey('settings-native-client-update-download');
+    await app.tapKey('settings-native-client-update-confirm');
     expect(
       find.text(en.settingsDesktopBuildUpdateLaunchFailed),
       findsOneWidget,
@@ -964,6 +1052,7 @@ void main() {
     launched.clear();
     launcher = 'opens';
     await app.tapKey('settings-native-client-update-download');
+    await app.tapKey('settings-native-client-update-confirm');
     expect(
       launched.single.toString(),
       'https://github.com/cosyncing/cosyncing/releases/download/'

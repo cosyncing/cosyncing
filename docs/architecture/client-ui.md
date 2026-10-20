@@ -248,10 +248,25 @@ The shared adaptive picker anchors its popup to the triggering control on all
 screen sizes. Settings use a quiet label/value row on phones, and a value
 button on desktop. Popup width follows the trigger; a bounded list scrolls,
 flipping above when needed. Dark popups have no decorative perimeter border.
+The new-session agent picker shows harness logos and omits search.
 
 Display settings separate tool-call visibility, tool detail expansion and
 assistant-message filtering. A device default controls visibility unless a
 session explicitly selects Show or Hide. Use default removes that override.
+On phones, the session menu exposes one Hide tool calls checkbox showing the
+effective value; changing it saves a session override. Wider layouts retain
+the explicit default/show/hide selector. The global reset restores inheritance.
 Overrides include broker-source identity and survive closing tabs and cache
 cleanup. Reset session overrides offers Undo. Required input, delivered files,
 errors and notices remain available when routine tool calls are hidden.
+
+Compact session navigation uses Chat and Files icons at phone widths, with
+accessible labels and tooltips. Open documents stay between those controls.
+While an inline question editor owns the software keyboard, the main composer
+is hidden without discarding its draft; normal prompt entry retains keyboard
+avoidance.
+
+Updates is reached through General settings. Availability checks show status
+text, while real downloads and installations retain their progress indicators.
+App and server actions name their scope and open a confirmation sheet with
+versions and interruption details. Current servers have plain status rows.
