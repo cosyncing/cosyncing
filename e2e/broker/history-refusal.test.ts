@@ -298,8 +298,16 @@ describe('a Codex history past its index ceilings', () => {
 
   test('a tail adopted from an over-index capture continues the turn it attached inside', async () => {
     // The tail's state at its boundary comes from the capture's watermark: a steer takes the turn's
-    // next ordinal, and a result for a call read before the boundary keeps that call's detail.
+    // next ordinal, a call keeps its detail, and a historical question keeps its partial answers.
     const turn = 'h1f-open-turn';
+    const questionId = 'h1f-question';
+    const requestId = `codex:aq:${questionId}`;
+    const reply = (index: number, question: string, answer: string) =>
+      '<send_user_message_question_reply>\n' + JSON.stringify([{
+        answer, question,
+        questionItemId: JSON.stringify(['request_user_input_async', questionId, index]),
+      }]) + '\n</send_user_message_question_reply>';
+    const isResolution = (message: any) => message?.type === 'question-resolved' && message.requestId === requestId;
     const big = writeRollout(broker.paths.home, {
       sparseBytes: OVER_INDEX,
       rows: [
@@ -310,22 +318,46 @@ describe('a Codex history past its index ceilings', () => {
           type: 'response_item',
           payload: { type: 'function_call', name: 'exec_command', call_id: 'h1f-call', arguments: '{"cmd":"ls h1f"}' },
         },
+        {
+          timestamp: '2026-08-01T00:59:03.000Z',
+          type: 'event_msg',
+          payload: {
+            type: 'item_completed', turn_id: turn,
+            item: { type: 'AgentMessage', id: questionId, delivery: 'async', questions: [
+              { title: 'Which provider?', options: ['Codex', 'Claude Code'] },
+              { title: 'Which windows?', options: ['Both', 'Weekly'] },
+            ] },
+          },
+        },
+        codexUser(reply(0, 'Which provider?', 'Codex'), '2026-08-01T00:59:04.000Z'),
       ],
     });
     const { stream: live, frame } = await attach(big);
     expect(frame.gap?.code).toBe('HISTORY_PAGE_RESOURCE_LIMIT');
+    const historicalQuestion = await eventually(() => windowAfterAttach(live).find(
+      (message) => message.type === 'question-request' && message.requestId === requestId,
+    ), { what: 'the partially answered historical question in the attached window' });
+    expect(historicalQuestion.readOnly).toBe(true);
+    expect(windowAfterAttach(live).filter(isResolution)).toHaveLength(0);
     big.append([
       codexUser('h1f steer', '2026-08-01T01:00:00.000Z'),
       { timestamp: '2026-08-01T01:00:01.000Z', type: 'event_msg', payload: { type: 'exec_command_end', call_id: 'h1f-call', exit_code: 3 } },
       { timestamp: '2026-08-01T01:00:02.000Z', type: 'response_item', payload: { type: 'function_call_output', call_id: 'h1f-call', output: 'h1f failed' } },
+      codexUser(reply(1, 'Which windows?', 'Both'), '2026-08-01T01:00:03.000Z'),
+      codexUser('h1f reply delivered', '2026-08-01T01:00:04.000Z'),
     ]);
     const isSteer = (message: any) => message?.type === 'user-message' && message.text === 'h1f steer';
     const isResult = (message: any) => message?.type === 'tool-result' && message.callId === 'h1f-call';
     const steer = (await live.waitForFrame((candidate) => candidate.kind === 'message' && isSteer(candidate.message))).message;
     const result = (await live.waitForFrame((candidate) => candidate.kind === 'message' && isResult(candidate.message))).message;
-    expect(steer.key).toBe(`codex:${turn}:u1`);
+    expect(steer.key).toBe(`codex:${turn}:u2`);
     expect(result).toMatchObject({ toolName: 'exec_command', toolClass: 'execute', isError: true, exitCode: 3 });
     expect(result.semantic).toMatchObject({ kind: 'command', command: 'ls h1f', state: 'failed' });
+    // The sentinel is after the reply, so every settlement caused by that reply has arrived.
+    await live.waitForFrame((candidate) => candidate.kind === 'message' && candidate.message?.text === 'h1f reply delivered');
+    const resolutions = live.messages().filter(isResolution);
+    expect(resolutions).toHaveLength(1);
+    expect(resolutions[0].answers).toEqual([['Codex'], ['Both']]);
 
     // A refresh reads both rows exactly as the tail delivered them.
     const { stream: refreshed } = await attach(big);
@@ -337,6 +369,7 @@ describe('a Codex history past its index ceilings', () => {
     }, { what: 'the tailed steer and result in the refreshed window' });
     expect(rows.steers).toEqual([steer]);
     expect(rows.results).toEqual([result]);
+    expect(windowAfterAttach(refreshed).filter(isResolution)).toEqual(resolutions);
   });
 
   // Last: it restarts the broker.

@@ -29,6 +29,7 @@ import 'package:cosyncing_client/src/features/sessions/roster/session_roster_win
 import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_body.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_store.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/overview_quota_preferences.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/sessions_workspace.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_focus.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_frame.dart';
@@ -37,6 +38,7 @@ import 'package:cosyncing_client/src/features/sessions/workspace/workspace_pane_
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_prefs_store.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_sidebar.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_split_sash.dart';
+import 'package:cosyncing_client/src/features/settings/data/managed_runtime_api.dart';
 import 'package:cosyncing_client/src/features/settings/data/session_display_preferences_store.dart';
 import 'package:cosyncing_client/src/features/usage/data/usage_report_api.dart';
 import 'package:cosyncing_client/src/platform/update/native_client_update.dart';
@@ -58,6 +60,11 @@ SessionInfo _session(String tool, String id, {String title = 'title'}) =>
       status: SessionStatus.idle,
       attachMode: AttachMode.observe,
     );
+
+class _NoQuotaChoices extends OverviewQuotaPreferences {
+  @override
+  Future<List<String>> build() async => const [];
+}
 
 void main() {
   Widget buildSubject(
@@ -98,6 +105,8 @@ void main() {
         : null;
     return ProviderScope(
       overrides: [
+        overviewQuotaPreferencesProvider.overrideWith(_NoQuotaChoices.new),
+        managedRuntimeQuotaProvider.overrideWith((ref) async => null),
         attentionInboxProvider.overrideWith(
           (ref) async => AttentionInboxSections(
             actionRequired: [],

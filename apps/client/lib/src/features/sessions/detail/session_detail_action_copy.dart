@@ -274,6 +274,7 @@ class _SessionActionGroups extends StatelessWidget {
           color: context.tokens.textSecondary,
         ),
         minTileHeight: 40,
+        contentPadding: EdgeInsets.zero,
       ),
       child: _buildGroups(context, l10n, connected, compatibleControls),
     );
@@ -287,12 +288,9 @@ class _SessionActionGroups extends StatelessWidget {
   ) {
     return Column(
       children: [
-        Card(
+        Padding(
           key: const Key('session-actions-group-session'),
-          margin: EdgeInsets.zero,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(context.tokens.radiusLg),
-          ),
+          padding: EdgeInsets.zero,
           child: Column(
             children: [
               if (state.sessionInfo != null) ...[
@@ -300,7 +298,7 @@ class _SessionActionGroups extends StatelessWidget {
                   session: state.sessionInfo!,
                   connected: hasActiveBrokerClient && compatibleControls,
                 ),
-                const Divider(height: 1),
+                const SizedBox(height: 8),
               ],
               ListTile(
                 key: const Key('session-detail-detach-button'),
@@ -310,7 +308,7 @@ class _SessionActionGroups extends StatelessWidget {
                 enabled: canDetach,
                 onTap: canDetach ? onDetach : null,
               ),
-              const Divider(height: 1),
+              const SizedBox(height: 8),
               ListTile(
                 key: const Key('session-detail-fork-button'),
                 leading: const Icon(Icons.call_split, size: 18),
@@ -338,12 +336,9 @@ class _SessionActionGroups extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 8),
-        Card(
+        Padding(
           key: const Key('session-actions-group-transcript'),
-          margin: EdgeInsets.zero,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(context.tokens.radiusLg),
-          ),
+          padding: EdgeInsets.zero,
           child: Column(
             children: [
               ListTile(

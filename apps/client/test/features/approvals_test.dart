@@ -9,6 +9,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../support/feature/approvals_wire.dart';
+import '../support/feature/composer_driver.dart';
+import '../support/feature/composer_wire.dart';
 import '../support/feature/cosyncing_app.dart';
 import '../support/feature/fake_broker.dart';
 import '../support/feature/session_driver.dart';
@@ -710,6 +712,88 @@ void main() {
   });
 
   group('question cards', () {
+    featureTest(
+      'an earlier Codex question offers an explicit follow-up while live '
+      'questions keep their answer channel',
+      (f) async {
+        const earlier = 'codex:aq:earlier';
+        const live = 'codex:aq:live';
+        final question = askQuestion(
+          'Which provider?',
+          options: [
+            {'label': 'Codex'},
+            {'label': 'Claude Code'},
+          ],
+        );
+        late FakeBroker studio;
+        final app = await openTranscript(
+          f,
+          [
+            questionRequest(
+              earlier,
+              [question],
+              readOnly: true,
+              blocking: false,
+            ),
+          ],
+          setup: (broker) {
+            studio = broker;
+            ComposerDesk(broker);
+          },
+        );
+        await app.type('Keep this unsent draft');
+        expect(app.canPress(app.questionOption(earlier, 0, 0)), isFalse);
+        expect(find.text(en.sessionQuestionHistorical), findsOneWidget);
+        expect(
+          find.textContaining(en.sessionRequestAwaitingAnswer),
+          findsNothing,
+        );
+        await app.tapKey('session-question-recover-$earlier');
+        await app.tap(app.questionOption(earlier, 0, 0));
+        await app.sendAnswer(earlier);
+        expect(app.decisionsSent(studio), isEmpty);
+        final prompts = f.network.sockets
+            .expand((socket) => socket.sent)
+            .where((frame) => frame['kind'] == 'prompt');
+        expect(prompts, hasLength(1));
+        expect(prompts.single['text'], '> Which provider?\n\nCodex');
+        expect(prompts.single['draftRevision'], 0);
+        expect(prompts.single['files'], isNull);
+        expect(app.composerText, 'Keep this unsent draft');
+        expect(find.text(en.sessionQuestionFollowUpSent), findsOneWidget);
+        expect(find.text(en.sessionQuestionRecoveryHint), findsNothing);
+        expect(
+          app.tester
+              .widget<FilterChip>(app.questionOption(earlier, 0, 0))
+              .selected,
+          isTrue,
+        );
+        expect(app.canPress(app.questionOption(earlier, 0, 0)), isFalse);
+        expect(app.questionControl('answer-button', earlier), findsNothing);
+        expect(
+          find.byKey(const Key('session-question-recover-$earlier')),
+          findsNothing,
+        );
+        await app.liveAll(studio, [
+          questionRequest(live, [question], blocking: false),
+        ]);
+        await app.tap(app.questionOption(live, 0, 1));
+        await app.sendAnswer(live);
+        expect(app.decisionsSent(studio).single['requestId'], live);
+        await app.liveAll(studio, [
+          questionResolved(
+            earlier,
+            answers: [
+              ['Codex'],
+            ],
+          ),
+        ]);
+        expect(
+          find.byKey(const Key('session-question-recover-$earlier')),
+          findsNothing,
+        );
+      },
+    );
     featureTest(
       'a question is answered, dismissed or refused empty, with each kind of '
       'question taking only the answers it accepts',

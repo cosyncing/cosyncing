@@ -1258,20 +1258,26 @@ class _PromptComposerState extends ConsumerState<_PromptComposer>
       widget.canSend &&
       widget.interruptPhase == SessionInterruptPhase.idle &&
       !voiceState.isActive;
+  bool get _sendUsesMeta =>
+      !kIsWeb && Theme.of(context).platform == TargetPlatform.macOS;
+
+  bool get _sendUsesControl {
+    final platform = Theme.of(context).platform;
+    return kIsWeb ||
+        platform == TargetPlatform.windows ||
+        platform == TargetPlatform.linux;
+  }
+
   bool _isPlatformSendChord() {
     final keyboard = HardwareKeyboard.instance;
-    final platform = Theme.of(context).platform;
-    final usesMeta = !kIsWeb && platform == TargetPlatform.macOS;
+    final usesMeta = _sendUsesMeta;
     if (usesMeta) {
       return keyboard.isMetaPressed &&
           !keyboard.isControlPressed &&
           !keyboard.isAltPressed &&
           !keyboard.isShiftPressed;
     }
-    final usesControl =
-        kIsWeb ||
-        platform == TargetPlatform.windows ||
-        platform == TargetPlatform.linux;
+    final usesControl = _sendUsesControl;
     return usesControl &&
         keyboard.isControlPressed &&
         !keyboard.isMetaPressed &&
@@ -1380,7 +1386,11 @@ class _PromptComposerState extends ConsumerState<_PromptComposer>
         : const Icon(Icons.arrow_upward, size: 16);
 
     final sendButton = IconButton(
-      tooltip: l10n.sessionComposerSendTooltip,
+      tooltip: _sendUsesMeta || _sendUsesControl
+          ? l10n.sessionComposerSendShortcut(
+              _sendUsesMeta ? '⌘Enter' : 'Ctrl+Enter',
+            )
+          : l10n.sessionComposerSendTooltip,
       key: const Key('session-detail-send-button'),
       onPressed: effectiveCanSend ? widget.onSend : null,
       icon: sendIcon,

@@ -77,6 +77,10 @@ void main() {
           en.sessionRosterLast24Hours,
         );
         expect(app.rosterReads(studio).map(windowOf), contains('1d'));
+        expect(
+          find.byKey(const Key('session-roster-filters-active')),
+          findsNothing,
+        );
         await app.expandProject('/work/studio');
         expect(find.text('Fresh work'), findsOneWidget);
         expect(find.text('Last week'), findsNothing);
@@ -114,7 +118,12 @@ void main() {
       await f.storage.seedServer(studio);
       final app = await f.launch();
       await app.openFromRoster('hide-me', cwd: '/work/studio');
-      await app.tapKey('session-actions-codex-hide-me');
+      expect(
+        find.byKey(const Key('session-actions-codex-hide-me')),
+        findsNothing,
+      );
+      await app.tester.longPress(app.row('hide-me'));
+      await app.settle();
       await app.tap(find.text(en.sessionHide));
       await app.waitForAbsent(app.row('hide-me'));
       expect(app.tab('hide-me'), findsOneWidget);
@@ -150,7 +159,12 @@ void main() {
       await app.settle();
       expect(app.rosterReads(studio).map(windowOf), contains('2d'));
       await app.tap(find.text(en.done));
-      await app.tapKey('session-actions-codex-hide-me');
+      expect(
+        find.byKey(const Key('session-actions-codex-hide-me')),
+        findsNothing,
+      );
+      await app.tester.longPress(app.row('hide-me'));
+      await app.settle();
       await app.tap(find.text(en.sessionUnhide));
       expect(
         studio.sessions.firstWhere((s) => s['id'] == 'hide-me')['appHidden'],

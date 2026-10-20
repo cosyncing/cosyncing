@@ -201,7 +201,6 @@ class _ArchivableLiveStateItemState extends State<_ArchivableLiveStateItem> {
                           borderRadius: BorderRadius.circular(
                             tokens.radiusSm,
                           ),
-                          side: BorderSide(color: tokens.separator),
                         ),
                         clipBehavior: Clip.antiAlias,
                         child: InkWell(
@@ -535,13 +534,9 @@ class _CommandProgressCardState extends State<_CommandProgressCard> {
         DateTime.now().millisecondsSinceEpoch - widget.progress.startedAt;
     return Container(
       decoration: BoxDecoration(
-        color: tokens.surface2,
         borderRadius: BorderRadius.circular(tokens.radiusMd),
-        border: Border.all(
-          color: tokens.statusWorking.withValues(alpha: 0.45),
-        ),
       ),
-      padding: const EdgeInsets.all(12),
+      padding: EdgeInsets.zero,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -755,7 +750,7 @@ class _AgentActivityCardState extends State<_AgentActivityCard> {
         widget.activity.output != null;
 
     return Material(
-      color: tokens.surface2,
+      type: MaterialType.transparency,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(tokens.radiusMd),
       ),
@@ -763,12 +758,18 @@ class _AgentActivityCardState extends State<_AgentActivityCard> {
       child: !hasBody
           ? ListTile(
               key: const Key('session-agent-activity-row'),
+              contentPadding: EdgeInsets.zero,
               leading: leading,
               title: title,
               subtitle: subtitle,
               trailing: trailing,
             )
           : ExpansionTile(
+              tilePadding: EdgeInsets.zero,
+              backgroundColor: tokens.surface.withValues(alpha: 0),
+              collapsedBackgroundColor: tokens.surface.withValues(alpha: 0),
+              shape: const Border(),
+              collapsedShape: const Border(),
               leading: leading,
               title: title,
               subtitle: subtitle,
@@ -998,11 +999,9 @@ class _GoalStateCardState extends State<_GoalStateCard> {
 
     return Container(
       decoration: BoxDecoration(
-        color: tokens.surface2,
         borderRadius: BorderRadius.circular(tokens.radiusMd),
-        border: Border.all(color: color.withValues(alpha: 0.45)),
       ),
-      padding: const EdgeInsets.all(12),
+      padding: EdgeInsets.zero,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -1050,7 +1049,7 @@ class _GoalStateCardState extends State<_GoalStateCard> {
               ],
             ),
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 12),
           Tooltip(
             message: blockedReason ?? '',
             child: Wrap(
@@ -1190,14 +1189,18 @@ class _TaskListStateCard extends StatelessWidget {
           };
 
     return Material(
-      color: tokens.surface2,
+      type: MaterialType.transparency,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(tokens.radiusMd),
-        side: BorderSide(color: tokens.separator),
       ),
       clipBehavior: Clip.antiAlias,
       child: ExpansionTile(
         key: const Key('session-task-list-expansion'),
+        tilePadding: EdgeInsets.zero,
+        backgroundColor: tokens.surface.withValues(alpha: 0),
+        collapsedBackgroundColor: tokens.surface.withValues(alpha: 0),
+        shape: const Border(),
+        collapsedShape: const Border(),
         initiallyExpanded: taskList.status == TaskListStateStatus.running,
         leading: Icon(Icons.checklist_rounded, color: color),
         // The region is explicit now that SelectableTapRegion no longer creates

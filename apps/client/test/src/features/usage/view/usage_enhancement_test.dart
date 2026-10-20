@@ -9,7 +9,6 @@ import 'package:cosyncing_client/src/features/usage/data/usage_export_service.da
 import 'package:cosyncing_client/src/features/usage/model/usage_period.dart';
 import 'package:cosyncing_client/src/features/usage/model/usage_source_catalog.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_activity.dart';
-import 'package:cosyncing_client/src/features/usage/view/usage_agent_table.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_heatmap.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -35,25 +34,6 @@ void main() {
     expect(usageSourceNames.keys, isNot(contains('commandcode')));
     expect(usageSourceNames.keys, isNot(contains('zai')));
     expect(usageSourceNames.keys, isNot(contains('cursor')));
-  });
-
-  test('CSV is period-scoped and preserves unknown cells safely', () {
-    const range = UsageReportRange(
-      from: '2026-09-01',
-      to: '2026-09-26',
-      recognized: true,
-    );
-    const tool = UsageReportTool(
-      tool: 'custom',
-      label: '=malicious,"name"',
-      tokens: 123,
-      cost: 4,
-      coding: false,
-    );
-    final csv = usageReportCsv([tool], range);
-    expect(csv, contains('"2026-09-01","2026-09-26"'));
-    expect(csv, contains('"\'=malicious,""name"""'));
-    expect(csv, contains('"123.0",,,,,"4.0",'));
   });
 
   testWidgets(

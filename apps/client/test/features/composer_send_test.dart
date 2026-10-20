@@ -66,6 +66,12 @@ void main() {
             setup: (_, desk) => desk.answer = PromptAnswer.hold,
           );
           final composer = find.byKey(const Key('session-detail-composer'));
+          expect(
+            app.tester.widget<IconButton>(sendButton).tooltip,
+            scenario.platform == TargetPlatform.linux
+                ? 'Send prompt (Ctrl+Enter)'
+                : 'Send prompt',
+          );
           f.tester.view
             ..viewPadding = const FakeViewPadding(bottom: 24)
             ..padding = const FakeViewPadding(bottom: 24);
@@ -392,6 +398,10 @@ void main() {
       'Ctrl+Enter sends on Linux and plain Enter only adds a line',
       (f) async {
         final (app, _, desk) = await openComposer(f);
+        expect(
+          app.tester.widget<IconButton>(sendButton).tooltip,
+          'Send prompt (Ctrl+Enter)',
+        );
         await app.type('first line');
         await app.chord(LogicalKeyboardKey.enter);
         expect(desk.prompts, isEmpty);
@@ -410,6 +420,10 @@ void main() {
       'Command+Enter is the macOS send chord and Control+Enter is not',
       (f) async {
         final (app, _, desk) = await openComposer(f);
+        expect(
+          app.tester.widget<IconButton>(sendButton).tooltip,
+          'Send prompt (⌘Enter)',
+        );
         await app.type('from a mac');
         await app.chord(
           LogicalKeyboardKey.enter,

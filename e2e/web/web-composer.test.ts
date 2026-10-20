@@ -137,7 +137,7 @@ describe('phone composer', () => {
         await keyboard(page, 0);
         await expectEditorOffset(field, originalY, 0);
         await waitForFlutter(page);
-        await page.getByRole('button', { name: 'Send prompt', exact: true }).waitFor();
+        await page.getByRole('button', { name: 'Send prompt (Ctrl+Enter)', exact: true }).waitFor();
       } finally {
         await context.close();
         await pi.bye();

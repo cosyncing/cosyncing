@@ -159,7 +159,7 @@ void main() {
     );
     expect(desk.windows.single, (from: '2026-01-01', to: '2026-09-02'));
 
-    // An unknown link name opens nothing of its own: the month in progress,
+    // A missing/unknown period uses the current day,
     // and the sections below the fold arrive after the page.
     await app.go(generalSettingsRoute);
     desk.windows.clear();
@@ -173,7 +173,13 @@ void main() {
     await app.settle();
     expect(key('usage-report-agents'), findsOneWidget);
     expect(key('usage-report-share'), findsOneWidget);
-    expect(desk.windows.single, (from: '2026-09-01', to: '2026-09-02'));
+    expect(desk.windows.single, (from: '2026-09-02', to: '2026-09-02'));
+    await app.tap(
+      find.descendant(
+        of: key('usage-period-switcher'),
+        matching: find.text(en.usagePeriodMonth),
+      ),
+    );
 
     // --- one served month, read in full -------------------------------------
     expect(
@@ -274,7 +280,24 @@ void main() {
       );
     }
     expect(
-      find.descendant(of: podium, matching: find.textContaining('10.1B · 51%')),
+      find.descendant(
+        of: podium,
+        matching: find.text(r'10.1B tokens  $7,568 · 51%'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: podium,
+        matching: find.text(r'7.8B tokens  $5,882 · 39%'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: podium,
+        matching: find.text(r'8.0B tokens  $5,147 · 40%'),
+      ),
       findsOneWidget,
     );
     expect(
@@ -918,13 +941,8 @@ void main() {
     );
     expect(written, hasLength(2));
 
-    // The agent table exports its own CSV, named for the window.
-    written.clear();
-    await press('usage-export-csv');
-    expect(
-      written.keys.single,
-      '/tmp/out/cosyncing-usage-2026-08-01-2026-08-31.csv',
-    );
+    expect(key('usage-export-csv'), findsNothing);
+    expect(key('usage-source-catalog'), findsNothing);
 
     // A card that cannot be captured says so and writes nothing.
     written.clear();
@@ -933,14 +951,6 @@ void main() {
     expect(written, isEmpty);
     expect(find.text(en.usageExportFailed), findsOneWidget);
 
-    // The catalog of readable sources names what is read, and nothing else.
-    await app.reveal(key('usage-source-catalog'));
-    await app.tester.tap(key('usage-source-catalog'));
-    await app.settle();
-    expect(find.text('MiniMax Code'), findsOneWidget);
-    for (final text in ['Command Code', 'Z.ai', 'Cursor']) {
-      expect(find.text(text), findsNothing, reason: text);
-    }
     expect(app.tester.takeException(), isNull);
   });
 
@@ -993,9 +1003,7 @@ void main() {
       expect(shared.last, hasLength(4));
       expect(find.textContaining('Shared '), findsOneWidget);
 
-      // The agent table's CSV goes through the same sheet.
-      await press('usage-export-csv');
-      expect(shared.last.single, endsWith('.csv'));
+      expect(key('usage-export-csv'), findsNothing);
       expect(app.tester.takeException(), isNull);
     },
     platform: TargetPlatform.android,

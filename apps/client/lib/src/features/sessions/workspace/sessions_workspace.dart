@@ -26,6 +26,7 @@ import 'package:cosyncing_client/src/features/sessions/workspace/workspace_overv
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_pane_key.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_prefs_store.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_split_sash.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_tab_actions.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -240,18 +241,6 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace> {
         .activate(open.refs[next].key);
   }
 
-  /// Closes the active tab, the same working-set-only close the tab strip's
-  /// button performs. The agent keeps running.
-  ///
-  /// Unawaited on purpose: the close is fire-and-forget from a keystroke, and
-  /// the draft-durability barrier it waits on lives inside the controller, so
-  /// nothing here has to sequence after it.
-  void _closeActiveSession(OpenSessionsState open) {
-    final key = open.activeKey;
-    if (key == null) return;
-    unawaited(ref.read(openSessionsControllerProvider.notifier).close(key));
-  }
-
   /// The opened-sessions chords.
   ///
   /// Wide and compact bind the same registry specs to different handlers,
@@ -267,7 +256,8 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace> {
     ...appShortcutBindings(
       specs: appShortcutsForScope(AppShortcutScope.workspace),
       handlers: {
-        AppShortcutId.closeSession: () => _closeActiveSession(open),
+        AppShortcutId.closeSession: () =>
+            unawaited(closeWorkspaceTabSelection(context, ref)),
         AppShortcutId.nextSession: () => _cycleSession(open, 1),
         AppShortcutId.previousSession: () => _cycleSession(open, -1),
         AppShortcutId.jumpToLastSession: () => _activateLastSession(open),

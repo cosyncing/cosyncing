@@ -11,6 +11,29 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Added
+
+- Select multiple session and file tabs with Ctrl/Command or Shift, then close
+  the group with the workspace close shortcut or selection action. Undo restores
+  the closed tabs and their order; sessions keep running.
+- Workspace Overview can show quota providers chosen on this device, with their
+  remaining limits and reset times.
+
+### Changed
+
+- Usage overview opens on Day, includes cost beside tokens and share in every
+  ranking, and removes the integrations catalog and CSV export.
+- Send shows its keyboard shortcut in the tooltip. Background activity and
+  Session Status use quieter surfaces; roster filters no longer show a count,
+  and session actions remain available through context menus without overflow
+  buttons on each row.
+
+### Fixed
+
+- Codex's structured terminal question replies now settle the corresponding
+  cards after reconnecting. Earlier questions without a live answer channel
+  offer an explicit follow-up reply when this client can control the session.
+
 ## 0.7.2 — 2026-10-19
 
 ### Added

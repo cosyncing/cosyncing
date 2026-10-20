@@ -1092,7 +1092,7 @@
   "@shortcutPreviousSession": {
     "description": "Description of the previous open session shortcut."
   },
-  "shortcutCloseSession": "Close the current session view. The agent keeps running.",
+  "shortcutCloseSession": "Close selected tabs in the focused pane, or its active tab. Sessions keep running.",
   "@shortcutCloseSession": {
     "description": "Description of the close open session shortcut."
   },
@@ -6330,10 +6330,7 @@
   "settingsEnhancementAgentsQuotaHint": "Managed runtimes, quota windows and warnings",
   "usageEnhancementDay": "Day",
   "usageEnhancementCurrent": "Current period",
-  "usageEnhancementIntegrations": "Usage integrations",
-  "usageEnhancementIntegrationsHint": "Supported sources are shown for reference. Availability depends on the selected server and its Tokdash installation.",
   "usageEnhancementNoReading": "No reading in this period",
-  "usageEnhancementExportCsv": "Export CSV",
   "usageEnhancementActivity": "Activity",
   "usageEnhancementDetailUnavailable": "— indicates a breakdown this source does not provide.",
   "@settingsEnhancementFontSize": {
@@ -6698,5 +6695,19 @@
   "updatesProgressVersions": "{from} → {to}\n{phase}",
   "@updatesProgressVersions": {"placeholders": {"from": {"type": "String"}, "to": {"type": "String"}, "phase": {"type": "String"}}},
   "updatesVersionChange": "{from} → {to}",
-  "@updatesVersionChange": {"placeholders": {"from": {"type": "String"}, "to": {"type": "String"}}}
+  "@updatesVersionChange": {"placeholders": {"from": {"type": "String"}, "to": {"type": "String"}}},
+  "sessionComposerSendShortcut": "Send prompt ({shortcut})",
+  "@sessionComposerSendShortcut": {"placeholders": {"shortcut": {"type": "String"}}},
+  "usageRankingMetrics": "{tokens} tokens  {cost} · {share}",
+  "@usageRankingMetrics": {"placeholders": {"tokens": {"type": "String"}, "cost": {"type": "String"}, "share": {"type": "String"}}},
+  "workspaceCloseSelectedTabs": "Close {count} selected tabs",
+  "overviewQuotaChoose": "Choose providers",
+  "overviewQuotaAll": "All quotas",
+  "overviewQuotaSaveFailed": "Could not save quota choices. Try again.",
+  "sessionQuestionRecover": "Reply to earlier question",
+  "sessionQuestionRecoveryHint": "This question predates this connection. Your reply will be sent as a follow-up message to the agent.",
+  "sessionQuestionHistorical": "Earlier question · live answer state unavailable",
+  "@workspaceCloseSelectedTabs": {"placeholders": {"count": {"type": "int"}}},
+  "workspaceActiveTab": "Active tab",
+  "sessionQuestionFollowUpSent": "Follow-up reply sent"
 }

@@ -483,6 +483,70 @@ void main() {
 
   group('quota', () {
     featureTest(
+      'Overview saves chosen providers per broker without changing '
+      'quota warning consent',
+      (f) async {
+        final studio = await studioSeeded(f);
+        final desk = RuntimeDesk(studio)
+          ..quotaBody = quotaSnapshot({
+            'codex': quotaProvider(
+              'codex',
+              buckets: [
+                quotaBucket(),
+                quotaBucket(id: '7d', label: 'Weekly', remaining: 81),
+              ],
+            ),
+            'claude': quotaProvider(
+              'claude',
+              buckets: [
+                quotaBucket(id: 'session', label: 'Session', remaining: 60),
+              ],
+            ),
+          });
+        final tower = f.network.add('http://tower.test:7734');
+        RuntimeDesk(tower).quotaBody = desk.quotaBody;
+        await f.storage.seedServer(tower, active: false);
+        var app = await f.launch();
+        await app.tapKey('overview-quota-choose');
+        await app.tapKey('overview-quota-provider-codex');
+        await app.tapKey('overview-quota-provider-claude');
+        await app.tapKey('overview-quota-done');
+        await app.waitFor(find.byKey(const Key('settings-quota-row-codex-5h')));
+        expect(
+          find.byKey(const Key('settings-quota-row-codex-7d')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const Key('settings-quota-row-claude-session')),
+          findsOneWidget,
+        );
+        expect(desk.quotaPreferenceWrites, isEmpty);
+        await app.tapKey('overview-quota-choose');
+        await app.tapKey('overview-quota-provider-codex');
+        await app.dismissModal();
+        expect(
+          find.byKey(const Key('settings-quota-row-codex-5h')),
+          findsOneWidget,
+        );
+        app = await f.restart();
+        expect(
+          find.byKey(const Key('settings-quota-row-codex-5h')),
+          findsOneWidget,
+        );
+        await app.switchServer(tower.baseUri.toString());
+        expect(
+          find.byKey(const Key('settings-quota-row-codex-5h')),
+          findsNothing,
+        );
+        await app.switchServer(studio.baseUri.toString());
+        expect(
+          find.byKey(const Key('settings-quota-row-codex-5h')),
+          findsOneWidget,
+        );
+        expect(desk.quotaPreferenceWrites, isEmpty);
+      },
+    );
+    featureTest(
       'the quota panel states what remains in every window it can read',
       semantics: true,
       (f) async {

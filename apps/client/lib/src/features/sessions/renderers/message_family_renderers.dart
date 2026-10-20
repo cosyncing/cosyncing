@@ -292,6 +292,12 @@ Widget _questionRequestMessageRenderer(
 }) {
   final l10n = AppLocalizations.of(context);
   final questions = message.questionRequestQuestions;
+  final requestId = message.raw['requestId'];
+  final historicalCodexQuestion =
+      requestId is String &&
+      requestId.startsWith('codex:aq:') &&
+      message.raw['blocking'] == false &&
+      !message.questionRequestAnswerInTerminal;
   return _TranscriptBoxMessage(
     plain: true,
     icon: Icons.quiz_outlined,
@@ -312,7 +318,10 @@ Widget _questionRequestMessageRenderer(
     // Only while somebody still owes the answer. A settled question is drawn
     // read-only too, and "Awaiting answer" above "Settled in your terminal or
     // another app." gave one card two accounts of the same question.
-    readOnlyHint: message.requestIsReadOnly && !settled
+    // Historical async questions have no verified pending state. Their action
+    // area explains follow-ups without claiming somebody still owes an answer.
+    readOnlyHint:
+        message.requestIsReadOnly && !settled && !historicalCodexQuestion
         ? l10n.sessionRequestAwaitingAnswer
         : null,
     payloadAsChips: true,

@@ -83,6 +83,8 @@ import 'package:cosyncing_client/src/features/sessions/workspace/side_pane_scope
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_focus.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_frame.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_pane_key.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_tab_actions.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_tab_selection.dart';
 import 'package:cosyncing_client/src/features/settings/controller/broker_credentials_controller.dart';
 import 'package:cosyncing_client/src/features/settings/controller/conversation_display_controller.dart';
 import 'package:cosyncing_client/src/features/settings/controller/debug_views_controller.dart';
@@ -2264,7 +2266,54 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
   /// [_ensureCurrentSessionTab] re-adding the tab on the next frame.
   void _closeSessionFromShortcut() {
     if (!_sessionTabShortcutAllowed()) return;
-    unawaited(_closeOpenSession('${widget.tool}/${widget.sessionId}'));
+    unawaited(_closeSelectedTabsFromPage());
+  }
+
+  Future<void> _closeSelectedTabsFromPage() async {
+    final source = RosterSource.of(ref.read(activeBrokerProfileProvider));
+    final currentKey = '${widget.tool}/${widget.sessionId}';
+    final focused = ref.read(focusedPaneProvider);
+    final closingFiles =
+        focused != null &&
+        isWorkspaceFilePaneKey(focused) &&
+        workspacePaneSessionKey(focused) == currentKey;
+    final selected = ref.read(workspaceTabSelectionProvider('sessions')).keys;
+    final sessionKeys = selected.isEmpty
+        ? {currentKey}
+        : Set<String>.of(selected);
+    final closingCurrent =
+        !closingFiles && (selected.isEmpty || selected.contains(currentKey));
+    if (closingCurrent) {
+      if (!await _establishDraftDurabilityBarrier() || !mounted) return;
+      if (source != RosterSource.of(ref.read(activeBrokerProfileProvider))) {
+        return;
+      }
+      _suppressedSessionTabKey = currentKey;
+    }
+    await closeWorkspaceTabSelection(
+      context,
+      ref,
+      sessionKeys: closingFiles ? null : sessionKeys,
+    );
+    if (!mounted) return;
+    if (source != RosterSource.of(ref.read(activeBrokerProfileProvider))) {
+      _suppressedSessionTabKey = null;
+      return;
+    }
+    if (!closingCurrent) return;
+    final open = ref.read(openSessionsControllerProvider).valueOrNull;
+    if (open?.refs.any((entry) => entry.key == currentKey) ?? false) {
+      _suppressedSessionTabKey = null;
+      return;
+    }
+    final next = open?.active;
+    if (GoRouter.maybeOf(context) != null) {
+      context.go(
+        next == null
+            ? sessionsRoute
+            : sessionDetailLocation(tool: next.tool, sessionId: next.id),
+      );
+    }
   }
 
   void _activateOrdinalFromShortcut(OpenSessionsState open, int index) {
@@ -2694,6 +2743,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                     onSelect: (key) =>
                         unawaited(_selectOpenSession(key, openSessions.refs)),
                     onClose: (key) => unawaited(_closeOpenSession(key)),
+                    onCloseSelected: _closeSessionFromShortcut,
                   ),
                 if (!(showSinglePaneSessionStrip &&
                     openSessions != null &&

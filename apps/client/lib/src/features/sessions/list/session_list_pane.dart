@@ -1001,15 +1001,6 @@ class _RosterFilterMenu extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
-    final count =
-        (filters.status == null ? 0 : 1) +
-        (filters.tool == null ? 0 : 1) +
-        (filters.activity == SessionActivityWindow.last7Days ||
-                (filters.activity == SessionActivityWindow.custom &&
-                    filters.customDays == 7)
-            ? 0
-            : 1) +
-        (filters.showHidden ? 1 : 0);
     return _RosterBarButton(
       key: const Key('session-roster-filter-button'),
       tooltip: l10n.sessionRosterFilters,
@@ -1094,37 +1085,9 @@ class _RosterFilterMenu extends StatelessWidget {
           );
         }
       },
-      child: Stack(
-        clipBehavior: Clip.none,
-        children: [
-          StrokeIcon(
-            StrokeGlyph.filter,
-            color: active
-                ? context.tokens.accent
-                : context.tokens.textSecondary,
-          ),
-          if (count > 0)
-            Positioned(
-              right: -8,
-              top: -8,
-              child: Container(
-                key: const Key('session-roster-filters-active'),
-                padding: const EdgeInsets.symmetric(horizontal: 4),
-                decoration: BoxDecoration(
-                  color: context.tokens.accent,
-                  borderRadius: BorderRadius.circular(
-                    context.tokens.radiusSm,
-                  ),
-                ),
-                child: Text(
-                  '$count',
-                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    color: context.tokens.accentInk,
-                  ),
-                ),
-              ),
-            ),
-        ],
+      child: StrokeIcon(
+        StrokeGlyph.filter,
+        color: active ? context.tokens.accent : context.tokens.textSecondary,
       ),
     );
   }
