@@ -266,7 +266,7 @@ for await (const chunk of Bun.stdin.stream()) {
     else if (msg.method === 'thread/loaded/list') send({ id: msg.id, result: { data: [], nextCursor: null } }); // cold-load pre-check (issues-part3 mode restore)
     else if (msg.method === 'thread/settings/update') {
       const unknown = Object.keys(msg.params || {}).filter(
-        (key) => !['threadId', 'model', 'effort'].includes(key),
+        (key) => !['threadId', 'model', 'effort', 'approvalPolicy', 'approvalsReviewer', 'sandboxPolicy'].includes(key),
       );
       if (unknown.length) {
         send({ id: msg.id, error: { message: 'unknown settings field: ' + unknown.join(',') } });

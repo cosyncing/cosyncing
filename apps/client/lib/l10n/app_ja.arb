@@ -975,7 +975,7 @@
   "sessionRequestSubmitting": "送信中",
   "sessionRequestSent": "送信済み",
   "sessionRequestFailed": "失敗",
-  "sessionRequestResolvedElsewhere": "別のクライアントで対応済みです。",
+  "sessionRequestResolved": "対応済みです。",
   "sessionRequestNoLongerWaiting": "回答待ちではなくなりました。",
   "sessionRequestSettledInTerminal": "ターミナルで対応済みです。",
   "sessionQuestionSettledElsewhere": "ターミナルまたは別のアプリで対応済みです。",

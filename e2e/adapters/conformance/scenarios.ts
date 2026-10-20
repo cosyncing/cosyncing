@@ -725,7 +725,11 @@ export function conformanceSuite(kit: ConformanceKit): void {
       else if (profile.nativePermission) expect(approvedOnce).toEqual(profile.nativePermission.approveOnce);
       else expect(approvedOnce?.outcome).toEqual({ outcome: 'selected', optionId: 'allow_once' });
       for (const stream of [owner, late]) {
-        await stream.waitForMessage((message) => message.type === 'permission-resolved' && message.requestId === card.requestId);
+        const resolved = await stream.waitForMessage((message) => message.type === 'permission-resolved' && message.requestId === card.requestId);
+        if (agent === 'codex') {
+          expect(resolved.decision).toBe('approve');
+          expect(resolved.decidedBy).toBe('app');
+        }
       }
       // A second decision on a settled card is refused and never reaches the agent.
       if (assertsFixed('C11')) {

@@ -613,6 +613,72 @@ const codexExtras: ConformanceExtra[] = [];
 const THREAD_WRITES = new Set(['thread/settings/update', 'thread/name/set', 'turn/start', 'turn/steer']);
 
 codexExtras.push({
+  title: 'a new app session applies automatic review before its first prompt despite inherited untrusted workspace defaults',
+  async run(context) {
+    const fake = context.fake as CodexFake;
+    const before = fake.configure({
+      threadDefaults: { approvalPolicy: 'untrusted', approvalsReviewer: 'auto_review' },
+    }) as unknown as FakeCodexAppServerConfig;
+    let stream: SessionStream | undefined;
+    try {
+      const created = await context.client.post('/api/sessions/codex', {
+        directory: fake.workspace('untrusted-create'), title: 'App default in an untrusted workspace',
+      });
+      expect(created.status, created.text).toBe(200);
+      expect(created.body.session.currentMode).toBe('approve-for-me');
+      stream = await context.client.attach('codex', created.body.session.id, { mode: 'resume' });
+      await stream.waitForKind('history');
+      expect(lastSession(stream)?.info.currentMode).toBe('approve-for-me');
+      expect((await stream.sendAndAwait({ kind: 'prompt', text: 'First app prompt' })).kind).toBe('ack');
+      await stream.waitForMessage((message) => message.type === 'model-output' && message.final === true);
+      const contexts = readFileSync(fake.rolloutOf(created.body.session.id), 'utf8').trim().split('\n')
+        .map((line) => JSON.parse(line)).filter((record) => record.type === 'turn_context');
+      expect(contexts.at(-1)?.payload.approval_policy).toBe('on-request');
+      expect(contexts.at(-1)?.payload.approvals_reviewer).toBe('auto_review');
+      expect(contexts.at(-1)?.payload.sandbox_policy.type).toBe('workspace-write');
+    } finally {
+      stream?.close();
+      fake.configure({ threadDefaults: before.threadDefaults });
+    }
+  },
+});
+
+codexExtras.push({
+  title: 'an untrusted approval policy still shows Ask permission with an automatic reviewer, and an explicit app pick enables auto-review',
+  async run(context) {
+    const fake = context.fake as CodexFake;
+    const session = fake.seedSession({ title: 'Untrusted workspace with automatic reviewer' });
+    appendRecords(fake.rolloutOf(session.id), [{
+      type: 'turn_context',
+      payload: {
+        approval_policy: 'untrusted',
+        approvals_reviewer: 'auto_review',
+        sandbox_policy: { type: 'workspace-write', writable_roots: [session.cwd] },
+      },
+    }]);
+    const row = await rowWhen(context, session.id, () => true);
+    expect(row.currentMode).toBe('ask-permission');
+    const stream = await context.client.attach('codex', session.id, { mode: 'resume' });
+    try {
+      await stream.waitForKind('history');
+      expect(lastSession(stream)?.info.currentMode).toBe('ask-permission');
+      const mark = fake.ledger.mark();
+      expect((await stream.sendAndAwait({
+        kind: 'prompt', text: 'Enable automatic review', permissionMode: 'approve-for-me',
+      })).kind).toBe('ack');
+      await stream.waitForMessage((message) => message.type === 'model-output' && message.final === true);
+      const start = fake.ledger.nativeRequests('turn/start', mark).at(-1)?.frame?.params;
+      expect(start.approvalPolicy).toBe('on-request');
+      expect(start.approvalsReviewer).toBe('auto_review');
+      expect(start.sandboxPolicy.type).toBe('workspaceWrite');
+      expect(lastSession(stream)?.info.currentMode).toBe('approve-for-me');
+    } finally {
+      stream.close();
+    }
+  },
+});
+
+codexExtras.push({
   title: 'a create thread/start answers with a rollout already in the store is refused, and nothing is written into that session',
   async run(context) {
     const fake = context.fake as CodexFake;

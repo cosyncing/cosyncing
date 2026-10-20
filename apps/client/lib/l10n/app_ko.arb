@@ -975,7 +975,7 @@
   "sessionRequestSubmitting": "보내는 중",
   "sessionRequestSent": "보냄",
   "sessionRequestFailed": "실패",
-  "sessionRequestResolvedElsewhere": "다른 클라이언트에서 처리되었습니다.",
+  "sessionRequestResolved": "처리되었습니다.",
   "sessionRequestNoLongerWaiting": "더 이상 답변을 기다리지 않습니다.",
   "sessionRequestSettledInTerminal": "터미널에서 처리되었습니다.",
   "sessionQuestionSettledElsewhere": "터미널 또는 다른 앱에서 처리되었습니다.",

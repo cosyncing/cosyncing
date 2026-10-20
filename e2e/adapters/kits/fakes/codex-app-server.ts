@@ -84,6 +84,8 @@ export interface FakeCodexAppServerConfig {
   models: FakeCodexModel[];
   /** `skills/list` for every workspace. */
   skills: Array<{ name: string; description: string }>;
+  /** Native defaults inherited by newly created threads (for example an untrusted workspace). */
+  threadDefaults?: Partial<CodexThreadSettings>;
   /** Fault knobs. */
   faults?: {
     /** The daemon accepts connections but answers nothing (a wedged daemon). */
@@ -590,6 +592,7 @@ function runFakeCodex(): void {
         }
         const cwd = String(params.cwd ?? process.cwd());
         const settings = defaultCodexSettings(cwd, params.model ? String(params.model) : config.models[0]?.id);
+        Object.assign(settings, config.threadDefaults);
         if (params.modelProvider) settings.modelProvider = String(params.modelProvider);
         const thread: Thread = {
           id,

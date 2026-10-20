@@ -30,6 +30,10 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Approval cards show the outcome without naming the client that resolved them.
+  New Codex sessions apply the app's permission default before their first prompt,
+  including in untrusted folders. Existing sessions with an untrusted command
+  policy show Ask permission even when an automatic reviewer is configured.
 - Codex's structured terminal question replies now settle the corresponding
   cards after reconnecting. Earlier questions without a live answer channel
   offer an explicit follow-up reply when this client can control the session.

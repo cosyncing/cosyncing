@@ -221,10 +221,9 @@ function emitCodexAttachDiagnostic(diagnostic: CodexAttachDiagnostic): void {
   }
 }
 
-/** Default mode for a session with NO recorded approval/reviewer/sandbox settings (fresh app-created threads,
- *  never-turned rollouts): maintainer wants approve-for-me, not the daemon's config default of "ask"
- *  (issues-part3 follow-up 2026-07-13). Asserted only on COLD loads we own — recorded rollout settings
- *  and already-loaded (terminal-live) threads are never overridden, and an explicit pick always wins.
+/** Default mode for fresh app-created threads and cold loads with no recorded permission settings.
+ *  Recorded rollout settings and already-loaded existing threads are never overridden;
+ *  an explicit pick always wins.
  *  Overridable via COSYNCING_CODEX_DEFAULT_MODE (ask-permission | approve-for-me | full-access). */
 const CODEX_DEFAULT_SESSION_MODE = ((): string => {
   const v = (process.env.COSYNCING_CODEX_DEFAULT_MODE ?? 'approve-for-me').trim();
@@ -418,6 +417,7 @@ export class CodexAdapter implements AgentBackend {
       model: started?.model
         ? String(started.model)
         : opts.model?.modelID,
+      currentMode: codexModeFromSettings(started?.approvalPolicy, started?.approvalsReviewer, started?.sandbox),
       currentModel: started?.model || opts.model
         ? {
             providerID: String(
@@ -2998,23 +2998,20 @@ async function createCodexThread(
       if (threadId != null) await rpc('thread/unsubscribe', { threadId: String(threadId) }, 5000).catch(() => undefined);
       throw new Error('Codex answered with a session that already exists in its session store, so it was not created.');
     }
+    const mode = codexPermissionMode(CODEX_DEFAULT_SESSION_MODE, safeCodexSandboxPolicy(started?.sandbox, cwd));
     if (threadId != null) {
-      // Codex 0.146.0's generated ThreadStartParams accepts model and
-      // modelProvider, but not reasoningEffort. Effort is a supported
-      // thread-settings field (`effort`), so apply it through the same native
-      // settings path used for cold-restore before claiming the exact
-      // selection on the created session.
-      if (model?.reasoningEffort) {
-        await rpc(
-          'thread/settings/update',
-          {
-            threadId,
-            model: model.modelID,
-            effort: model.reasoningEffort,
-          },
-          5000,
-        );
-      }
+      // This new thread is already loaded on the daemon, so its first attach trusts the live
+      // settings and skips cold-load defaults. Apply the app default here or an untrusted cwd
+      // inherits untrusted + auto_review and still asks the user despite the automatic badge.
+      // Do this only after refusing stored rollouts above, so creation cannot alter an old thread.
+      // Effort is a thread-settings field too (not a ThreadStartParams field on older Codex).
+      await rpc('thread/settings/update', {
+        threadId,
+        approvalPolicy: mode.approvalPolicy,
+        approvalsReviewer: mode.approvalsReviewer,
+        sandboxPolicy: mode.sandboxPolicy,
+        ...(model?.reasoningEffort ? { model: model.modelID, effort: model.reasoningEffort } : {}),
+      }, 5000);
       try {
         await rpc('thread/name/set', { threadId, name: name?.trim() || basename(cwd) || `${PRODUCT_IDENTITY.productName} session` }, 10000);
       } catch {
@@ -3025,7 +3022,13 @@ async function createCodexThread(
       for (let i = 0; i < 20 && !existsSync(path); i++) await new Promise((r) => setTimeout(r, 200));
       if (!existsSync(path)) throw new Error('Codex did not persist the new session rollout after requesting legacy history.');
     }
-    return { ...started, cosyncingSyncUnavailableReason: shared ? undefined : providerReason ?? CODEX_DAEMON_UNAVAILABLE_REASON };
+    return {
+      ...started,
+      approvalPolicy: mode.approvalPolicy,
+      approvalsReviewer: mode.approvalsReviewer,
+      sandbox: mode.sandboxPolicy,
+      cosyncingSyncUnavailableReason: shared ? undefined : providerReason ?? CODEX_DAEMON_UNAVAILABLE_REASON,
+    };
   });
 }
 
@@ -5647,9 +5650,8 @@ class CodexResumeConnection implements SessionConnection {
     );
   }
 
-  /** Another client of the shared daemon (e.g. a synced `codex resume --remote` terminal) answered a
-   *  server→client request. The daemon broadcasts only that the request is settled — not the decision —
-   *  so resolve our card as 'external' instead of leaving it stuck on "needs input" forever. */
+  /** The shared daemon closed a server→client request. It does not report the decision or
+   *  decider, so 'external' only closes our card; it cannot attribute an answer to another client. */
   private handleServerRequestResolved(params: any): void {
     if (params?.threadId && String(params.threadId) !== this.threadId) return;
     const requestId = params?.requestId;
@@ -6218,7 +6220,7 @@ class CodexResumeConnection implements SessionConnection {
     const result = approvalResponse(pending.method, pending.params, decision);
     this.pendingApprovals.delete(requestId);
     this.write({ id: pending.rpcId, result });
-    this.emit({ type: 'permission-resolved', requestId, decision });
+    this.emit({ type: 'permission-resolved', requestId, decision, decidedBy: 'app' });
   }
 
   async answerQuestion(requestId: string, answers: string[][]): Promise<void> {
@@ -8743,6 +8745,9 @@ function codexModeFromSettings(approvalPolicy: unknown, approvalsReviewer: unkno
   // An unsandboxed thread must never be presented as a safe mode, even if another client left a
   // mixed approval/reviewer tuple behind. Sandbox danger takes precedence over reviewer policy.
   if (sandbox === 'dangerFullAccess' || sandbox === 'danger-full-access') return 'full-access';
+  // An untrusted workspace can inherit this legacy policy alongside auto_review. Its command
+  // prompts still go to the user; the reviewer alone cannot establish automatic approval.
+  if (approval === 'untrusted') return CODEX_DEFAULT_PERMISSION_MODE;
   if (reviewer === 'auto_review' || reviewer === 'guardian_subagent') return 'approve-for-me';
   // Compatibility for rollouts written before Codex exposed approvals_reviewer separately.
   if (approval === 'never') return 'approve-for-me';

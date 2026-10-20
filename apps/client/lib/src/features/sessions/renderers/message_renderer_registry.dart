@@ -97,6 +97,7 @@ Widget buildAgentMessageRenderer(
       context,
       message,
       action: requestAction,
+      settled: requestSettled,
     );
   }
   if (message.type == AgentMessageType.questionRequest) {

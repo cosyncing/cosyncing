@@ -1021,7 +1021,7 @@
   "sessionRequestSubmitting": "正在提交",
   "sessionRequestSent": "已发送",
   "sessionRequestFailed": "失败",
-  "sessionRequestResolvedElsewhere": "已在其他客户端处理。",
+  "sessionRequestResolved": "已处理。",
   "sessionRequestNoLongerWaiting": "已不再等待回答。",
   "sessionRequestSettledInTerminal": "已在你的终端里处理。",
   "sessionQuestionSettledElsewhere": "已在你的终端或其他应用中处理。",

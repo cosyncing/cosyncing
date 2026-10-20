@@ -3303,7 +3303,10 @@
   "sessionRequestSubmitting": "Submitting",
   "sessionRequestSent": "Sent",
   "sessionRequestFailed": "Failed",
-  "sessionRequestResolvedElsewhere": "Resolved in another client.",
+  "sessionRequestResolved": "Resolved.",
+  "@sessionRequestResolved": {
+    "description": "A permission request closed without a known approval decision. Show a neutral outcome without naming the resolving client."
+  },
   "sessionRequestNoLongerWaiting": "No longer waiting for an answer.",
   "@sessionRequestNoLongerWaiting": {
     "description": "Request card label: the session no longer offers this approval or question, so it cannot be answered here; no resolution for it reached this device."
