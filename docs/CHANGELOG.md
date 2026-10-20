@@ -30,6 +30,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Android QR pairing preserves ML Kit initialization classes in optimized
+  release builds, fixing a scanner error after camera permission is granted.
 - Approval cards show the outcome without naming the client that resolved them.
   New Codex sessions apply the app's permission default before their first prompt,
   including in untrusted folders. Existing sessions with an untrusted command
