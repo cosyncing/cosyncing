@@ -33,6 +33,11 @@ export class AttentionPolicy {
   }
 
   async handleMessage(session: SessionInfo, message: AgentMessage): Promise<void> {
+    // Child sessions report to their parent agent, which owns any user-facing
+    // request or outcome. Keep their transcript observable without creating
+    // inbox events, badges, reminders or notifications for internal work.
+    if (session.origin === 'subagent') return;
+
     switch (message.type) {
       case 'permission-request':
         if (!message.readOnly) await this.upsertRequest(session, 'permission-required', message.requestId);

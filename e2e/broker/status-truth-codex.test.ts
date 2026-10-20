@@ -183,6 +183,47 @@ describe.skipIf(!posix)('Codex run state', () => {
     expect(seen).toEqual(Object.fromEntries(seeds.map((seed) => [seed.name, [seed.status]])));
   });
 
+  test('Guardian reviews and spawned subagents stream their work without attention events; the parent still notifies', async () => {
+    const parent = thread();
+    const parentRollout = codex.writeRollout(parent);
+    const children = [false, true].map((guardian) => {
+      const id = thread();
+      return codex.writeRollout(id, [], { parent, guardian });
+    });
+    await hold([parent, ...children.map((child) => child.threadId)], { status: 'unknown' });
+
+    for (const child of children) {
+      expect(await rosterRow(child.threadId)).toMatchObject({ origin: 'subagent', parentThreadId: parent });
+      const stream = await open(child, { readOnly: true });
+      const turnId = `turn-${child.threadId}`;
+      const goal = (status: string) => codexRecord('event_msg', {
+        type: 'thread_goal_updated',
+        goal: { threadId: child.threadId, objective: 'Internal review', status, createdAt: at(1) },
+      });
+      child.append(codexStart(turnId), goal('active'));
+      await footerArrives(stream, turnId, false);
+      await stream.waitForMessage((message) => message.type === 'goal-state' && message.status === 'active');
+      child.append(codexComplete(turnId), goal('completed'));
+      await footerArrives(stream, turnId, true);
+      await stream.waitForMessage((message) => message.type === 'goal-state' && message.status === 'done');
+      stream.close();
+    }
+
+    // A later parent outcome is a barrier through the broker's ordered attention queue.
+    // It proves silence for fully processed child turns, without a timed absence check.
+    const parentStream = await open(parentRollout, { readOnly: true });
+    parentRollout.append(codexStart('turn-parent'), codexComplete('turn-parent'));
+    await footerArrives(parentStream, 'turn-parent', true);
+    const events = await eventually(async () => {
+      const response = await client.get('/api/attention-events?clientId=subagent-check&limit=200');
+      expect(response.status).toBe(200);
+      return response.body.events.some((event: any) => event.sessionId === parentRollout.id && event.kind === 'run-finished')
+        ? response.body.events : undefined;
+    }, { what: 'the parent completion notification' });
+    expect(events.filter((event: any) => children.some((child) => child.id === event.sessionId))).toEqual([]);
+    parentStream.close();
+  });
+
   test('a stale rollout qualification (same size and mtime) cannot seed Idle over a start already on disk, and the tail still streams', async () => {
     const id = thread();
     const start = `${JSON.stringify(codexStart('turn-seed-race'))}\n`;

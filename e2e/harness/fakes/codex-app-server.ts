@@ -178,9 +178,10 @@ export class CodexAppServer {
   }
 
   /**
-   * A rollout for `threadId` (a UUID). `parent` makes it a subagent thread spawned by that one.
+   * A rollout for `threadId` (a UUID). `parent` makes it a subagent thread spawned by that one;
+   * `guardian` uses the native automatic approval review metadata instead of a spawned worker.
    */
-  writeRollout(threadId: string, records: Array<Record<string, unknown>> = [], options: { parent?: string } = {}): CodexRollout {
+  writeRollout(threadId: string, records: Array<Record<string, unknown>> = [], options: { parent?: string; guardian?: boolean } = {}): CodexRollout {
     const [year, month, date] = DAY.split('-');
     const directory = join(this.codexHome, 'sessions', year!, month!, date!);
     mkdirSync(directory, { recursive: true });
@@ -188,7 +189,9 @@ export class CodexAppServer {
     const meta = {
       id: threadId,
       cwd: this.workspace,
-      ...(options.parent
+      ...(options.guardian
+        ? { originator: 'codex-tui', thread_source: 'guardian_review', parent_thread_id: options.parent, source: { subagent: { other: 'guardian' } } }
+        : options.parent
         ? { thread_source: 'subagent', source: { subagent: { thread_spawn: { parent_thread_id: options.parent, depth: 1 } } } }
         : {}),
     };

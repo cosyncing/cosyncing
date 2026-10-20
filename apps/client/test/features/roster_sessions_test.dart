@@ -227,7 +227,8 @@ void main() {
   );
 
   featureTest(
-    'Home counts old active sessions before filters and never fetches all time',
+    'Home excludes subagents, counts old active sessions before filters '
+    'and never fetches all time',
     (f) async {
       final studio = f.network.add('http://studio.test:7734')
         ..addSession(
@@ -242,6 +243,26 @@ void main() {
           origin: 'exec',
           status: SessionStatus.needsInput,
           updatedAt: daysAgo(30),
+        )
+        ..addSession(
+          'guardian',
+          'Guardian review',
+          origin: 'subagent',
+          parentThreadId: 'old',
+          status: SessionStatus.working,
+        )
+        ..addSession(
+          'worker',
+          'Internal worker question',
+          origin: 'subagent',
+          parentThreadId: 'old',
+          status: SessionStatus.needsInput,
+        )
+        ..addSession(
+          'orphan',
+          'Internal orphan work',
+          origin: 'subagent',
+          status: SessionStatus.working,
         );
       final lab = f.network.add('http://lab.test:7734', machine: 'lab')
         ..addSession('lab', 'Lab task', status: SessionStatus.needsInput);
@@ -268,6 +289,16 @@ void main() {
 
       expect(count('running', '1'), findsOneWidget);
       expect(count('waiting', '1'), findsOneWidget);
+      final home = find.byKey(const Key('workspace-overview'));
+      Finder homeText(String title) =>
+          find.descendant(of: home, matching: find.text(title));
+      expect(homeText('Internal worker question'), findsNothing);
+      await app.tapKey('workspace-overview-count-running');
+      expect(homeText('Old active work'), findsOneWidget);
+      expect(homeText('Guardian review'), findsNothing);
+      expect(homeText('Internal orphan work'), findsNothing);
+      // Even a live child status change must not add a Home input item.
+      studio.updateSession('guardian', {'status': 'needs-input'});
       noOverviewFetches();
       await app.search('no matching sidebar row');
       expect(count('running', '1'), findsOneWidget);
@@ -601,41 +632,40 @@ void main() {
   });
 
   group('live changes and races', () {
-    featureTest(
-      'a session changing rebuilds its own roster row and no other',
-      (f) async {
-        final studio = f.network.add('http://studio.test:7734')
-          ..addSession('a1', 'Fix login')
-          ..addSession('a2', 'Tidy styles')
-          ..addSession('a3', 'Write docs');
-        await f.storage.seedServer(studio);
-        final app = await f.launch();
-        await app.expandProject('/work/studio');
-        final rebuilt = <String>[];
-        debugOnRebuildDirtyWidget = (element, _) {
-          if (element.widget case SessionRenameRegion(:final sessionId)) {
-            rebuilt.add(sessionId);
-          }
-        };
-        addTearDown(() => debugOnRebuildDirtyWidget = null);
+    featureTest('a session changing rebuilds its own roster row and no other', (
+      f,
+    ) async {
+      final studio = f.network.add('http://studio.test:7734')
+        ..addSession('a1', 'Fix login')
+        ..addSession('a2', 'Tidy styles')
+        ..addSession('a3', 'Write docs');
+      await f.storage.seedServer(studio);
+      final app = await f.launch();
+      await app.expandProject('/work/studio');
+      final rebuilt = <String>[];
+      debugOnRebuildDirtyWidget = (element, _) {
+        if (element.widget case SessionRenameRegion(:final sessionId)) {
+          rebuilt.add(sessionId);
+        }
+      };
+      addTearDown(() => debugOnRebuildDirtyWidget = null);
 
-        studio.updateSession('a2', {'status': 'working'});
-        await app.pumpUntil(
-          () => app.container
-              .read(sessionListControllerProvider)
-              .sessions
-              .any((s) => s.id == 'a2' && s.status == SessionStatus.working),
-          reason: 'the roster takes the new status',
-        );
+      studio.updateSession('a2', {'status': 'working'});
+      await app.pumpUntil(
+        () => app.container
+            .read(sessionListControllerProvider)
+            .sessions
+            .any((s) => s.id == 'a2' && s.status == SessionStatus.working),
+        reason: 'the roster takes the new status',
+      );
 
-        expect(rebuilt, isNotEmpty, reason: 'the changed row shows it');
-        expect(
-          rebuilt.toSet(),
-          {'a2'},
-          reason: 'rows whose session did not change are kept as they were',
-        );
-      },
-    );
+      expect(rebuilt, isNotEmpty, reason: 'the changed row shows it');
+      expect(
+        rebuilt.toSet(),
+        {'a2'},
+        reason: 'rows whose session did not change are kept as they were',
+      );
+    });
 
     featureTest(
       'another session changing leaves the open session page, and its '
@@ -822,36 +852,35 @@ void main() {
       },
     );
 
-    featureTest(
-      'a roster feed that fails once is retried and carries on',
-      (f) async {
-        final studio = f.network.add('http://studio.test:7734')
-          ..addSession('a1', 'Fix login')
-          ..respondNextWhere(
-            (r) => r.path == '/api/session-roster-deltas',
-            FakeBrokerResponse.error(500, 'INTERNAL', 'feed $rawLeakSentinel'),
-          );
-        await f.storage.seedServer(studio);
-        final app = await f.launch();
-        List<FakeBrokerRequest> polls() =>
-            studio.requestsTo('/api/session-roster-deltas');
-        await app.pumpUntil(
-          () => polls().length >= 2,
-          reason: 'the feed asks again after the failure',
-          every: const Duration(milliseconds: 250),
+    featureTest('a roster feed that fails once is retried and carries on', (
+      f,
+    ) async {
+      final studio = f.network.add('http://studio.test:7734')
+        ..addSession('a1', 'Fix login')
+        ..respondNextWhere(
+          (r) => r.path == '/api/session-roster-deltas',
+          FakeBrokerResponse.error(500, 'INTERNAL', 'feed $rawLeakSentinel'),
         );
-        expect(polls().first.answered, 500);
-        expect(find.byKey(const Key('session-roster-error')), findsNothing);
+      await f.storage.seedServer(studio);
+      final app = await f.launch();
+      List<FakeBrokerRequest> polls() =>
+          studio.requestsTo('/api/session-roster-deltas');
+      await app.pumpUntil(
+        () => polls().length >= 2,
+        reason: 'the feed asks again after the failure',
+        every: const Duration(milliseconds: 250),
+      );
+      expect(polls().first.answered, 500);
+      expect(find.byKey(const Key('session-roster-error')), findsNothing);
 
-        studio.addSession('a2', 'After the hiccup');
-        await app.expandProject('/work/studio');
-        await app.pumpUntil(
-          () => find.text('After the hiccup').evaluate().isNotEmpty,
-          reason: 'the retried feed delivers the change',
-        );
-        app.expectNoRawErrorLeak();
-      },
-    );
+      studio.addSession('a2', 'After the hiccup');
+      await app.expandProject('/work/studio');
+      await app.pumpUntil(
+        () => find.text('After the hiccup').evaluate().isNotEmpty,
+        reason: 'the retried feed delivers the change',
+      );
+      app.expectNoRawErrorLeak();
+    });
 
     featureTest(
       'a broker without a delta feed is polled, answers not-modified until '
@@ -1169,6 +1198,31 @@ void main() {
         );
         // The idle parent reads Working while a child works.
         expect(find.text(en.sessionRosterStatusWorking), findsOneWidget);
+        await app.tapKey('session-children-codex/p1');
+        expect(find.text('Child one'), findsOneWidget);
+        expect(
+          find.descendant(
+            of: app.row('c1'),
+            matching: find.text(en.sessionRosterStatusWorking),
+          ),
+          findsOneWidget,
+          reason: 'the child keeps its own Working status in the roster',
+        );
+        expect(
+          find.descendant(
+            of: find.byKey(const Key('workspace-overview-count-running')),
+            matching: find.text('0'),
+          ),
+          findsOneWidget,
+          reason: 'a working child does not become Overview work',
+        );
+        expect(
+          find.descendant(
+            of: find.byKey(const Key('workspace-overview')),
+            matching: find.text('Child one'),
+          ),
+          findsNothing,
+        );
 
         await app.search('Child two');
         Finder inList(String text) => find.descendant(

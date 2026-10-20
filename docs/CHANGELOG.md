@@ -30,6 +30,10 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Subagent sessions, including Codex Guardian reviews, no longer raise
+  notifications or count as running or waiting work on Home. Their activity
+  remains available in the session roster and transcript.
+
 - Session hidden and unhidden notices dismiss automatically and include a close
   button. Undo stays available until dismissed when a screen reader is active.
 - Android QR pairing preserves ML Kit initialization classes in optimized
