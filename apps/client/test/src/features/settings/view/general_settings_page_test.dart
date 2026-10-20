@@ -4,6 +4,7 @@ import 'package:cosyncing_client/src/features/settings/data/ui_preferences_store
 import 'package:cosyncing_client/src/features/settings/view/general_settings_page.dart';
 import 'package:cosyncing_client/src/features/voice/data/read_aloud_preferences_store.dart';
 import 'package:cosyncing_client/src/platform/update/desktop_client_update_provider.dart';
+import 'package:cosyncing_client/src/platform/update/native_client_update.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -32,6 +33,7 @@ void main() {
       readAloudPreferencesStoreProvider.overrideWithValue(readAloudStore),
       clientTargetPlatformProvider.overrideWithValue(platform),
       clientIsWebProvider.overrideWithValue(isWeb),
+      nativeClientUpdateAvailableProvider.overrideWithValue(false),
       ...overrides,
     ],
     child: MaterialApp(

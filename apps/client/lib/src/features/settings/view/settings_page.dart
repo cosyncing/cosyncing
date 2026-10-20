@@ -10,7 +10,6 @@ import 'package:cosyncing_client/src/features/settings/view/display_settings_pag
 import 'package:cosyncing_client/src/features/settings/view/general_settings_page.dart';
 import 'package:cosyncing_client/src/features/settings/view/notification_settings_page.dart';
 import 'package:cosyncing_client/src/features/settings/view/settings_common.dart';
-import 'package:cosyncing_client/src/features/updates/view/updates_page.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_report_page.dart';
 import 'package:cosyncing_client/src/platform/update/desktop_client_update_provider.dart';
 import 'package:cosyncing_client/src/platform/update/native_client_update.dart';
@@ -100,15 +99,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         subtitle: nativeUpdatesSupported
             ? l10n.settingsCategoryGeneralNativeSubtitle
             : l10n.settingsCategoryGeneralSubtitle,
-        onTap: () => openCategory(5, generalSettingsRoute),
-      ),
-      SettingsLinkTile(
-        tileKey: const Key('settings-category-updates'),
-        icon: Icons.system_update_alt,
-        title: l10n.updatesTitle,
-        subtitle: l10n.updatesSubtitle,
         showAttentionDot: clientUpdateAvailable,
-        onTap: () => openCategory(6, updatesRoute),
+        onTap: () => openCategory(5, generalSettingsRoute),
       ),
     ];
     return Scaffold(
@@ -176,7 +168,6 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                       2 => const BrokerDevicesSettingsPage(),
                       3 => const AgentsSettingsPage(),
                       4 => const UsageReportPage(),
-                      6 => const UpdatesPage(),
                       _ => const GeneralSettingsPage(),
                     },
                   ),

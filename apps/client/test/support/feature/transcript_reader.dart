@@ -519,16 +519,31 @@ extension TranscriptReader on AppDriver {
 
   /// Hides tool calls from the View menu: only what was said is drawn.
   Future<void> hideToolCalls() async {
-    await tapKey('session-detail-view-menu');
-    await tapKey('session-tool-visibility');
-    await tap(find.text('Hide tool calls').last);
+    await _setToolCallsHidden(true);
   }
 
   /// Shows the tool calls [hideToolCalls] hid.
   Future<void> showToolCalls() async {
+    await _setToolCallsHidden(false);
+  }
+
+  Future<void> _setToolCallsHidden(bool hidden) async {
     await tapKey('session-detail-view-menu');
+    final toggle = find.byKey(const Key('session-tool-visibility-toggle'));
+    if (toggle.evaluate().isNotEmpty) {
+      final checked = tester
+          .widget<CheckedPopupMenuItem<dynamic>>(toggle)
+          .checked;
+      if (checked != hidden) {
+        await tap(toggle);
+      } else {
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await settle();
+      }
+      return;
+    }
     await tapKey('session-tool-visibility');
-    await tap(find.text('Show tool calls').last);
+    await tap(find.text(hidden ? 'Hide tool calls' : 'Show tool calls').last);
   }
 }
 

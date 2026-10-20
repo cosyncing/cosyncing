@@ -2880,5 +2880,21 @@
   "sessionQuestionHistorical": "之前的问题 · 当前回答状态不可用",
   "@workspaceCloseSelectedTabs": {"placeholders": {"count": {"type": "int"}}},
   "workspaceActiveTab": "当前标签页",
-  "sessionQuestionFollowUpSent": "后续回复已发送"
+  "sessionQuestionFollowUpSent": "后续回复已发送",
+  "updatesUpdateApp": "更新应用",
+  "updatesUpdateServer": "更新服务器",
+  "updatesUpdateServers": "{count, plural, =1{更新 1 个服务器} other{更新 {count} 个服务器}}",
+  "updatesIncludeApp": "同时更新此应用",
+  "updatesInstall": "安装更新",
+  "updatesDownload": "下载更新",
+  "updatesCheckAgain": "再次检查",
+  "updatesAndroidInstallerNotice": "将先下载更新，然后由 Android 系统安装程序询问是否安装。",
+  "updatesDownloadNotice": "下载更新后，请手动安装。此应用不会自动替换。",
+  "@updatesUpdateServers": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  }
 }

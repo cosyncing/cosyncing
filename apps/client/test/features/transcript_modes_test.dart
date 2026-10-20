@@ -43,45 +43,109 @@ List<Map<String, Object?>> mixedHistory() => [
 ];
 
 void main() {
-  featureTest(
-    'tool visibility follows global default until a session '
-    'explicitly overrides it',
-    (f) async {
-      var app = await openTranscript(f, mixedHistory());
-      final sessionLocation = app.router.routeInformationProvider.value.uri
-          .toString();
-      app.router.go(displaySettingsRoute);
-      await app.settle();
-      await app.toggle('tools-hide-default');
-      app.router.go(sessionLocation);
-      await app.settle();
-      expect(find.byKey(const ValueKey('tool-c1-details')), findsNothing);
-      await app.tapKey('session-detail-view-menu');
-      await app.pick('session-tool-visibility', 'Show tool calls');
-      expect(find.byKey(const ValueKey('tool-c1-details')), findsOneWidget);
-      app.router.go(displaySettingsRoute);
-      await app.settle();
-      await app.toggle('tools-hide-default');
-      await app.toggle('tools-hide-default');
-      app.router.go(sessionLocation);
-      await app.settle();
-      expect(find.byKey(const ValueKey('tool-c1-details')), findsOneWidget);
-      app = await f.restart(initialLocation: sessionLocation);
-      expect(find.byKey(const ValueKey('tool-c1-details')), findsOneWidget);
-      app.router.go(displaySettingsRoute);
-      await app.settle();
-      await app.tap(find.text('Reset session overrides'));
-      await app.tap(find.text('Undo'));
-      app.router.go(sessionLocation);
-      await app.settle();
-      expect(find.byKey(const ValueKey('tool-c1-details')), findsOneWidget);
-      await app.tapKey('session-detail-view-menu');
-      await app.pick('session-tool-visibility', 'Use default (Hidden)');
-      expect(find.byKey(const ValueKey('tool-c1-details')), findsNothing);
-      expect(find.text('Report ready'), findsOneWidget);
-      expect(find.text('report.zip'), findsOneWidget);
-    },
-  );
+  for (final viewport in [
+    FeatureViewport.desktopTall,
+    FeatureViewport.phoneTall,
+  ]) {
+    featureTest(
+      'tool visibility follows global default until a session '
+      'explicitly overrides it (${viewport.name})',
+      (f) async {
+        var app = await openTranscript(f, mixedHistory(), viewport: viewport);
+        final sessionLocation = app.router.routeInformationProvider.value.uri
+            .toString();
+        if (viewport == FeatureViewport.phoneTall) {
+          await app.tapKey('session-detail-view-menu');
+          final toggle = find.byKey(
+            const Key('session-tool-visibility-toggle'),
+          );
+          expect(
+            app.tester.widget<CheckedPopupMenuItem<dynamic>>(toggle).checked,
+            isFalse,
+          );
+          await app.dismissModal();
+        }
+        app.router.go(displaySettingsRoute);
+        await app.settle();
+        await app.toggle('tools-hide-default');
+        app.router.go(sessionLocation);
+        await app.settle();
+        expect(find.byKey(const ValueKey('tool-c1-details')), findsNothing);
+        await app.tapKey('session-detail-view-menu');
+        if (viewport == FeatureViewport.phoneTall) {
+          final toggle = find.byKey(
+            const Key('session-tool-visibility-toggle'),
+          );
+          expect(
+            app.tester.widget<CheckedPopupMenuItem<dynamic>>(toggle).checked,
+            isTrue,
+          );
+          await app.tap(toggle);
+        } else {
+          await app.pick('session-tool-visibility', 'Show tool calls');
+        }
+        expect(find.byKey(const ValueKey('tool-c1-details')), findsOneWidget);
+        app.router.go(displaySettingsRoute);
+        await app.settle();
+        await app.toggle('tools-hide-default');
+        await app.toggle('tools-hide-default');
+        app.router.go(sessionLocation);
+        await app.settle();
+        expect(find.byKey(const ValueKey('tool-c1-details')), findsOneWidget);
+        app = await f.restart(initialLocation: sessionLocation);
+        expect(find.byKey(const ValueKey('tool-c1-details')), findsOneWidget);
+        app.router.go(displaySettingsRoute);
+        await app.settle();
+        await app.tap(find.text('Reset session overrides'));
+        await app.tap(find.text('Undo'));
+        app.router.go(sessionLocation);
+        await app.settle();
+        expect(find.byKey(const ValueKey('tool-c1-details')), findsOneWidget);
+        if (viewport == FeatureViewport.phoneTall) {
+          app.router.go(displaySettingsRoute);
+          await app.settle();
+          await app.tap(find.text('Reset session overrides'));
+          app.router.go(sessionLocation);
+          await app.settle();
+          await app.tapKey('session-detail-view-menu');
+          final toggle = find.byKey(
+            const Key('session-tool-visibility-toggle'),
+          );
+          expect(
+            app.tester.widget<CheckedPopupMenuItem<dynamic>>(toggle).checked,
+            isTrue,
+          );
+          await app.dismissModal();
+        } else {
+          await app.tapKey('session-detail-view-menu');
+          await app.pick('session-tool-visibility', 'Use default (Hidden)');
+        }
+        expect(find.byKey(const ValueKey('tool-c1-details')), findsNothing);
+        expect(find.text('Report ready'), findsOneWidget);
+        expect(find.text('report.zip'), findsOneWidget);
+        if (viewport == FeatureViewport.phoneTall) {
+          app.router.go(displaySettingsRoute);
+          await app.settle();
+          await app.toggle('tools-hide-default');
+          app.router.go(sessionLocation);
+          await app.settle();
+          expect(find.byKey(const ValueKey('tool-c1-details')), findsOneWidget);
+          await app.tapKey('session-detail-view-menu');
+          await app.tapKey('session-tool-visibility-toggle');
+          expect(find.byKey(const ValueKey('tool-c1-details')), findsNothing);
+          await app.tapKey('session-detail-view-menu');
+          final toggle = find.byKey(
+            const Key('session-tool-visibility-toggle'),
+          );
+          expect(
+            app.tester.widget<CheckedPopupMenuItem<dynamic>>(toggle).checked,
+            isTrue,
+          );
+          await app.dismissModal();
+        }
+      },
+    );
+  }
 
   group('tool display modes', () {
     final cases = <({String mode, bool tool, bool thinking, bool preamble})>[

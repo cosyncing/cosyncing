@@ -1901,5 +1901,21 @@
   "sessionQuestionHistorical": "以前の質問 · 現在の回答状態は不明",
   "@workspaceCloseSelectedTabs": {"placeholders": {"count": {"type": "int"}}},
   "workspaceActiveTab": "現在のタブ",
-  "sessionQuestionFollowUpSent": "追加の返信を送信しました"
+  "sessionQuestionFollowUpSent": "追加の返信を送信しました",
+  "updatesUpdateApp": "アプリを更新",
+  "updatesUpdateServer": "サーバーを更新",
+  "updatesUpdateServers": "{count, plural, =1{サーバー 1 台を更新} other{{count} 台のサーバーを更新}}",
+  "updatesIncludeApp": "このアプリも更新",
+  "updatesInstall": "更新をインストール",
+  "updatesDownload": "更新をダウンロード",
+  "updatesCheckAgain": "再確認",
+  "updatesAndroidInstallerNotice": "まず更新をダウンロードします。その後、Android のシステムインストーラーでインストールを確認します。",
+  "updatesDownloadNotice": "更新をダウンロードし、手動でインストールしてください。アプリは自動では置き換えられません。",
+  "@updatesUpdateServers": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  }
 }

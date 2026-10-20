@@ -46,6 +46,7 @@ class AdaptivePicker<T> extends StatefulWidget {
     this.title,
     this.trigger,
     this.placeholder = '',
+    this.searchable,
     super.key,
   });
 
@@ -66,6 +67,9 @@ class AdaptivePicker<T> extends StatefulWidget {
 
   /// Localized placeholder when no value is selected.
   final String placeholder;
+
+  /// Overrides the automatic search field for lists of eight or more choices.
+  final bool? searchable;
 
   @override
   State<AdaptivePicker<T>> createState() => _AdaptivePickerState<T>();
@@ -95,6 +99,7 @@ class _AdaptivePickerState<T> extends State<AdaptivePicker<T>> {
         value: widget.value,
         options: widget.options,
         title: widget.title,
+        searchable: widget.searchable,
       ),
     );
     if (!mounted) return;
@@ -171,6 +176,7 @@ class _PickerPopup<T> extends StatefulWidget {
     required this.value,
     required this.options,
     this.title,
+    this.searchable,
   });
   final Rect anchor;
 
@@ -182,6 +188,7 @@ class _PickerPopup<T> extends StatefulWidget {
 
   /// Localized setting name for the popup heading.
   final String? title;
+  final bool? searchable;
   @override
   State<_PickerPopup<T>> createState() => _PickerPopupState<T>();
 }
@@ -227,6 +234,7 @@ class _PickerPopupState<T> extends State<_PickerPopup<T>> {
     final t = context.tokens;
     final l10n = AppLocalizations.of(context);
     final media = MediaQuery.of(context);
+    final searchable = widget.searchable ?? widget.options.length >= 8;
     _initialSize ??= media.size;
     _initialTextSize ??= media.textScaler.scale(14);
     final available = math.max(
@@ -237,9 +245,7 @@ class _PickerPopupState<T> extends State<_PickerPopup<T>> {
           16,
     );
     final minimum =
-        56 +
-        (widget.title == null ? 0 : 40) +
-        (widget.options.length >= 8 ? 56 : 0);
+        56 + (widget.title == null ? 0 : 40) + (searchable ? 56 : 0);
     if (_initialSize != media.size ||
         _initialTextSize != media.textScaler.scale(14) ||
         widget.anchor.top < media.padding.top ||
@@ -303,7 +309,7 @@ class _PickerPopupState<T> extends State<_PickerPopup<T>> {
                     ),
                   ],
                 ),
-              if (widget.options.length >= 8)
+              if (searchable)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 8),
                   child: TextField(
@@ -501,6 +507,8 @@ class AdaptivePickerFormField<T> extends FormField<T> {
     required this.onChanged,
     this.decoration = const InputDecoration(),
     Widget? hint,
+    bool? searchable,
+    Widget? Function(T? value)? leadingBuilder,
     super.initialValue,
     super.validator,
     super.onSaved,
@@ -516,6 +524,7 @@ class AdaptivePickerFormField<T> extends FormField<T> {
            ),
            isEmpty: state.value == null,
            child: AdaptivePicker<T?>(
+             searchable: searchable,
              value: state.value,
              title: decoration.labelText,
              placeholder: _pickerText(hint),
@@ -524,6 +533,7 @@ class AdaptivePickerFormField<T> extends FormField<T> {
                  PickerOption(
                    value: item.value,
                    label: _pickerText(item.child),
+                   leading: leadingBuilder?.call(item.value),
                    enabled: item.enabled,
                    key: item.key,
                    description: item.child is Tooltip

@@ -236,14 +236,15 @@ void main() {
     // Layer one is the whole point of the hierarchy: the hub lists categories
     // and carries no controls of its own.
 
-    testWidgets('Updates category shows an available-update dot', (
+    testWidgets('General category shows an available-update dot', (
       tester,
     ) async {
       final semantics = tester.ensureSemantics();
       await tester.pumpWidget(buildSubject(clientUpdateAvailable: true));
       await tester.pumpAndSettle();
 
-      final tile = find.byKey(const Key('settings-category-updates'));
+      final tile = find.byKey(const Key('settings-category-general'));
+      expect(find.byKey(const Key('settings-category-updates')), findsNothing);
       expect(tile, findsOneWidget);
       expect(
         find.descendant(of: tile, matching: find.byType(StatusDot)),

@@ -21,6 +21,14 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Changed
 
+- New-session agent choices show their logos without a search field.
+- Narrow session navigation uses Chat and Files icons. The mobile session menu
+  has one Hide tool calls checkbox reflecting the global default or the saved
+  session override.
+- Updates opens from General settings, shows text while checking, and names app
+  and server actions. Confirmation sheets show versions and installation effects
+  before downloading or applying updates.
+
 - Usage overview opens on Day, includes cost beside tokens and share in every
   ranking, and removes the integrations catalog and CSV export.
 - Send shows its keyboard shortcut in the tooltip. Background activity and
@@ -30,6 +38,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Typing an answer to an inline question on a phone keeps the main prompt
+  composer out of the answer area while preserving its draft.
 - Hide and unhide sessions respond immediately while the broker saves the
   change. Undo also responds while saving; failed changes restore the current
   broker state and show an error.

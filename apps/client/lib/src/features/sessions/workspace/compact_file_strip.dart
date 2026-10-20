@@ -36,6 +36,7 @@ class CompactFileStrip extends ConsumerWidget {
     required this.onChat,
     required this.onRead,
     required this.onBrowse,
+    this.filesSelected = false,
     super.key,
   });
 
@@ -47,6 +48,9 @@ class CompactFileStrip extends ConsumerWidget {
 
   /// Chat is the selected destination rather than another session view.
   final bool chatSelected;
+
+  /// Whether the directory browser is the selected destination.
+  final bool filesSelected;
 
   /// Returns to the retained chat and composer.
   final VoidCallback onChat;
@@ -77,6 +81,7 @@ class CompactFileStrip extends ConsumerWidget {
     final selection = ref.watch(workspaceTabSelectionProvider(region)).keys;
     final l10n = AppLocalizations.of(context);
     final t = context.tokens;
+    final iconNavigation = MediaQuery.sizeOf(context).width < 600;
     final controller = ref.read(filePanesControllerProvider.notifier);
     final source = RosterSource.of(
       ref.watch(activeBrokerProfileProvider),
@@ -88,9 +93,11 @@ class CompactFileStrip extends ConsumerWidget {
         height: 40,
         child: Row(
           children: [
-            Semantics(
-              selected: chatSelected,
+            Tooltip(
+              message: l10n.sessionViewChat,
+              excludeFromSemantics: iconNavigation,
               child: TextButton(
+                key: const Key('compact-chat'),
                 onPressed: onChat,
                 style: TextButton.styleFrom(
                   backgroundColor: chatSelected ? t.surface2 : null,
@@ -100,9 +107,15 @@ class CompactFileStrip extends ConsumerWidget {
                   minimumSize: const Size(40, 40),
                   padding: const EdgeInsets.symmetric(horizontal: 8),
                 ),
-                child: Text(
-                  l10n.sessionViewChat,
-                  style: Theme.of(context).textTheme.labelSmall,
+                child: Semantics(
+                  label: iconNavigation ? l10n.sessionViewChat : null,
+                  selected: chatSelected,
+                  child: iconNavigation
+                      ? const StrokeIcon(StrokeGlyph.chat, size: 20)
+                      : Text(
+                          l10n.sessionViewChat,
+                          style: Theme.of(context).textTheme.labelSmall,
+                        ),
                 ),
               ),
             ),
@@ -162,6 +175,7 @@ class CompactFileStrip extends ConsumerWidget {
             TextButton(
               key: const Key('compact-manage-files'),
               style: TextButton.styleFrom(
+                backgroundColor: filesSelected ? t.surface2 : null,
                 minimumSize: const Size(40, 40),
                 padding: const EdgeInsets.symmetric(horizontal: 8),
               ),
@@ -433,11 +447,35 @@ class CompactFileStrip extends ConsumerWidget {
                         },
                       ),
                     ),
-              child: Text(
-                panes.isEmpty
-                    ? l10n.sessionViewFiles
-                    : '${l10n.sessionViewFiles} ${panes.length}',
-                style: Theme.of(context).textTheme.labelSmall,
+              child: Tooltip(
+                message: l10n.sessionViewFiles,
+                excludeFromSemantics: iconNavigation,
+                child: Semantics(
+                  label: iconNavigation ? l10n.sessionViewFiles : null,
+                  selected: filesSelected,
+                  child: iconNavigation
+                      ? Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const StrokeIcon(StrokeGlyph.folder, size: 20),
+                            if (panes.isNotEmpty) ...[
+                              const SizedBox(width: 4),
+                              Text(
+                                MaterialLocalizations.of(
+                                  context,
+                                ).formatDecimal(panes.length),
+                                style: Theme.of(context).textTheme.labelSmall,
+                              ),
+                            ],
+                          ],
+                        )
+                      : Text(
+                          panes.isEmpty
+                              ? l10n.sessionViewFiles
+                              : '${l10n.sessionViewFiles} ${panes.length}',
+                          style: Theme.of(context).textTheme.labelSmall,
+                        ),
+                ),
               ),
             ),
           ],

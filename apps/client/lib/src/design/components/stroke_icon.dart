@@ -31,6 +31,9 @@ enum StrokeGlyph {
   /// Project folder.
   folder,
 
+  /// Session conversation.
+  chat,
+
   /// Disclosure chevron, pointing down (rotate for right).
   chevronDown,
 
@@ -141,6 +144,9 @@ const Map<StrokeGlyph, List<String>> _outlines = {
     'M3 8V6a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM3 9h18',
   ],
   StrokeGlyph.chevronDown: ['m7 10 5 5 5-5'],
+  StrokeGlyph.chat: [
+    'M21 15a3 3 0 0 1-3 3H8l-5 3V6a3 3 0 0 1 3-3h12a3 3 0 0 1 3 3z',
+  ],
   StrokeGlyph.monitor: ['R3 3 18 13 2', 'M8 21h8m-4-5v5'],
   StrokeGlyph.settings: [
     'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z',

@@ -1901,5 +1901,21 @@
   "sessionQuestionHistorical": "이전 질문 · 현재 응답 상태 확인 불가",
   "@workspaceCloseSelectedTabs": {"placeholders": {"count": {"type": "int"}}},
   "workspaceActiveTab": "현재 탭",
-  "sessionQuestionFollowUpSent": "후속 답변을 보냈습니다"
+  "sessionQuestionFollowUpSent": "후속 답변을 보냈습니다",
+  "updatesUpdateApp": "앱 업데이트",
+  "updatesUpdateServer": "서버 업데이트",
+  "updatesUpdateServers": "{count, plural, =1{서버 1개 업데이트} other{서버 {count}개 업데이트}}",
+  "updatesIncludeApp": "이 앱도 업데이트",
+  "updatesInstall": "업데이트 설치",
+  "updatesDownload": "업데이트 다운로드",
+  "updatesCheckAgain": "다시 확인",
+  "updatesAndroidInstallerNotice": "먼저 업데이트를 다운로드합니다. 그런 다음 Android 시스템 설치 프로그램에서 설치 여부를 확인합니다.",
+  "updatesDownloadNotice": "업데이트를 다운로드한 후 직접 설치하세요. 이 앱은 자동으로 교체되지 않습니다.",
+  "@updatesUpdateServers": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  }
 }

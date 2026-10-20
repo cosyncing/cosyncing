@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_media_source.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_file_service.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_file_browser.dart';
@@ -46,6 +47,36 @@ void main() {
       await app.tapKey('workspace-open-drawer');
       await app.openFromRoster('s1', cwd: '/work/studio');
       expect(find.byKey(const Key('compact-manage-files')), findsOneWidget);
+      final semantics = f.tester.ensureSemantics();
+      try {
+        await app.settle();
+        expect(
+          app.tester.getSemantics(find.byKey(const Key('compact-chat'))).label,
+          'Chat',
+        );
+        expect(
+          app.tester
+              .getSemantics(find.byKey(const Key('compact-manage-files')))
+              .label,
+          'Files',
+        );
+      } finally {
+        semantics.dispose();
+      }
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('compact-chat')),
+          matching: find.byType(StrokeIcon),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('compact-manage-files')),
+          matching: find.text('Files'),
+        ),
+        findsNothing,
+      );
       await app.enterText(
         find.byKey(const Key('session-detail-prompt-input')),
         'Keep my draft',
@@ -88,7 +119,7 @@ void main() {
       await app.tapKey('compact-manage-files');
       await app.tap(find.byTooltip('Pin file'));
       await app.tapKey('compact-files-close');
-      await app.tap(find.text('Chat').first);
+      await app.tapKey('compact-chat');
       expect(find.text('Keep my draft'), findsOneWidget);
       await app.tap(find.text('plan.md').first);
       expect(

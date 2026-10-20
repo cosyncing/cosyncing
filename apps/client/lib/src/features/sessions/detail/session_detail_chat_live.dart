@@ -22,6 +22,7 @@ class _ChatPanel extends ConsumerWidget {
     required this.isAttachmentIntakeBusy,
     required this.promptController,
     required this.promptFocusNode,
+    required this.transcriptFocusNode,
     required this.stagedAttachments,
     required this.archivedLiveState,
     required this.onArchiveLiveState,
@@ -73,6 +74,7 @@ class _ChatPanel extends ConsumerWidget {
   final bool isAttachmentIntakeBusy;
   final TextEditingController promptController;
   final FocusNode promptFocusNode;
+  final FocusNode transcriptFocusNode;
   final List<SessionStagedAttachment> stagedAttachments;
   final Map<String, String> archivedLiveState;
   final ValueChanged<List<_LiveStateItem>> onArchiveLiveState;
@@ -388,7 +390,12 @@ class _ChatPanel extends ConsumerWidget {
                           child: _ReadableColumn(child: liveStateSurface),
                         ),
                       ),
-                    Expanded(child: transcript),
+                    Expanded(
+                      child: Focus(
+                        focusNode: transcriptFocusNode,
+                        child: transcript,
+                      ),
+                    ),
                   ],
                 );
               },
@@ -397,7 +404,19 @@ class _ChatPanel extends ConsumerWidget {
           // No gap: the composer's own rounded container is the top edge of the
           // composer region. There is no card or tab around it, so any spacer
           // here would read as a second boundary.
-          composer(constraints.maxHeight),
+          ListenableBuilder(
+            listenable: transcriptFocusNode,
+            child: composer(constraints.maxHeight),
+            builder: (context, child) {
+              // Scaffold already consumed the inset. Read the view only to
+              // detect the keyboard; do not subtract its height a second time.
+              final answering =
+                  MediaQuery.sizeOf(context).width < 600 &&
+                  View.of(context).viewInsets.bottom > 0 &&
+                  transcriptFocusNode.hasFocus;
+              return Offstage(offstage: answering, child: child);
+            },
+          ),
         ],
       ),
     );
