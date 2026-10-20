@@ -101,41 +101,148 @@ void main() {
   });
 
   featureTest(
-    'hiding retains its open tab, notices expire or close with accessible '
-    'Undo, and custom days reach the broker',
+    'hiding responds before the broker, retains its open tab, and supports '
+    'Undo, expiring notices, accessible dismissal, and custom days',
     (f) async {
       final studio = f.network.add('http://studio.test:7734')
         ..addSession(
           'hide-me',
           'Keep this conversation',
+          nativeId: 'thread-hide-me',
           extra: {
             'appHidden': false,
             'appHiddenByAncestor': false,
             'appVisibilityRevision': 0,
           },
         )
+        ..addSession(
+          'hide-child',
+          'Linked conversation',
+          origin: 'subagent',
+          parentThreadId: 'thread-hide-me',
+          extra: {'appHidden': false, 'appHiddenByAncestor': false},
+        )
+        ..addSession(
+          'hidden-during-save',
+          'Hidden on another device while saving',
+          nativeId: 'thread-hidden-during-save',
+          origin: 'subagent',
+          parentThreadId: 'thread-hide-me',
+          extra: {'appHidden': false, 'appHiddenByAncestor': false},
+        )
+        ..addSession(
+          'grandchild',
+          'Conversation under the later hidden child',
+          origin: 'subagent',
+          parentThreadId: 'thread-hidden-during-save',
+          extra: {'appHidden': false, 'appHiddenByAncestor': false},
+        )
+        ..addSession(
+          'explicitly-hidden',
+          'Independently hidden conversation',
+          origin: 'subagent',
+          parentThreadId: 'thread-hide-me',
+          extra: {'appHidden': true, 'appHiddenByAncestor': false},
+        )
         ..addSession('other', 'Another conversation');
       await f.storage.seedServer(studio);
       final app = await f.launch();
       await app.openFromRoster('hide-me', cwd: '/work/studio');
+      await app.tapKey('session-children-codex/hide-me');
+      expect(app.row('hide-child'), findsOneWidget);
+      expect(app.row('explicitly-hidden'), findsNothing);
+      await app.tapKey('session-children-codex/hidden-during-save');
+      await app.openFromRoster('grandchild');
       expect(
         find.byKey(const Key('session-actions-codex-hide-me')),
         findsNothing,
       );
       await app.tester.longPress(app.row('hide-me'));
       await app.settle();
+      const visibilityPath = '/api/sessions/codex/hide-me/visibility';
+      final hide = studio.hold('PATCH', visibilityPath);
       await app.tap(find.text(en.sessionHide));
-      await app.waitForAbsent(app.row('hide-me'));
+      expect(hide.pending, 1);
+      expect(app.row('hide-me'), findsNothing);
+      expect(app.row('hide-child'), findsNothing);
+      expect(find.text(en.sessionHidden), findsOneWidget);
       expect(app.tab('hide-me'), findsOneWidget);
+
+      // An old visibility value in a live activity delta cannot undo the click.
+      studio.updateSession('hide-me', {'title': 'Updated while saving'});
+      await app.pumpUntil(
+        () => app.container
+            .read(sessionListControllerProvider)
+            .sessions
+            .any((s) => s.id == 'hide-me' && s.title == 'Updated while saving'),
+        reason: 'the live delta arrives while the hide response is held',
+      );
+      expect(app.row('hide-me'), findsNothing);
+
+      studio.updateSession('hidden-during-save', {
+        'appHidden': true,
+        'appHiddenByAncestor': false,
+        'appVisibilityRevision': 1,
+      });
+      await app.pumpUntil(
+        () => app.container
+            .read(sessionListControllerProvider)
+            .sessions
+            .any((s) => s.id == 'hidden-during-save' && (s.appHidden ?? false)),
+        reason:
+            'an explicit child hide arrives before the parent hide is saved',
+      );
+      final undo = studio.holdWhere(
+        (r) => r.path == visibilityPath && (r.body as Map?)?['hidden'] == false,
+      );
       await app.tap(find.text(en.sessionVisibilityUndo));
-      await app.waitFor(app.row('hide-me'));
+      expect(app.row('hide-me'), findsOneWidget);
+      expect(app.row('hide-child'), findsOneWidget);
+      expect(undo.arrivals, 0, reason: 'Undo waits for the in-flight write');
+      hide.release();
+      await app.pumpUntil(
+        () => undo.pending == 1,
+        reason: 'Undo is sent after the hide is accepted',
+      );
+      expect(app.row('hide-me'), findsOneWidget);
+      expect(app.row('hide-child'), findsOneWidget);
+      expect(app.row('explicitly-hidden'), findsNothing);
+      expect(app.row('hidden-during-save'), findsNothing);
+      expect(
+        studio.sessions.firstWhere(
+          (s) => s['id'] == 'hide-child',
+        )['appHiddenByAncestor'],
+        true,
+        reason: 'the hide acknowledgement contains inherited visibility',
+      );
+      expect(app.tab('hide-me'), findsOneWidget);
+      await app.openStatus();
+      expect(
+        app.tester
+            .widget<ListTile>(
+              find.byKey(const Key('session-detail-hide-button')),
+            )
+            .enabled,
+        false,
+        reason: 'a grandchild still inherits the newer explicit child hide',
+      );
+      expect(find.text(en.sessionVisibilityParent), findsOneWidget);
+      await app.tap(app.tab('hide-me'));
+      undo.release();
+      await app.pumpUntil(
+        () =>
+            studio.sessions.firstWhere(
+              (s) => s['id'] == 'hide-me',
+            )['appHidden'] ==
+            false,
+        reason: 'the broker accepts Undo',
+      );
       await app.tester.longPress(app.row('hide-me'));
       await app.settle();
       await app.tap(find.text(en.sessionHide));
       await app.waitForAbsent(app.row('hide-me'));
       await app.waitFor(find.text(en.sessionHidden));
       await app.waitForAbsent(find.byType(SnackBar));
-      expect(app.tab('hide-me'), findsOneWidget);
       await app.tapKey('session-roster-filter-button');
       await app.tapKey('session-roster-show-hidden');
       await app.waitFor(app.row('hide-me'));
@@ -223,6 +330,109 @@ void main() {
       );
       await app.waitFor(find.text(en.sessionUnhidden));
       await app.waitForAbsent(find.byType(SnackBar));
+    },
+  );
+
+  featureTest(
+    'failed visibility changes restore live rows and Status; pending hides '
+    'and late errors stay on their own server',
+    (f) async {
+      final studio = f.network.add('http://studio.test:7734')
+        ..addSession(
+          'same-id',
+          'Studio conversation',
+          extra: {'appHidden': false, 'appVisibilityRevision': 0},
+        )
+        ..addSession('other', 'Another conversation');
+      final lab = f.network.add('http://lab.test:7734', machine: 'lab')
+        ..addSession(
+          'same-id',
+          'Lab conversation',
+          extra: {'appHidden': false, 'appVisibilityRevision': 0},
+        );
+      await f.storage.seedServer(studio);
+      await f.storage.seedServer(lab, active: false);
+      final app = await f.launch();
+      await app.openFromRoster('same-id', cwd: '/work/studio');
+      await app.openStatus();
+      final button = find.byKey(const Key('session-detail-hide-button'));
+      Finder action(String label) => find.descendant(
+        of: button,
+        matching: find.text(label),
+      );
+      const path = '/api/sessions/codex/same-id/visibility';
+      final rejected = FakeBrokerResponse.error(
+        500,
+        'SAVE_FAILED',
+        'Save failed',
+      );
+      final hide = studio.hold('PATCH', path);
+      await app.tapKey('session-detail-hide-button');
+      expect(action(en.sessionUnhide), findsOneWidget);
+      expect(app.row('same-id'), findsNothing);
+      expect(hide.pending, 1);
+      studio.updateSession('same-id', {'title': 'New title while saving'});
+      await app.pumpUntil(
+        () => app.container
+            .read(sessionListControllerProvider)
+            .sessions
+            .any((s) => s.title == 'New title while saving'),
+        reason: 'a newer title arrives before the rejected visibility response',
+      );
+      hide.release(rejected);
+      await app.waitFor(action(en.sessionHide));
+      expect(app.row('same-id'), findsOneWidget);
+      expect(find.text('New title while saving'), findsWidgets);
+      expect(find.text(en.sessionVisibilityFailed), findsOneWidget);
+      expect(app.tab('same-id'), findsOneWidget);
+
+      await app.tapKey('session-detail-hide-button');
+      await app.pumpUntil(
+        () =>
+            studio.sessions.firstWhere(
+              (s) => s['id'] == 'same-id',
+            )['appHidden'] ==
+            true,
+        reason: 'a subsequent hide succeeds',
+      );
+      final unhide = studio.hold('PATCH', path);
+      await app.tapKey('session-detail-hide-button');
+      expect(action(en.sessionHide), findsOneWidget);
+      expect(app.row('same-id'), findsOneWidget);
+      expect(unhide.pending, 1);
+      unhide.release(rejected);
+      await app.waitFor(action(en.sessionUnhide));
+      expect(app.row('same-id'), findsNothing);
+      expect(app.tab('same-id'), findsOneWidget);
+
+      await app.tapKey('session-detail-hide-button');
+      await app.pumpUntil(
+        () =>
+            studio.sessions.firstWhere(
+              (s) => s['id'] == 'same-id',
+            )['appHidden'] ==
+            false,
+        reason: 'a subsequent unhide succeeds',
+      );
+      // Start another request and leave before it answers. The same session
+      // handle at another broker must not inherit this pending hide or error.
+      final late = studio.hold('PATCH', path);
+      await app.tapKey('session-detail-hide-button');
+      expect(late.pending, 1);
+      await app.tester.drag(find.byType(SnackBar), const Offset(0, 200));
+      await app.settle();
+      await app.switchServer('http://lab.test:7734');
+      await app.expandProject('/work/lab');
+      expect(app.row('same-id'), findsOneWidget);
+      late.release(rejected);
+      await app.pumpUntil(
+        () => studio.requestsTo(path).last.answered == 500,
+        reason: 'the old server answers after switching',
+      );
+      expect(find.text('Lab conversation'), findsOneWidget);
+      expect(app.row('same-id'), findsOneWidget);
+      expect(find.text(en.sessionVisibilityFailed), findsNothing);
+      expect(lab.requestsTo(path), isEmpty);
     },
   );
 

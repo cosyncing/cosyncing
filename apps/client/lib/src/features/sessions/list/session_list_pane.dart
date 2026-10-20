@@ -7,6 +7,7 @@ import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/design/window_size_class.dart';
 import 'package:cosyncing_client/src/errors/localized_user_facing_error.dart';
 import 'package:cosyncing_client/src/errors/user_facing_error.dart';
+import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/list/relative_time.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_harness_logo.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_controller.dart';
@@ -14,6 +15,7 @@ import 'package:cosyncing_client/src/features/sessions/list/session_list_present
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_rename_region.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_roster_disclosure.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_visibility_action.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/cached_roster_pane.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_identity.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_projection.dart';
@@ -382,15 +384,6 @@ class _SessionListPaneState extends ConsumerState<SessionListPane> {
         customDays: widget.queryWindow.days,
       );
     }
-    // One forest per rebuild for navigation reveal and projection.
-    final lineage = SessionRosterLineage.build(widget.sessions);
-    final unread = widget.unreadCompletionKeys;
-    _readyToReviewKeys = {
-      for (final session in widget.sessions)
-        if (unread.contains(sessionRosterKey(session)))
-          sessionCompositeRosterKey(session),
-    };
-    final revealActiveProject = _revealActiveAncestry(lineage);
     if (widget.sessions.isEmpty) {
       // Cached identity outranks both the spinner and the error pane, but only
       // while there is no authoritative roster: a successful response clears
@@ -420,13 +413,35 @@ class _SessionListPaneState extends ConsumerState<SessionListPane> {
       }
       return widget.emptyState ?? const SizedBox.shrink();
     }
+    final source = RosterSource.of(ref.watch(activeBrokerProfileProvider));
+    final pendingVisibility = ref.watch(sessionVisibilityPendingProvider);
+    final sessions = pendingVisibility.isEmpty
+        ? widget.sessions
+        : [
+            for (final session in widget.sessions)
+              projectPendingSessionVisibility(
+                session,
+                source,
+                pendingVisibility,
+              ),
+          ];
+    // One forest per rebuild for navigation reveal and projection. Pending
+    // parent hides also hide descendants through the existing lineage rules.
+    final lineage = SessionRosterLineage.build(sessions);
+    final unread = widget.unreadCompletionKeys;
+    _readyToReviewKeys = {
+      for (final session in widget.sessions)
+        if (unread.contains(sessionRosterKey(session)))
+          sessionCompositeRosterKey(session),
+    };
+    final revealActiveProject = _revealActiveAncestry(lineage);
     final preferences =
         widget.visibilityPreferences ??
         ref.watch(sessionVisibilityControllerProvider).valueOrNull ??
         const SessionVisibilityPreferences();
     final l10n = AppLocalizations.of(context);
     final projection = SessionRosterProjection.build(
-      sessions: widget.sessions,
+      sessions: sessions,
       preferences: preferences,
       childExpansion: _childExpansion,
       revealChildExpansion: _revealChildExpansion,
