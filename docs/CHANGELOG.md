@@ -11,6 +11,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+## 0.8.0 — 2026-10-21
+
 ### Added
 
 - Saved servers can keep several approved addresses under one server identity,

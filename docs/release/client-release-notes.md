@@ -5,64 +5,83 @@ then use `cosy pair` to authorize the client.
 
 ## Update your client with this release
 
-0.7.2 gives the app its own update screen. Settings → Updates checks this
-device and each saved server separately, without changing the active
-connection, and lists the named components, the exact versions and anything
-that interrupted the check before you install what you select. Prepared
-downloads and server jobs survive an app restart or a lost response: reopen
-Updates and choose **Continue remaining updates**. Server owners can review
-which devices may run updates and revoke that permission later.
+0.8.0 lets one saved server keep several approved addresses, and native clients
+can reach them through an HTTP or SOCKS5 proxy profile kept on that device.
+Settings now separates what this device stores (cache and downloaded copies)
+from what the server stores, and server cleanup is an owner-authorized job that
+keeps its identity across reconnects and restarts. HTML previews run their own
+scripts by default.
+
+Server addresses and server-side cleanup need a 0.8.0 Server. The broker
+contract moves to revision 35 and the minimum accepted client revision stays
+17, so a 0.6.x or 0.7.x native client still drives a 0.8.0 Server. The web
+client ships with the broker and always matches it.
+
+The Server now needs Bun 1.4.3, up from 1.3.14. A Server installed with the
+signed installer on 0.6.6 or later gets it from `cosy update`, which installs
+Bun 1.4.3 before switching to 0.8.0 and restores the previous broker and runtime
+together if the new broker fails its health check. A Bun you chose with
+`COSYNCING_BUN_BIN` is never replaced; upgrade it first. A Server on 0.6.5 or
+earlier refuses this update without changing anything: re-run the installer
+instead. The new Bun stops buffering a download eagerly when the receiver
+pauses, so large files keep bounded memory while active files stay protected
+from cleanup.
 
 A desktop update in this release still ends in a **Download**, or in
-`cosy update` for a desktop the all-in-one installer placed. The staged
-handoff that would replace the app in place exists, but a release advertises
-internal installation only for a platform where replacement, relaunch and
-recovery have been accepted with the installed helper, and 0.7.2 advertises
-none. Existing desktop apps need one manual upgrade to acquire the new screen;
-on macOS, running the new signed all-in-one installer once registers the
-independent user helper for a later release to use.
+`cosy update` for a desktop the all-in-one installer placed. The signed release
+enables in-place replacement for no platform yet, so the app offers the
+download instead of replacing itself.
 
-The broker contract moves to revision 34 and the minimum accepted client
-revision stays 17, so a 0.6.x or 0.7.x native client still drives a 0.7.2
-Server. Messages sent from other Claude sessions and subagent reports need both
-the 0.7.2 Server and a 0.7.2 client to appear as a collapsible 'Message from
-…' row; an older client draws the same delivery as an ordinary event row.
-Nothing else about the Server moves in this release: Bun stays at 1.3.14 and
-npm distribution stays retired at 0.6.6.
-
-Update the Server first with `cosy update`; the app then offers the 0.7.2
+Update the Server first with `cosy update`; the app then offers the 0.8.0
 download.
 
-## What's new in 0.7.2
+## What's new in 0.8.0
 
-- Settings → Updates checks this app and your saved servers without switching
-  to them, shows what each one would install and what got in the way, and lets
-  you run only the parts you select. Interrupted work is recoverable, and a
-  server that can only be updated by hand reports the available version and the
-  installer to run.
-- A local desktop update helper carries the in-place install path: it stages
-  the signed build, saves drafts, waits for the app to exit fully, replaces it
-  and verifies the reopened build. Continuing an update reconciles an
-  interrupted helper job before it retries, and a failure after exit reopens
-  the unchanged app only when its integrity and stopped state can be
-  confirmed. Nothing installs in place until a signed release enables the
-  platform.
-- Messages from other Claude sessions and subagent reports collapse into a
-  'Message from …' row instead of a queued user message, stay visible in
-  Final-only mode, and carry their own footer with completion and error
-  notifications.
-- Compact sessions keep open and pinned files in a slim chat/file strip, and
-  file links and browser selections share one reader. Supported documents open
-  rendered by default and remember an explicit reader choice.
-- Selection controls use anchored popups on phones and desktop, with quieter
-  settings rows and borderless dark surfaces.
-- Display settings add a default tool-call visibility with persistent
-  per-session overrides, kept separate from assistant-message filtering.
-- Overview shows Time, Tokens, Cost and Messages in a two-column mobile grid,
-  and narrow session navigation uses tighter spacing around the menu, Overview
-  and session tabs while keeping usable touch targets.
-- Refused-send details scroll inside the narrow chat reading area, so the draft
-  and the Send button stay reachable in a short phone window.
+- A saved server can keep several approved addresses under one identity, with
+  Automatic or Fixed selection and readiness checks. Native clients add
+  device-local HTTP or SOCKS5 proxy profiles; the browser client uses
+  browser-managed networking and explains the bindings it cannot honor.
+- Storage separates device cache and downloaded copies from owner-authorized
+  server cleanup. File review uses measured snapshots, accepted cleanup jobs
+  survive reconnects and restarts, and a removed server artifact leaves a
+  non-actionable entry in the conversation.
+- Status and error details open from a contextual gesture or the keyboard and
+  copy a bounded, sanitized snapshot.
+- Select several session and file tabs with Ctrl/Command or Shift and close the
+  group with the workspace close shortcut. Undo restores the tabs in order;
+  sessions keep running.
+- Workspace Overview can show the quota providers you pick on this device, with
+  remaining limits and reset times. Usage opens on Day, shows cost beside
+  tokens and share in every ranking, and drops the integrations catalog and CSV
+  export.
+- HTML previews run self-contained scripts by default and keep visible state
+  across ordinary updates, releasing execution when hidden or backgrounded.
+  Source and Rendered controls remain, remote resources stay blocked, and
+  incomplete HTML stays in Source.
+- Hiding and unhiding a session responds immediately while the broker saves it;
+  Undo does too, and a failed change restores the broker's state with an error.
+  The hidden notice dismisses itself and has a close button.
+- Subagent sessions, including Codex Guardian reviews, no longer raise
+  notifications or count as running or waiting work on Home. Their activity
+  stays in the roster and transcript.
+- New Codex sessions apply the app's permission default before their first
+  prompt, including in untrusted folders, and approval cards show the outcome
+  without naming the client that resolved it.
+- Codex structured terminal question replies settle their cards after a
+  reconnect, and Cline and Grok recover from a failed filesystem watcher
+  without leaving session updates stuck.
+- Typing an answer to an inline question on a phone keeps the main prompt
+  composer out of the answer area and keeps its draft.
+- Settings choices highlight only the selected value, dropdowns match their
+  button width, and General settings use standard row typography. Updates opens
+  from General settings and names the app and server actions, and its
+  confirmation sheets show versions and installation effects first.
+- Narrow session navigation uses Chat and Files icons, and the mobile session
+  menu has one Hide tool calls checkbox. New-session agent choices show logos
+  without a search field, and Send shows its shortcut in the tooltip.
+- Android QR pairing keeps the ML Kit classes that optimized release builds
+  were stripping, which fixes a scanner error after camera permission is
+  granted.
 
 ## Downloads
 
