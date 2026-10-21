@@ -2,9 +2,16 @@ import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/data/broker_profile_mutation_gate.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/data/broker_profile_repository.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/data/credential_store.dart';
+import 'package:cosyncing_client/src/features/broker_profiles/model/broker_credential.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/provider/broker_profile_providers.dart';
+import 'package:cosyncing_client/src/features/connection/data/active_broker_profile_store.dart';
+import 'package:cosyncing_client/src/features/connection/data/broker_route_store.dart';
+import 'package:cosyncing_client/src/features/connection/data/broker_source_migration.dart';
+import 'package:cosyncing_client/src/features/connection/model/broker_routes.dart';
+import 'package:cosyncing_client/src/features/connection/provider/broker_route_providers.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
+import 'package:cosyncing_client/src/local/app_database.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 const String _credentialKeyPrefix = 'broker-token:';
@@ -80,7 +87,7 @@ class BrokerCredentialsState {
   /// wrapped a caught exception; drives which recovery advice is shown.
   final FailureKind? failureKind;
 
-  /// Raw, untranslated diagnostic for a "Technical details" disclosure.
+  /// Raw, untranslated diagnostic for the affected item’s details action.
   ///
   /// Never concatenated into the message a user reads.
   final String? detail;
@@ -186,6 +193,19 @@ final class BrokerCredentialsController
     try {
       await _profileMutationGate.runForProfile(activeProfile, (current) async {
         _requireActiveIncarnation(activeProfile);
+        final routes = ref.read(brokerRouteStoreProvider);
+        final binding = current.incarnationId == null
+            ? null
+            : await routes.read(current.id, current.incarnationId!);
+        final peer =
+            (current.credentialKey != null &&
+                brokerCredentialKindForKey(current.credentialKey!) ==
+                    BrokerCredentialKind.peerToken) ||
+            (binding?.principalId != null && binding!.principalId != 'owner');
+        if (peer) {
+          await _saveSeparateOwner(current, binding, token);
+          return;
+        }
         final credentialKey = _credentialKeyForProfile(current.id);
         final previousCredentialKey = current.credentialKey;
         final previousToken = await _credentialStore.readBrokerToken(
@@ -193,6 +213,11 @@ final class BrokerCredentialsController
         );
         var wroteToken = false;
         try {
+          if (ref.exists(brokerRouteCoordinatorProvider)) {
+            ref
+                .read(brokerRouteCoordinatorProvider)
+                .authorizationChanged(current);
+          }
           await _credentialStore.writeBrokerToken(credentialKey, token);
           wroteToken = true;
 
@@ -233,7 +258,7 @@ final class BrokerCredentialsController
     } on Object catch (error) {
       // The raw exception goes to `detail`, never into the message. This state
       // renders on the connection gate, which already has a collapsed
-      // "Technical details" disclosure for exactly this.
+      // contextual details action for exactly this.
       state = state.copyWith(
         isBusy: false,
         notice: BrokerCredentialNotice.saveFailed,
@@ -312,6 +337,87 @@ final class BrokerCredentialsController
   String _credentialKeyForProfile(String profileId) =>
       '$_credentialKeyPrefix$profileId';
 
+  Future<void> _saveSeparateOwner(
+    BrokerProfile previous,
+    BrokerRouteServer? binding,
+    String token,
+  ) async {
+    // Pasting an owner token is deliberate reauthentication, but it cannot
+    // inherit a paired peer's drafts, pending sends, or remembered authority.
+    final id = newConnectionId();
+    final credentialKey = _credentialKeyForProfile(id);
+    final now = DateTime.now();
+    var saved = await _brokerProfileRepository.save(
+      BrokerProfile(
+        id: id,
+        displayName: previous.displayName,
+        baseUri: previous.baseUri,
+        createdAt: now,
+        updatedAt: now,
+        credentialKey: credentialKey,
+      ),
+    );
+    try {
+      await _credentialStore.writeBrokerToken(credentialKey, token);
+      final routes = ref.read(brokerRouteStoreProvider);
+      final initial = await routes.ensure(saved);
+      if (binding != null) {
+        await routes.save(
+          BrokerRouteServer(
+            profileId: saved.id,
+            incarnation: saved.incarnationId!,
+            legacyOrigin: binding.legacyOrigin,
+            addresses: binding.addresses,
+            identityPublicKey: binding.identityPublicKey,
+            credentialReference: credentialKey,
+            mode: binding.mode,
+            fixedRouteId: binding.fixedRouteId,
+            lastSuccessfulRouteId: binding.lastSuccessfulRouteId,
+            generation: initial.generation,
+          ),
+          expectedGeneration: initial.generation,
+        );
+        if (binding.sourceIdentity != null) {
+          final candidate = binding.addresses
+              .where(
+                (route) =>
+                    route.enabled &&
+                    (binding.mode != BrokerRouteMode.fixed ||
+                        route.id == binding.fixedRouteId),
+              )
+              .firstOrNull;
+          if (candidate == null) throw StateError('No enabled address');
+          final observation = await ref
+              .read(brokerRouteCoordinatorProvider)
+              .testAddress(saved, candidate);
+          final prepared = (await routes.read(id, saved.incarnationId!))!;
+          saved =
+              await BrokerSourceMigration(
+                ref.read(appDatabaseProvider),
+                routes,
+                _credentialStore,
+              ).bind(
+                saved,
+                prepared.copyWith(
+                  identityPublicKey: observation.identityPublicKey,
+                  principalId: observation.principalId,
+                ),
+              );
+          ref.read(brokerRouteCoordinatorProvider).retireProfile(saved);
+        }
+      }
+      _requireActiveIncarnation(previous);
+      await ref.read(activeBrokerProfileStoreProvider).setActiveProfileId(id);
+      ref.invalidate(brokerProfileListProvider);
+      ref.read(activeBrokerProfileProvider.notifier).state = saved;
+    } on Object {
+      // No data is ever copied from the old access binding to this new row.
+      // Keep an incomplete new row repairable if secure storage is unavailable.
+      ref.invalidate(brokerProfileListProvider);
+      rethrow;
+    }
+  }
+
   Future<bool> _clearCredentialForActive(BrokerProfile expectedActive) {
     return _profileMutationGate.runForProfile(expectedActive, (current) async {
       _requireActiveIncarnation(expectedActive);
@@ -323,6 +429,11 @@ final class BrokerCredentialsController
       );
       var deletedToken = false;
       try {
+        if (ref.exists(brokerRouteCoordinatorProvider)) {
+          ref
+              .read(brokerRouteCoordinatorProvider)
+              .authorizationChanged(current);
+        }
         await _credentialStore.deleteBrokerToken(credentialKey);
         deletedToken = true;
 

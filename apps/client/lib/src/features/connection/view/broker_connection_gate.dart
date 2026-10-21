@@ -4,6 +4,7 @@ import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/components.dart';
+import 'package:cosyncing_client/src/design/components/contextual_details.dart';
 import 'package:cosyncing_client/src/features/connection/controller/broker_gate_controller.dart';
 import 'package:cosyncing_client/src/features/connection/model/broker_gate_state.dart';
 import 'package:cosyncing_client/src/features/settings/controller/broker_credentials_controller.dart';
@@ -31,7 +32,7 @@ import 'package:go_router/go_router.dart';
 /// This is the first screen a new user sees, so every string here is
 /// user-facing product copy: plain language, no status codes, no exception or
 /// Dart type names. Raw diagnostics stay reachable for support behind the
-/// collapsed "Technical details" disclosure in [_GateCard] — never in the
+/// contextual details action on [_GateCard] — never in the
 /// primary reading path.
 ///
 /// See `docs/architecture/client-ui.md`.
@@ -474,7 +475,7 @@ class _GateCard extends StatelessWidget {
   final List<Widget> content;
 
   /// Raw, untranslated diagnostic text. Never rendered in the primary reading
-  /// path — see [_TechnicalDetails].
+  /// path; available from the owning notice’s contextual actions.
   final String? detail;
 
   /// Whether this state is an actual failure. Drives only the icon colour, so
@@ -488,116 +489,69 @@ class _GateCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
-    final trimmedDetail = detail?.trim();
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            SelectionArea(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Icon(
-                        icon,
-                        color: isFailure
-                            ? colors.error
-                            : colors.onSurfaceVariant,
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Text(title, style: theme.textTheme.titleMedium),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    body,
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      color: colors.onSurfaceVariant,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            if (content.isNotEmpty) ...[
-              const SizedBox(height: 16),
+    return ContextualDetails(
+      key: const Key('broker-gate-diagnostic-item'),
+      label: title,
+      detail: detail,
+      child: Card(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
               SelectionArea(
                 child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: content,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Icon(
+                          icon,
+                          color: isFailure
+                              ? colors.error
+                              : colors.onSurfaceVariant,
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            title,
+                            style: theme.textTheme.titleMedium,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      body,
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        color: colors.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
                 ),
               ),
-            ],
-            if (children.isNotEmpty) ...[
-              const SizedBox(height: 16),
-              Wrap(
-                spacing: 12,
-                runSpacing: 12,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: children,
-              ),
-            ],
-            if (trimmedDetail != null && trimmedDetail.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              _TechnicalDetails(detail: trimmedDetail),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// Collapsed disclosure holding the raw diagnostic string.
-///
-/// The diagnostic is developer-facing text (transport errors, status codes)
-/// and is deliberately kept out of the headline. It stays available, and
-/// selectable, so a user can copy it into a support request.
-class _TechnicalDetails extends StatelessWidget {
-  const _TechnicalDetails({required this.detail});
-
-  final String detail;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Theme(
-      // Strips the default ExpansionTile divider lines so the disclosure reads
-      // as a quiet footnote rather than another section of the card.
-      data: theme.copyWith(dividerColor: Colors.transparent),
-      child: ExpansionTile(
-        key: const Key('broker-gate-technical-details'),
-        tilePadding: EdgeInsets.zero,
-        childrenPadding: EdgeInsets.zero,
-        expandedCrossAxisAlignment: CrossAxisAlignment.start,
-        visualDensity: VisualDensity.compact,
-        title: Text(
-          AppLocalizations.of(context).brokerGateTechnicalDetails,
-          style: theme.textTheme.bodySmall?.copyWith(
-            color: theme.colorScheme.onSurfaceVariant,
-          ),
-        ),
-        children: [
-          SelectionArea(
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                detail,
-                key: const Key('broker-gate-detail'),
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                  fontFamily: 'monospace',
+              if (content.isNotEmpty) ...[
+                const SizedBox(height: 16),
+                SelectionArea(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: content,
+                  ),
                 ),
-              ),
-            ),
+              ],
+              if (children.isNotEmpty) ...[
+                const SizedBox(height: 16),
+                Wrap(
+                  spacing: 12,
+                  runSpacing: 12,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: children,
+                ),
+              ],
+            ],
           ),
-          const SizedBox(height: 8),
-        ],
+        ),
       ),
     );
   }

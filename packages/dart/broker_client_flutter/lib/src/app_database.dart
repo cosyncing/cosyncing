@@ -1,6 +1,9 @@
 import 'package:drift/drift.dart';
 import 'package:drift_flutter/drift_flutter.dart';
 
+import 'managed_storage_schema.dart';
+import 'broker_route_schema.dart';
+
 part 'app_database.g.dart';
 
 /// Durable local database for app state that must survive restarts.
@@ -45,7 +48,7 @@ final class AppDatabase extends _$AppDatabase {
   static final Uri defaultWebDriftWorkerUri = Uri.parse('drift_worker.js');
 
   @override
-  int get schemaVersion => 19;
+  int get schemaVersion => 20;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -56,9 +59,32 @@ final class AppDatabase extends _$AppDatabase {
       // their current vacuum mode — changing it would require a full VACUUM,
       // which the retention contract forbids as an automatic operation.
       await customStatement('PRAGMA auto_vacuum = INCREMENTAL');
-      await migrator.createAll();
+      // One durable commit avoids a browser filesystem flush for every table
+      // and fence. Keep the vacuum pragma before both the transaction and the
+      // first table; publish the schema only after all objects exist.
+      await transaction(() async {
+        await migrator.createAll();
+        await batch((batch) {
+          for (final statement in [
+            ...managedStorageSchema,
+            ...brokerRouteSchema,
+          ]) {
+            batch.customStatement(statement);
+          }
+        });
+      });
     },
     onUpgrade: (migrator, from, to) async {
+      if (from > to) {
+        throw StateError('This database requires a newer cosyncing client.');
+      }
+      if (from < 20) {
+        await batch((batch) {
+          for (final statement in managedStorageSchema) {
+            batch.customStatement(statement);
+          }
+        });
+      }
       if (from < 2) {
         await migrator.addColumn(
           artifactTransferRows,
@@ -312,6 +338,27 @@ final class AppDatabase extends _$AppDatabase {
             }
           }
         }
+      }
+      if (from < 20) {
+        // Some supported historical repair fixtures contain only their
+        // affected tables. Read that set once before batching the new fences.
+        final tables = {
+          for (final row in await customSelect(
+            "SELECT name FROM sqlite_master WHERE type='table'",
+          ).get())
+            row.read<String>('name'),
+        };
+        await batch((batch) {
+          for (final statement in brokerRouteSchema) {
+            if (statement.contains('CREATE TRIGGER')) {
+              final table = RegExp(
+                r'BEFORE (?:INSERT|UPDATE) ON (\w+)',
+              ).firstMatch(statement)!.group(1)!;
+              if (!tables.contains(table)) continue;
+            }
+            batch.customStatement(statement);
+          }
+        });
       }
     },
   );
@@ -743,7 +790,8 @@ class SessionDraftRows extends Table {
   ///
   /// A conditional update on this value is what makes concurrent writers safe:
   /// the in-process mutation chain covers one controller and a transaction
-  /// covers one connection, but a second browser tab is neither. `localRevision`
+  /// covers one connection, but a second browser tab is neither.
+  /// `localRevision`
   /// cannot serve — it tracks coalesced user edits, so state-only writes
   /// (binding a send, adopting a revision, clearing a conflict) leave it
   /// unchanged and would look like no mutation at all.
@@ -770,7 +818,8 @@ class SessionDraftRows extends Table {
   Set<Column<Object>> get primaryKey => {brokerProfileId, tool, sessionId};
 }
 
-/// Bounded last-known roster IDENTITY snapshot (N3), one row per broker profile.
+/// Bounded last-known roster IDENTITY snapshot (N3), one row per broker
+/// profile.
 ///
 /// Read once during the existing initial roster load so a cold start — a web
 /// refresh in particular — renders the real navigation and roster shape instead

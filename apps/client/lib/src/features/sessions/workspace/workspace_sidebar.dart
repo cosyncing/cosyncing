@@ -556,6 +556,8 @@ class _SidebarFooter extends ConsumerWidget {
                                             color: tokens.textTertiary,
                                           ),
                                     ),
+                                  if (profile != null)
+                                    WorkspaceRouteSubtitle(profile: profile),
                                 ],
                               ),
                             ),

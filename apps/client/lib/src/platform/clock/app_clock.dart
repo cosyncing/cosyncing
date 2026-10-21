@@ -6,3 +6,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 /// One provider rather than `DateTime.now()` at each site, so a test can drive
 /// those windows on fake time.
 final appClockProvider = Provider<DateTime Function()>((ref) => DateTime.now);
+
+/// Monotonic elapsed time for latency; wall-clock corrections cannot skew it.
+final appMonotonicClockProvider = Provider<Duration Function()>((ref) {
+  final watch = Stopwatch()..start();
+  ref.onDispose(watch.stop);
+  return () => watch.elapsed;
+});

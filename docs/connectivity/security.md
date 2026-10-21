@@ -47,7 +47,7 @@ Before exposing the broker:
 - Pair devices so each receives a revocable, non-owner credential. Paired
   devices can observe, drive, and transfer files by default, but cannot create
   pairing offers, administer devices, change global runtime policy, restart the
-  broker, or start updates.
+  broker, manage server-wide storage, or start updates.
 - Treat a paired device with `drive` as a high-trust, potentially host-equivalent
   credential. It can direct a coding agent that may have same-user shell and
   filesystem access. Owner-only broker routes limit direct API authority and

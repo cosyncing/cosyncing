@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 export {};
 import { strict as assert } from 'node:assert';
-import { appendFileSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { EventEmitter } from 'node:events';
+import { appendFileSync, readFileSync, renameSync, unlinkSync, writeFileSync, type FSWatcher, type watch } from 'node:fs';
 import {
   AcpRpcError,
   type AcpRequestPermissionParams,
@@ -1200,6 +1201,15 @@ try {
         && runNotifications(fallbackLive)[0]?.key === fallbackKey,
       JSON.stringify(runSummaries(fallbackLive)));
 
+    // The filesystem watcher can already be draining when the explicit drain
+    // below joins it. That method requests another pass but does not await the
+    // existing pass; await the terminal publication this scenario observes.
+    let completeLateTerminal!: () => void;
+    const lateTerminal = new Promise<void>((resolve) => { completeLateTerminal = resolve; });
+    const stopLateTerminal = fallbackConnection.subscribe((message) => {
+      if (message.type === 'run-summary' && message.status !== 'running'
+        && message.key.includes('fallback-native-complete')) completeLateTerminal();
+    });
     fallbackSummaryTree.append({
       timestamp: '2026-08-23T10:04:02.000Z',
       method: '_x.ai/session/update',
@@ -1214,6 +1224,7 @@ try {
       },
     });
     await (fallbackConnection as unknown as { drain(): Promise<void> }).drain();
+    try { await within(lateTerminal); } finally { stopLateTerminal(); }
     const lateNativeLive = terminalRuns(fallbackLive).filter((message) =>
       message.key.includes('fallback-native-complete'));
     check('the late native terminal after an ACP fallback is published without reopening the settled turn',
@@ -2201,6 +2212,66 @@ try {
   }
 } finally {
   tree.cleanup();
+}
+
+// A write inside watcher replacement cannot be scheduled deterministically
+// through the wire journey. Use the existing watchFactory seam for this gap;
+// conformance still exercises real rename/append delivery through WebSockets.
+const watcherGapTree = buildGrokFixtureTree();
+let watcherGapConnection: GrokObserveConnection | undefined;
+let watcherGapDeadline: ReturnType<typeof setTimeout> | undefined;
+try {
+  const session = (await discoverGrokStore({ root: watcherGapTree.root }))[0]!;
+  const watchers: EventEmitter[] = [];
+  const live: AgentMessage[] = [];
+  let priorClosed = false;
+  let delivered: (() => void) | undefined;
+  const arrived = new Promise<boolean>((resolve) => {
+    delivered = () => resolve(true);
+    watcherGapDeadline = setTimeout(() => resolve(false), 5_000);
+  });
+  watcherGapConnection = new GrokObserveConnection({
+    session,
+    info: { ...driveInfo(session.id, session.cwd), attachMode: 'observe' },
+    watchFactory: (() => {
+      const watcher = Object.assign(new EventEmitter(), {
+        close() { priorClosed = true; },
+      });
+      if (watchers.length === 1) {
+        assert(priorClosed, 'the previous watcher must be closed');
+        watcherGapTree.append({
+          timestamp: '2026-08-23T10:20:00.000Z',
+          method: 'session/update',
+          params: {
+            sessionId: session.id,
+            _meta: { eventId: 'watcher-gap-answer' },
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'answer written during watcher replacement' },
+            },
+          },
+        });
+        // Neither watcher delivers a filesystem event for this write.
+      }
+      watchers.push(watcher);
+      return watcher as unknown as FSWatcher;
+    }) as typeof watch,
+  });
+  await watcherGapConnection.getHistory();
+  watcherGapConnection.subscribe((message) => {
+    live.push(message);
+    if (message.type === 'model-output'
+      && (message.text ?? message.delta) === 'answer written during watcher replacement') delivered?.();
+  });
+  watchers[0]!.emit('error', new Error('controlled watcher replacement'));
+  const received = await arrived;
+  check('watcher replacement delivers an append from the unwatched gap exactly once',
+    received && watchers.length === 2 && live.filter((message) => message.type === 'model-output'
+      && (message.text ?? message.delta) === 'answer written during watcher replacement').length === 1);
+} finally {
+  clearTimeout(watcherGapDeadline);
+  await watcherGapConnection?.close();
+  watcherGapTree.cleanup();
 }
 
 const failed = results.filter((result) => !result.ok).length;

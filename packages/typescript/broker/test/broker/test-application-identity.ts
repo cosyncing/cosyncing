@@ -57,7 +57,7 @@ try {
   // global bin symlinks npm creates for both command names, and a separately installed Bun.
   const npmPackageBin = join(root, 'prefix', 'lib', 'node_modules', 'cosyncing', 'bin');
   const globalBin = join(root, 'prefix', 'bin');
-  const bunBin = join(root, 'runtimes', 'bun-1.3.14', 'bin');
+  const bunBin = join(root, 'runtimes', `bun-${PINNED_BUN_RUNTIME_VERSION}`, 'bin');
   const stateHome = join(root, 'state');
   mkdirSync(npmPackageBin, { recursive: true });
   mkdirSync(globalBin, { recursive: true });
@@ -76,7 +76,7 @@ try {
     writeFileSync(path, `#!/bin/sh\n${script}\n`, { mode: 0o755 });
     return path;
   }
-  const bunRuntime = fakeRuntime(join(bunBin, 'bun'), 'echo 1.3.14+aaaaaaaaaa');
+  const bunRuntime = fakeRuntime(join(bunBin, 'bun'), `echo ${PINNED_BUN_RUNTIME_VERSION}+aaaaaaaaaa`);
   // One patch below the floor, derived from it: the refusal must hold at the boundary, not only for an
   // ancient Bun, and must keep holding wherever the floor sits.
   const [floorMajor, floorMinor, floorPatch] = MINIMUM_BUN_RUNTIME_VERSION.split('.').map(Number) as [number, number, number];
@@ -84,9 +84,9 @@ try {
   const belowFloor = `${floorMajor}.${floorMinor}.${floorPatch - 1}`;
   const outdatedBun = fakeRuntime(join(root, 'runtimes', 'outdated-bun'), `echo ${belowFloor}+aaaaaaaaaa`);
   const floorBun = fakeRuntime(join(root, 'runtimes', 'floor-bun'), `echo ${MINIMUM_BUN_RUNTIME_VERSION}+aaaaaaaaaa`);
-  // The previous floor, which can stall silently while loading modules. Hosts installed before the floor
-  // moved still carry it, so it is refused by name rather than only by being below some boundary.
-  const previousFloorBun = fakeRuntime(join(root, 'runtimes', 'previous-floor-bun'), 'echo 1.3.8+aaaaaaaaaa');
+  // The previous floor eagerly buffers streamed downloads for stalled receivers.
+  // Refuse it explicitly as well as testing the exact new version boundary.
+  const previousFloorBun = fakeRuntime(join(root, 'runtimes', 'previous-floor-bun'), 'echo 1.3.14+aaaaaaaaaa');
   const silentExecutable = fakeRuntime(join(root, 'runtimes', 'not-bun'), 'exit 0');
   const failingExecutable = fakeRuntime(join(root, 'runtimes', 'broken'), 'exit 3');
   symlinkSync(applicationBundle, join(globalBin, 'cosyncing'));
@@ -259,7 +259,7 @@ try {
     overrideProblem(outdatedBun) === 'bun-runtime-outdated', overrideProblem(outdatedBun));
   check('a Bun exactly at the floor is accepted',
     overrideProblem(floorBun) === undefined, overrideProblem(floorBun));
-  check('the previous 1.3.8 floor is refused, so an install still on it cannot be recorded as supported',
+  check('the previous 1.3.14 floor is refused, so an install still on it cannot be recorded as supported',
     overrideProblem(previousFloorBun) === 'bun-runtime-outdated', overrideProblem(previousFloorBun));
   // The installers place, and releases sign, the pinned version; below the floor it would be a runtime the
   // application refuses to run under.
@@ -285,17 +285,17 @@ try {
   let probes = 0;
   const selfEvident = resolveBunRuntime({
     execPath: bunRuntime,
-    runningVersion: '1.3.14',
-    probe: () => { probes += 1; return '1.3.14'; },
+    runningVersion: PINNED_BUN_RUNTIME_VERSION,
+    probe: () => { probes += 1; return PINNED_BUN_RUNTIME_VERSION; },
   });
   const overrideProbed = resolveBunRuntime({
     execPath: bunRuntime,
     override: outdatedBun,
-    runningVersion: '1.3.14',
-    probe: () => { probes += 1; return '1.3.14'; },
+    runningVersion: PINNED_BUN_RUNTIME_VERSION,
+    probe: () => { probes += 1; return PINNED_BUN_RUNTIME_VERSION; },
   });
   check('the running runtime is trusted without a subprocess, and any other candidate is still probed',
-    probes === 1 && selfEvident.version === '1.3.14' && overrideProbed.path === outdatedBun,
+    probes === 1 && selfEvident.version === PINNED_BUN_RUNTIME_VERSION && overrideProbed.path === outdatedBun,
     `${probes} probe(s)`);
 
   // Identity rejects only cross-platform control characters. Provider serializers own their narrower
@@ -307,11 +307,11 @@ try {
   }));
   const colonDirectory = join(root, 'runtimes', 'a:b');
   mkdirSync(colonDirectory, { recursive: true });
-  const colonRuntime = fakeRuntime(join(colonDirectory, 'bun'), 'echo 1.3.14+aaaaaaaaaa');
+  const colonRuntime = fakeRuntime(join(colonDirectory, 'bun'), `echo ${PINNED_BUN_RUNTIME_VERSION}+aaaaaaaaaa`);
   const colonIdentity = resolveBunRuntime({ execPath: bunRuntime, override: colonRuntime });
   const percentDirectory = join(root, 'runtimes', 'a%b');
   mkdirSync(percentDirectory, { recursive: true });
-  const percentRuntime = fakeRuntime(join(percentDirectory, 'bun'), 'echo 1.3.14+aaaaaaaaaa');
+  const percentRuntime = fakeRuntime(join(percentDirectory, 'bun'), `echo ${PINNED_BUN_RUNTIME_VERSION}+aaaaaaaaaa`);
   const percentIdentity = resolveBunRuntime({ execPath: bunRuntime, override: percentRuntime });
   check('identity refuses control characters but preserves provider-specific path characters',
     !!unsafeCharacters && colonIdentity.path === colonRuntime && percentIdentity.path === percentRuntime,

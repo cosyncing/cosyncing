@@ -100,6 +100,8 @@ import { PiBridgeRegistry } from '@cosyncing/adapter-pi';
 import { ClaudeHooksRegistry } from '@cosyncing/adapter-claude';
 import { HISTORY_WEBSOCKET_OPTIONS } from '../transport/http-contracts.ts';
 import { sendJson, withJsonCompression } from '../transport/json-egress.ts';
+import { ServerRoutes, RouteProofError, withServerRouteOrigins } from '../connections/server-routes.ts';
+import { StorageService, StorageOperationError } from '../storage/storage-service.ts';
 import {
   acceptsGzip,
   filterSessionsByWindow,
@@ -1403,13 +1405,38 @@ const transportPairings = new TransportPairingRegistry({
   broker: BROKER_DESCRIPTOR,
   ttlMs: TRANSPORT_PAIRING_TTL_MS,
 });
+const serverRoutes = new ServerRoutes(setupStateHome(), [BROKER_URL], transportPairings.routeIdentity());
+function connectionCheck(principal: AuthenticatedPrincipal) {
+  const authorization = artifactAuthorization(principal);
+  return { capability: 'server-routes-v1' as const, identityPublicKey: serverRoutes.identityPublicKey,
+    // Owner credentials can rotate without changing the logical account.
+    // Ticket and storage authorization still use their credential-bound scope.
+    principalId: principal.kind === 'owner' ? 'owner' : authorization.principalId,
+    authGeneration: authorization.authGeneration, contract: BROKER_CONTRACT };
+}
 // Test hook (source runs only): a short ticket lifetime makes expiry observable without waiting 30 s.
 const wsAuthTickets = new WsAuthTicketRegistry(
   BUILD_INFO.packaged ? {} : { ttlMs: envNumber('COSYNCING_TEST_WS_TICKET_TTL_MS', 0) || undefined },
 );
 const mediaPreviewTickets = new MediaPreviewTickets();
+const storageManagement = new StorageService({
+  home: setupStateHome(),
+  serverIdentity: serverRoutes.identityPublicKey,
+  artifacts: artifactStore,
+  uploads: () => uploadStaging,
+  liveCwds: () => liveSessionCwds(),
+  now: attentionClock.now,
+  protectedSession: (tool, id, artifact) => mediaPreviewTickets.referencesArtifact(tool, id, artifact)
+    || hub.getConns(tool, id).some((connection) => connection.status !== 'idle'),
+  principalActive: (principal) => !shuttingDown && principal === `owner:${TOKEN ? tokenHash(TOKEN) : SOURCE_DEVELOPMENT_CREDENTIAL_ID}`,
+  changed: (tool, id, artifactKey) => {
+    const artifact = artifactStore.removedArtifact(tool, id, artifactKey);
+    if (!artifact) return;
+    for (const connection of hub.getConns(tool, id)) connection.publishArtifactRetirement(artifact);
+  },
+});
 
-async function serveMediaPreview(binding: MediaPreviewBinding, req: Request): Promise<Response> {
+async function serveMediaPreview(binding: MediaPreviewBinding, req: Request, requestActive?: () => boolean): Promise<Response> {
   const principal = principalFromWsTicket(binding.principal);
   if (principal.kind === 'peer' && !transportPairings.isPeerGenerationActive(principal.peerId, principal.authGeneration)) {
     return new Response('Preview expired', { status: 403 });
@@ -1419,7 +1446,7 @@ async function serveMediaPreview(binding: MediaPreviewBinding, req: Request): Pr
     binding.path !== undefined ? `${resource}/fs/download` : `${resource}/artifact/${encodeURIComponent(binding.artifactId!)}`, 'GET');
   if (denied) return denied;
   if (binding.artifactId !== undefined) {
-    return artifactStore.serveMediaPreview(binding.tool, binding.sessionId, binding.artifactId, req);
+    return artifactStore.serveMediaPreview(binding.tool, binding.sessionId, binding.artifactId, req, requestActive);
   }
   const gate = fsTrustGate();
   if (gate) return gate;
@@ -3136,6 +3163,7 @@ function parseInitialHistoryLimit(searchParams: URLSearchParams): number {
 }
 
 interface WsData {
+  connectionCheck?: ReturnType<typeof connectionCheck>;
   tool: string;
   id: string;
   /** Attach mode from `?mode=` (default observe). `resume` opens a DRIVABLE connection (own Hub owner)
@@ -5443,6 +5471,8 @@ class HttpStatusError extends Error {
 
 function jsonRequestBodyLimit(path: string, method: string): number | undefined {
   if (method !== 'POST' && method !== 'PATCH' && method !== 'PUT') return undefined;
+  if (path === '/api/connection/identity-proof') return 4096;
+  if (path.startsWith('/api/connection/') || path.startsWith('/api/storage/')) return 64 * 1024;
   if (path === '/api/transport/envelopes' || path === '/api/transport/session-control') return undefined;
   if (/^\/api\/sessions\/[^/]+\/[^/]+\/uploads\/[^/]+$/.test(path) && method === 'PATCH') return undefined;
   if (/^\/api\/transport\/pairings\/[^/]+\/accept$/.test(path)) return PAIRING_ACCEPT_MAX_BYTES;
@@ -6043,7 +6073,7 @@ server = Bun.serve<WsData>({
   hostname: LISTEN_HOST,
   idleTimeout: 240,
   development: false,
-  fetch: withJsonCompression<WsData>(async (req, srv) => {
+  fetch: withServerRouteOrigins(serverRoutes, withJsonCompression<WsData>(async (req, srv) => {
     const url = new URL(req.url);
     const path = url.pathname;
     const principal = authenticatedPrincipal(req, path);
@@ -6056,7 +6086,7 @@ server = Bun.serve<WsData>({
       if (binding && req.method === 'DELETE') mediaPreviewTickets.revoke(mediaPreview[1]!);
       const response = !binding ? new Response('Preview expired', { status: 403 })
         : ['DELETE', 'OPTIONS'].includes(req.method) ? new Response(null, { status: 204 })
-        : await serveMediaPreview(binding, req);
+        : await serveMediaPreview(binding, req, () => srv.requestIP(req) !== null);
       response.headers.set('access-control-allow-origin', '*');
       response.headers.set('access-control-allow-methods', 'GET, HEAD, DELETE, OPTIONS');
       response.headers.set('access-control-allow-headers', 'Range, If-Range');
@@ -6081,6 +6111,8 @@ server = Bun.serve<WsData>({
       && !!url.searchParams.get('wsAuthTicket');
     const isPublicApiRequest = (path === '/api/health' && (req.method === 'GET' || req.method === 'HEAD'))
       || isPairingAccept
+      || (path === '/api/connection/identity-proof' && req.method === 'POST')
+      || (path === '/api/connection/check/ws' && req.method === 'GET' && !!url.searchParams.get('wsAuthTicket'))
       || isWsTicketUpgrade;
     const isApiRequest = path.startsWith('/api/');
     const isPiIntegrationRoute = path.startsWith('/pi/bridge/');
@@ -6138,6 +6170,91 @@ server = Bun.serve<WsData>({
       }
     }
 
+    if (path === '/api/storage' || path.startsWith('/api/storage/')) {
+      if (principal?.kind !== 'owner') return json({ error: 'Owner access required for server storage' }, 403);
+      const caller = artifactAuthorization(principal).principalId;
+      try {
+        if (path === '/api/storage' && req.method === 'GET') {
+          const inventory = storageManagement.latest();
+          return inventory ? json(inventory) : json({
+            capability: 'storage-v1', code: 'NO_INVENTORY', error: 'Refresh storage to measure usage',
+          }, 404);
+        }
+        if (path === '/api/storage/scans' && req.method === 'POST') {
+          return json(storageManagement.startScan(), 202);
+        }
+        const scan = path.match(/^\/api\/storage\/scans\/([^/]+)$/);
+        if (scan && req.method === 'GET') {
+          return json(await storageManagement.waitForScan(scan[1]!, Number(url.searchParams.get('waitMs') ?? 0)));
+        }
+        if (path === '/api/storage/items' && req.method === 'GET') {
+          return json(storageManagement.items(caller, url.searchParams.get('inventoryId') ?? '', {
+            category: url.searchParams.get('category') ?? undefined,
+            olderThanDays: Number(url.searchParams.get('olderThanDays') ?? 0),
+            search: url.searchParams.get('search') ?? undefined,
+            sort: url.searchParams.get('sort') ?? undefined,
+            cursor: url.searchParams.get('cursor') ?? undefined,
+            limit: Number(url.searchParams.get('limit') ?? 100),
+            failedJob: url.searchParams.get('failedJob') ?? undefined,
+          }));
+        }
+        if (path === '/api/storage/cleanup-plans' && req.method === 'POST') {
+          return json(storageManagement.plan(caller, await req.json() as any), 201);
+        }
+        if (path === '/api/storage/cleanup-jobs' && req.method === 'POST') {
+          const body = await req.json() as any;
+          return json(storageManagement.accept(caller, body?.planId, body?.idempotencyKey), 202);
+        }
+        const cancelJob = path.match(/^\/api\/storage\/cleanup-jobs\/([^/]+)\/cancel$/);
+        if (cancelJob && req.method === 'POST') {
+          return json(storageManagement.cancel(caller, cancelJob[1]!));
+        }
+        const job = path.match(/^\/api\/storage\/cleanup-jobs\/([^/]+)$/);
+        if (job && req.method === 'GET') {
+          return json({
+            ...await storageManagement.waitForJob(caller, job[1]!, Number(url.searchParams.get('waitMs') ?? 0)),
+            outcomes: storageManagement.outcomes(caller, job[1]!, Number(url.searchParams.get('offset') ?? 0)),
+          });
+        }
+        return json({ error: 'Storage operation not found' }, 404);
+      } catch (error) {
+        if (error instanceof StorageOperationError) return json({ code: error.code, error: error.message }, error.status);
+        return json({ code: 'STORAGE_UNAVAILABLE', error: 'Storage operation could not be completed' }, 503);
+      }
+    }
+
+    if (path === '/api/connection/identity-proof' && req.method === 'POST') {
+      try { return Response.json(serverRoutes.proof(await req.json()), { headers: { 'cache-control': 'no-store' } }); }
+      catch (error) { return json({ code: 'BAD_PARAM', error: error instanceof Error ? error.message : 'Invalid challenge' }, error instanceof RouteProofError ? error.status : 400); }
+    }
+    if (path === '/api/connection/configuration' && (req.method === 'GET' || req.method === 'POST')) {
+      if (principal?.kind !== 'owner') return json({ error: 'Owner access required' }, 403);
+      try { return json(req.method === 'GET' ? serverRoutes.configuration() : serverRoutes.configure(await req.json())); }
+      catch { return json({ code: 'BAD_PARAM', error: 'Invalid or stale route configuration' }, 400); }
+    }
+    if (path === '/api/connection/check' && req.method === 'GET') {
+      if (!principal || principal.kind === 'integration') return json({ error: 'Broker principal required' }, 403);
+      return Response.json(connectionCheck(principal), { headers: { 'cache-control': 'no-store' } });
+    }
+    if (path === '/api/connection/check/ws' && req.method === 'GET') {
+      const binding = wsAuthTickets.consume(url.searchParams.get('wsAuthTicket') ?? '', '', '', {
+        targetOrigin: url.origin, clientOrigin: req.headers.get('origin') ?? undefined, audience: 'connection-check',
+      });
+      if (!binding) return json({ code: 'AUTH_REQUIRED', error: 'Valid connection-check ticket required' }, 401);
+      const caller = principalFromWsTicket(binding.principal);
+      if (caller.kind === 'peer' && (!transportPairings.isPeerGenerationActive(caller.peerId, caller.authGeneration)
+        || !caller.roles.has('observe'))) return json({ error: 'Peer credential revoked or Observe unavailable' }, 403);
+      const parsed = parseWsClientContract(new URLSearchParams(binding.params));
+      if (parsed.error) return json({ code: 'BAD_PARAM', error: parsed.error }, 400);
+      const ok = srv.upgrade(req, { data: {
+        tool: '', id: '', identity: binding.identity, uploadIdentity: binding.uploadIdentity,
+        principal: caller, artifactAuthorization: artifactAuthorization(caller), canDrive: false,
+        compatibility: evaluateBrokerClientCompatibility(parsed.client), readOnlyRequested: true,
+        credentialAuthenticated: true, connectionCheck: connectionCheck(caller),
+      } });
+      return ok ? undefined : new Response('WebSocket upgrade required', { status: 426 });
+    }
+
     if (path === '/api/media-preview-tickets' && req.method === 'POST') {
       const ticketPrincipal = principal && wsTicketPrincipal(principal);
       if (!ticketPrincipal) return new Response('Unauthorized', { status: 401 });
@@ -6170,6 +6287,7 @@ server = Bun.serve<WsData>({
         return json({ ok: false, code: 'AUTH_REQUIRED', error: 'authenticated credential required' }, 401);
       }
       const body = await req.json().catch(() => undefined) as any;
+      const connectionCheckTicket = body?.audience === 'connection-check';
       const tool = typeof body?.tool === 'string' ? body.tool.trim() : '';
       const sessionId = typeof body?.sessionId === 'string' ? body.sessionId.trim() : '';
       const rawParams = body?.params;
@@ -6178,7 +6296,7 @@ server = Bun.serve<WsData>({
         'initialHistory', 'artifactMode', 'clientVersion', 'contractRevision',
         'minimumBrokerRevision', 'contractSurfaceHash',
       ]);
-      if (!tool || !sessionId || tool.length > 1_000 || sessionId.length > 1_000
+      if ((!connectionCheckTicket && (!tool || !sessionId)) || tool.length > 1_000 || sessionId.length > 1_000
         || rawParams == null || typeof rawParams !== 'object' || Array.isArray(rawParams)) {
         return json({ ok: false, code: 'BAD_PARAM', error: 'tool, sessionId, and params are required' }, 400);
       }
@@ -6202,8 +6320,11 @@ server = Bun.serve<WsData>({
       return json({
         ok: true,
         ...wsAuthTickets.issue({
-          tool,
-          sessionId,
+          targetOrigin: url.origin,
+          clientOrigin: req.headers.get('origin') ?? undefined,
+          audience: connectionCheckTicket ? 'connection-check' : 'session',
+          tool: connectionCheckTicket ? '' : tool,
+          sessionId: connectionCheckTicket ? '' : sessionId,
           params,
           identity: requestCredentialIdentity(req, url, principal),
           uploadIdentity: requestUploadIdentity(req, url, principal),
@@ -6219,7 +6340,7 @@ server = Bun.serve<WsData>({
       const id = decodeURIComponent(ws[2]!);
       const wsAuthTicket = url.searchParams.get('wsAuthTicket') ?? '';
       const ticketBinding: WsAuthTicketBinding | undefined = wsAuthTicket
-        ? wsAuthTickets.consume(wsAuthTicket, tool, id)
+        ? wsAuthTickets.consume(wsAuthTicket, tool, id, { targetOrigin: url.origin, clientOrigin: req.headers.get('origin') ?? undefined, audience: 'session' })
         : undefined;
       if (TOKEN && !ticketBinding) {
         return json({ ok: false, code: 'AUTH_REQUIRED', error: 'valid WebSocket authorization ticket required' }, 401);
@@ -6379,12 +6500,11 @@ server = Bun.serve<WsData>({
         url.searchParams.get('sig'),
         artifactAuthorization(principal),
         req.headers,
+        req.method === 'HEAD',
+        () => srv.requestIP(req) !== null,
       );
-      // A `HEAD` answers headers only, including the 206 and `content-range` a
-      // ranged `HEAD` earns — the same shape the workspace route gives.
-      return req.method === 'HEAD'
-        ? new Response(null, { status: response.status, headers: response.headers })
-        : response;
+      // HEAD never opens a leased body that no consumer will drain.
+      return response;
     }
 
     const artifactTicket = path.match(
@@ -8528,7 +8648,7 @@ server = Bun.serve<WsData>({
     // See docs/architecture/monorepo.md.
     if (path === '/') return new Response(null, { status: 302, headers: { location: APP_MOUNT_PATH } });
     return new Response('Not found', { status: 404 });
-  }),
+  })),
   error(error) {
     // Bun's default development response includes source context. Keep unexpected request failures
     // content-free on the wire and in the ordinary log stream.
@@ -8557,6 +8677,11 @@ server = Bun.serve<WsData>({
     async open(ws) {
       if (!socketPrincipalActive(ws)) {
         ws.close(4401, 'peer credential revoked');
+        return;
+      }
+      if (ws.data.connectionCheck) {
+        sendJson(ws, { kind: 'connection-check', ...ws.data.connectionCheck, compatibility: ws.data.compatibility });
+        ws.close(1000, 'Connection check complete');
         return;
       }
       registerPeerSocket(ws);
@@ -9197,6 +9322,7 @@ server = Bun.serve<WsData>({
       }
     },
     message(ws, raw) {
+      if (ws.data.connectionCheck) { ws.close(1008, 'Read-only connection check'); return; }
       if (!socketPrincipalActive(ws)) {
         ws.close(4401, 'peer credential revoked');
         return;
@@ -9210,6 +9336,7 @@ server = Bun.serve<WsData>({
       routeInbound(ws, String(raw));
     },
     close(ws) {
+      if (ws.data.connectionCheck) return;
       unregisterPeerSocket(ws);
       ws.data.historyBootstrapAbort?.abort();
       ws.data.historyBootstrapAbort = undefined;
@@ -9482,6 +9609,8 @@ async function shutdownBroker(reason = 'requested'): Promise<void> {
       console.warn(`[${PRODUCT_IDENTITY.productName}] claude-mod socket shutdown failed: ${String(error)}`);
     }
 
+    await storageManagement.close();
+    artifactStore.closeStorage();
     stopOpencodeConfigWatch();
     if (relaunchTimer) clearTimeout(relaunchTimer);
     relaunchTimer = undefined;

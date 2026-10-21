@@ -25,14 +25,14 @@ ever added back to any channel — including npm — this control applies to tha
 channel again in full.
 
 The optional native broker builder uses `bun build --compile`. Bun documents
-that a standalone executable contains a copy of the Bun runtime. The pinned Bun 1.3.14 licence also
+that a standalone executable contains a copy of the Bun runtime. The pinned Bun 1.4.3 licence also
 states that Bun statically links JavaScriptCore and WebKit under LGPL-2 and that
 static linking requires providing the application in an object form that permits
 modification and relinking.
 
-The repository carries the exact upstream Bun 1.3.14 `LICENSE.md` at
-`docs/legal/bun-1.3.14-LICENSE.md`. Its SHA-256 is
-`2c6160ec8fb853f7e8f97d9b249e756c9b0ac44860a68b6bf4f1b0bcbc5c3741`.
+The repository carries the exact upstream Bun 1.4.3 `LICENSE.md` at
+`docs/legal/bun-1.4.3-LICENSE.md`. Its SHA-256 is
+`056696884250b0d682365260cf1487a6501b1665a343ec60e23a1e647043c572`.
 The compiled-notice generator verifies that pin and includes the file in native
 third-party notices. JavaScript release notices omit it because Bun is external.
 Preserving the upstream notice does not by itself satisfy or resolve the

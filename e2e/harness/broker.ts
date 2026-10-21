@@ -25,7 +25,6 @@ import { BrokerClient, type ClientAuth } from './client.ts';
 import { scaled } from './wait.ts';
 
 export const REPO_ROOT = resolve(import.meta.dir, '..', '..');
-const BROKER_ENTRY = join(REPO_ROOT, 'packages/typescript/broker/src/main.ts');
 
 export interface FixturePaths {
   /** Everything this broker owns lives under here. */
@@ -39,6 +38,8 @@ export interface FixturePaths {
 }
 
 export interface BrokerOptions {
+  /** Optional frozen source checkout for matched baseline/candidate benchmarks. */
+  sourceDirectory?: string;
   /**
    * Require the owner token on every request (`true` generates one). Without
    * it a source-mode broker treats loopback callers as the owner, which is
@@ -90,6 +91,7 @@ export class Broker {
     token: string | undefined,
     ownsRoot: boolean,
     port = 0,
+    private readonly sourceDirectory = REPO_ROOT,
   ) {
     this.paths = paths;
     this.#port = port;
@@ -135,8 +137,8 @@ export class Broker {
       reservePort: this.#port ? async () => this.#port : undefined,
       spawn: (port) => {
         spawnedPort = port;
-        const spawned = Bun.spawn(['bun', 'run', BROKER_ENTRY], {
-          cwd: REPO_ROOT,
+        const spawned = Bun.spawn(['bun', 'run', join(this.sourceDirectory, 'packages/typescript/broker/src/main.ts')], {
+          cwd: this.sourceDirectory,
           // A pipe this process never writes: when it dies, however it dies, the broker reads end of
           // file and shuts down, taking its managed hosts with it (the source-only stdin hook).
           env: { ...this.#env, PORT: String(port), HOST: '127.0.0.1', COSYNCING_TEST_EXIT_ON_STDIN_EOF: '1' },
@@ -276,7 +278,7 @@ export async function startBroker(options: BrokerOptions = {}): Promise<Broker> 
     PATH: fixturePath(paths.bin, options.hostPath ? base.PATH : undefined),
     ...extra,
   };
-  const broker = new Broker(paths, env, token, ownsRoot, options.port);
+  const broker = new Broker(paths, env, token, ownsRoot, options.port, options.sourceDirectory);
   try {
     await broker.start();
   } catch (error) {

@@ -200,7 +200,7 @@ else if (command === 'pair' && args[0] === '--json' && args[1] === '--broker-url
  * A Bun stand-in for the installer's two uses of one: the `--revision` capability probe, and running the
  * verified bundle. `version` lets a test present a runtime that is too old without installing one.
  */
-function writeFakeBun(path: string, version = '1.3.14'): void {
+function writeFakeBun(path: string, version = MINIMUM_BUN_RUNTIME_VERSION): void {
   writeFileSync(path, `#!/usr/bin/env bash
 if [ "\${1:-}" = --revision ]; then
   echo '${version}+fixturebuild'

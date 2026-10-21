@@ -40,6 +40,8 @@ final class BrokerProfileLocalDataPurge {
     'attention_badge_seen_cursor:',
     'session_driving_intent:',
     'session_model_preference:',
+    'session_model_default:',
+    'session_live_state_archived_v2:',
   ];
 
   /// Settings-table key prefixes followed directly by the RAW broker scope
@@ -47,6 +49,8 @@ final class BrokerProfileLocalDataPurge {
   static const _rawScopeKvPrefixes = [
     'broker_identity:',
     'broker_hello:',
+    'open_file_panes_v1:',
+    'storage.cleanup.',
   ];
 
   /// Removes every durable row [profileId] owns, as one atomic unit.
@@ -93,6 +97,24 @@ final class BrokerProfileLocalDataPurge {
         database.attentionCursorRows.brokerProfileId,
       );
       await _deleteSettingRows(profileId);
+      await database.customStatement(
+        'DELETE FROM broker_route_servers WHERE profile=?',
+        [profileId],
+      );
+      final recovered = await database
+          .customSelect('SELECT DISTINCT source FROM broker_recovered_drafts')
+          .get();
+      for (final row in recovered) {
+        final source = row.read<String>('source');
+        if (RosterSource.storageKeyBelongsToProfile(source, profileId)) {
+          await database.customStatement(
+            'DELETE FROM broker_recovered_drafts WHERE source=?',
+            [source],
+          );
+        }
+      }
+      // Completed migration fences intentionally survive profile deletion.
+      // A late old writer must remain retired after the same ID is re-added.
     });
   }
 
@@ -136,6 +158,19 @@ final class BrokerProfileLocalDataPurge {
 
   /// Whether a settings-table key stores broker-bound state [profileId] owns.
   static bool _settingKeyBelongsToProfile(String key, String profileId) {
+    const feedPrefix = 'attention_feed_enabled_profile:';
+    if (key.startsWith(feedPrefix)) {
+      try {
+        final owner = utf8.decode(
+          base64Url.decode(
+            base64Url.normalize(key.substring(feedPrefix.length)),
+          ),
+        );
+        return RosterSource.storageKeyBelongsToProfile(owner, profileId);
+      } on FormatException {
+        return false;
+      }
+    }
     if (key == '$openSessionsSettingKeyPrefix$profileId') return true;
     if (key.startsWith(openSessionMembershipSettingKeyPrefix)) {
       final rest = key.substring(openSessionMembershipSettingKeyPrefix.length);

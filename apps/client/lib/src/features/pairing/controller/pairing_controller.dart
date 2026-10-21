@@ -12,11 +12,15 @@ import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profi
 import 'package:cosyncing_client/src/features/broker_profiles/model/url_normalizer.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/provider/broker_profile_providers.dart';
 import 'package:cosyncing_client/src/features/connection/data/active_broker_profile_store.dart';
+import 'package:cosyncing_client/src/features/connection/data/broker_route_store.dart';
+import 'package:cosyncing_client/src/features/connection/model/broker_routes.dart';
+import 'package:cosyncing_client/src/features/connection/provider/broker_route_providers.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/pairing/data/transport_pairing_accept_service.dart';
 import 'package:cosyncing_client/src/features/pairing/data/transport_pairing_store.dart';
 import 'package:cosyncing_client/src/features/pairing/model/pairing_payload.dart';
 import 'package:cosyncing_client/src/features/pairing/model/transport_qr_payload.dart';
+import 'package:cosyncing_client/src/local/app_database.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 /// Runtime state for pairing payload import actions.
@@ -201,10 +205,19 @@ class PairingController extends Notifier<PairingControllerState> {
         .supersedePendingConnection();
     state = PairingControllerState(isBusy: true);
 
-    final profileId = payload.brokerUrl.toString();
-    await _profileMutationGate.runForCurrent(profileId, (
-      previousProfile,
-    ) async {
+    await _profileMutationGate.runExclusive(() async {
+      final previousProfile = (await _repository.getAll())
+          .where(
+            (p) =>
+                p.baseUri.origin == payload.brokerUrl.origin &&
+                (p.credentialKey == null ||
+                    brokerCredentialKindForKey(p.credentialKey!) !=
+                        BrokerCredentialKind.peerToken) &&
+                (p.sourceIdentity == null ||
+                    p.sourceIdentity!.endsWith(':owner')),
+          )
+          .firstOrNull;
+      final profileId = previousProfile?.id ?? newConnectionId();
       final previousCredentialKey = previousProfile?.credentialKey;
       final now = DateTime.now();
 
@@ -226,6 +239,12 @@ class PairingController extends Notifier<PairingControllerState> {
               credentialKey,
             );
             previousTokenWasRead = true;
+          }
+          if (previousProfile != null &&
+              ref.exists(brokerRouteCoordinatorProvider)) {
+            ref
+                .read(brokerRouteCoordinatorProvider)
+                .authorizationChanged(previousProfile);
           }
           await _credentialStore.writeBrokerToken(
             credentialKey,
@@ -249,6 +268,7 @@ class PairingController extends Notifier<PairingControllerState> {
         updatedAt: now,
         lastUsedAt: previousProfile?.lastUsedAt,
         credentialKey: credentialKey,
+        sourceIdentity: previousProfile?.sourceIdentity,
       );
 
       late final BrokerProfile savedProfile;
@@ -420,11 +440,17 @@ class PairingController extends Notifier<PairingControllerState> {
     required DateTime now,
   }) async {
     final profileBaseUri = brokerBaseFromOrigin(brokerUrl);
-    final profileId = profileBaseUri.toString();
-    final credentialKey = brokerPeerTokenCredentialKey(profileId);
-    return _profileMutationGate.runForCurrent(profileId, (
-      previousProfile,
-    ) async {
+    return _profileMutationGate.runExclusive(() async {
+      // A new paired peer is a distinct access boundary, even when another
+      // profile names this broker. Never overwrite its drafts or authority.
+      final pairingScope =
+          'server:${Uri.encodeComponent(credentials.brokerIdentityPublicKey)}:'
+          '${Uri.encodeComponent('peer:${credentials.localPeerId}')}';
+      final previousProfile = (await _repository.getAll())
+          .where((p) => p.sourceIdentity == pairingScope)
+          .firstOrNull;
+      final profileId = previousProfile?.id ?? newConnectionId();
+      final credentialKey = brokerPeerTokenCredentialKey(profileId);
       final previousCredentialKey = previousProfile?.credentialKey;
       final previousPeerToken = await _credentialStore.readBrokerToken(
         credentialKey,
@@ -438,6 +464,12 @@ class PairingController extends Notifier<PairingControllerState> {
       try {
         await _transportPairingStore.write(credentials);
         wroteTransportCredentials = true;
+        if (previousProfile != null &&
+            ref.exists(brokerRouteCoordinatorProvider)) {
+          ref
+              .read(brokerRouteCoordinatorProvider)
+              .authorizationChanged(previousProfile);
+        }
         await _credentialStore.writeBrokerToken(credentialKey, brokerPeerToken);
         wrotePeerToken = true;
 
@@ -454,7 +486,25 @@ class PairingController extends Notifier<PairingControllerState> {
           lastUsedAt: now,
           credentialKey: credentialKey,
         );
-        final savedProfile = await _repository.save(profile);
+        final savedProfile = await ref.read(appDatabaseProvider).transaction(
+          () async {
+            final saved = await _repository.save(profile);
+            final routeStore = ref.read(brokerRouteStoreProvider);
+            final server = await routeStore.ensure(saved);
+            // The acceptance proof pins the broker key and opaque encryption
+            // reference. Keep legacy connection compatibility until routes-v1
+            // authenticated readiness establishes the principal/source
+            // migration.
+            await routeStore.save(
+              server.copyWith(
+                identityPublicKey: credentials.brokerIdentityPublicKey,
+                pairingReference: credentials.id,
+              ),
+              expectedGeneration: server.generation,
+            );
+            return saved;
+          },
+        );
         ref.invalidate(brokerProfileListProvider);
 
         try {

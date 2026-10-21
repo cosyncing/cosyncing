@@ -228,6 +228,32 @@ class UnreadyKeyring implements SecureBrokerCredentialBackend {
   Future<void> delete(String key) => _inner.delete(key);
 }
 
+/// Proxy publication failures over the same secure-storage fixture backend.
+class FaultySecureCredentialBackend implements SecureBrokerCredentialBackend {
+  final _inner = FlutterSecureStorageBrokerCredentialBackend();
+  final reads = StoreFault();
+  final writes = StoreFault();
+  final deletes = StoreFault();
+
+  @override
+  Future<String?> read(String key) async {
+    await reads.enter('secure read');
+    return _inner.read(key);
+  }
+
+  @override
+  Future<void> write(String key, String value) async {
+    await writes.enter('secure write');
+    await _inner.write(key, value);
+  }
+
+  @override
+  Future<void> delete(String key) async {
+    await deletes.enter('secure delete');
+    await _inner.delete(key);
+  }
+}
+
 /// [RosterSnapshotRepository] over the real Drift snapshot store, with faults.
 class FaultyRosterSnapshots implements RosterSnapshotRepository {
   /// Wraps [inner]. Pass [deletes] to keep one fault across provider

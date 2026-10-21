@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:cosyncing_client/src/features/storage/data/managed_file_access.dart';
 import 'package:cosyncing_client/src/features/transfers/data/local_transfer_file_opener_types.dart';
 import 'package:open_filex/open_filex.dart';
 
@@ -14,6 +15,7 @@ final class _LocalTransferFileOpener implements LocalTransferFileOpener {
 
   @override
   Future<LocalTransferFileActionResult> openFile(String localPath) async {
+    ManagedFileAccess.shared.retainForSession(localPath);
     if (Platform.isAndroid || Platform.isIOS) {
       try {
         final result = await OpenFilex.open(localPath);
@@ -90,6 +92,7 @@ final class _LocalTransferFileOpener implements LocalTransferFileOpener {
     String localPath, {
     int maxBytes = 64 * 1024,
   }) async {
+    final release = ManagedFileAccess.shared.acquire(localPath);
     try {
       final file = File(localPath);
       final exists = file.existsSync();
@@ -130,6 +133,8 @@ final class _LocalTransferFileOpener implements LocalTransferFileOpener {
       return LocalTransferTextPreviewResult.failed(
         'Failed to read local file for text preview: $error',
       );
+    } finally {
+      release();
     }
   }
 

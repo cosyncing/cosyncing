@@ -23,17 +23,9 @@ class _TerminalPanelState extends State<_TerminalPanel> {
 
   bool _showAll = false;
 
-  String _summaryLabel(
-    AppLocalizations l10n,
-    int totalCount,
-    bool showAll,
-  ) {
+  String _summaryLabel(AppLocalizations l10n, int totalCount, bool showAll) {
     final hiddenCount =
-        totalCount -
-        _clippedTerminalMessages(
-          widget.messages,
-          showAll,
-        ).length;
+        totalCount - _clippedTerminalMessages(widget.messages, showAll).length;
 
     if (!showAll && hiddenCount > 0) {
       final visibleCount = totalCount - hiddenCount;
@@ -55,10 +47,7 @@ class _TerminalPanelState extends State<_TerminalPanel> {
   Future<void> _copyVisibleOutput(BuildContext context) async {
     // Keep terminal tooling read-only and visibility-scoped; see
     // `docs/architecture/client-ui.md`.
-    final visibleMessages = _clippedTerminalMessages(
-      widget.messages,
-      _showAll,
-    );
+    final visibleMessages = _clippedTerminalMessages(widget.messages, _showAll);
     final visibleText = _visibleTerminalOutputText(visibleMessages);
     await Clipboard.setData(ClipboardData(text: visibleText));
     if (!context.mounted) {
@@ -93,10 +82,7 @@ class _TerminalPanelState extends State<_TerminalPanel> {
     }
 
     final canToggle = widget.messages.length > _maxVisibleMessages;
-    final visibleMessages = _clippedTerminalMessages(
-      widget.messages,
-      _showAll,
-    );
+    final visibleMessages = _clippedTerminalMessages(widget.messages, _showAll);
     final showAllLabel = _showAll ? l10n.showLatest : l10n.showAll;
     final toggleKey = _showAll
         ? const Key('session-detail-terminal-show-latest')
@@ -109,11 +95,7 @@ class _TerminalPanelState extends State<_TerminalPanel> {
           totalCount: widget.messages.length,
           onCopiedVisible: () => _copyVisibleOutput(context),
           canToggle: canToggle,
-          summaryLabel: _summaryLabel(
-            l10n,
-            widget.messages.length,
-            _showAll,
-          ),
+          summaryLabel: _summaryLabel(l10n, widget.messages.length, _showAll),
           copyLabel: l10n.copyVisible,
           showAllLabel: showAllLabel,
           onToggleShowAll: canToggle ? _toggleShowAll : null,
@@ -442,9 +424,7 @@ class _SessionFilesSurface extends StatelessWidget {
                 message: _sessionFileBrowserNotice(l10n, state),
               ),
               SessionFileBrowserPhase.remoteDisabled => _SessionFilesStatus(
-                key: const Key(
-                  'session-detail-files-remote-disabled-state',
-                ),
+                key: const Key('session-detail-files-remote-disabled-state'),
                 icon: Icons.lock_outline,
                 message: _sessionFileBrowserNotice(l10n, state),
                 technicalDetail: state.technicalDetail,
@@ -713,26 +693,18 @@ class _SessionFilesStatus extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 24),
-      child: Column(
-        children: [
-          Icon(icon, size: 32),
-          const SizedBox(height: 8),
-          SelectableText(
-            message,
-            textAlign: TextAlign.center,
-          ),
-          if (technicalDetail?.trim().isNotEmpty ?? false)
-            Material(
-              type: MaterialType.transparency,
-              child: ExpansionTile(
-                tilePadding: EdgeInsets.zero,
-                title: Text(AppLocalizations.of(context).technicalDetails),
-                children: [SelectableText(technicalDetail!)],
-              ),
-            ),
-        ],
+    return ContextualDetails(
+      label: message,
+      detail: technicalDetail,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 24),
+        child: Column(
+          children: [
+            Icon(icon, size: 32),
+            const SizedBox(height: 8),
+            SelectableText(message, textAlign: TextAlign.center),
+          ],
+        ),
       ),
     );
   }
@@ -747,10 +719,7 @@ IconData _iconForSessionFileEntry(FsDirEntry entry) {
   };
 }
 
-String _sessionFileEntrySubtitle(
-  AppLocalizations l10n,
-  FsDirEntry entry,
-) {
+String _sessionFileEntrySubtitle(AppLocalizations l10n, FsDirEntry entry) {
   final type = switch (entry.type) {
     'directory' => l10n.sessionFileTypeDirectory,
     'file' => l10n.sessionFileTypeFile,

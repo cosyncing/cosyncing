@@ -43,10 +43,10 @@ void main() {
       // Persisted for restart survival and profile-list visibility.
       expect(
         await activeStore.getActiveProfileId(),
-        'http://127.0.0.1:7734',
+        selected.id,
       );
       expect(
-        await repository.getById('http://127.0.0.1:7734'),
+        await repository.getById(selected.id),
         isNotNull,
       );
     });
@@ -61,7 +61,7 @@ void main() {
       // exactly the ordering that hid the profile on a fresh web client.
       expect(await container.read(brokerProfileListProvider.future), isEmpty);
 
-      await selectSameOriginBrokerProfile(
+      final selected = await selectSameOriginBrokerProfile(
         container.read(_refProbeProvider),
         base: Uri.parse('http://127.0.0.1:7734/cosy/'),
       );
@@ -69,7 +69,7 @@ void main() {
       final profiles = await container.read(brokerProfileListProvider.future);
       expect(
         profiles.map((profile) => profile.id),
-        contains('http://127.0.0.1:7734'),
+        contains(selected!.id),
         reason: 'the feed coordinator only polls profiles in this list',
       );
     });

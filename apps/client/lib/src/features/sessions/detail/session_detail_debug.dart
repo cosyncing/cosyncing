@@ -132,32 +132,28 @@ class _ErrorBanner extends StatelessWidget {
     final l10n = AppLocalizations.of(context);
     final visibleMessage = localizedFailureText(l10n, failure);
     final detail = failure.detail;
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: theme.colorScheme.errorContainer,
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            SelectableText(
-              visibleMessage,
-              style: theme.textTheme.bodyMedium?.copyWith(
-                color: theme.colorScheme.onErrorContainer,
-              ),
-            ),
-            if (detail != null && detail.isNotEmpty)
-              Material(
-                type: MaterialType.transparency,
-                child: ExpansionTile(
-                  tilePadding: EdgeInsets.zero,
-                  title: Text(l10n.technicalDetails),
-                  children: [SelectableText(detail)],
+    return ContextualDetails(
+      key: const Key('session-error-diagnostic-item'),
+      label: visibleMessage,
+      detail: detail,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: theme.colorScheme.errorContainer,
+          borderRadius: BorderRadius.circular(context.tokens.radiusMd),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SelectableText(
+                visibleMessage,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: theme.colorScheme.onErrorContainer,
                 ),
               ),
-          ],
+            ],
+          ),
         ),
       ),
     );

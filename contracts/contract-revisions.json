@@ -213,6 +213,13 @@
       "minimumClientRevision": 17,
       "clientMinimumBrokerRevision": 16,
       "change": "Add the peer.message event constant and payload DTO for provenance-stamped session messages and subagent reports. DTO only: the surface hash is unchanged and the minimum client remains 17. Compatible revision-33 clients render an ordinary event card; revision-32 and earlier clients are read-only under the one-revision overlap window."
+    },
+    {
+      "revision": 35,
+      "surfaceHash": "fnv1a32:9adc64d6",
+      "minimumClientRevision": 17,
+      "clientMinimumBrokerRevision": 16,
+      "change": "Adds origin-bound server identity proofs, owner-managed advertised routes and trusted browser origins, an authenticated read-only connection-check WebSocket, and owner storage inventory, finite cleanup plans and durable jobs. Retired file artifacts preserve conversation identity with removedAt and no usable remote action. Existing single-address clients remain compatible."
     }
   ]
 }

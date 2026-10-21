@@ -17,6 +17,7 @@ class SessionArtifactDescriptor {
     this.format,
     this.redactionSummary,
     this.expiresAt,
+    this.removedAt,
     this.interactionPolicy,
     this.proactive = false,
   });
@@ -60,6 +61,12 @@ class SessionArtifactDescriptor {
   /// Optional expiry epoch (ms) for short-retention export artifacts.
   final int? expiresAt;
 
+  /// Time the broker retired this reference. Local exported copies survive.
+  final int? removedAt;
+
+  /// A retirement wins over stale signed URLs in cached message metadata.
+  bool get isRemoved => removedAt != null;
+
   /// Broker-owned structured interaction policy.
   final ArtifactInteractionPolicy? interactionPolicy;
 
@@ -68,14 +75,18 @@ class SessionArtifactDescriptor {
   final bool proactive;
 
   /// Whether the broker supplied a supported signed interaction reference.
-  bool get isInteractable => interactionPolicy?.canInteract ?? false;
+  bool get isInteractable =>
+      !isRemoved && (interactionPolicy?.canInteract ?? false);
 
   /// Inline data URL when the selected source is embedded in the message.
   String? get inlineDataUrl => isInlineDataUrl ? _downloadSource : null;
 
   /// Preferred download source URL.
-  String? get _downloadSource =>
-      (fetchUrl != null && fetchUrl!.isNotEmpty) ? fetchUrl : url;
+  String? get _downloadSource => isRemoved
+      ? null
+      : (fetchUrl != null && fetchUrl!.isNotEmpty)
+      ? fetchUrl
+      : url;
 
   /// `true` when an action is available for download/fetch.
   bool get isDownloadable => _downloadSource != null;
@@ -260,6 +271,7 @@ class SessionArtifactDescriptor {
         'redactionSummary',
       ]),
       expiresAt: _firstIntValue(message.raw, const ['expiresAt']),
+      removedAt: _firstIntValue(message.raw, const ['removedAt']),
       interactionPolicy: ArtifactInteractionPolicy.fromJson(
         message.raw['interactionPolicy'],
       ),

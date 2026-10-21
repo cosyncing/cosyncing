@@ -16,9 +16,7 @@ SessionDetailState watchQualifiedDetail(WidgetRef ref, SessionDetailKey key) =>
     ref
         .watch(sessionDetailControllerProvider(key))
         .forActiveSource(
-          ref.watch(
-            activeBrokerProfileProvider.select(RosterSource.of),
-          ),
+          ref.watch(activeBrokerProfileProvider.select(RosterSource.of)),
         );
 
 /// One-shot read of the qualified detail state. See [watchQualifiedDetail].
@@ -62,10 +60,7 @@ class _TelemetryPanel extends StatelessWidget {
 
     final rows = <(String, String)>[
       if (telemetry.hasContext)
-        (
-          l10n.sessionDetailTelemetryContextUsed,
-          _describeContext(telemetry),
-        ),
+        (l10n.sessionDetailTelemetryContextUsed, _describeContext(telemetry)),
       if (telemetry.inputTokens case final value?)
         (
           l10n.sessionDetailTelemetryInput,
@@ -586,9 +581,7 @@ class _StatusOwnershipHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final pill = KeyedSubtree(
-      key: Key(
-        'session-detail-status-sheet-control-pill-$controlPillState',
-      ),
+      key: Key('session-detail-status-sheet-control-pill-$controlPillState'),
       child: _SessionControlPill(
         control: control,
         freshness: freshness,
@@ -605,15 +598,9 @@ class _StatusOwnershipHeader extends StatelessWidget {
         );
         if (constraints.maxWidth < 360) {
           return Column(
-            key: const Key(
-              'session-detail-status-ownership-header-compact',
-            ),
+            key: const Key('session-detail-status-ownership-header-compact'),
             crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              titleWidget,
-              const SizedBox(height: 4),
-              pill,
-            ],
+            children: [titleWidget, const SizedBox(height: 4), pill],
           );
         }
         return Row(
@@ -710,11 +697,7 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
     }
     setState(() => _takeOverPending = true);
     try {
-      await _confirmAndTakeOver(
-        context,
-        ref,
-        widget.sessionKey,
-      );
+      await _confirmAndTakeOver(context, ref, widget.sessionKey);
       if (mounted) {
         await _loadWarningPreference();
       }
@@ -732,9 +715,7 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
     setState(() => _handoffPending = true);
     try {
       return await ref
-          .read(
-            sessionDetailControllerProvider(widget.sessionKey).notifier,
-          )
+          .read(sessionDetailControllerProvider(widget.sessionKey).notifier)
           .handoffToTerminal();
     } finally {
       if (mounted) {
@@ -916,17 +897,21 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      _StatusOwnershipHeader(
-                        title: l10n.sessionControlHeading,
-                        control: control,
-                        freshness: freshness,
-                        restoringDrive: restoringDrive,
-                        controlPillState: controlPillState,
+                      ContextualDetails(
+                        label: l10n.sessionControlHeading,
+                        detail: control.reason,
+                        child: _StatusOwnershipHeader(
+                          title: l10n.sessionControlHeading,
+                          control: control,
+                          freshness: freshness,
+                          restoringDrive: restoringDrive,
+                          controlPillState: controlPillState,
+                        ),
                       ),
                       // U3-C: the native session id used to sit here. It is
                       // technical identity, and Debug's "Session identity"
                       // card —
-                      // behind General → Developer options → Show debug views,
+                      // behind General → Show debug views,
                       // default off — already owns it. Normal Status answers
                       // "who controls this session", not its fingerprint.
                       if (detached)
@@ -973,40 +958,6 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
                           ),
                         ),
                       ],
-                      if (control.reason?.trim().isNotEmpty ?? false) ...[
-                        const SizedBox(height: 8),
-                        Material(
-                          type: MaterialType.transparency,
-                          child: ExpansionTile(
-                            tilePadding: EdgeInsets.zero,
-                            backgroundColor: context.tokens.surface.withValues(
-                              alpha: 0,
-                            ),
-                            collapsedBackgroundColor: context.tokens.surface
-                                .withValues(alpha: 0),
-                            shape: const Border(),
-                            collapsedShape: const Border(),
-                            // A quiet disclosure, not a heading: without an
-                            // explicit role the ListTile default (bodyLarge,
-                            // 16sp) rendered this control larger than the
-                            // SectionHeader above it and the reason body below.
-                            title: Text(
-                              l10n.technicalDetails,
-                              style: theme.textTheme.bodySmall?.copyWith(
-                                color: context.tokens.textSecondary,
-                              ),
-                            ),
-                            children: [
-                              SelectableText(
-                                control.reason!,
-                                style: theme.textTheme.bodySmall?.copyWith(
-                                  color: theme.colorScheme.onSurfaceVariant,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
                       if (state.driveRestoreConflict case final conflict?) ...[
                         const SizedBox(height: 8),
                         Text(
@@ -1049,9 +1000,7 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
                           color: context.tokens.textSecondary,
                           l10n.sessionSyncWithTerminal,
                           padding: EdgeInsets.zero,
-                          key: const Key(
-                            'session-detail-status-sync-heading',
-                          ),
+                          key: const Key('session-detail-status-sync-heading'),
                         ),
                         const SizedBox(height: 4),
                         Text(
@@ -1199,9 +1148,7 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
                           ),
                           onPressed: () =>
                               unawaited(_restoreTakeOverWarnings()),
-                          child: Text(
-                            l10n.sessionRestoreTakeoverConfirmations,
-                          ),
+                          child: Text(l10n.sessionRestoreTakeoverConfirmations),
                         ),
                       ],
                     ],
@@ -1587,10 +1534,7 @@ String _controlTerminalStatusDescription(
   return l10n.sessionTerminalUnknown;
 }
 
-String _controlCommandLabel(
-  AppLocalizations l10n,
-  SessionControlView control,
-) {
+String _controlCommandLabel(AppLocalizations l10n, SessionControlView control) {
   return switch (control.action) {
     SessionControlAction.handoff => l10n.sessionResumeInTerminal,
     SessionControlAction.join => l10n.sessionOpenInTerminal,
@@ -1711,10 +1655,7 @@ class _TranscriptExportConfirmDialog extends StatelessWidget {
 }
 
 class _DialogMetadata extends StatelessWidget {
-  const _DialogMetadata({
-    required this.label,
-    required this.value,
-  });
+  const _DialogMetadata({required this.label, required this.value});
 
   final String label;
   final String value;
@@ -1724,10 +1665,7 @@ class _DialogMetadata extends StatelessWidget {
     final theme = Theme.of(context);
     return Padding(
       padding: const EdgeInsets.only(bottom: 4),
-      child: Text(
-        '$label: $value',
-        style: theme.textTheme.bodySmall,
-      ),
+      child: Text('$label: $value', style: theme.textTheme.bodySmall),
     );
   }
 }

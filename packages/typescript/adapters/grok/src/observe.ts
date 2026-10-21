@@ -541,7 +541,12 @@ export class GrokObserveConnection implements SessionConnection {
     this.watcherRearmAttempts += 1;
     this.pendingWatcherRearm = setTimeout(() => {
       this.pendingWatcherRearm = undefined;
-      if (!this.closed && this.handlers.size > 0) this.startWatcher();
+      if (!this.closed && this.handlers.size > 0) {
+        this.startWatcher();
+        // Replacing a watcher can lose an append between its old and new
+        // subscriptions. Reconcile once after re-arming, without idle polling.
+        void this.drain();
+      }
     }, WATCH_REARM_MS);
   }
 

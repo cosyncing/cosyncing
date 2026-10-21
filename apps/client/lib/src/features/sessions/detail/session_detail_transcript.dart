@@ -404,17 +404,16 @@ String _toolTranscriptIdentity(ToolTranscriptDisplayEntry entry) {
 /// Builds a stable identity for a transcript row so positional `ListView`
 /// reuse cannot re-pair a `State`-bearing row (e.g. question/permission/action)
 /// with a different message after older-page prepends.
-String _transcriptRowIdentity(
-  SessionTranscriptDisplayEntry entry,
-) => switch (entry) {
-  MessageTranscriptDisplayEntry(:final message) =>
-    'message:${_messageIdentity(message)}',
-  final ToolTranscriptDisplayEntry tool =>
-    'tool:${_toolTranscriptIdentity(tool)}',
-  LookupGroupTranscriptDisplayEntry(:final tools) =>
-    'lookup:'
-        '${tools.map(_toolTranscriptIdentity).join(',')}',
-};
+String _transcriptRowIdentity(SessionTranscriptDisplayEntry entry) =>
+    switch (entry) {
+      MessageTranscriptDisplayEntry(:final message) =>
+        'message:${_messageIdentity(message)}',
+      final ToolTranscriptDisplayEntry tool =>
+        'tool:${_toolTranscriptIdentity(tool)}',
+      LookupGroupTranscriptDisplayEntry(:final tools) =>
+        'lookup:'
+            '${tools.map(_toolTranscriptIdentity).join(',')}',
+    };
 
 /// Test-only counter proving transcript row presentation work is bounded by
 /// the retained window rather than by how much history has been paged in.
@@ -496,14 +495,12 @@ class _ChatUserItem extends _ChatItem {
 class _ChatEntryItem extends _ChatItem {
   _ChatEntryItem(this.entry)
     : identity = _transcriptRowIdentity(entry),
-      canonicalMessageKey = stableTranscriptMessageKey(
-        switch (entry) {
-          MessageTranscriptDisplayEntry(:final message) => message,
-          ToolTranscriptDisplayEntry(:final primaryMessage) => primaryMessage,
-          LookupGroupTranscriptDisplayEntry(:final tools) =>
-            tools.first.primaryMessage,
-        },
-      );
+      canonicalMessageKey = stableTranscriptMessageKey(switch (entry) {
+        MessageTranscriptDisplayEntry(:final message) => message,
+        ToolTranscriptDisplayEntry(:final primaryMessage) => primaryMessage,
+        LookupGroupTranscriptDisplayEntry(:final tools) =>
+          tools.first.primaryMessage,
+      });
 
   final SessionTranscriptDisplayEntry entry;
 
@@ -1578,11 +1575,8 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
       consider(
         key,
         position.pixels - position.minScrollExtent,
-        () => _requestHistoryCursor(
-          cursor,
-          leadingEdge: true,
-          prefetchKey: key,
-        ),
+        () =>
+            _requestHistoryCursor(cursor, leadingEdge: true, prefetchKey: key),
       );
     }
     final estimate = _mountedRowSpan();
@@ -2513,10 +2507,7 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
         final stableMessageKey = canonicalMessageKeys[index];
         if (stableMessageKey != null) {
           _messageStableKeyByItemKey[key] = stableMessageKey;
-          _itemKeyByStableMessageKey.putIfAbsent(
-            stableMessageKey,
-            () => key,
-          );
+          _itemKeyByStableMessageKey.putIfAbsent(stableMessageKey, () => key);
         }
       }
     }
@@ -2688,10 +2679,7 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
       if (viewportBottom < 0 || viewportTop > position.viewportDimension) {
         continue;
       }
-      return (
-        stableMessageKey: stableMessageKey,
-        viewportTop: viewportTop,
-      );
+      return (stableMessageKey: stableMessageKey, viewportTop: viewportTop);
     }
     return null;
   }
@@ -2959,11 +2947,7 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
           schedule: schedule,
           busy: inlineState.mutatingIds.contains(schedule.id),
           onEdit: () => unawaited(
-            _editInlineSchedule(
-              context,
-              schedule,
-              inlineController,
-            ),
+            _editInlineSchedule(context, schedule, inlineController),
           ),
           onCancel: () => unawaited(inlineController.cancel(schedule.id)),
         ),
@@ -3094,7 +3078,10 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
             final descriptor = SessionArtifactDescriptor.fromMessage(
               attachment,
             );
-            if (descriptor == null || !descriptor.isDownloadable) return null;
+            if (descriptor == null ||
+                (!descriptor.isDownloadable && !descriptor.isRemoved)) {
+              return null;
+            }
             return _TranscriptArtifactDownloadAction(
               descriptor: descriptor,
               actionState: _artifactActionStateForMessage(
@@ -3519,9 +3506,7 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
                               child: _MeasuredTranscriptList(
                                 readingWidth: display.readingWidth,
                                 child: _TranscriptScrollView(
-                                  key: const Key(
-                                    'session-detail-chat-scroll',
-                                  ),
+                                  key: const Key('session-detail-chat-scroll'),
                                   controller: _scrollController,
                                   // Scroll offset 0 is the center row's top:
                                   // rows before it are laid out upward from
@@ -3532,18 +3517,14 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
                                     'transcript-rows-from-$centerGeneration',
                                   ),
                                   scrollCacheExtent:
-                                      const ScrollCacheExtent.viewport(
-                                        2,
-                                      ),
+                                      const ScrollCacheExtent.viewport(2),
                                   // U5b: the tail invariant. Applied to the
                                   // ambient physics so platform scroll feel
                                   // (bounce, clamp, fling) is untouched.
                                   physics: _transcriptPhysics.applyTo(
                                     ScrollConfiguration.of(
                                       context,
-                                    ).getScrollPhysics(
-                                      context,
-                                    ),
+                                    ).getScrollPhysics(context),
                                   ),
                                   semanticChildCount: totalItems,
                                   slivers: [
@@ -3690,10 +3671,10 @@ _RowSignature? _rowSignature(_ChatItem item) => switch (item) {
       AgentMessageType.userMessage => _RowSignature(1, [message]),
       _ => null,
     },
-    ToolTranscriptDisplayEntry(:final call, :final result) => _RowSignature(
-      2,
-      [call, result],
-    ),
+    ToolTranscriptDisplayEntry(:final call, :final result) => _RowSignature(2, [
+      call,
+      result,
+    ]),
     LookupGroupTranscriptDisplayEntry(:final tools) => _RowSignature(3, [
       for (final tool in tools) ...[tool.call, tool.result],
     ]),
@@ -3715,9 +3696,7 @@ SessionArtifactActionState _artifactActionStateForMessage(
 ) {
   final descriptor = SessionArtifactDescriptor.fromMessage(message);
   return descriptor == null
-      ? const SessionArtifactActionState(
-          phase: SessionArtifactActionPhase.idle,
-        )
+      ? const SessionArtifactActionState(phase: SessionArtifactActionPhase.idle)
       : state.actionStateFor(descriptor.actionStateKey);
 }
 
@@ -4144,11 +4123,7 @@ class _HistoryScopeNoticeState extends State<_HistoryScopeNotice> {
         return Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(
-              Icons.first_page,
-              size: 16,
-              color: tokens.textTertiary,
-            ),
+            Icon(Icons.first_page, size: 16, color: tokens.textTertiary),
             const SizedBox(width: 8),
             Text(
               l10n.sessionHistoryStart,
@@ -4191,11 +4166,7 @@ class _HistoryScopeNoticeState extends State<_HistoryScopeNotice> {
           child: Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(
-                Icons.error_outline,
-                size: 16,
-                color: tokens.statusError,
-              ),
+              Icon(Icons.error_outline, size: 16, color: tokens.statusError),
               const SizedBox(width: 8),
               Flexible(
                 child: Text(
@@ -4254,43 +4225,26 @@ class _HistoryScopeNoticeState extends State<_HistoryScopeNotice> {
             // sentence followed by an English one. The code it carries is
             // already in the localized string, and the raw text stays one tap
             // away below. (H1c / S2 boundary.)
-            Text(
-              // "the broker sent a full replay" is true of a stale CURSOR, and
-              // false of a history the broker could not read — which is when it
-              // used to be printed above an empty transcript.
-              isHistoryUnavailableGapCode(value.code)
-                  ? l10n.sessionHistoryUnavailable(value.code)
-                  : l10n.sessionHistoryCursorUnavailable(value.code),
-              key: const Key('session-history-gap-text'),
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: tokens.textSecondary,
-              ),
-              textAlign: TextAlign.center,
-            ),
-            if (gapMessage != null && gapMessage.isNotEmpty)
-              Material(
-                type: MaterialType.transparency,
-                child: ExpansionTile(
-                  key: const Key('session-history-gap-technical-details'),
-                  tilePadding: EdgeInsets.zero,
-                  dense: true,
-                  title: Text(
-                    l10n.technicalDetails,
-                    style: theme.textTheme.labelSmall?.copyWith(
-                      color: tokens.textTertiary,
-                    ),
-                  ),
-                  children: [
-                    SelectableText(
-                      gapMessage,
-                      key: const Key('session-history-gap-detail'),
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: tokens.textTertiary,
-                      ),
-                    ),
-                  ],
+            ContextualDetails(
+              key: const Key('session-history-diagnostic-item'),
+              label: l10n.technicalDetails,
+              detail: gapMessage,
+              child: Text(
+                // "the broker sent a full replay" is true of a stale CURSOR,
+                // and
+                // false of a history the broker could not read — which is
+                // when it
+                // used to be printed above an empty transcript.
+                isHistoryUnavailableGapCode(value.code)
+                    ? l10n.sessionHistoryUnavailable(value.code)
+                    : l10n.sessionHistoryCursorUnavailable(value.code),
+                key: const Key('session-history-gap-text'),
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: tokens.textSecondary,
                 ),
+                textAlign: TextAlign.center,
               ),
+            ),
           ],
           // Its own selection container. The slot trades its Retry button,
           // its loading line and its placeholder as a page is asked for and

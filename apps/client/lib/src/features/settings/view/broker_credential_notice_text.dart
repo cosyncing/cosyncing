@@ -17,7 +17,7 @@ String failureAdviceText(AppLocalizations l10n, FailureKind kind) {
 /// Failures are composed from two parts: a lead naming what failed in the
 /// user's terms, and advice chosen from the classified [FailureKind]. The raw
 /// exception is never part of this string — it stays in
-/// [BrokerCredentialsState.detail] for the "Technical details" disclosure.
+/// [BrokerCredentialsState.detail] for the notice’s contextual details action.
 ///
 /// Returns null when there is nothing to report.
 String? brokerCredentialNoticeText(

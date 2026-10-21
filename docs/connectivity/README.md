@@ -58,5 +58,34 @@ cosy pair --broker-url https://cosy.example.com
 ```
 
 Omit `--broker-url` to create an authentication-only offer. The client must then
-already know, or be given, its broker URL. cosyncing does not persist, probe,
-monitor, repair, or remove the path behind a supplied URL.
+already know, or be given, its broker URL. cosyncing does not configure, repair,
+or remove the operator-owned path behind a supplied URL.
+
+## Several addresses for one server
+
+Open **Settings → Servers → Saved servers**, then select a server's name to
+manage its addresses. Labels such as LAN, Tailscale, and Tunnel are local to this
+device. **Test** verifies server identity, sign-in, protocol compatibility, and
+WebSocket readiness before an additional address can carry credentials.
+
+**Automatic** chooses among enabled, approved addresses. **Fixed** keeps one
+address, including when it fails. Changing an address preserves the logical
+server's sessions, drafts, and file ownership. Removing an address does not
+remove the server. Separately saved entries with the same verified server and
+access binding can be merged after review; different paired devices' access
+bindings are kept separate.
+
+Native clients offer reusable HTTP and SOCKS5 proxy profiles under an address's
+**Advanced** options. SOCKS5 resolves the destination through the proxy. A bound
+address cannot retry Direct when its proxy fails or its credentials are missing.
+Automatic can still choose another explicitly enabled address with its own path.
+Proxy profiles and secrets remain on this device. Browsers use their own network
+configuration; an imported native proxy requirement is blocked until explicitly
+changed or another approved address is selected.
+
+The broker owner can open **Advertised addresses and browser origins** from the
+address manager to configure advertised broker addresses and trusted browser-client
+origins separately. Advertising a destination does not grant a web origin access.
+Browser CORS and mixed-content restrictions still apply. An older broker can
+retain its original single-address connection; adding addresses requires the
+`server-routes-v1` capability.

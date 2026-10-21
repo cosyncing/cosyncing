@@ -6,7 +6,11 @@ import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/controller/broker_profile_manager_controller.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/provider/broker_profile_providers.dart';
+import 'package:cosyncing_client/src/features/connection/controller/broker_route_coordinator.dart';
+import 'package:cosyncing_client/src/features/connection/model/broker_routes.dart';
+import 'package:cosyncing_client/src/features/connection/provider/broker_route_providers.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
+import 'package:cosyncing_client/src/features/connection/view/broker_addresses_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -130,6 +134,17 @@ class WorkspaceServerSwitcher extends ConsumerWidget {
               onSelect: (profile) =>
                   unawaited(_activate(context, ref, profile)),
             ),
+            if (ref.watch(activeBrokerProfileProvider) case final profile?)
+              action(
+                key: const Key('workspace-server-addresses'),
+                glyph: StrokeGlyph.settings,
+                label: l10n.routesManage,
+                onPressed: () => Navigator.of(context).push<void>(
+                  MaterialPageRoute(
+                    builder: (_) => BrokerAddressesPage(profile: profile),
+                  ),
+                ),
+              ),
             const SizedBox(height: 8),
             action(
               key: const Key('workspace-server-add'),
@@ -214,6 +229,7 @@ class _ServerOptions extends ConsumerWidget {
                 overflow: TextOverflow.ellipsis,
                 style: secondary,
               ),
+              WorkspaceRouteSubtitle(profile: profile),
             ],
           ),
         ),
@@ -224,6 +240,55 @@ class _ServerOptions extends ConsumerWidget {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [for (final profile in profiles) option(profile)],
+    );
+  }
+}
+
+/// Route-only status rebuilds this label rather than the workspace/transcript.
+class WorkspaceRouteSubtitle extends ConsumerWidget {
+  /// Uses an already loaded server observation; reading starts no probe.
+  const WorkspaceRouteSubtitle({required this.profile, super.key});
+
+  /// Logical server named by the surrounding row.
+  final BrokerProfile profile;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // Unsaved/legacy presentation models have no durable route binding.
+    if (profile.incarnationId == null) return const SizedBox.shrink();
+    final summary = ref.watch(
+      brokerRouteCoordinatorProvider.select((value) {
+        final state = value.status(profile);
+        if (state == null || state.server.addresses.length < 2) return null;
+        final active = state.server.addresses
+            .where((a) => a.id == state.activeRouteId)
+            .firstOrNull;
+        return (
+          state.phase,
+          state.server.mode,
+          active?.label,
+          state.observations[state.activeRouteId]?.medianMilliseconds?.round(),
+        );
+      }),
+    );
+    if (summary == null) return const SizedBox.shrink();
+    final l = AppLocalizations.of(context);
+    final (phase, mode, label, milliseconds) = summary;
+    return Text(
+      [
+        if (mode == BrokerRouteMode.fixed) l.routesFixed else l.routesAutomatic,
+        if (label != null) label,
+        if (phase == BrokerRoutePhase.recovering ||
+            phase == BrokerRoutePhase.switching)
+          l.connectionConnecting,
+        if (phase == BrokerRoutePhase.offline) l.sessionControlUnavailable,
+        if (milliseconds != null) l.routesLatency(milliseconds.toString()),
+      ].join(' · '),
+      maxLines: 2,
+      overflow: TextOverflow.ellipsis,
+      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+        color: context.tokens.textTertiary,
+      ),
     );
   }
 }

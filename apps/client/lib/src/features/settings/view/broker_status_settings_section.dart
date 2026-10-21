@@ -5,6 +5,7 @@ import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/components.dart';
+import 'package:cosyncing_client/src/design/components/contextual_details.dart';
 import 'package:cosyncing_client/src/features/settings/controller/managed_runtime_controller.dart';
 import 'package:cosyncing_client/src/features/settings/view/settings_common.dart';
 import 'package:cosyncing_client/src/platform/update/desktop_client_update.dart';
@@ -289,19 +290,30 @@ class _BrokerVersionRow extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        SettingsRow(
-          key: const Key('settings-broker-version'),
-          title: SelectableText(
-            l10n.settingsBrokerVersionTitle(
-              health?.version ?? l10n.settingsBrokerVersionUnknown,
+        ContextualDetails(
+          label: l10n.settingsBrokerVersionTitle(
+            health?.version ?? l10n.settingsBrokerVersionUnknown,
+          ),
+          detailsBuilder: contract == null
+              ? null
+              : () => l10n.settingsBrokerContractDetails(
+                  contract.revision,
+                  contract.surfaceHash,
+                ),
+          child: SettingsRow(
+            key: const Key('settings-broker-version'),
+            title: SelectableText(
+              l10n.settingsBrokerVersionTitle(
+                health?.version ?? l10n.settingsBrokerVersionUnknown,
+              ),
             ),
+            subtitle: SelectableText(
+              contract == null
+                  ? l10n.settingsBrokerContractLegacy
+                  : l10n.settingsBrokerContractCompatible,
+            ),
+            trailing: trailing(),
           ),
-          subtitle: SelectableText(
-            contract == null
-                ? l10n.settingsBrokerContractLegacy
-                : l10n.settingsBrokerContractCompatible,
-          ),
-          trailing: trailing(),
         ),
         // The pill says the broker will not update itself; this says what does.
         // Without it, the honest state is just a dead end.
@@ -333,31 +345,6 @@ class _BrokerVersionRow extends StatelessWidget {
                 context,
               ).textTheme.labelMedium?.copyWith(color: tokens.textSecondary),
             ),
-          ),
-        if (contract != null)
-          ExpansionTile(
-            key: const Key('settings-broker-contract-details'),
-            tilePadding: EdgeInsets.zero,
-            shape: const Border(),
-            collapsedShape: const Border(),
-            dense: true,
-            title: Text(
-              l10n.settingsBrokerTechnicalDetails,
-              style: Theme.of(
-                context,
-              ).textTheme.bodySmall?.copyWith(color: tokens.textSecondary),
-            ),
-            children: [
-              Align(
-                alignment: AlignmentDirectional.centerStart,
-                child: SelectableText(
-                  l10n.settingsBrokerContractDetails(
-                    contract.revision,
-                    contract.surfaceHash,
-                  ),
-                ),
-              ),
-            ],
           ),
       ],
     );

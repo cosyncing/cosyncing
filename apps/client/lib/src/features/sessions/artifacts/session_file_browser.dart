@@ -5,6 +5,7 @@ import 'package:broker_client/broker_client.dart';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/broker_media_source.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_media_source.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_detail_state.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
@@ -83,10 +84,7 @@ class BrokerSessionFileBrowserRepository
         sessionId: session.sessionId,
         path: path,
       );
-      return FileMediaSource(
-        uri: ticket.url,
-        release: () => unawaited(_client.releaseMediaPreview(ticket)),
-      );
+      return brokerMediaSource(_client, ticket);
     },
   );
 
@@ -1005,7 +1003,8 @@ bool isPreviewableMime(String? mimeType) {
 /// those bytes with `allowMalformed: true` and hand back mojibake — so a base64
 /// read is still judged on its label alone, exactly as today. That keeps every
 /// binary refusal standing (`image/png`, `application/pdf`,
-/// `application/octet-stream` all fail the label test) without retracting the one
+/// `application/octet-stream` all fail the label test) without retracting the
+/// one
 /// case the label does admit: a `text/*` file the broker could not decode as
 /// UTF-8. A binary renderer is what replaces that, not this predicate.
 bool isPreviewableRead(FsReadResult read) {

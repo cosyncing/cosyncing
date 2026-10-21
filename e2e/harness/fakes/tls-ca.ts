@@ -1,5 +1,5 @@
 /**
- * A throwaway certificate authority and a `127.0.0.1` server certificate, made at test time.
+ * A throwaway certificate authority and a loopback server certificate, made at test time.
  *
  * A fake HTTPS endpoint (a Web Push service) serves the leaf; the broker under test trusts the CA
  * through `NODE_EXTRA_CA_CERTS`, so its real TLS client verifies the connection as it would a push
@@ -11,7 +11,7 @@ import { generateKeyPairSync, randomBytes, sign, type KeyObject } from 'node:cry
 export interface TestCertificates {
   /** PEM of the CA to trust. */
   caPem: string;
-  /** PEM of the server certificate for `127.0.0.1`, issued by the CA. */
+  /** PEM of the server certificate for `127.0.0.1` and `::1`, issued by the CA. */
   certPem: string;
   /** PKCS#8 PEM of the server key. */
   keyPem: string;
@@ -30,7 +30,14 @@ const tlv = (tag: number, ...parts: Buffer[]): Buffer => {
 };
 const sequence = (...parts: Buffer[]) => tlv(0x30, ...parts);
 const set = (...parts: Buffer[]) => tlv(0x31, ...parts);
-const integer = (bytes: Buffer) => tlv(0x02, bytes[0]! & 0x80 ? Buffer.concat([Buffer.from([0]), bytes]) : bytes);
+const integer = (bytes: Buffer): Buffer => {
+  // DER integers have no redundant leading zero. A random serial starting
+  // with 00 otherwise intermittently fails BoringSSL's stricter X.509 parser.
+  let first = 0;
+  while (first < bytes.length - 1 && bytes[first] === 0) first++;
+  const value = bytes.subarray(first);
+  return tlv(0x02, value[0]! & 0x80 ? Buffer.concat([Buffer.from([0]), value]) : value);
+};
 const bitString = (bytes: Buffer) => tlv(0x03, Buffer.from([0]), bytes);
 const octetString = (bytes: Buffer) => tlv(0x04, bytes);
 const boolean = (value: boolean) => tlv(0x01, Buffer.from([value ? 0xff : 0]));
@@ -69,8 +76,11 @@ function certificate(input: {
     // basicConstraints, keyUsage (keyCertSign + cRLSign for the CA, digitalSignature for the leaf).
     extension('2.5.29.19', true, sequence(...(input.authority ? [boolean(true)] : []))),
     extension('2.5.29.15', true, bitString(Buffer.from([input.authority ? 0x06 : 0x80]))),
-    // subjectAltName IP:127.0.0.1 on the leaf.
-    ...(input.authority ? [] : [extension('2.5.29.17', false, sequence(tlv(0x87, Buffer.from([127, 0, 0, 1]))))]),
+    // Both loopback address families are verified as IP subjectAltNames.
+    ...(input.authority ? [] : [extension('2.5.29.17', false, sequence(
+      tlv(0x87, Buffer.from([127, 0, 0, 1])),
+      tlv(0x87, Buffer.from([...Array<number>(15).fill(0), 1])),
+    ))]),
   ];
   const tbs = sequence(
     explicit(0, integer(Buffer.from([2]))),

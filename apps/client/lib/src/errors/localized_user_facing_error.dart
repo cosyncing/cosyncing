@@ -57,6 +57,7 @@ String localizedFailureLead(AppLocalizations l10n, FailureLead lead) {
     FailureLead.sendArtifactInteraction =>
       l10n.failureLeadSendArtifactInteraction,
     FailureLead.sendCommand => l10n.failureLeadSendCommand,
+    FailureLead.routeOutcomeUnknown => l10n.routesOutcomeUnknown,
     FailureLead.sendPrompt => l10n.failureLeadSendPrompt,
     FailureLead.sendTranscriptReceipt => l10n.failureLeadSendTranscriptReceipt,
     FailureLead.startBackgroundDownload =>

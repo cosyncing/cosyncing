@@ -147,7 +147,7 @@ void main() {
           ),
           terminalSync: syncBlock(supported: false),
         ),
-        says: [en.technicalDetails],
+        says: [],
         silent: ['broker: fixture technical detail'],
         takeOver: true,
         copyCommand: false,
@@ -161,6 +161,14 @@ void main() {
         await app.openStatus();
 
         final sheet = find.byKey(const Key('session-detail-status-sheet'));
+        if (c.name == 'a broker reason survives behind Technical details') {
+          await app.openTechnicalDetails(find.text(en.sessionControlHeading));
+          expect(
+            find.textContaining('broker: fixture technical detail'),
+            findsOneWidget,
+          );
+          await app.tapKey('contextual-details-close');
+        }
         for (final text in c.says) {
           expect(
             find.descendant(of: sheet, matching: find.textContaining(text)),
@@ -271,41 +279,36 @@ void main() {
       },
     );
 
-    featureTest(
-      'with debug views off there is no Debug view to open',
-      (f) async {
-        final studio = studioWith(f);
-        final app = await openSession(f, studio);
-        await app.tapKey('session-detail-view-menu');
-        expect(
-          find.byKey(const Key('session-detail-view-item-debug')),
-          findsNothing,
-        );
-      },
-    );
+    featureTest('with debug views off there is no Debug view to open', (
+      f,
+    ) async {
+      final studio = studioWith(f);
+      final app = await openSession(f, studio);
+      await app.tapKey('session-detail-view-menu');
+      expect(
+        find.byKey(const Key('session-detail-view-item-debug')),
+        findsNothing,
+      );
+    });
 
-    featureTest(
-      'actions an agent type cannot do are disabled and say why',
-      (f) async {
-        final studio = studioWith(f);
-        final app = await openSession(f, studio);
-        await app.openStatus();
+    featureTest('actions an agent type cannot do are disabled and say why', (
+      f,
+    ) async {
+      final studio = studioWith(f);
+      final app = await openSession(f, studio);
+      await app.openStatus();
+      expect(find.text(en.sessionDuplicateDisabledUnsupported), findsNothing);
+      expect(find.text(en.sessionExportDisabledUnsupported), findsOneWidget);
+      for (final key in ['fork']) {
         expect(
-          find.text(en.sessionDuplicateDisabledUnsupported),
-          findsNothing,
+          app.tester
+              .widget<ListTile>(find.byKey(Key('session-detail-$key-button')))
+              .enabled,
+          isFalse,
+          reason: key,
         );
-        expect(find.text(en.sessionExportDisabledUnsupported), findsOneWidget);
-        for (final key in ['fork']) {
-          expect(
-            app.tester
-                .widget<ListTile>(find.byKey(Key('session-detail-$key-button')))
-                .enabled,
-            isFalse,
-            reason: key,
-          );
-        }
-      },
-    );
+      }
+    });
 
     featureTest(
       'a session that is not attached disables its actions and says it '
@@ -383,25 +386,22 @@ void main() {
       },
     );
 
-    featureTest(
-      'Fork at latest asks the broker once and opens the '
-      'new session in its own tab',
-      (f) async {
-        final studio = studioWith(f)
-          ..agents = [fakeAgent(canFork: true, canClone: true)];
-        final app = await openSession(f, studio);
-        await app.openStatus();
-        await app.tapKey('session-detail-fork-button');
-        await app.pumpUntil(
-          () => app.tab('fork-of-s1').evaluate().isNotEmpty,
-          reason: 'the fork opens in a tab',
-        );
-        expect(
-          studio.requestsTo('/api/sessions/codex/s1/fork', method: 'POST'),
-          hasLength(1),
-        );
-      },
-    );
+    featureTest('Fork at latest asks the broker once and opens the '
+        'new session in its own tab', (f) async {
+      final studio = studioWith(f)
+        ..agents = [fakeAgent(canFork: true, canClone: true)];
+      final app = await openSession(f, studio);
+      await app.openStatus();
+      await app.tapKey('session-detail-fork-button');
+      await app.pumpUntil(
+        () => app.tab('fork-of-s1').evaluate().isNotEmpty,
+        reason: 'the fork opens in a tab',
+      );
+      expect(
+        studio.requestsTo('/api/sessions/codex/s1/fork', method: 'POST'),
+        hasLength(1),
+      );
+    });
 
     featureTest(
       'forking a session another agent spawned is refused in plain words, '

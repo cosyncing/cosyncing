@@ -244,7 +244,7 @@ public static class FakeBun {
     return output;
   }
 
-  const currentBun = buildFakeBun('bun-current', '1.3.14');
+  const currentBun = buildFakeBun('bun-current', MINIMUM_BUN_RUNTIME_VERSION);
   const staleBun = buildFakeBun('bun-stale', '1.2.99');
   const pinnedBun = buildFakeBun('bun-pinned', PINNED_BUN_RUNTIME_VERSION);
   // What earlier installers placed: below the pinned version, whatever the floor.

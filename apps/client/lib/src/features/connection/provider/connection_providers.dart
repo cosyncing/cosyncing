@@ -9,10 +9,16 @@ import 'package:cosyncing_client/src/features/broker_profiles/model/url_normaliz
 import 'package:cosyncing_client/src/features/broker_profiles/provider/broker_profile_providers.dart';
 import 'package:cosyncing_client/src/features/connection/data/active_broker_profile_store.dart';
 import 'package:cosyncing_client/src/features/connection/data/broker_http_transport.dart';
+import 'package:cosyncing_client/src/features/connection/data/broker_route_store.dart';
+import 'package:cosyncing_client/src/features/connection/data/broker_route_transport.dart';
+import 'package:cosyncing_client/src/features/connection/data/broker_source_migration.dart';
 import 'package:cosyncing_client/src/features/connection/model/broker_health_probe.dart';
+import 'package:cosyncing_client/src/features/connection/model/broker_routes.dart';
 import 'package:cosyncing_client/src/features/connection/model/connection_state.dart';
 import 'package:cosyncing_client/src/features/connection/model/real_broker_health_probe.dart';
 import 'package:cosyncing_client/src/features/connection/model/same_origin_broker_profile.dart';
+import 'package:cosyncing_client/src/features/connection/provider/broker_route_providers.dart';
+import 'package:cosyncing_client/src/local/app_database.dart';
 import 'package:flutter/foundation.dart' show immutable, kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -51,7 +57,40 @@ final activeBrokerProfileHydrationProvider = FutureProvider<void>((ref) async {
   var needsWebDefault = false;
   await ref.read(brokerProfileMutationGateProvider).runExclusive(() async {
     final store = ref.read(activeBrokerProfileStoreProvider);
-    final persistedId = await store.getActiveProfileId();
+    // Neither read publishes state. Start them together under the mutation
+    // gate so normal startup does not serialize two browser-worker trips.
+    // Recovery can change durable metadata, so re-read selection afterwards
+    // whenever a journal was present.
+    final (recovery, selectedId) = await (
+      readBrokerRouteRecovery(ref.read(appDatabaseProvider)),
+      store.getActiveProfileId(),
+    ).wait;
+    if (recovery.merges) {
+      try {
+        await ref.read(brokerProfileMergeProvider).recover();
+      } on Object {
+        /* A committed merge retains its pending secret-cleanup journal. */
+      }
+    }
+    try {
+      if (recovery.proxies) {
+        await ref.read(brokerRouteStoreProvider).recoverProxyWrites();
+      }
+    } on Object {
+      // Preserve the journal while the keyring is locked. Resolving a required
+      // path still validates its published secret and never falls back Direct.
+    }
+    if (recovery.migrations) {
+      await BrokerSourceMigration(
+        ref.read(appDatabaseProvider),
+        ref.read(brokerRouteStoreProvider),
+        ref.read(credentialStoreProvider),
+      ).recover();
+    }
+    final persistedId =
+        recovery.merges || recovery.proxies || recovery.migrations
+        ? await store.getActiveProfileId()
+        : selectedId;
 
     if (persistedId != null) {
       final repository = ref.read(brokerProfileRepositoryProvider);
@@ -96,19 +135,21 @@ Future<BrokerProfile?> selectSameOriginBrokerProfile(
 
   final defaultProfile = sameOriginBrokerProfile(base: origin);
   final repository = ref.read(brokerProfileRepositoryProvider);
-  return ref.read(brokerProfileMutationGateProvider).runForCurrent(
-    defaultProfile.id,
-    (existing) async {
-      final resolved = existing ?? defaultProfile;
-      final saved = await repository.save(resolved);
-      ref.invalidate(brokerProfileListProvider);
-      await ref
-          .read(activeBrokerProfileStoreProvider)
-          .setActiveProfileId(saved.id);
-      ref.read(activeBrokerProfileProvider.notifier).state = saved;
-      return saved;
-    },
-  );
+  return ref.read(brokerProfileMutationGateProvider).runExclusive(() async {
+    final existing = (await repository.getAll())
+        .where(
+          (profile) => profile.baseUri.origin == defaultProfile.baseUri.origin,
+        )
+        .firstOrNull;
+    final resolved = existing ?? defaultProfile.copyWith(id: newConnectionId());
+    final saved = await repository.save(resolved);
+    ref.invalidate(brokerProfileListProvider);
+    await ref
+        .read(activeBrokerProfileStoreProvider)
+        .setActiveProfileId(saved.id);
+    ref.read(activeBrokerProfileProvider.notifier).state = saved;
+    return saved;
+  });
 }
 
 /// Runtime broker credential store.
@@ -228,32 +269,37 @@ class ConnectionController extends Notifier<ConnectionStateModel> {
       final repository = ref.read(brokerProfileRepositoryProvider);
       final activated = await ref
           .read(brokerProfileMutationGateProvider)
-          .runForCurrent(
-            normalized.toString(),
-            (persistedProfile) async {
-              if (!_isCurrent(intentGeneration)) return false;
-              final now = DateTime.now();
-              final profile = BrokerProfile(
-                id: normalized.toString(),
-                displayName: persistedProfile?.displayName ?? normalized.host,
-                baseUri: normalized,
-                createdAt: persistedProfile?.createdAt ?? now,
-                incarnationId: persistedProfile?.incarnationId,
-                updatedAt: now,
-                lastUsedAt: now,
-                credentialKey: persistedProfile?.credentialKey,
-              );
-              final saved = await repository.save(profile);
-              if (!_isCurrent(intentGeneration)) return false;
-              ref.invalidate(brokerProfileListProvider);
-              await ref
-                  .read(activeBrokerProfileStoreProvider)
-                  .setActiveProfileId(saved.id);
-              if (!_isCurrent(intentGeneration)) return false;
-              ref.read(activeBrokerProfileProvider.notifier).state = saved;
-              return true;
-            },
-          );
+          .runExclusive(() async {
+            if (!_isCurrent(intentGeneration)) return false;
+            final candidates = (await repository.getAll())
+                .where((profile) => profile.baseUri.origin == normalized.origin)
+                .toList();
+            final activeId = ref.read(activeBrokerProfileProvider)?.id;
+            final persistedProfile =
+                candidates.where((p) => p.id == activeId).firstOrNull ??
+                candidates.firstOrNull;
+            final now = DateTime.now();
+            final profile = BrokerProfile(
+              id: persistedProfile?.id ?? newConnectionId(),
+              displayName: persistedProfile?.displayName ?? normalized.host,
+              baseUri: normalized,
+              createdAt: persistedProfile?.createdAt ?? now,
+              incarnationId: persistedProfile?.incarnationId,
+              updatedAt: now,
+              lastUsedAt: now,
+              credentialKey: persistedProfile?.credentialKey,
+              sourceIdentity: persistedProfile?.sourceIdentity,
+            );
+            final saved = await repository.save(profile);
+            if (!_isCurrent(intentGeneration)) return false;
+            ref.invalidate(brokerProfileListProvider);
+            await ref
+                .read(activeBrokerProfileStoreProvider)
+                .setActiveProfileId(saved.id);
+            if (!_isCurrent(intentGeneration)) return false;
+            ref.read(activeBrokerProfileProvider.notifier).state = saved;
+            return true;
+          });
       if (!activated || !_isCurrent(intentGeneration)) return false;
       state = ConnectionStateModel(
         status: ConnectionStatus.success,
@@ -311,61 +357,50 @@ Future<BrokerClient> createBrokerClientForProfile(
   Ref ref,
   BrokerProfile profile,
 ) async {
-  final sourceArguments = (
-    profileId: profile.id,
-    incarnation:
-        profile.incarnationId ??
-        'created-${profile.createdAt.toUtc().microsecondsSinceEpoch}',
-  );
   final transport = ref.read(brokerHttpTransportProvider);
-  // Read now, not from the callback: the caller's ref may be gone by the time
-  // a request this client sent comes back refused.
+  final coordinator = profile.incarnationId == null
+      ? null
+      : ref.read(brokerRouteCoordinatorProvider);
+  final store = ref.read(credentialStoreProvider);
+  final active = ref.read(activeBrokerProfileProvider);
   final unauthorized = ref.read(brokerUnauthorizedSignalProvider);
   final source = BrokerUnauthorizedSource.ofProfile(profile);
   void reportUnauthorized() => unauthorized.report(source);
   final credentialKey = profile.credentialKey;
-  if (credentialKey == null) {
-    return BrokerClient(
-      baseUrl: profile.baseUri.toString(),
-      clientProfileId: sourceArguments.profileId,
-      clientProfileIncarnation: sourceArguments.incarnation,
-      dio: brokerTransportDioReportingUnauthorized(
-        transport,
-        onUnauthorized: reportUnauthorized,
-      ),
-    );
-  }
-
-  final raw = await ref
-      .read(credentialStoreProvider)
-      .readBrokerToken(credentialKey);
+  final raw = credentialKey == null
+      ? null
+      : await store.readBrokerToken(credentialKey);
   final credential = raw?.trim();
-  if (credential == null || credential.isEmpty) {
+  if (credentialKey != null && (credential == null || credential.isEmpty)) {
     throw BrokerCredentialUnavailableException(profile.id);
   }
-
-  return switch (brokerCredentialKindForKey(credentialKey)) {
-    BrokerCredentialKind.sharedToken => BrokerClient(
-      baseUrl: profile.baseUri.toString(),
-      token: credential,
-      clientProfileId: sourceArguments.profileId,
-      clientProfileIncarnation: sourceArguments.incarnation,
-      dio: brokerTransportDioReportingUnauthorized(
-        transport,
-        onUnauthorized: reportUnauthorized,
-      ),
-    ),
-    BrokerCredentialKind.peerToken => BrokerClient(
-      baseUrl: profile.baseUri.toString(),
-      peerToken: credential,
-      clientProfileId: sourceArguments.profileId,
-      clientProfileIncarnation: sourceArguments.incarnation,
-      dio: brokerTransportDioReportingUnauthorized(
-        transport,
-        onUnauthorized: reportUnauthorized,
-      ),
-    ),
-  };
+  final route = await coordinator?.resolve(
+    profile,
+    alternates:
+        active?.id == profile.id &&
+        active?.incarnationId == profile.incarnationId,
+  );
+  final peer =
+      credentialKey != null &&
+      brokerCredentialKindForKey(credentialKey) ==
+          BrokerCredentialKind.peerToken;
+  final client = BrokerClient(
+    baseUrl: (route?.context.origin ?? profile.baseUri).toString(),
+    token: peer ? null : credential,
+    peerToken: peer ? credential : null,
+    clientProfileId: profile.id,
+    clientProfileIncarnation:
+        profile.incarnationId ??
+        'created-${profile.createdAt.toUtc().microsecondsSinceEpoch}',
+    dio:
+        route?.dio(onUnauthorized: reportUnauthorized) ??
+        brokerTransportDioReportingUnauthorized(
+          transport,
+          onUnauthorized: reportUnauthorized,
+        ),
+  );
+  if (route != null) bindResolverRoute(client.resolver, route);
+  return client;
 }
 
 /// The saved server a refused request was sent to: profile, endpoint and
@@ -385,7 +420,7 @@ final class BrokerUnauthorizedSource {
   factory BrokerUnauthorizedSource.ofProfile(BrokerProfile profile) =>
       BrokerUnauthorizedSource(
         profileId: profile.id,
-        endpoint: profile.baseUri.toString(),
+        endpoint: profile.sourceIdentity ?? profile.baseUri.toString(),
         incarnationId: profile.incarnationId,
       );
 

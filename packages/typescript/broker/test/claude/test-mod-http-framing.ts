@@ -44,6 +44,7 @@ const registry = new ModRegistry();
 const audit = new ModAuditStore();
 const holds = new ModHoldStore({ registry, audit, gate: () => ({ mode: 'auto', viewers: 0, killSwitch: false }) });
 const refusals: string[] = [];
+const socketWarnings: string[] = [];
 const server = new ModSocketServer({
   socketPath,
   registry,
@@ -53,7 +54,7 @@ const server = new ModSocketServer({
   bodyDeadlineMs: 600,
   maxConnections: 24,
   onRefusal: (code) => refusals.push(code),
-  log: { warn: () => {} },
+  log: { warn: (message) => { socketWarnings.push(message); } },
 });
 
 interface RawReply {
@@ -80,14 +81,28 @@ function raw(bytes: (string | Uint8Array)[], opts: { idleMs?: number; expectClos
       socket.destroy();
       resolve({ status, head, body, responses: (text.match(/HTTP\/1\.[01] /g) ?? []).length, closed });
     };
+    const fail = (error: NodeJS.ErrnoException) => {
+      if (settled) return;
+      // A listener enforcing its connection cap may close before the request
+      // write completes. Both EOF and these reset errors prove that refusal.
+      if (opts.expectClose && ['EPIPE', 'ECONNRESET'].includes(error.code ?? '')) {
+        finish(true);
+        return;
+      }
+      settled = true;
+      if (timer) clearTimeout(timer);
+      socket.destroy();
+      reject(new Error(`Raw request ${String(bytes[0]).split('\r\n')[0]} failed: ${error.code}; received ${Buffer.concat(chunks).toString('latin1').slice(0, 160)}; listener: ${socketWarnings.at(-1) ?? 'no warning'}`, { cause: error }));
+    };
     const socket = net.createConnection({ path: opts.path ?? socketPath }, () => {
       void (async () => {
         for (const piece of bytes) {
+          if (settled) return;
           socket.write(typeof piece === 'string' ? piece : Buffer.from(piece));
           await sleep(2);
         }
-        timer = setTimeout(() => finish(false), opts.idleMs ?? 1_200);
-      })();
+        if (!settled) timer = setTimeout(() => finish(false), opts.idleMs ?? 1_200);
+      })().catch(fail);
     });
     socket.on('data', (chunk) => {
       chunks.push(Buffer.from(chunk));
@@ -101,9 +116,7 @@ function raw(bytes: (string | Uint8Array)[], opts: { idleMs?: number; expectClos
       }
     });
     socket.on('close', () => finish(true));
-    socket.on('error', (error) => {
-      if (!settled) reject(error);
-    });
+    socket.on('error', fail);
   });
 }
 
@@ -303,7 +316,7 @@ try {
   })));
   const stillParked = parked.filter((open) => open).length;
   check('the cap admits its own complement of parked polls', stillParked === 24, `${stillParked}/24 still open`);
-  const overflow = await raw([`POST /claude/mod/poll?sid=${sessionId} HTTP/1.1\r\ncontent-length: ${Buffer.byteLength(parkBody)}\r\n\r\n${parkBody}`], { idleMs: 900 });
+  const overflow = await raw([`POST /claude/mod/poll?sid=${sessionId} HTTP/1.1\r\ncontent-length: ${Buffer.byteLength(parkBody)}\r\n\r\n${parkBody}`], { idleMs: 900, expectClose: true });
   check('a connection over the cap is closed without an answer', overflow.status === 0 && overflow.responses === 0, `status=${overflow.status} responses=${overflow.responses}`);
   for (const sock of parkedSockets) sock.destroy();
   await sleep(150);
@@ -365,14 +378,26 @@ try {
     refusedOk === false && /undelivered after [0-9] ms: the socket refused the write$/.test(refusedReports[0] ?? '')
       && !/10000/.test(refusedReports[0] ?? ''), refusedReports[0]);
 
-  // Rule 14: bytes that arrive after the handler took the connection are dropped, not buffered, so
-  // the one-request-per-connection rule cannot be turned into an unbounded buffer.
+  // Rule 14 needs the first handler to remain in flight when the extra bytes
+  // arrive. A real completed socket may reset the late writer before its first
+  // response is read. Use this file's existing narrow framing seam to hold
+  // dispatch explicitly; the real-socket pipeline case above covers ingress.
   const afterDispatch: string[] = [];
-  const late = await raw([
-    `POST /claude/mod/register?sid=${sessionId} HTTP/1.1\r\ncontent-length: ${declared}\r\n\r\n${bodyFor('register')}`,
-    'POST /claude/mod/poll HTTP/1.1\r\ncontent-length: 2\r\n\r\n{}',
-  ], { idleMs: 900 });
-  check('bytes after the request was dispatched get no second answer', late.responses === 1, `responses=${late.responses} ${afterDispatch.length}`);
+  const lateResponses: string[] = [];
+  const heldSocket = { fd: 5, end(data?: string | Uint8Array) {
+    if (data) lateResponses.push(Buffer.from(data).toString());
+  } };
+  const heldReader = new Http1RequestReader({
+    onRequest: (_socket, _fd, request) => { afterDispatch.push(request.target); },
+  });
+  heldReader.open(heldSocket);
+  heldReader.onData(heldSocket,
+    `POST /claude/mod/register?sid=${sessionId} HTTP/1.1\r\ncontent-length: ${declared}\r\n\r\n${bodyFor('register')}`);
+  heldReader.onData(heldSocket, 'POST /claude/mod/poll HTTP/1.1\r\ncontent-length: 2\r\n\r\n{}');
+  await heldReader.respond(heldSocket, 200, '{"ok":true}');
+  check('bytes after the request was dispatched get no second answer',
+    afterDispatch.length === 1 && lateResponses.length === 1,
+    `${afterDispatch.length} dispatch, ${lateResponses.length} response`);
 
   // Fixture replay: the exact header blocks a real 2.1.288 session put on the wire.
   const fixture = JSON.parse(readFileSync(join(import.meta.dir, 'fixtures', 'claude-fetch-requests.json'), 'utf8')) as {

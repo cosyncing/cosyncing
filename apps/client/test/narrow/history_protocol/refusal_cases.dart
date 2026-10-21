@@ -98,17 +98,15 @@ void defineRefusalCases() {
       await _pumpTranscript(tester, connection);
 
       // Collapsed by default: the raw text is available, not displayed.
-      expect(find.byKey(const Key('session-history-gap-detail')), findsNothing);
-      final expander = find.byKey(
-        const Key('session-history-gap-technical-details'),
-      );
+      expect(find.byKey(const Key('contextual-details-text')), findsNothing);
+      final expander = find.byKey(const Key('session-history-diagnostic-item'));
       expect(expander, findsOneWidget);
-      await tester.tap(expander);
+      await tester.longPress(expander);
       await tester.pumpAndSettle();
       final detail = tester.widget<SelectableText>(
-        find.byKey(const Key('session-history-gap-detail')),
+        find.byKey(const Key('contextual-details-text')),
       );
-      expect(detail.data, _resourceLimitGap.message);
+      expect(detail.data, contains(_resourceLimitGap.message));
     });
   });
 

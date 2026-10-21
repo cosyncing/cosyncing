@@ -954,6 +954,8 @@ export type AgentMessage =
   | { type: 'fs-edit'; path: string; description?: string; diff?: string }
   | {
       type: 'file-artifact';
+      /** Durable retirement of this exact version; no fetch/open action remains. */
+      removedAt?: number;
       path: string;
       name: string;
       mimeType: string;
@@ -1604,6 +1606,18 @@ export const CANONICAL_MESSAGE_TYPES = [
  * and parseable for clients.
  */
 export const BROKER_ROUTES = [
+  '/api/connection/identity-proof',
+  '/api/connection/check',
+  '/api/connection/check/ws',
+  '/api/connection/configuration',
+  '/api/storage',
+  '/api/storage/scans',
+  '/api/storage/scans/{id}',
+  '/api/storage/items',
+  '/api/storage/cleanup-plans',
+  '/api/storage/cleanup-jobs',
+  '/api/storage/cleanup-jobs/{id}',
+  '/api/storage/cleanup-jobs/{id}/cancel',
   '/api/agents',
   '/api/agents/{id}/models',
   '/api/agents/{id}/modes',
@@ -1705,6 +1719,8 @@ export const BROKER_INTEGRATION_ROUTES = [
  * Stable broker error codes returned in API payloads.
  */
 export const BROKER_ERROR_CODES = [
+  'NO_INVENTORY',
+  'STORAGE_UNAVAILABLE',
   'AUTH_REQUIRED',
   'BAD_PARAM',
   'ACK_UNKNOWN_TARGET',
@@ -2186,7 +2202,8 @@ export type ClientMessageKind = (typeof BROKER_CLIENT_MESSAGE_KINDS)[number];
  * remain free-form: the surface hash and minimum client (17) are unchanged.
  * A compatible revision-33 client renders an ordinary event card. Revision 32
  * and earlier clients are read-only under the one-revision overlap window. */
-export const BROKER_CONTRACT_REVISION = 34 as const;
+/** Revision 35 adds owner storage and verified multi-address readiness. */
+export const BROKER_CONTRACT_REVISION = 35 as const;
 // Revision 17 removes public artifact bearer capabilities. The client-first
 // release sequence must complete before this broker ships; older clients do not
 // authenticate artifact downloads and therefore must fail closed as read-only.
@@ -3867,3 +3884,89 @@ export const UPDATE_ERROR_CODES = [
   'UPDATE_UNKNOWN_JOB_SCHEMA',
 ] as const;
 export type UpdateErrorCode = (typeof UPDATE_ERROR_CODES)[number];
+
+/** server-routes-v1: a credential-free, origin-bound Ed25519 challenge. */
+export interface ServerRouteIdentityProof {
+  version: 1;
+  nonce: string;
+  origin: string;
+  identityPublicKey: string;
+  issuedAt: number;
+  expiresAt: number;
+  signature: string;
+}
+
+/** Side-effect-free authenticated HTTP/WS readiness. No session is attached. */
+export interface ServerRouteConnectionCheck {
+  capability: 'server-routes-v1';
+  identityPublicKey: string;
+  principalId: string;
+  authGeneration: number;
+  contract: typeof BROKER_CONTRACT;
+}
+
+/** storage-v1 wire types. Bytes are null whenever measurement is unavailable. */
+export type StorageCategoryId = 'rebuildable' | 'staging' | 'stored-files' | 'protected';
+export interface StorageCategoryMeasurement {
+  id: StorageCategoryId;
+  bytes: number | null;
+  itemCount: number;
+  eligibleCount: number;
+  eligibleBytes: number | null;
+  quality: 'measured' | 'logical-estimate' | 'partial' | 'unavailable';
+}
+export interface StorageInventory {
+  capability: 'storage-v1';
+  inventoryId: string;
+  serverIdentity: string;
+  measuredAt: number;
+  status: 'complete' | 'partial';
+  categories: StorageCategoryMeasurement[];
+  actions: Array<'cache' | 'stored-files'>;
+}
+export interface StorageReviewItem {
+  id: string;
+  version: string;
+  category: StorageCategoryId;
+  label: string;
+  size: number | null;
+  createdAt: number;
+  tool?: string;
+  sessionId?: string;
+  eligible: boolean;
+  reason?: string;
+}
+export interface StorageCleanupPlan {
+  planId: string;
+  inventoryId: string;
+  expiresAt: number;
+  itemCount: number;
+  affectedSessions: number;
+  logicalBytes: number | null;
+  reclaimableBytes: number | null;
+  skippedCount: number;
+}
+export type StorageCleanupOutcome = 'REMOVED' | 'REFERENCE_REMOVED' | 'ALREADY_MISSING' | 'OBJECT_CHANGED' | 'IN_USE' | 'PERMISSION_CHANGED' | 'FAILED';
+export const STORAGE_ERROR_CODES = [
+  'INVENTORY_EXPIRED', 'PLAN_EXPIRED', 'PLAN_CONSUMED', 'IDEMPOTENCY_CONFLICT',
+  'BUSY', 'STORAGE_UNAVAILABLE',
+] as const;
+export type StorageErrorCode = (typeof STORAGE_ERROR_CODES)[number];
+export interface StorageCleanupItemResult {
+  id: string;
+  outcome: StorageCleanupOutcome;
+  reclaimedBytes: number | null;
+}
+export interface StorageCleanupJob {
+  jobId: string;
+  planId: string;
+  state: 'pending' | 'running' | 'completed' | 'partial' | 'canceled' | 'interrupted';
+  total: number;
+  processed: number;
+  removed: number;
+  missing: number;
+  skipped: number;
+  failed: number;
+  reclaimedBytes: number | null;
+  retainedUntil: number;
+}

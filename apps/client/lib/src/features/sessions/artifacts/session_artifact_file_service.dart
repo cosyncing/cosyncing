@@ -5,9 +5,13 @@ import 'dart:ui' as ui;
 
 import 'package:broker_client/broker_client.dart';
 import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/src/features/connection/data/broker_route_transport.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_descriptor.dart';
 import 'package:cosyncing_client/src/features/settings/controller/locale_controller.dart';
+import 'package:cosyncing_client/src/features/storage/data/device_file_registry.dart';
+import 'package:cosyncing_client/src/features/storage/data/managed_file_access.dart';
+import 'package:cosyncing_client/src/features/storage/data/managed_memory_files.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -243,9 +247,10 @@ final class BrokerArtifactDownloadBackend
         ResumableArtifactDownloadBackend,
         BoundedResumableArtifactDownloadBackend {
   /// Creates a [BrokerArtifactDownloadBackend].
-  const BrokerArtifactDownloadBackend(this._client);
+  const BrokerArtifactDownloadBackend(this._originalClient);
 
-  final BrokerClient _client;
+  final BrokerClient _originalClient;
+  BrokerClient get _client => brokerRouteOperationClient(_originalClient);
 
   @override
   Future<ArtifactDownload> fetchArtifactUrl(String url) {
@@ -577,10 +582,13 @@ final sessionArtifactFileServiceProvider = Provider<SessionArtifactFileService>(
     if (kIsWeb) {
       return BrowserSessionArtifactFileService(
         downloadBackend,
+        memory: ref.watch(managedMemoryFilesProvider),
+        onCompleted: ref.watch(deviceFileRegistryProvider).register,
       );
     }
     return DefaultSessionArtifactFileService(
       downloadBackend: downloadBackend,
+      onCompleted: ref.watch(deviceFileRegistryProvider).register,
       cacheDirectoryProvider: const TemporaryArtifactCacheDirectoryProvider(),
       saveTargetProvider: FileSelectorArtifactSaveTargetProvider(
         typeLabel: artifactSaveTypeLabel(
@@ -592,15 +600,12 @@ final sessionArtifactFileServiceProvider = Provider<SessionArtifactFileService>(
   },
 );
 
-const int _browserArtifactCacheMaxEntries = 16;
 const int _browserArtifactCacheMaxBytes = 64 * 1024 * 1024;
 const int _browserSessionFileRangeBytes = 1024 * 1024;
 
-final class _BrowserArtifactCacheEntry {
-  const _BrowserArtifactCacheEntry(this.bytes);
-
-  final Uint8List bytes;
-}
+/// Durable registration runs only after a complete copy exists.
+typedef ArtifactCopyCompleted =
+    Future<void> Function({required String location, required String label});
 
 /// Browser artifact cache/export path.
 ///
@@ -612,12 +617,15 @@ final class _BrowserArtifactCacheEntry {
 final class BrowserSessionArtifactFileService
     implements SessionArtifactFileService {
   /// Creates the web implementation bound to the active broker client.
-  BrowserSessionArtifactFileService(this._downloadBackend);
+  BrowserSessionArtifactFileService(
+    this._downloadBackend, {
+    ManagedMemoryFiles? memory,
+    this._onCompleted,
+  }) : _memory = memory ?? ManagedMemoryFiles();
 
   final ArtifactDownloadBackend? _downloadBackend;
-  final Map<String, _BrowserArtifactCacheEntry> _cache = {};
-  var _cacheBytes = 0;
-  var _sequence = 0;
+  final ManagedMemoryFiles _memory;
+  final ArtifactCopyCompleted? _onCompleted;
 
   @override
   Future<SessionArtifactCachedFile> cacheArtifact(
@@ -650,8 +658,9 @@ final class BrowserSessionArtifactFileService
       descriptor,
       contentType: contentType,
     );
-    final cacheKey = _retain(
+    final cacheKey = await _retain(
       fetched.bytes,
+      fileName: fileName,
       cancellationToken: cancellationToken,
       onProgress: onProgress,
     );
@@ -694,8 +703,9 @@ final class BrowserSessionArtifactFileService
       SessionArtifactDescriptor(name: fileName, path: path),
       contentType: contentType,
     );
-    final cacheKey = _retain(
+    final cacheKey = await _retain(
       download.bytes,
+      fileName: safeName,
       cancellationToken: cancellationToken,
       onProgress: onProgress,
     );
@@ -713,21 +723,24 @@ final class BrowserSessionArtifactFileService
     SessionArtifactCancellationToken? cancellationToken,
   }) async {
     cancellationToken?.throwIfCanceled();
-    final entry = _cache.remove(artifact.cachedFilePath);
+    final entry = _memory.read(artifact.cachedFilePath);
     if (entry == null) {
       throw StateError(
         'The browser artifact cache entry is no longer available.',
       );
     }
-    // Refresh LRU position while the browser begins the export.
-    _cache[artifact.cachedFilePath] = entry;
-    await XFile.fromData(
-      entry.bytes,
-      name: artifact.fileName,
-      mimeType: artifact.contentType,
-    ).saveTo('');
-    cancellationToken?.throwIfCanceled();
-    return artifact.fileName;
+    final release = ManagedFileAccess.shared.acquire(artifact.cachedFilePath);
+    try {
+      await XFile.fromData(
+        entry,
+        name: artifact.fileName,
+        mimeType: artifact.contentType,
+      ).saveTo('');
+      cancellationToken?.throwIfCanceled();
+      return artifact.fileName;
+    } finally {
+      release();
+    }
   }
 
   Future<SessionArtifactFetchData> _fetchReference(
@@ -956,30 +969,17 @@ final class BrowserSessionArtifactFileService
     );
   }
 
-  String _retain(
+  Future<String> _retain(
     List<int> bytes, {
+    required String fileName,
     SessionArtifactCancellationToken? cancellationToken,
     SessionArtifactProgressCallback? onProgress,
-  }) {
+  }) async {
     cancellationToken?.throwIfCanceled();
-    if (bytes.length > _browserArtifactCacheMaxBytes) {
-      throw StateError('Artifact exceeds the browser cache limit.');
-    }
-    while (_cache.isNotEmpty &&
-        (_cache.length >= _browserArtifactCacheMaxEntries ||
-            _cacheBytes + bytes.length > _browserArtifactCacheMaxBytes)) {
-      final oldestKey = _cache.keys.first;
-      _cacheBytes -= _cache.remove(oldestKey)!.bytes.length;
-    }
-    final cacheKey = 'browser-artifact:${++_sequence}';
-    final retained = bytes is Uint8List ? bytes : Uint8List.fromList(bytes);
-    _cache[cacheKey] = _BrowserArtifactCacheEntry(retained);
-    _cacheBytes += retained.length;
-    onProgress?.call(
-      bytesTransferred: retained.length,
-      totalBytes: retained.length,
-    );
-    return cacheKey;
+    final key = _memory.retain(bytes);
+    await _onCompleted?.call(location: key, label: fileName);
+    onProgress?.call(bytesTransferred: bytes.length, totalBytes: bytes.length);
+    return key;
   }
 }
 
@@ -994,21 +994,25 @@ final class DefaultSessionArtifactFileService
     required ArtifactDownloadBackend? downloadBackend,
     required ArtifactCacheDirectoryProvider cacheDirectoryProvider,
     required ArtifactSaveTargetProvider saveTargetProvider,
+    ArtifactCopyCompleted? onCompleted,
   }) : this._(
          downloadBackend: downloadBackend,
          cacheDirectoryProvider: cacheDirectoryProvider,
          saveTargetProvider: saveTargetProvider,
+         onCompleted: onCompleted,
        );
 
   const DefaultSessionArtifactFileService._({
     required this._downloadBackend,
     required this._cacheDirectoryProvider,
     required this._saveTargetProvider,
+    this._onCompleted,
   });
 
   final ArtifactDownloadBackend? _downloadBackend;
   final ArtifactCacheDirectoryProvider _cacheDirectoryProvider;
   final ArtifactSaveTargetProvider _saveTargetProvider;
+  final ArtifactCopyCompleted? _onCompleted;
 
   static const Map<String, String> _extensionByMime = {
     'text/plain': 'txt',
@@ -1548,6 +1552,10 @@ final class DefaultSessionArtifactFileService
       finalPath = _nextAvailablePath(targetDirectory, resolvedFileName);
     }
     partialFile.renameSync(finalPath);
+    await _onCompleted?.call(
+      location: finalPath,
+      label: _filenameFromPath(finalPath),
+    );
     return SessionArtifactCachedFile(
       cachedFilePath: finalPath,
       fileName: _filenameFromPath(finalPath),
@@ -1616,6 +1624,10 @@ final class DefaultSessionArtifactFileService
         source.deleteSync();
       }
     }
+    await _onCompleted?.call(
+      location: finalPath,
+      label: _filenameFromPath(finalPath),
+    );
     return SessionArtifactCachedFile(
       cachedFilePath: finalPath,
       fileName: _filenameFromPath(finalPath),
@@ -1671,6 +1683,7 @@ final class DefaultSessionArtifactFileService
       rethrow;
     }
 
+    await _onCompleted?.call(location: finalPath, label: safeFileName);
     return finalPath;
   }
 
@@ -1691,19 +1704,24 @@ final class DefaultSessionArtifactFileService
     SessionArtifactCancellationToken? cancellationToken,
   }) async {
     cancellationToken?.throwIfCanceled();
-    final selectedPath = await _saveTargetProvider.pickSavePath(
-      suggestedName: artifact.fileName,
-      mimeType: artifact.contentType,
-    );
-    cancellationToken?.throwIfCanceled();
-    if (selectedPath == null) {
-      return null;
-    }
+    final release = ManagedFileAccess.shared.acquire(artifact.cachedFilePath);
+    try {
+      final selectedPath = await _saveTargetProvider.pickSavePath(
+        suggestedName: artifact.fileName,
+        mimeType: artifact.contentType,
+      );
+      cancellationToken?.throwIfCanceled();
+      if (selectedPath == null) {
+        return null;
+      }
 
-    final source = File(artifact.cachedFilePath);
-    await source.copy(selectedPath);
-    cancellationToken?.throwIfCanceled();
-    return selectedPath;
+      final source = File(artifact.cachedFilePath);
+      await source.copy(selectedPath);
+      cancellationToken?.throwIfCanceled();
+      return selectedPath;
+    } finally {
+      release();
+    }
   }
 
   String _nextAvailablePath(String directoryPath, String fileName) {

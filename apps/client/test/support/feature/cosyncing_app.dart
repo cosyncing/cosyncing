@@ -35,14 +35,17 @@ import 'package:cosyncing_client/src/features/connection/data/broker_http_transp
 import 'package:cosyncing_client/src/features/pairing/controller/installer_pairing_handoff_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_detail_connection.dart';
 import 'package:cosyncing_client/src/features/settings/data/ui_preferences_store.dart';
+import 'package:cosyncing_client/src/features/storage/data/device_storage_providers.dart';
 import 'package:cosyncing_client/src/local/app_database.dart';
 import 'package:cosyncing_client/src/platform/clock/app_clock.dart';
+import 'package:cosyncing_client/src/platform/connection/broker_network_changes.dart';
 import 'package:cosyncing_client/src/platform/update/stable_release_manifest.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_participants.dart';
 import 'package:dio/dio.dart';
 import 'package:drift/native.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -54,6 +57,7 @@ import 'app_driver.dart';
 import 'fake_broker.dart';
 import 'fake_camera.dart';
 import 'fake_installer_inbox.dart';
+import 'storage_files.dart';
 
 /// Window sizes feature scenarios run at.
 enum FeatureViewport {
@@ -212,6 +216,21 @@ class FeatureContext {
     String initialLocation = sessionsRoute,
     List<Override> overrides = const [],
   }) async {
+    const reviewDirectory = String.fromEnvironment(
+      'COSYNCING_REVIEW_SCREENSHOTS',
+    );
+    if (reviewDirectory.isNotEmpty) {
+      await tester.runAsync(() async {
+        final font = FontLoader('Lato');
+        for (final name in ['Regular', 'Semibold', 'Bold', 'Italic']) {
+          font.addFont(rootBundle.load('assets/fonts/Lato-$name.ttf'));
+        }
+        await font.load();
+        final icons = FontLoader('MaterialIcons')
+          ..addFont(rootBundle.load('fonts/MaterialIcons-Regular.otf'));
+        await icons.load();
+      });
+    }
     _viewport = viewport;
     _overrides = overrides;
     tester.view
@@ -238,6 +257,11 @@ class FeatureContext {
           () => tester.binding.clock.now(),
         ),
         appClockProvider.overrideWithValue(now),
+        appMonotonicClockProvider.overrideWithValue(
+          () => tester.binding.clock.now().difference(_fakeStart),
+        ),
+        brokerNetworkChangesProvider.overrideWithValue(const Stream.empty()),
+        localStorageFileBackendProvider.overrideWithValue(StorageFiles()),
         ...overrides,
       ],
     );

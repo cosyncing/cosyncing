@@ -14,10 +14,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # The Bun floor, and what every workflow builds, tests and releases on. 1.3.8 intermittently
-  # livelocks while loading a module graph or bundling (13 stalls in 18,500 fresh processes, 0 on
-  # 1.3.14), which was the cause of the zero-output timeouts.
-  BUN_VERSION: 1.3.14
+  # Keep the tested runtime aligned with the installer pins and package floor.
+  # Bun 1.3.14 eagerly buffers streamed HTTP bodies for stalled receivers.
+  BUN_VERSION: 1.4.3
   FLUTTER_VERSION: 3.44.3
   NODE_VERSION: 22.14.0
 

@@ -40,7 +40,7 @@ void main() {
       final version = await database
           .customSelect('PRAGMA user_version')
           .getSingle();
-      expect(version.read<int>('user_version'), 19);
+      expect(version.read<int>('user_version'), 20);
 
       // The pre-existing outbox row survives untouched.
       final outboxRows = await database
@@ -112,7 +112,7 @@ void main() {
     final version = await database
         .customSelect('PRAGMA user_version')
         .getSingle();
-    expect(version.read<int>('user_version'), 19);
+    expect(version.read<int>('user_version'), 20);
 
     // The pre-existing draft survives, and its clear target reads as absent —
     // a v13 row was never a pending clear.
@@ -152,7 +152,7 @@ void main() {
     final version = await database
         .customSelect('PRAGMA user_version')
         .getSingle();
-    expect(version.read<int>('user_version'), 19);
+    expect(version.read<int>('user_version'), 20);
 
     final row = await database.select(database.attentionEventRows).getSingle();
     expect(row.eventId, 'event-v15');
@@ -194,7 +194,7 @@ void main() {
       final version = await database
           .customSelect('PRAGMA user_version')
           .getSingle();
-      expect(version.read<int>('user_version'), 19);
+      expect(version.read<int>('user_version'), 20);
 
       // Profiles.
       final profile = await database

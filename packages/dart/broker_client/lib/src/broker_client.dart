@@ -67,6 +67,110 @@ class BrokerClient {
   /// The endpoint resolver.
   EndpointResolver get resolver => _resolver;
 
+  /// Owner-approved advertised routes and distinct browser-client origins.
+  Future<Map<String, dynamic>> getRouteConfiguration() =>
+      _get<Map<String, dynamic>>(
+        '${_resolver.baseUrl}/api/connection/configuration',
+      );
+
+  /// Compare-and-set an owner configuration without discovering new hosts.
+  Future<Map<String, dynamic>> saveRouteConfiguration(
+    Map<String, Object?> configuration,
+  ) => _post<Map<String, dynamic>>(
+    '${_resolver.baseUrl}/api/connection/configuration',
+    data: configuration,
+  );
+
+  /// Latest finite server storage measurement; this read starts no scan.
+  Future<StorageInventory> getStorage() async => StorageInventory.fromJson(
+    await _get<Map<String, dynamic>>('${_resolver.baseUrl}/api/storage'),
+  );
+
+  /// Starts/coalesces a bounded inventory scan.
+  Future<Map<String, dynamic>> startStorageScan() =>
+      _post<Map<String, dynamic>>(
+        '${_resolver.baseUrl}/api/storage/scans',
+        data: const <String, Object?>{},
+      );
+
+  /// Reads scan progress without starting another scan.
+  Future<Map<String, dynamic>> getStorageScan(
+    String id,
+  ) => _get<Map<String, dynamic>>(
+    '${_resolver.baseUrl}/api/storage/scans/${Uri.encodeComponent(id)}?waitMs=10000',
+    receiveTimeout: const Duration(seconds: 15),
+  );
+
+  /// Reviews a snapshot through opaque bounded pages.
+  Future<StorageReviewPage> getStorageItems(
+    String inventory, {
+    String category = 'stored-files',
+    int olderThanDays = 0,
+    String search = '',
+    String sort = 'date',
+    String? cursor,
+    String? failedJob,
+  }) async => StorageReviewPage.fromJson(
+    await _get<Map<String, dynamic>>(
+      Uri.parse('${_resolver.baseUrl}/api/storage/items')
+          .replace(
+            queryParameters: {
+              'inventoryId': inventory,
+              'category': category,
+              'olderThanDays': '$olderThanDays',
+              'search': search,
+              'sort': sort,
+              if (cursor != null) 'cursor': cursor,
+              if (failedJob != null) 'failedJob': failedJob,
+            },
+          )
+          .toString(),
+    ),
+  );
+
+  /// Freezes the explicit selection for owner confirmation.
+  Future<StorageCleanupPlan> createStoragePlan(
+    Map<String, Object?> selection,
+  ) async => StorageCleanupPlan.fromJson(
+    await _post<Map<String, dynamic>>(
+      '${_resolver.baseUrl}/api/storage/cleanup-plans',
+      data: selection,
+    ),
+  );
+
+  /// Accepts exactly one job. The caller retains the same key across
+  /// reconnects.
+  Future<StorageCleanupJob> startStorageCleanup(
+    String planId,
+    String idempotencyKey,
+  ) async => StorageCleanupJob.fromJson(
+    await _post<Map<String, dynamic>>(
+      '${_resolver.baseUrl}/api/storage/cleanup-jobs',
+      data: {'planId': planId, 'idempotencyKey': idempotencyKey},
+    ),
+  );
+
+  /// Resumes a known cleanup result without repeating the mutation.
+  Future<StorageCleanupJob> getStorageCleanup(
+    String id, {
+    int offset = 0,
+  }) async => StorageCleanupJob.fromJson(
+    await _get<Map<String, dynamic>>(
+      '${_resolver.baseUrl}/api/storage/cleanup-jobs/${Uri.encodeComponent(id)}?offset=$offset&waitMs=10000',
+      receiveTimeout: const Duration(seconds: 15),
+    ),
+  );
+
+  /// Best-effort cancellation between items; completed deletions remain final.
+  Future<StorageCleanupJob> cancelStorageCleanup(
+    String id,
+  ) async => StorageCleanupJob.fromJson(
+    await _post<Map<String, dynamic>>(
+      '${_resolver.baseUrl}/api/storage/cleanup-jobs/${Uri.encodeComponent(id)}/cancel',
+      data: const <String, Object?>{},
+    ),
+  );
+
   /// Issues a revocable media capability after checking the resource and size.
   Future<MediaPreviewTicket> createMediaPreview({
     required String tool,
@@ -1134,7 +1238,7 @@ class BrokerClient {
         contentRange: headers.value('content-range'),
       );
     } on DioException catch (e) {
-      if (overLimit || e.type == DioExceptionType.cancel) {
+      if (overLimit) {
         throw ArtifactTooLargeException(limit: maxBytes);
       }
       throw BrokerException(
@@ -1338,7 +1442,8 @@ class BrokerClient {
     }
   }
 
-  /// Fetches a signed artifact/diff URL with a hard byte ceiling, cancelling the
+  /// Fetches a signed artifact/diff URL with a hard byte ceiling, cancelling
+  /// the
   /// transfer once [maxBytes] is crossed — so an oversized body is never fully
   /// buffered on a phone. Uses `onReceiveProgress` (not a `ResponseType.stream`
   /// read) so the bound ALSO holds on Flutter Web, where Dio's browser adapter
@@ -1823,8 +1928,8 @@ class BrokerClient {
           }
         },
       );
-    } on DioException catch (error) {
-      if (overLimit || error.type == DioExceptionType.cancel) {
+    } on DioException {
+      if (overLimit) {
         throw ArtifactTooLargeException(limit: maxBytes);
       }
       rethrow;

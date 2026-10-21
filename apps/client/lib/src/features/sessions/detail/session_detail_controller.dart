@@ -7,6 +7,7 @@ import 'dart:developer' as developer;
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/connection/data/broker_identity_store.dart';
+import 'package:cosyncing_client/src/features/connection/provider/broker_route_providers.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_descriptor.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_file_service.dart';
@@ -121,6 +122,36 @@ const _claudeToolId = 'claude';
 class SessionDetailController
     extends AutoDisposeFamilyNotifier<SessionDetailState, SessionDetailKey> {
   SessionDetailConnection? _connection;
+  RosterSource? _routeInterestSource;
+  void Function()? _releaseRouteInterest;
+
+  void _retainRouteInterest() {
+    final profile = ref.read(activeBrokerProfileProvider);
+    final source = RosterSource.of(profile);
+    if (source == _routeInterestSource) return;
+    _releaseRouteInterest?.call();
+    _releaseRouteInterest = null;
+    _routeInterestSource = source;
+    if (profile?.incarnationId == null) return;
+    unawaited(
+      ref
+          .read(brokerRouteCoordinatorProvider)
+          .retainSession(profile!)
+          .then(
+            (release) {
+              if (_disposed || _routeInterestSource != source) {
+                release();
+              } else {
+                _releaseRouteInterest = release;
+              }
+            },
+            onError: (Object _, StackTrace _) {
+              // The attach path reports the same retired/unavailable source.
+            },
+          ),
+    );
+  }
+
   StreamSubscription<SessionDetailConnectionStatus>? _stateSub;
   StreamSubscription<WireEvent>? _eventSub;
   var _clientMessageCounter = 0;
@@ -351,6 +382,16 @@ class SessionDetailController
 
   @override
   SessionDetailState build(SessionDetailKey arg) {
+    ref.listen(brokerRouteRevisionProvider, (previous, next) {
+      final profile = ref.read(activeBrokerProfileProvider);
+      if (profile == null ||
+          (previous?[profile.id] ?? 0) == (next[profile.id] ?? 0)) {
+        return;
+      }
+      if (_connectionSource == RosterSource.ofProfile(profile)) {
+        unawaited(rebindBrokerClient(routeHandoff: true));
+      }
+    });
     final visibilityKey = ref.read(toolVisibilityKeyProvider(arg));
     bool hidden(AsyncValue<ToolVisibilityPreferences> value) {
       final preferences = value.valueOrNull;
@@ -366,6 +407,8 @@ class SessionDetailController
     _cacheWriteFence = ref.read(sessionCacheWriteFenceProvider);
     ref.onDispose(() {
       _disposed = true;
+      _releaseRouteInterest?.call();
+      _releaseRouteInterest = null;
       _cacheWriteFence.release(_pendingTranscriptAdmission);
       _pendingTranscriptAdmission = null;
       final transportCancellations = _requestTransportAttachCancellation();
@@ -417,6 +460,7 @@ class SessionDetailController
     SessionDetailAttachIntent intent = SessionDetailAttachIntent.interactive,
     bool force = false,
   }) {
+    _retainRouteInterest();
     final requestedSource = RosterSource.of(
       ref.read(activeBrokerProfileProvider),
     );
@@ -524,9 +568,17 @@ class SessionDetailController
   /// but an already-mounted Session Detail otherwise keeps reconnecting with
   /// the resolver that preceded that credential mutation. Supersede that
   /// same-source attach and create a fresh connection from the current client.
-  Future<void> rebindBrokerClient({SessionDetailAttachIntent? intent}) {
+  Future<void> rebindBrokerClient({
+    SessionDetailAttachIntent? intent,
+    bool routeHandoff = false,
+  }) {
     final source = RosterSource.of(ref.read(activeBrokerProfileProvider));
     if (source == null || _disposed) return Future<void>.value();
+    final previousConnection = _connection;
+    final continuation =
+        routeHandoff && previousConnection is SessionRouteContinuable
+        ? (previousConnection! as SessionRouteContinuable).routeContinuation
+        : null;
     final requestedIntent =
         intent ??
         _establishedAttachIntent ??
@@ -544,13 +596,45 @@ class SessionDetailController
     operation = () async {
       await _transportSuspensionInFlight;
       if (_disposed || !identical(_attachInFlight, operation)) return;
+      var unknownAction = false;
+      if (routeHandoff) {
+        // Commands have no safe reconciliation query. Preserve their durable
+        // outcome as unknown rather than silently dispatching them again.
+        final repository = ref.read(sessionOutboxRepositoryProvider);
+        final pending = await repository.loadRetryableForSession(
+          arg,
+          brokerProfileId: source.storageKey,
+        );
+        for (final message in pending) {
+          if (message.kind != SessionOutboxMessageKind.prompt &&
+              message.attemptCount > 0) {
+            await repository.markFailed(
+              message.clientMessageId,
+              'ROUTE_OUTCOME_UNKNOWN',
+            );
+            unknownAction = true;
+          }
+        }
+        if (_disposed || !identical(_attachInFlight, operation)) return;
+      }
       await _resetConnectionForProfileSwitch();
       if (_disposed ||
           !identical(_attachInFlight, operation) ||
           RosterSource.of(ref.read(activeBrokerProfileProvider)) != source) {
         return;
       }
-      await _attachOnce(requestedIntent);
+      await _attachOnce(requestedIntent, routeContinuation: continuation);
+      if (unknownAction &&
+          !_disposed &&
+          identical(_attachInFlight, operation) &&
+          RosterSource.of(ref.read(activeBrokerProfileProvider)) == source) {
+        state = state.copyWith(
+          error: const LocalizedFailure(
+            lead: FailureLead.routeOutcomeUnknown,
+            detail: 'ROUTE_OUTCOME_UNKNOWN',
+          ),
+        );
+      }
     }();
     _attachInFlight = operation;
     _attachInFlightSource = source;

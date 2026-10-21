@@ -58,6 +58,7 @@ import {
 const BOOT = 'boot-aaaa';
 import { cliMessages, cliPaint } from '../../src/cli/cli-i18n.ts';
 import { PRODUCT_IDENTITY } from '../../../adapter-api/src/index.ts';
+import { PINNED_BUN_RUNTIME_VERSION } from '../../src/runtime/application-identity.ts';
 import { BUILD_INFO, buildFingerprint } from '../../src/runtime/build-info.ts';
 import { ArtifactStore } from '../../src/artifacts/artifact-store.ts';
 import { createSetupDiagnosisContext } from '../../src/installation/diagnosis-context.ts';
@@ -3666,13 +3667,13 @@ try {
           return fetcher(input, init);
         }) as typeof fetch,
       });
-      check('a host still on Bun 1.3.8 fetches the compiled pinned 1.3.14 and refuses substituted bytes before anything changes',
+      check('a host still on Bun 1.3.8 fetches the compiled pinned runtime and refuses substituted bytes before anything changes',
         refused.status === 'failed' && refused.detailCode === 'release-runtime-size-mismatch'
-          && requested.includes('https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64.zip')
+          && requested.includes(`https://github.com/oven-sh/bun/releases/download/bun-v${PINNED_BUN_RUNTIME_VERSION}/bun-linux-x64.zip`)
           && readFileSync(fixture.m.binary, 'utf8') === 'old-binary-v1'
           && !existsSync(join(fixture.m.home, 'bin', 'cosyncing-web-2.0.0'))
           && !existsSync(join(fixture.m.home, 'bin', 'cosyncing.staging-2.0.0'))
-          && !existsSync(join(fixture.m.home, 'runtime', 'bun-1.3.14'))
+          && !existsSync(join(fixture.m.home, 'runtime', `bun-${PINNED_BUN_RUNTIME_VERSION}`))
           && fixture.active(),
         `${refused.detailCode} ${JSON.stringify(requested)}`);
     }

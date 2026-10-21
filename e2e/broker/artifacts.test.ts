@@ -14,9 +14,10 @@
  * only come back after them.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { Database } from 'bun:sqlite';
+import { chmodSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { connect, createServer, type Server, type Socket } from 'node:net';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   type Broker,
   BrokerClient,
@@ -25,6 +26,229 @@ import {
 } from '../harness/index.ts';
 import { PiBridgeSession } from '../harness/fakes/pi-bridge-driver.ts';
 import { pairDevice } from '../harness/pairing.ts';
+import { eventually } from '../harness/wait.ts';
+
+test('owner storage cleanup freezes selections, rechecks previews and keeps retired conversation entries', async () => {
+  const broker = await startBroker({ name: 'artifact-storage-cleanup', token: true,
+    env: (paths) => ({ COSYNCING_CACHE_DIR: join(paths.root, 'shared-cache') }) });
+  const client = broker.client();
+  const scan = async () => {
+    const started = await client.post('/api/storage/scans');
+    expect(started.status).toBe(202);
+    let state = started.body;
+    for (let attempt = 0; state.state === 'running' && attempt < 5; attempt++) {
+      state = (await client.get(`/api/storage/scans/${state.scanId}?waitMs=10000`)).body;
+    }
+    expect(state.state).toBe('completed');
+    const inventory = await client.get('/api/storage');
+    expect(inventory.status).toBe(200);
+    return inventory.body;
+  };
+  const finish = async (id: string) => {
+    let result: any;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      result = (await client.get(`/api/storage/cleanup-jobs/${id}?waitMs=10000`)).body;
+      if (['completed', 'partial', 'canceled'].includes(result.state)) return result;
+    }
+    throw new Error(`cleanup did not settle: ${JSON.stringify(result)}`);
+  };
+  try {
+    const cwd = join(broker.paths.root, 'workspace');
+    mkdirSync(cwd);
+    const pi = await PiBridgeSession.open(client, { cwd });
+    let stream = await attachSettled(client, pi.id);
+    const deliver = async (name: string, content: string) => {
+      writeFileSync(join(cwd, name), content);
+      expect((await pi.sendFile(join(cwd, name))).status).toBe(200);
+      return artifactNamed(stream, name);
+    };
+    const sharedBytes = '%PDF-1.7\nshared stored bytes\n%%EOF';
+    const first = await deliver('first.pdf', sharedBytes);
+    const second = await deliver('second.pdf', sharedBytes);
+    const thirdBytes = 'only this stored blob is unlinked';
+    const third = await deliver('third.txt', thirdBytes);
+    expect((await download(broker.url, third.fetchUrl, client.credentialHeaders(), 'HEAD')).response.status).toBe(200);
+    const inventory = await scan();
+    const stored = inventory.categories.find((category: any) => category.id === 'stored-files');
+    expect(stored).toMatchObject({ itemCount: 3, eligibleCount: 3, bytes: Buffer.byteLength(sharedBytes + thirdBytes) });
+    const page = await client.get(`/api/storage/items?inventoryId=${inventory.inventoryId}&category=stored-files`);
+    expect(page.body.items).toHaveLength(3);
+    // The API never accepts a workspace path as an owned item identifier.
+    const arbitrary = await client.post('/api/storage/cleanup-plans', {
+      mode: 'stored-files', inventoryId: inventory.inventoryId, itemIds: [join(cwd, 'third.txt')],
+    });
+    expect(arbitrary.body.itemCount).toBe(0);
+    const planned = await client.post('/api/storage/cleanup-plans', {
+      mode: 'stored-files', inventoryId: inventory.inventoryId, selectAll: true,
+    });
+    expect(planned.status).toBe(201);
+    expect(planned.body).toMatchObject({ itemCount: 3, affectedSessions: 1, reclaimableBytes: Buffer.byteLength(sharedBytes + thirdBytes) });
+    const late = await deliver('arrived-later.txt', 'not selected');
+    // Protection acquired after review wins over the old eligibility snapshot.
+    expect((await client.post('/api/media-preview-tickets', {
+      tool: 'pi', sessionId: pi.id, artifactId: second.artifactKey,
+    })).status).toBe(201);
+    const protectedInventory = await scan();
+    expect(protectedInventory.categories.find((category: any) => category.id === 'stored-files')).toMatchObject({
+      itemCount: 4,
+      eligibleCount: 3,
+      bytes: Buffer.byteLength(sharedBytes + thirdBytes + 'not selected'),
+      eligibleBytes: Buffer.byteLength(thirdBytes + 'not selected'),
+    });
+    const acceptance = { planId: planned.body.planId, idempotencyKey: 'storage-cleanup-fixture-001' };
+    const accepted = await client.post('/api/storage/cleanup-jobs', acceptance);
+    expect(accepted.status).toBe(202);
+    const replayed = await client.post('/api/storage/cleanup-jobs', acceptance);
+    expect(replayed.body.jobId).toBe(accepted.body.jobId);
+    const result = await finish(accepted.body.jobId);
+    expect(result).toMatchObject({ state: 'partial', total: 3, removed: 2, skipped: 1, failed: 0, reclaimedBytes: Buffer.byteLength(thirdBytes) });
+    expect(result.outcomes.map((item: any) => item.outcome).sort()).toEqual(['IN_USE', 'REFERENCE_REMOVED', 'REMOVED']);
+    const headers = client.credentialHeaders();
+    expect((await download(broker.url, first.fetchUrl, headers)).response.status).toBe(404);
+    expect((await download(broker.url, third.fetchUrl, headers)).response.status).toBe(404);
+    expect((await download(broker.url, second.fetchUrl, headers)).bytes.toString()).toBe(sharedBytes);
+    expect((await download(broker.url, late.fetchUrl, headers)).bytes.toString()).toBe('not selected');
+    expect(readFileSync(join(cwd, 'third.txt'), 'utf8')).toBe(thirdBytes);
+    const retired = await artifactNamed(stream, 'third.txt', (message) => typeof message.removedAt === 'number');
+    expect(retired.fetchUrl).toBeUndefined();
+    expect(retired.artifactKey).toBe(third.artifactKey);
+    const removals = stream.messages().filter((message) => message.type === 'file-artifact' && message.removedAt !== undefined);
+    expect(removals.map((message) => message.artifactKey).sort()).toEqual([first.artifactKey, third.artifactKey].sort());
+    stream.close();
+    await broker.restart();
+    await pi.rehello();
+    stream = await attachSettled(client, pi.id);
+    const afterRestart = await artifactNamed(stream, 'third.txt', (message) => typeof message.removedAt === 'number');
+    expect(afterRestart.artifactKey).toBe(third.artifactKey);
+    expect(afterRestart.fetchUrl).toBeUndefined();
+    expect((await client.post('/api/storage/cleanup-jobs', acceptance)).body.jobId).toBe(accepted.body.jobId);
+    expect((await finish(accepted.body.jobId)).reclaimedBytes).toBe(Buffer.byteLength(thirdBytes));
+    if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+      // The first shared reference was retired without reclaiming its blob.
+      // Deny the last physical unlink, then review only the failed remainder.
+      const beforeFailure = await scan();
+      const failedPlan = await client.post('/api/storage/cleanup-plans', {
+        mode: 'stored-files', inventoryId: beforeFailure.inventoryId,
+        selectAll: true, filter: { search: 'second.pdf' },
+      });
+      expect(failedPlan.body.itemCount).toBe(1);
+      const storageDb = new Database(join(broker.paths.cosyncingHome, 'storage-operations.sqlite'), { readonly: true });
+      const object = storageDb.query<{ body: string }, [string]>("SELECT body FROM items WHERE inventory=? AND label='second.pdf'").get(beforeFailure.inventoryId)!;
+      storageDb.close();
+      const directory = dirname(JSON.parse(object.body).filePath);
+      const permissions = statSync(directory).mode & 0o777;
+      let failedJob: string;
+      chmodSync(directory, 0o500);
+      try {
+        const failure = await client.post('/api/storage/cleanup-jobs', {
+          planId: failedPlan.body.planId, idempotencyKey: 'denied-last-shared-unlink',
+        });
+        failedJob = failure.body.jobId;
+        expect(await finish(failedJob)).toMatchObject({ state: 'partial', failed: 1, removed: 0, reclaimedBytes: 0 });
+      } finally { chmodSync(directory, permissions); }
+      expect((await download(broker.url, second.fetchUrl, headers)).response.status).toBe(404);
+      const retryInventory = await scan();
+      const failures = await client.get(`/api/storage/items?inventoryId=${retryInventory.inventoryId}&failedJob=${failedJob}`);
+      expect(failures.body.eligibleCount).toBe(1);
+      expect(failures.body.items).toHaveLength(1);
+      expect(failures.body.items[0].category).toBe('staging');
+      expect((await client.get(`/api/storage/items?inventoryId=${retryInventory.inventoryId}&failedJob=someone-elses-job`)).status).toBe(404);
+      const retryPlan = await client.post('/api/storage/cleanup-plans', {
+        mode: 'stored-files', inventoryId: retryInventory.inventoryId, selectAll: true,
+        filter: { failedJob },
+      });
+      expect(retryPlan.body.itemCount).toBe(1);
+      const retry = await client.post('/api/storage/cleanup-jobs', {
+        planId: retryPlan.body.planId, idempotencyKey: 'retry-last-shared-unlink',
+      });
+      expect(await finish(retry.body.jobId)).toMatchObject({ state: 'completed', removed: 1, failed: 0, reclaimedBytes: Buffer.byteLength(sharedBytes) });
+      expect(readFileSync(join(cwd, 'second.pdf'), 'utf8')).toBe(sharedBytes);
+    }
+    // Arrange a crash immediately after durable acceptance, before the first
+    // unlink. Using the recorded plan avoids a timing race with a fast worker.
+    const nextInventory = await scan();
+    const pendingPlan = await client.post('/api/storage/cleanup-plans', {
+      mode: 'stored-files', inventoryId: nextInventory.inventoryId, selectAll: true,
+      filter: { search: 'arrived-later' },
+    });
+    expect(pendingPlan.body.itemCount).toBe(1);
+    const otherPlan = await client.post('/api/storage/cleanup-plans', {
+      mode: 'stored-files', inventoryId: nextInventory.inventoryId, itemIds: [],
+    });
+    stream.close();
+    await broker.stop({ keepState: true });
+    const seedAccepted = (id: string, planId: string, principal?: string) => {
+      const db = new Database(join(broker.paths.cosyncingHome, 'storage-operations.sqlite'));
+      try {
+        const owner = principal ?? (db.query('SELECT principal FROM plans WHERE id=?').get(planId) as any).principal;
+        db.transaction(() => {
+          db.run("UPDATE plans SET state='consumed',principal=? WHERE id=?", [owner, planId]);
+          db.run("INSERT INTO jobs(id,plan,principal,idempotency,state,retained) VALUES (?,?,?,?,'running',?)",
+            [id, planId, owner, id, Date.now() + 86400_000]);
+        })();
+      } finally { db.close(); }
+    };
+    const canceledId = 'interrupted-storage-cancel';
+    seedAccepted(canceledId, pendingPlan.body.planId);
+    await broker.start();
+    // Before this job is reconciled, another device cannot widen the selection.
+    expect((await client.post('/api/storage/cleanup-jobs', {
+      planId: otherPlan.body.planId, idempotencyKey: 'other-device-cleanup-001',
+    })).status).toBe(409);
+    expect((await client.post(`/api/storage/cleanup-jobs/${canceledId}/cancel`)).status).toBe(200);
+    expect(await finish(canceledId)).toMatchObject({ state: 'canceled', processed: 0, reclaimedBytes: null });
+    expect((await download(broker.url, late.fetchUrl, headers)).bytes.toString()).toBe('not selected');
+    expect((await client.post('/api/storage/cleanup-jobs', {
+      planId: pendingPlan.body.planId, idempotencyKey: canceledId,
+    })).body.jobId).toBe(canceledId);
+    expect((await client.post('/api/storage/cleanup-jobs', {
+      planId: otherPlan.body.planId, idempotencyKey: canceledId,
+    })).status).toBe(409);
+
+    const revokedPlan = await client.post('/api/storage/cleanup-plans', {
+      mode: 'stored-files', inventoryId: nextInventory.inventoryId, selectAll: true,
+      filter: { search: 'arrived-later' },
+    });
+    await broker.stop({ keepState: true });
+    seedAccepted('revoked-storage-acceptance', revokedPlan.body.planId, 'owner:retired-fixture-credential');
+    await broker.start();
+    expect((await client.get('/api/storage/cleanup-jobs/revoked-storage-acceptance')).status).toBe(404);
+    const afterRevocation = await client.post('/api/storage/cleanup-jobs', {
+      planId: otherPlan.body.planId, idempotencyKey: 'other-device-cleanup-001',
+    });
+    expect(afterRevocation.status).toBe(202);
+    expect((await finish(afterRevocation.body.jobId)).state).toBe('completed');
+    expect((await download(broker.url, late.fetchUrl, headers)).bytes.toString()).toBe('not selected');
+    await pi.rehello();
+    stream = await attachSettled(client, pi.id);
+    // Deliberate re-delivery creates a new reference; old cached URLs stay retired.
+    expect((await pi.sendFile(join(cwd, 'third.txt'))).status).toBe(200);
+    const redelivered = await artifactNamed(stream, 'third.txt', (message) => message.artifactKey !== third.artifactKey && Boolean(message.fetchUrl));
+    expect((await download(broker.url, redelivered.fetchUrl, headers)).bytes.toString()).toBe(thirdBytes);
+    stream.close();
+    await broker.stop({ keepState: true });
+    // Sharing a cache location does not grant another broker ownership of
+    // either live references or retirement records for the same native session.
+    const other = await startBroker({ name: 'artifact-retirement-other-source', token: true,
+      env: { COSYNCING_CACHE_DIR: join(broker.paths.root, 'shared-cache') } });
+    try {
+      const otherClient = other.client();
+      const same = await PiBridgeSession.open(otherClient, { cwd, sessionFile: pi.sessionFile });
+      expect(same.id).toBe(pi.id);
+      const otherStream = await attachSettled(otherClient, same.id);
+      expect(artifacts(otherStream)).toEqual([]);
+      expect((await same.sendFile(join(cwd, 'third.txt'))).status).toBe(200);
+      const own = await artifactNamed(otherStream, 'third.txt');
+      expect(own.removedAt).toBeUndefined();
+      expect((await download(other.url, own.fetchUrl, otherClient.credentialHeaders())).bytes.toString()).toBe(thirdBytes);
+      otherStream.close(); otherClient.closeAll();
+    } finally { await other.stop(); }
+
+  } finally {
+    client.closeAll();
+    await broker.stop();
+  }
+});
 
 const POSIX = process.platform !== 'win32';
 
@@ -445,7 +669,7 @@ describe('artifact delivery is scoped to the session that sent it', () => {
 
     const closed = await get({ range: 'bytes=0-2047' });
     expect(closed.response.status).toBe(206);
-    expect(closed.response.headers.get('content-length')).toBe('2048');
+    expect(closed.bytes.byteLength).toBe(2048);
     expect(closed.response.headers.get('content-range')).toBe('bytes 0-2047/4096');
     const open = await get({ range: 'bytes=2048-' });
     expect(open.response.status).toBe(206);
@@ -483,6 +707,115 @@ describe('artifact delivery is scoped to the session that sent it', () => {
       'x-content-type-options': 'nosniff',
       'content-security-policy': 'sandbox',
     });
+    // Exercise backpressure beyond the small-file fast path. Read incrementally
+    // so the fixture does not hide a truncated or stalled leased response.
+    const largeStream = await attachSettled(viaProxy, owner.id);
+    const largeBytes = Buffer.allocUnsafe(4 * 1024 * 1024);
+    for (let offset = 0; offset < largeBytes.length; offset += 65536) {
+      largeBytes.fill((offset / 65536) % 251, offset, offset + 65536);
+    }
+    writeFileSync(join(cwd, 'large-ranged.bin'), largeBytes);
+    expect((await owner.sendFile(join(cwd, 'large-ranged.bin'))).status).toBe(200);
+    const large = await artifactNamed(largeStream, 'large-ranged.bin');
+    largeStream.close();
+    for (const range of [undefined, 'bytes=1048576-3145727']) {
+      const response = await fetch(new URL(large.fetchUrl, broker.url), {
+        headers: range ? { range } : undefined,
+        signal: AbortSignal.timeout(10_000),
+      });
+      expect(response.status).toBe(range ? 206 : 200);
+      let received = 0;
+      const reader = response.body!.getReader();
+      try {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          const offset = (range ? 1048576 : 0) + received;
+          expect(Buffer.from(value).equals(largeBytes.subarray(offset, offset + value.byteLength))).toBe(true);
+          received += value.byteLength;
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      expect(received).toBe((range ? 2 : 4) * 1024 * 1024);
+    }
+
+    // An admitted download keeps cleanup protection while its receiver is
+    // backpressured. Aborting the socket must release that protection. Use a
+    // body larger than socket buffers, without buffering it in the test client.
+    const pausedStream = await attachSettled(viaProxy, owner.id);
+    writeFileSync(join(cwd, 'paused-download.bin'), Buffer.alloc(32 * 1024 * 1024, 98));
+    expect((await owner.sendFile(join(cwd, 'paused-download.bin'))).status).toBe(200);
+    const pausedArtifact = await artifactNamed(pausedStream, 'paused-download.bin');
+    pausedStream.close();
+    const client = broker.client();
+    const inspect = async () => {
+      let state = (await client.post('/api/storage/scans')).body;
+      for (let attempt = 0; state.state === 'running' && attempt < 5; attempt++) {
+        state = (await client.get(`/api/storage/scans/${state.scanId}?waitMs=10000`)).body;
+      }
+      expect(state.state).toBe('completed');
+      const inventory = (await client.get('/api/storage')).body;
+      const completed = await client.get(`/api/storage/items?inventoryId=${inventory.inventoryId}&category=stored-files&search=large-ranged`);
+      expect(completed.body.items).toHaveLength(1);
+      expect(completed.body.items[0].eligible).toBe(true);
+      const page = await client.get(`/api/storage/items?inventoryId=${inventory.inventoryId}&category=stored-files&search=paused-download`);
+      expect(page.body.items).toHaveLength(1);
+      return { inventory, item: page.body.items[0] };
+    };
+    const initial = await inspect();
+    const planned = await client.post('/api/storage/cleanup-plans', {
+      mode: 'stored-files', inventoryId: initial.inventory.inventoryId, itemIds: [initial.item.id],
+    });
+    expect(planned.body.itemCount).toBe(1);
+    const url = new URL(pausedArtifact.fetchUrl, broker.url);
+    let firstPacket: Buffer | undefined;
+    let socketError: Error | undefined;
+    const socket = await Bun.connect({ hostname: url.hostname, port: Number(url.port), socket: {
+      open(socket) {
+        socket.write(`GET ${url.pathname}${url.search} HTTP/1.1\r\nHost: ${url.host}\r\nConnection: close\r\n\r\n`);
+      },
+      data(socket, packet) { socket.pause(); firstPacket = Buffer.from(packet); },
+      error(_socket, error) { socketError = error; },
+    },
+    });
+    try {
+      const packet = await eventually(() => {
+        if (socketError) throw socketError;
+        return firstPacket;
+      }, { what: 'paused download response headers' });
+      expect(packet.toString('latin1')).toContain('200 OK');
+      // Completing a second full transfer is a progress barrier: the first
+      // reader must remain protected after the broker has had time to drain it.
+      const concurrent = await fetch(url);
+      expect(concurrent.status).toBe(200);
+      let concurrentBytes = 0;
+      const concurrentReader = concurrent.body!.getReader();
+      try {
+        for (;;) {
+          const next = await concurrentReader.read();
+          if (next.done) break;
+          concurrentBytes += next.value.byteLength;
+        }
+      } finally {
+        concurrentReader.releaseLock();
+      }
+      expect(concurrentBytes).toBe(32 * 1024 * 1024);
+      expect((await inspect()).item).toMatchObject({ eligible: false, reason: 'IN_USE' });
+      const accepted = await client.post('/api/storage/cleanup-jobs', {
+        planId: planned.body.planId, idempotencyKey: 'paused-download-cleanup',
+      });
+      let job = accepted.body;
+      for (let attempt = 0; ['pending', 'running'].includes(job.state) && attempt < 5; attempt++) {
+        job = (await client.get(`/api/storage/cleanup-jobs/${job.jobId}?waitMs=10000`)).body;
+      }
+      expect(job).toMatchObject({ state: 'partial', removed: 0, skipped: 1 });
+      expect(job.outcomes[0].outcome).toBe('IN_USE');
+    } finally {
+      socket.terminate();
+    }
+    await eventually(async () => (await inspect()).item.eligible,
+      { what: 'aborted download releases cleanup protection' });
   });
 
   test('a fresh download ticket can be minted for a stored artifact, and clearing the session cache revokes its references', async () => {
