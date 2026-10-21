@@ -1,6 +1,6 @@
 # Implementation status
 
-Last updated: 2026-09-14.
+Last updated: 2026-09-14; verification section refreshed 2026-10-17.
 
 ## Publication state
 
@@ -46,13 +46,15 @@ credential.
 
 ## Verification state
 
-The public tree passes the required source-content policy with every retained
-binary pinned to reviewed content. Hosted Linux, Android, macOS, iOS simulator,
-Windows, web, broker, contract, and reusable-package jobs pass. The deterministic
-broker aggregate registers every sub-suite bound by the verification
-completeness anchor.
+The public-tree policy checks tracked source and retained binary assets. CI
+runs the shared feature-suite runner, plus platform builds and broker release
+gates. `bun run check` covers every suite supported by the current host;
+`scripts/ci/suites.ts` owns the task manifest. The former verification graph
+and completeness anchor have been removed.
 
-The local complete check covers every registered gate. Source architecture is
+[Tests and CI](../development/testing.md) defines functional coverage, speed
+targets, and reliability follow-ups. A green run can contain a reported retry
+recovery and does not close that defect. Source architecture is
 enforced through package dependency direction, adapter isolation, public
 facades, platform boundaries, generated-contract checks, and focused behavior
 suites. Files have no line-count ceiling; production modules are grouped by

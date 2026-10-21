@@ -4,14 +4,18 @@ Use Flutter 3.44.3 from `.fvmrc`, Dart supplied by that SDK, and Bun 1.3.14 from
 `package.json`. No sibling checkout, private service, or locally preinstalled
 agent CLI is required for deterministic gates.
 
-After any implementation, run the tests:
+During implementation, select the affected feature or suite. For the final
+implementation candidate, run the complete check once:
 
 ```bash
 bun run check
 ```
 
-See [Tests and CI](testing.md) for suites, selection, sharding, timeouts and
-the retry policy. Individual tools remain available for focused work:
+See [Tests and CI](testing.md) for functional coverage rules, runtime targets,
+selection, sharding, and flake handling. Documentation-only edits use its
+lightweight validation path. Individual tools below remain available for
+diagnosis; do not run them all again after the shared runner has already
+covered them:
 
 ```bash
 bun install --frozen-lockfile
