@@ -13,15 +13,23 @@
 //      peer, and a broker switch with calls in flight.
 //   5. platform toggles: keep running when closed, stay connected on Android.
 import 'dart:async';
+import 'dart:io';
 
 import 'package:broker_client_flutter/broker_client_flutter.dart';
+import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/design/ui_scale.dart';
-import 'package:cosyncing_client/src/features/sessions/detail/session_notification_hooks.dart';
+import 'package:cosyncing_client/src/features/sessions/sessions.dart';
 import 'package:cosyncing_client/src/features/settings/controller/locale_controller.dart';
 import 'package:cosyncing_client/src/features/settings/data/conversation_display_store.dart';
+import 'package:cosyncing_client/src/features/storage/data/device_file_registry.dart';
+import 'package:cosyncing_client/src/features/storage/data/device_storage_providers.dart';
+import 'package:cosyncing_client/src/features/storage/data/device_storage_service.dart';
+import 'package:cosyncing_client/src/features/storage/data/local_storage_file_backend.dart';
+import 'package:cosyncing_client/src/features/storage/data/managed_file_access.dart';
+import 'package:cosyncing_client/src/platform/storage/local_storage_file_backend_io.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -34,6 +42,8 @@ import '../support/feature/roster_driver.dart';
 import '../support/feature/session_driver.dart';
 import '../support/feature/settings_driver.dart';
 import '../support/feature/settings_wire.dart';
+import '../support/feature/storage_files.dart';
+import '../support/feature/storage_wire.dart';
 import '../support/notification_test_support.dart';
 
 final AppLocalizations en = lookupAppLocalizations(const Locale('en'));
@@ -47,24 +57,426 @@ Future<FakeBroker> studioSeeded(FeatureContext f) async {
 }
 
 void main() {
-  featureTest('General opens Storage and cache cleanup requires confirmation', (
-    f,
-  ) async {
-    await studioSeeded(f);
-    final app = await f.launch(
-      initialLocation: generalSettingsRoute,
-      viewport: FeatureViewport.phone,
-    );
-    await app.tapKey('settings-storage');
-    expect(find.text(en.storageDataDescription), findsOneWidget);
-    await app.tapKey('storage-clear-cache');
-    expect(find.text(en.sessionClearAllCacheConfirmTitle), findsOneWidget);
-    await app.dismissModal();
-    await app.tapKey('storage-clear-cache');
-    await app.tapKey('storage-clear-cache-confirm');
-    expect(find.text(en.sessionAllCacheCleared), findsOneWidget);
-    expect(find.text(en.storageDataDescription), findsOneWidget);
-  });
+  featureTest(
+    'native cleanup preserves outside files and recovers an interrupted '
+    'selection without deleting on restart',
+    (f) async {
+      final root = Directory.systemTemp.createTempSync('cosy-device-storage-');
+      addTearDown(() => root.deleteSync(recursive: true));
+      final cache = Directory('${root.path}/cache')..createSync();
+      final owned = File('${cache.path}/owned.txt')..writeAsStringSync('owned');
+      final outside = File('${root.path}/export.txt')
+        ..writeAsStringSync('export');
+      final registry = DeviceFileRegistry(f.storage.database);
+      final ioZone = (await f.tester.runAsync(() async => Zone.current))!;
+      final files = NativeStorageFiles(
+        NativeLocalStorageFileBackend(
+          root: () async => cache.path,
+          previewRoot: '${root.path}/previews',
+        ),
+        ioZone,
+      );
+      Future<void> finishNativeWork(bool Function() done) async {
+        for (var turn = 0; turn < 100; turn++) {
+          if (done()) return;
+          // Await the actual OS completion, then deliver its result through
+          // the widget clock. Empty fake-clock pumps cannot drain native I/O.
+          await f.tester.runAsync(() async => files.pending);
+          await f.tester.pump();
+        }
+        fail('Native storage did not finish its bounded fixture operations');
+      }
+
+      await registry.register(
+        location: owned.path,
+        label: 'Owned file',
+        completedAt: f.now(),
+      );
+      await registry.register(
+        location: outside.path,
+        label: 'Outside file',
+        completedAt: f.now(),
+      );
+      if (!Platform.isWindows) {
+        final link = Link('${cache.path}/linked.txt')..createSync(outside.path);
+        await registry.register(
+          location: link.path,
+          label: 'Linked file',
+          completedAt: f.now(),
+        );
+      }
+      var app = await f.launch(
+        initialLocation: storageSettingsRoute,
+        overrides: [
+          localStorageFileBackendProvider.overrideWithValue(
+            files,
+          ),
+        ],
+      );
+      await finishNativeWork(
+        () => find.text(en.storageLoading).evaluate().isEmpty,
+      );
+      await app.tapKey('storage-review-files');
+      await app.tapKey('storage-select-all');
+      await app.waitFor(find.text(en.storageSelection(1)));
+      await app.tapKey('storage-remove-selected');
+      await app.waitFor(find.byKey(const Key('storage-remove-confirm')));
+      // Simulate a stop immediately after durable admission. No real worker
+      // is running; restart must retain this finite manifest for fresh review.
+      final plan = await f.storage.database
+          .customSelect(
+            "SELECT id FROM device_storage_plans WHERE state='pending'",
+          )
+          .getSingle();
+      await f.storage.database.customStatement(
+        "UPDATE device_storage_plans SET state='running',lease_until=0 "
+        'WHERE id=?',
+        [plan.read<String>('id')],
+      );
+      app = await f.restart(initialLocation: storageSettingsRoute);
+      await finishNativeWork(
+        () => find.text(en.storageLoading).evaluate().isEmpty,
+      );
+      expect(owned.existsSync(), isTrue);
+      expect(outside.readAsStringSync(), 'export');
+      final interrupted = app.container
+          .read(deviceStorageServiceProvider)
+          .result!;
+      expect(interrupted.failed, 1);
+      expect(interrupted.bytes, isNull);
+      await app.tap(find.widgetWithText(TextButton, en.storageRetryFailed));
+      await app.waitFor(find.text(en.storageSelection(1)));
+      await app.tapKey('storage-remove-selected');
+      await app.tapKey('storage-remove-confirm');
+      await finishNativeWork(() => !owned.existsSync());
+      await app.waitFor(find.byKey(const Key('storage-review-files')));
+      expect(owned.existsSync(), isFalse);
+      expect(outside.readAsStringSync(), 'export');
+      if (!Platform.isWindows) {
+        expect(Link('${cache.path}/linked.txt').existsSync(), isTrue);
+      }
+      expect(f.tester.takeException(), isNull);
+    },
+  );
+
+  featureTest(
+    'server storage stays pinned and reconciles a lost acceptance after '
+    'relaunch',
+    (f) async {
+      final studio = await studioSeeded(f);
+      final tower = f.network.add('http://tower.test:7734');
+      await f.storage.seedServer(tower, displayName: 'Tower', active: false);
+      final desk = StorageDesk(studio)..failFirstJob = true;
+      final lifecycle = ControllableLifecycleMonitor();
+      addTearDown(lifecycle.dispose);
+      var app = await f.launch(
+        initialLocation: storageSettingsRoute,
+        overrides: [
+          sessionNotificationLifecycleMonitorProvider.overrideWithValue(
+            lifecycle,
+          ),
+        ],
+      );
+      await app.tap(find.text(en.storageServer).first);
+      await app.waitFor(find.widgetWithText(TextButton, en.storageStoredFiles));
+      await app.switchServer(tower.baseUri.toString());
+      expect(tower.requestsTo('/api/storage/scans'), isEmpty);
+      await app.tap(find.widgetWithText(TextButton, en.storageStoredFiles));
+      await app.tapKey('storage-select-all');
+      await app.tapKey('storage-remove-selected');
+      expect(find.textContaining(studio.baseUri.host), findsWidgets);
+      studio.loseNextAnswer('POST', '/api/storage/cleanup-jobs');
+      await app.tapKey('storage-remove-confirm');
+      await app.waitFor(find.text(en.storageCheckingResult));
+      expect(desk.jobs, hasLength(1));
+      expect(desk.plans, 1);
+      expect(tower.requestsTo('/api/storage/cleanup-jobs'), isEmpty);
+      app = await f.restart(initialLocation: storageSettingsRoute);
+      await app.tap(find.text(en.storageServer).first);
+      await app.tapKey('storage-server-picker');
+      await app.tap(find.text(studio.baseUri.host).last);
+      await app.waitFor(find.widgetWithText(TextButton, en.storageStoredFiles));
+      await app.waitForAbsent(find.text(en.storageLoading));
+      final attempts = studio.requestsTo('/api/storage/cleanup-jobs');
+      expect(attempts, hasLength(2));
+      expect(attempts.first.body, attempts.last.body);
+      expect(desk.jobs, hasLength(1));
+      expect(desk.plans, 1);
+      expect(f.tester.takeException(), isNull);
+      await app.tap(find.text(en.storageRetryFailed));
+      await app.waitFor(find.text('Report.txt'));
+      final reviews = studio.requestsTo('/api/storage/items');
+      expect(reviews.last.uri.queryParameters['failedJob'], 'job-1');
+      await app.tapKey('storage-remove-selected');
+      final completing = studio.hold('POST', '/api/storage/cleanup-jobs');
+      await app.tapKey('storage-remove-confirm');
+      await app.pumpUntil(
+        () => completing.pending == 1,
+        reason: 'accepted cleanup awaiting its response',
+      );
+      final scansBeforeBackground = studio
+          .requestsTo('/api/storage/scans')
+          .length;
+      lifecycle.emit(BrokerAppLifecycleState.paused);
+      completing.release();
+      await app.pumpUntil(
+        () => desk.jobs.length == 2,
+        reason: 'accepted cleanup completes',
+      );
+      await app.waitFor(find.widgetWithText(TextButton, en.storageStoredFiles));
+      expect(
+        studio.requestsTo('/api/storage/scans'),
+        hasLength(scansBeforeBackground),
+        reason: 'Cleanup completion must not start a hidden inventory scan',
+      );
+      lifecycle.emit(BrokerAppLifecycleState.resumed);
+      expect(desk.jobs, hasLength(2));
+      final retry =
+          studio.requestsTo('/api/storage/cleanup-plans').last.body! as Map;
+      expect(retry['selectAll'], isTrue);
+      expect(retry['filter'], containsPair('failedJob', 'job-1'));
+    },
+  );
+
+  featureTest(
+    'device storage reviews a finite selection across pages and preserves '
+    'newly protected copies',
+    (f) async {
+      final studio = await studioSeeded(f);
+      final saved = (await f.storage.profiles.getAll()).single;
+      final files = StorageFiles();
+      final lifecycle = ControllableLifecycleMonitor();
+      addTearDown(lifecycle.dispose);
+      final registry = DeviceFileRegistry(f.storage.database);
+      for (var index = 0; index < 102; index++) {
+        final path = '/app-cache/file-$index';
+        files.entries[path] = LocalFileObservation(
+          size: 20,
+          version: 'version-$index',
+        );
+        await registry.register(
+          location: path,
+          label: 'Report $index.txt',
+          completedAt: f.now().subtract(Duration(days: 8, milliseconds: index)),
+          source: index == 0 ? RosterSource.ofProfile(saved).storageKey : null,
+          session: index == 0 ? 'opaque-storage-session' : null,
+        );
+      }
+      files.entries['/downloads/external-export'] = const LocalFileObservation(
+        size: 900,
+        version: 'external',
+      );
+      final releaseOpen = ManagedFileAccess.shared.acquire('/app-cache/file-0');
+      addTearDown(releaseOpen);
+      final app = await f.launch(
+        initialLocation: generalSettingsRoute,
+        overrides: [
+          sessionNotificationLifecycleMonitorProvider.overrideWithValue(
+            lifecycle,
+          ),
+          deviceStorageServiceProvider.overrideWith((ref) {
+            final service = DeviceStorageService(
+              database: f.storage.database,
+              registry: registry,
+              files: files,
+              cache: ref.read(sessionCacheManagementProvider),
+              now: f.now,
+            );
+            ref.onDispose(service.dispose);
+            return service;
+          }),
+        ],
+      );
+      expect(files.inspections, 0);
+      await app.tapKey('settings-storage');
+      await app.waitForAbsent(find.text(en.storageLoading));
+      expect(find.textContaining('102 files'), findsOneWidget);
+      expect(
+        find.textContaining(RegExp(r' · \d+ snapshots? · ')),
+        findsOneWidget,
+      );
+      expect(find.textContaining(' managed · '), findsOneWidget);
+      expect(
+        find.textContaining(en.storagePartial),
+        findsNothing,
+        reason:
+            'The complete local database includes route and cleanup metadata',
+      );
+      await app.tapKey('storage-review-files');
+      await app.waitFor(find.byKey(const Key('storage-select-all')));
+      expect(find.textContaining('opaque-storage-session'), findsNothing);
+      await app.reveal(find.text('Report 0.txt'));
+      final ownerRow = find.ancestor(
+        of: find.text('Report 0.txt'),
+        matching: find.byType(CheckboxListTile),
+      );
+      expect(
+        find.descendant(
+          of: ownerRow,
+          matching: find.textContaining(saved.displayName),
+        ),
+        findsOneWidget,
+      );
+      await f.tester.longPress(find.text('Report 0.txt'));
+      await app.waitFor(find.byKey(const Key('contextual-details-text')));
+      expect(
+        f.tester
+            .widget<SelectableText>(
+              find.byKey(const Key('contextual-details-text')),
+            )
+            .data,
+        contains('opaque-storage-session'),
+      );
+      await app.tapKey('contextual-details-close');
+      await app.tapKey('storage-select-all');
+      await app.waitFor(find.text(en.storageSelection(101)));
+      await app.tap(find.widgetWithText(TextButton, en.storageNext));
+      expect(find.text(en.storageSelection(101)), findsOneWidget);
+      // A new copy arriving after review cannot enter Select all, even on
+      // page 2.
+      files.entries['/app-cache/late'] = const LocalFileObservation(
+        size: 30,
+        version: 'late',
+      );
+      await registry.register(
+        location: '/app-cache/late',
+        label: 'Late report',
+        completedAt: f.now(),
+      );
+      final releaseNew = ManagedFileAccess.shared.acquire('/app-cache/file-1');
+      addTearDown(releaseNew);
+      await app.tapKey('storage-remove-selected');
+      await app.tapKey('storage-remove-confirm');
+      await app.waitFor(find.byKey(const Key('storage-review-files')));
+      expect(files.entries.keys.toSet(), {
+        '/app-cache/file-0',
+        '/app-cache/file-1',
+        '/app-cache/late',
+        '/downloads/external-export',
+      });
+      releaseOpen();
+      releaseNew();
+      await app.tap(find.widgetWithText(TextButton, en.refresh));
+      await app.waitForAbsent(find.text(en.storageLoading));
+      await app.tapKey('storage-review-files');
+      await app.tapKey('storage-select-all');
+      await app.waitFor(find.text(en.storageSelection(3)));
+      await app.tapKey('storage-remove-selected');
+      // Only failures are offered for retry. A changed file and an already
+      // absent
+      // copy are separate outcomes, and missing bytes are never called
+      // reclaimed.
+      files.refused.add('/app-cache/file-0');
+      files.entries['/app-cache/file-1'] = const LocalFileObservation(
+        size: 40,
+        version: 'changed',
+      );
+      files.entries.remove('/app-cache/late');
+      await app.tapKey('storage-remove-confirm');
+      await app.waitFor(find.byKey(const Key('storage-review-files')));
+      final result = app.container.read(deviceStorageServiceProvider).result!;
+      expect(
+        (result.failed, result.skipped, result.missing, result.bytes),
+        (1, 1, 1, 0),
+      );
+      files.refused.clear();
+      await app.tap(find.widgetWithText(TextButton, en.storageRetryFailed));
+      await app.waitFor(find.text(en.storageSelection(1)));
+      await app.tapKey('storage-remove-selected');
+      int? inspectionsAtUnlink;
+      files.beforeRemove = () {
+        inspectionsAtUnlink = files.inspections;
+        lifecycle.emit(BrokerAppLifecycleState.paused);
+      };
+      await app.tapKey('storage-remove-confirm');
+      await app.waitFor(find.byKey(const Key('storage-review-files')));
+      expect(inspectionsAtUnlink, isNotNull);
+      expect(
+        files.inspections,
+        inspectionsAtUnlink,
+        reason: 'Accepted local cleanup must finish without a hidden rescan',
+      );
+      files.beforeRemove = null;
+      lifecycle.emit(BrokerAppLifecycleState.resumed);
+      expect(files.entries.keys.toSet(), {
+        '/app-cache/file-1',
+        '/downloads/external-export',
+      });
+      files.unavailable.add('/app-cache/file-1');
+      await app.tap(find.widgetWithText(TextButton, en.refresh));
+      await app.waitForAbsent(find.text(en.storageLoading));
+      expect(find.textContaining('Measured subtotal:'), findsOneWidget);
+      expect(
+        find.text(
+          en.storageUsage(en.storageUnavailable, 1, en.storageUnavailable),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        (await f.storage.profiles.getAll()).single.baseUri,
+        studio.baseUri,
+      );
+      expect(f.tester.takeException(), isNull);
+    },
+  );
+
+  featureTest(
+    'General opens Storage and offline cache cleanup requires confirmation',
+    (
+      f,
+    ) async {
+      final transcripts = DriftSessionTranscriptRepository(f.storage.database);
+      const cachedSession = SessionDetailKey(
+        tool: 'codex',
+        sessionId: 'offline',
+      );
+      const source = 'offline-profile@https://offline.example';
+      await transcripts.upsert(
+        SessionTranscriptSnapshot(
+          brokerProfileId: source,
+          sessionKey: cachedSession,
+          messages: [
+            AgentMessage.fromJson(const {
+              'type': 'model-output',
+              'text': 'cached offline',
+            }),
+          ],
+          hasEarlier: false,
+          updatedAt: f.now(),
+        ),
+      );
+      final app = await f.launch(
+        initialLocation: generalSettingsRoute,
+        viewport: FeatureViewport.phone,
+      );
+      await app.tapKey('settings-storage');
+      await app.reveal(find.text(en.storageDataDescription));
+      expect(find.text(en.storageDataDescription), findsOneWidget);
+      await app.tapKey('storage-clear-cache');
+      await app.waitFor(find.text(en.sessionClearAllCacheConfirmTitle));
+      await app.dismissModal();
+      expect(
+        await transcripts.load(
+          sessionKey: cachedSession,
+          brokerProfileId: source,
+        ),
+        isNotNull,
+      );
+      await app.tapKey('storage-clear-cache');
+      await app.waitFor(find.byKey(const Key('storage-clear-cache-confirm')));
+      await app.tapKey('storage-clear-cache-confirm');
+      await app.waitFor(find.text(en.sessionAllCacheCleared));
+      expect(
+        await transcripts.load(
+          sessionKey: cachedSession,
+          brokerProfileId: source,
+        ),
+        isNull,
+      );
+      await app.reveal(find.text(en.storageDataDescription));
+      expect(find.text(en.storageDataDescription), findsOneWidget);
+    },
+  );
 
   group('appearance', () {
     featureTest('a restyled app stays restyled after a relaunch', (f) async {
@@ -149,10 +561,7 @@ void main() {
       expect(app.tokens.canvas, graphite.dark.canvas);
       expect(app.theme.brightness, Brightness.dark);
       expect(app.textScale, UiTextScale.large.factor);
-      expect(
-        app.theme.visualDensity,
-        UiDensity.spacious.visualDensity,
-      );
+      expect(app.theme.visualDensity, UiDensity.spacious.visualDensity);
       expect(app.tester.takeException(), isNull);
 
       // Language applies to every screen it reaches.
@@ -373,6 +782,9 @@ void main() {
         find.byKey(const Key('settings-keyboard-shortcuts')),
         findsOneWidget,
       );
+      expect(find.text(en.settingsDeveloperOptionsTitle), findsNothing);
+      expect(find.text(en.settingsReadAloudTitle), findsNothing);
+      await app.pick('settings-read-aloud-rate-menu', '1.5×');
       expect(app.isOn('settings-show-debug-views'), isFalse);
       await app.toggle('settings-show-debug-views');
       expect(app.isOn('settings-show-debug-views'), isTrue);
@@ -388,6 +800,7 @@ void main() {
       );
       expect(app.isOn('conversation-reading-width'), isTrue);
       await app.go(generalSettingsRoute);
+      expect(app.selected('settings-read-aloud-rate-menu'), '1.5×');
       expect(app.isOn('settings-show-debug-views'), isTrue);
 
       // Stored values no build writes fall back on their own: each preference
@@ -574,70 +987,67 @@ void main() {
   });
 
   group('quota', () {
-    featureTest(
-      'Overview saves chosen providers per broker without changing '
-      'quota warning consent',
-      (f) async {
-        final studio = await studioSeeded(f);
-        final desk = RuntimeDesk(studio)
-          ..quotaBody = quotaSnapshot({
-            'codex': quotaProvider(
-              'codex',
-              buckets: [
-                quotaBucket(),
-                quotaBucket(id: '7d', label: 'Weekly', remaining: 81),
-              ],
-            ),
-            'claude': quotaProvider(
-              'claude',
-              buckets: [
-                quotaBucket(id: 'session', label: 'Session', remaining: 60),
-              ],
-            ),
-          });
-        final tower = f.network.add('http://tower.test:7734');
-        RuntimeDesk(tower).quotaBody = desk.quotaBody;
-        await f.storage.seedServer(tower, active: false);
-        var app = await f.launch();
-        await app.tapKey('overview-quota-choose');
-        await app.tapKey('overview-quota-provider-codex');
-        await app.tapKey('overview-quota-provider-claude');
-        await app.tapKey('overview-quota-done');
-        await app.waitFor(find.byKey(const Key('settings-quota-row-codex-5h')));
-        expect(
-          find.byKey(const Key('settings-quota-row-codex-7d')),
-          findsOneWidget,
-        );
-        expect(
-          find.byKey(const Key('settings-quota-row-claude-session')),
-          findsOneWidget,
-        );
-        expect(desk.quotaPreferenceWrites, isEmpty);
-        await app.tapKey('overview-quota-choose');
-        await app.tapKey('overview-quota-provider-codex');
-        await app.dismissModal();
-        expect(
-          find.byKey(const Key('settings-quota-row-codex-5h')),
-          findsOneWidget,
-        );
-        app = await f.restart();
-        expect(
-          find.byKey(const Key('settings-quota-row-codex-5h')),
-          findsOneWidget,
-        );
-        await app.switchServer(tower.baseUri.toString());
-        expect(
-          find.byKey(const Key('settings-quota-row-codex-5h')),
-          findsNothing,
-        );
-        await app.switchServer(studio.baseUri.toString());
-        expect(
-          find.byKey(const Key('settings-quota-row-codex-5h')),
-          findsOneWidget,
-        );
-        expect(desk.quotaPreferenceWrites, isEmpty);
-      },
-    );
+    featureTest('Overview saves chosen providers per broker without changing '
+        'quota warning consent', (f) async {
+      final studio = await studioSeeded(f);
+      final desk = RuntimeDesk(studio)
+        ..quotaBody = quotaSnapshot({
+          'codex': quotaProvider(
+            'codex',
+            buckets: [
+              quotaBucket(),
+              quotaBucket(id: '7d', label: 'Weekly', remaining: 81),
+            ],
+          ),
+          'claude': quotaProvider(
+            'claude',
+            buckets: [
+              quotaBucket(id: 'session', label: 'Session', remaining: 60),
+            ],
+          ),
+        });
+      final tower = f.network.add('http://tower.test:7734');
+      RuntimeDesk(tower).quotaBody = desk.quotaBody;
+      await f.storage.seedServer(tower, active: false);
+      var app = await f.launch();
+      await app.tapKey('overview-quota-choose');
+      await app.tapKey('overview-quota-provider-codex');
+      await app.tapKey('overview-quota-provider-claude');
+      await app.tapKey('overview-quota-done');
+      await app.waitFor(find.byKey(const Key('settings-quota-row-codex-5h')));
+      expect(
+        find.byKey(const Key('settings-quota-row-codex-7d')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('settings-quota-row-claude-session')),
+        findsOneWidget,
+      );
+      expect(desk.quotaPreferenceWrites, isEmpty);
+      await app.tapKey('overview-quota-choose');
+      await app.tapKey('overview-quota-provider-codex');
+      await app.dismissModal();
+      expect(
+        find.byKey(const Key('settings-quota-row-codex-5h')),
+        findsOneWidget,
+      );
+      app = await f.restart();
+      expect(
+        find.byKey(const Key('settings-quota-row-codex-5h')),
+        findsOneWidget,
+      );
+      await app.switchServer(tower.baseUri.toString());
+      expect(
+        find.byKey(const Key('settings-quota-row-codex-5h')),
+        findsNothing,
+      );
+      await app.switchServer(studio.baseUri.toString());
+      expect(
+        find.byKey(const Key('settings-quota-row-codex-5h')),
+        findsOneWidget,
+      );
+      expect(desk.quotaPreferenceWrites, isEmpty);
+    });
     featureTest(
       'the quota panel states what remains in every window it can read',
       semantics: true,

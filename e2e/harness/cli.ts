@@ -18,7 +18,7 @@ export const BROKER_ENTRY = join(REPO_ROOT, 'packages/typescript/broker/src/main
 
 export interface ProcessResult {
   exitCode: number | null;
-  signalCode: string | null;
+  signalCode: string | number | null;
   stdout: string;
   stderr: string;
   /** stdout then stderr, for assertions that do not care which. */

@@ -551,7 +551,13 @@ export class ClineObserveConnection implements SessionConnection {
     this.watcherRearmAttempts += 1;
     this.pendingWatcherRearm = setTimeout(() => {
       this.pendingWatcherRearm = undefined;
-      if (!this.closed && this.handlers.size > 0) this.startWatcher();
+      if (!this.closed && this.handlers.size > 0) {
+        this.startWatcher();
+        // A write between closing the old watcher and installing the new one
+        // has no event to replay. Catch up once after replacement; concurrent
+        // drains coalesce and the existing cursor prevents duplicate delivery.
+        void this.drain();
+      }
     }, WATCH_REARM_MS);
     this.pendingWatcherRearm.unref?.();
   }

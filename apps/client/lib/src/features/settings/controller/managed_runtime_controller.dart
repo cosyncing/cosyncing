@@ -199,15 +199,27 @@ class ManagedRuntimeController
   }
 
   /// Restarts all managed components after explicit view confirmation.
-  Future<BrokerRestartAllResponse> restartEverything() async {
+  Future<void> restartEverything() async {
     final admission = await _requireOwnerApiContext();
-    final result = await admission.context.api.restartAll();
-    if (!_isCurrent(admission)) return result;
     final current = state.valueOrNull;
-    if (current != null && current.brokerScopeKey == admission.brokerScopeKey) {
-      state = AsyncValue.data(current.withActionMessage(result.message));
+    try {
+      final result = await admission.context.api.restartAll();
+      if (!_isCurrent(admission)) return;
+      if (current != null &&
+          current.brokerScopeKey == admission.brokerScopeKey) {
+        state = AsyncValue.data(current.withActionMessage(result.message));
+      }
+    } on Object catch (error, stackTrace) {
+      // A retired transport may finish with cancellation instead of its old
+      // response. Neither outcome belongs to the newly selected server.
+      if (!_isCurrent(admission)) return;
+      if (current != null &&
+          current.brokerScopeKey == admission.brokerScopeKey) {
+        state = AsyncValue.data(current.withActionError(failureDetail(error)));
+      } else {
+        state = AsyncValue.error(error, stackTrace);
+      }
     }
-    return result;
   }
 
   /// Confirms and queues the signed stable broker update.

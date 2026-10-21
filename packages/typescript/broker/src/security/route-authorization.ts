@@ -56,6 +56,18 @@ const OMP_INTEGRATION: PeerRoutePolicy = { kind: 'integration', integration: 'om
  * Unlisted methods and paths are denied to every non-owner principal.
  */
 export const BROKER_ROUTE_POLICIES: readonly RoutePolicyEntry<BrokerRoute>[] = [
+  { route: '/api/connection/identity-proof', methods: ['POST'], policy: PUBLIC },
+  { route: '/api/connection/check', methods: ['GET'], policy: OBSERVE },
+  { route: '/api/connection/check/ws', methods: ['GET'], policy: OBSERVE },
+  { route: '/api/connection/configuration', methods: ['GET','POST'], policy: OWNER_ONLY },
+  { route: '/api/storage', methods: ['GET'], policy: OWNER_ONLY },
+  { route: '/api/storage/scans', methods: ['POST'], policy: OWNER_ONLY },
+  { route: '/api/storage/scans/{id}', methods: ['GET'], policy: OWNER_ONLY },
+  { route: '/api/storage/items', methods: ['GET'], policy: OWNER_ONLY },
+  { route: '/api/storage/cleanup-plans', methods: ['POST'], policy: OWNER_ONLY },
+  { route: '/api/storage/cleanup-jobs', methods: ['POST'], policy: OWNER_ONLY },
+  { route: '/api/storage/cleanup-jobs/{id}', methods: ['GET'], policy: OWNER_ONLY },
+  { route: '/api/storage/cleanup-jobs/{id}/cancel', methods: ['POST'], policy: OWNER_ONLY },
   { route: '/api/agents', methods: ['GET'], policy: OBSERVE },
   { route: '/api/agents/{id}/models', methods: ['GET'], policy: OBSERVE },
   { route: '/api/agents/{id}/modes', methods: ['GET'], policy: OBSERVE },

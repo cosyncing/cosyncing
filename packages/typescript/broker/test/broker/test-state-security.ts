@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 /** Configuration, credential, migration, lock, backup, and Pi auth-scope acceptance. */
 import assert from 'node:assert/strict';
+import { Database } from 'bun:sqlite';
 import {
   existsSync,
   mkdirSync,
@@ -497,9 +498,15 @@ try {
     atomicWriteOwnerOnly(layout.artifactUrlSecret, 'artifact-secret');
 
     atomicWriteOwnerOnly(join(stateRoot, 'session-visibility.json'), JSON.stringify({ version: 1, revision: 1, hidden: ['session'], links: {}, changed: { session: 1 } }));
+    atomicWriteOwnerOnly(join(stateRoot, 'server-routes.json'), JSON.stringify({ version: 1, generation: 1, advertisedOrigins: [], trustedClientOrigins: [] }));
+    for (const path of [join(stateRoot, 'storage-operations.sqlite'), join(cacheRoot, 'artifacts', 'retirements.sqlite')]) {
+      const database = new Database(path, { create: true });
+      database.exec('PRAGMA user_version=1'); database.close();
+      atomicWriteOwnerOnly(path, readFileSync(path));
+    }
     const schema = inspectDurableSchemas(layout);
-    check('all ten durable JSON stores have explicit current schema records',
-      DURABLE_SCHEMA_REGISTRY.length === 10 && schema.every((item) => item.status === 'ok'));
+    check('all governed JSON and SQLite stores have explicit current schema records',
+      schema.every((item) => item.status === 'ok'));
     const validBrokerInstance = readFileSync(layout.brokerInstance, 'utf8');
     atomicWriteOwnerOnly(layout.brokerInstance, '{"version":1,"instanceId":"invalid"}\n');
     const malformedInstance = inspectDurableSchemas(layout)

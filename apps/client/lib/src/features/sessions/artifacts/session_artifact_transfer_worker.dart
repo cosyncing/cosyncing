@@ -5,6 +5,7 @@ import 'package:broker_client/broker_client.dart';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:broker_crypto/broker_crypto.dart';
 import 'package:cosyncing_client/src/errors/user_facing_error.dart';
+import 'package:cosyncing_client/src/features/connection/data/broker_route_transport.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/background_downloader_engine.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_descriptor.dart';
@@ -133,7 +134,14 @@ final sessionArtifactTransferWorkerProvider =
           ? fileService as BackgroundSessionDownloadFinalizer
           : null;
       SessionFileBackgroundDownloadCoordinator? backgroundCoordinator;
-      if (engine != null && engine.isSupported && finalizer != null) {
+      final requiresProxy =
+          brokerClient != null &&
+          (resolverRoute(brokerClient.resolver)?.context.requiresProxy ??
+              false);
+      if (!requiresProxy &&
+          engine != null &&
+          engine.isSupported &&
+          finalizer != null) {
         final coordinator = SessionFileBackgroundDownloadCoordinator(
           engine: engine,
           transferController: transferController,
@@ -716,13 +724,16 @@ class SessionArtifactTransferWorker {
     required SessionDetailKey sessionKey,
     required _ChunkedUploadPayload payload,
     bool resumeUpload = false,
-  }) async {
+  }) => _withPinnedTransport(transferId, () async {
     final cancellationToken = _registerCancellationToken(transferId);
     transferController.markRunning(
       transferId,
       message: 'Uploading ${payload.fileName}...',
     );
-    final client = brokerClient;
+    final originalClient = brokerClient;
+    final client = originalClient == null
+        ? null
+        : brokerRouteOperationClient(originalClient);
     if (client == null) {
       const message = 'Connect to the server before uploading this file.';
       transferController.markFailed(transferId, message);
@@ -953,7 +964,7 @@ class SessionArtifactTransferWorker {
     } finally {
       _unregisterCancellationToken(transferId, cancellationToken);
     }
-  }
+  });
 
   void _validateUploadOffset({
     required int offset,
@@ -1095,8 +1106,9 @@ class SessionArtifactTransferWorker {
     required String fileName,
     required bool hasActiveBrokerClient,
     String? mimeType,
-  }) async {
-    // Platform capability gate: on iOS/Android, hand the workspace-file download
+  }) => _withPinnedTransport(transferId, () async {
+    // Platform capability gate: on iOS/Android, hand the workspace-file
+    // download
     // to the native background engine so it survives backgrounding. Everywhere
     // else fall through to the foreground resumable path below unchanged.
     final coordinator = backgroundCoordinator;
@@ -1221,7 +1233,7 @@ class SessionArtifactTransferWorker {
     } finally {
       _unregisterCancellationToken(transferId, cancellationToken);
     }
-  }
+  });
 
   /// Requests active cancellation for a queued or running transfer.
   ///
@@ -1238,7 +1250,7 @@ class SessionArtifactTransferWorker {
     required SessionDetailKey sessionKey,
     required SessionArtifactDescriptor descriptor,
     required bool hasActiveBrokerClient,
-  }) async {
+  }) => _withPinnedTransport(transferId, () async {
     final cancellationToken = _registerCancellationToken(transferId);
     transferController.markRunning(transferId, message: 'Downloading...');
 
@@ -1338,7 +1350,7 @@ class SessionArtifactTransferWorker {
     } finally {
       _unregisterCancellationToken(transferId, cancellationToken);
     }
-  }
+  });
 
   /// Caches an HTML artifact for preview.
   Future<SessionArtifactTransferWorkerResult> preparePreview({
@@ -1365,7 +1377,7 @@ class SessionArtifactTransferWorker {
     required SessionDetailKey sessionKey,
     required SessionArtifactDescriptor descriptor,
     required bool hasActiveBrokerClient,
-  }) async {
+  }) => _withPinnedTransport(transferId, () async {
     final cancellationToken = _registerCancellationToken(transferId);
     transferController.markRunning(transferId, message: 'Preparing preview...');
 
@@ -1449,14 +1461,17 @@ class SessionArtifactTransferWorker {
     } finally {
       _unregisterCancellationToken(transferId, cancellationToken);
     }
-  }
+  });
 
   String? _artifactReferenceError(
     SessionDetailKey sessionKey,
     SessionArtifactDescriptor descriptor,
   ) {
     if (descriptor.isInlineDataUrl) return null;
-    final client = brokerClient;
+    final originalClient = brokerClient;
+    final client = originalClient == null
+        ? null
+        : brokerRouteOperationClient(originalClient);
     final source = Uri.tryParse(descriptor.downloadSourceUrl ?? '');
     final broker = client == null ? null : Uri.tryParse(client.baseUrl);
     Uri? resolvedSource;
@@ -1504,6 +1519,23 @@ class SessionArtifactTransferWorker {
     return left.scheme.toLowerCase() == right.scheme.toLowerCase() &&
         left.host.toLowerCase() == right.host.toLowerCase() &&
         effectivePort(left) == effectivePort(right);
+  }
+
+  Future<SessionArtifactTransferWorkerResult> _withPinnedTransport(
+    String transferId,
+    Future<SessionArtifactTransferWorkerResult> Function() action,
+  ) async {
+    try {
+      return await withPinnedBrokerRoute(brokerClient, action);
+    } on Object catch (error) {
+      final message = '$error';
+      transferController.markFailed(transferId, message);
+      return SessionArtifactTransferWorkerResult(
+        transferId: transferId,
+        outcome: SessionArtifactTransferWorkerOutcome.failed,
+        message: message,
+      );
+    }
   }
 
   SessionArtifactCancellationToken _registerCancellationToken(

@@ -121,7 +121,7 @@ Consulta la [configuración de agentes compatibles](docs/supported_agents/README
 
 ## Requisitos previos
 
-El servidor usa [Bun](https://bun.sh) 1.3.14 o posterior. Los instaladores de un solo comando lo
+El servidor usa [Bun](https://bun.sh) 1.4.3 o posterior. Los instaladores de un solo comando lo
 instalan cuando hace falta; no se requiere Node.js/npm.
 El broker es local por omisión. Para usarlo entre dispositivos hace
 falta un proxy, un túnel, una VPN, una red mallada u otro
@@ -258,7 +258,7 @@ Informa de las vulnerabilidades por el canal privado de GitHub, según [SECURITY
 
 ## Desarrollo
 
-El repositorio fija Flutter 3.44.3 en `.fvmrc` y Bun 1.3.14 en `package.json`. Ejecuta los comandos
+El repositorio fija Flutter 3.44.3 en `.fvmrc` y Bun 1.4.3 en `package.json`. Ejecuta los comandos
 desde la raíz del repositorio.
 
 ```bash

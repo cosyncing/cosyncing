@@ -29,6 +29,18 @@ const _adopted = BrokerContractAdoption(
 
 /// Declared Flutter-client disposition for every broker REST route.
 const Map<String, BrokerContractAdoption> brokerRouteAdoption = {
+  '/api/connection/identity-proof': _adopted,
+  '/api/connection/check': _adopted,
+  '/api/connection/check/ws': _adopted,
+  '/api/connection/configuration': _adopted,
+  '/api/storage': _adopted,
+  '/api/storage/scans': _adopted,
+  '/api/storage/scans/{id}': _adopted,
+  '/api/storage/items': _adopted,
+  '/api/storage/cleanup-plans': _adopted,
+  '/api/storage/cleanup-jobs': _adopted,
+  '/api/storage/cleanup-jobs/{id}': _adopted,
+  '/api/storage/cleanup-jobs/{id}/cancel': _adopted,
   '/api/agents': _adopted,
   '/api/agents/{id}/models': _adopted,
   '/api/agents/{id}/modes': _adopted,

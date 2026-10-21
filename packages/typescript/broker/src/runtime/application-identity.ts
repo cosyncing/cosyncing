@@ -129,18 +129,17 @@ function assertExecutableFile(path: string, label: string, detailCode: string): 
  * Runtime enforcement remains necessary regardless of how the application was acquired. This is also
  * the `minimumBunVersion` every release manifest declares.
  *
- * 1.3.14 is the Bun every build and every gate run actually executes the bundle under. It was raised from
- * 1.3.8, which can stall silently while loading modules (13 of 18,500 processes measured, none on 1.3.14),
- * only after a bridge release had shipped the updater that installs a release's pinned Bun itself: a
- * release's floor is judged by the PREVIOUS build's updater, and updaters up to 0.6.5 cannot install one.
+ * Streamed artifact downloads require HTTP backpressure: Bun 1.3.14 drains a response into
+ * memory even when its receiver stalls (oven-sh/bun#32469). The tested 1.4.3 runtime
+ * includes that fix. Existing bridge updaters install the runtime pinned by the release.
  */
-export const MINIMUM_BUN_RUNTIME_VERSION = '1.3.14';
+export const MINIMUM_BUN_RUNTIME_VERSION = '1.4.3';
 
 /**
  * The Bun version every build in {@link PINNED_BUN_RUNTIME_ARCHIVES} is: what the installers place, and what
  * a release signs into its manifest for `cosy update` to install. Never below the floor, and asserted so.
  */
-export const PINNED_BUN_RUNTIME_VERSION = '1.3.14';
+export const PINNED_BUN_RUNTIME_VERSION = '1.4.3';
 
 /**
  * The official Bun release archives for exactly {@link PINNED_BUN_RUNTIME_VERSION}, by installer host.
@@ -148,13 +147,13 @@ export const PINNED_BUN_RUNTIME_VERSION = '1.3.14';
  * The curl installer digest-pins every cosyncing artifact it places, so the runtime that executes them
  * cannot be the one link resting on TLS alone. Piping `bun.sh/install` to a shell would do exactly that:
  * an unpinned third-party script, fetched fresh, choosing and placing a binary nothing here ever checks.
- * These digests come from Bun's own published `SHASUMS256.txt` beside the tagged release, are baked into
+ * These digests come from Bun's published tagged-release asset metadata, are baked into
  * the installer at assembly time, and are enforced before anything is unpacked.
  *
  * They live next to the pinned version because they are one fact with it: these are the checksums OF that
  * version, and changing the version without replacing them would pin the wrong bytes. Nothing offline can
  * prove that binding — Bun's asset names carry no version, the tag alone does — so adjacency is the whole
- * guard, and moving the pinned version means replacing this table from the new tag's `SHASUMS256.txt`.
+ * guard, and moving the pinned version means replacing this table from the new tag's release asset metadata.
  *
  * Several builds per host, most likely first, because one host target is not one binary: glibc and musl
  * need different builds, and pre-AVX2 x64 needs the baseline one. The installer reorders on what it can
@@ -175,21 +174,21 @@ export const PINNED_BUN_RUNTIME_VERSION = '1.3.14';
 export const PINNED_BUN_RUNTIME_ARCHIVES: Readonly<Record<string, readonly BunRuntimeArchive[]>> =
   Object.freeze({
     'linux-x64': Object.freeze([
-      { asset: 'bun-linux-x64.zip', sha256: '951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f', size: 35969274 },
-      { asset: 'bun-linux-x64-baseline.zip', sha256: 'a063908ae08b7852ca10939bbdc6ceed3ddabce8fb9402dce83d65d73b36e6c7', size: 35595658 },
-      { asset: 'bun-linux-x64-musl.zip', sha256: '14bd9aedeebf1dba67e8def9531c89bc989ecfdf1de42e5bfcaf1b8cd9294719', size: 34669122 },
-      { asset: 'bun-linux-x64-musl-baseline.zip', sha256: '56a7d6806cf155536c0178f0ea5fbd098e684fa509ebdb4fc0a7e19fb65382dc', size: 34384861 },
+      { asset: 'bun-linux-x64.zip', sha256: '3e730528d89775f03f87f05c06787c4df4099d0a37f3f252e7b829cb23816e18', size: 42015139 },
+      { asset: 'bun-linux-x64-baseline.zip', sha256: '1fc2edac843102909e3a1be1d8d9802cc6071cf074e67e88231f4ffe0f8b397b', size: 42015103 },
+      { asset: 'bun-linux-x64-musl.zip', sha256: '6e9ea98554ea0d05efda5840ae292618aaa3adefd66b0853520c5c86a37eac9c', size: 38594621 },
+      { asset: 'bun-linux-x64-musl-baseline.zip', sha256: '4b5b0b5503f6ebf15161e8c56eb5a263134c05cd98a86dc11ee43ac5bda9862e', size: 38594585 },
     ]),
     'linux-arm64': Object.freeze([
-      { asset: 'bun-linux-aarch64.zip', sha256: 'a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b', size: 35700603 },
-      { asset: 'bun-linux-aarch64-musl.zip', sha256: 'b98e0ad3625c5c00d1d5b5ff55605c7adddbfae151861e68ade57b2d3b8703bb', size: 34304457 },
+      { asset: 'bun-linux-aarch64.zip', sha256: 'efa9813da5ed72423bf847f916e8d2c47c0d776add972354026a75e10da9aa21', size: 41786424 },
+      { asset: 'bun-linux-aarch64-musl.zip', sha256: '8de8a0003cc2707bb555887e3d450e24e1edf3f605f491393e89ed61a8853420', size: 38194544 },
     ]),
     'darwin-arm64': Object.freeze([
-      { asset: 'bun-darwin-aarch64.zip', sha256: 'd8b96221828ad6f97ac7ac0ab7e95872341af763001e8803e8267652c2652620', size: 23586433 },
+      { asset: 'bun-darwin-aarch64.zip', sha256: '80afd4c069b46a6fa8f3ec520bebc750a7843e4a8d5b9583d29ad436c00a3403', size: 30530705 },
     ]),
     'windows-x64': Object.freeze([
-      { asset: 'bun-windows-x64.zip', sha256: '0a0620930b6675d7ba440e81f4e0e00d3cfbe096c4b140d3fff02205e9e18922', size: 38366737 },
-      { asset: 'bun-windows-x64-baseline.zip', sha256: '538f9c846355d9e847b2671bc00c47da4229a0befb24df3282b739770f3b475f', size: 38023440 },
+      { asset: 'bun-windows-x64.zip', sha256: '0bf84e808552beea67bf1202a287a35c6c825d837b287b3f8e9dd513dba35d3d', size: 44639930 },
+      { asset: 'bun-windows-x64-baseline.zip', sha256: 'd7a7d3eb216614544aab0cde2d8d9f2e4e87839bf5a30a1cd11d077f02d84e0c', size: 44639910 },
     ]),
   });
 

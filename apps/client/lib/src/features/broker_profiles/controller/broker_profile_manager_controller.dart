@@ -7,6 +7,7 @@ import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profi
 import 'package:cosyncing_client/src/features/broker_profiles/model/url_normalizer.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/provider/broker_profile_providers.dart';
 import 'package:cosyncing_client/src/features/connection/data/active_broker_profile_store.dart';
+import 'package:cosyncing_client/src/features/connection/provider/broker_route_providers.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_store.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
@@ -122,7 +123,8 @@ class BrokerProfileManagerController {
     }
   }
 
-  /// Updates a profile's display name and base URL while preserving id/metadata.
+  /// Updates a profile's display name and base URL while preserving
+  /// id/metadata.
   ///
   /// Preserves:
   /// - `id`
@@ -192,6 +194,14 @@ class BrokerProfileManagerController {
     final oldCredentialKey = existing.credentialKey;
     final isBaseUriChanged =
         existing.baseUri.toString() != normalized.toString();
+    if (isBaseUriChanged && existing.sourceIdentity != null) {
+      throw const BrokerProfileManagerException(
+        'Change verified server addresses in address settings.',
+      );
+    }
+    if (isBaseUriChanged && ref.exists(brokerRouteCoordinatorProvider)) {
+      ref.read(brokerRouteCoordinatorProvider).retireProfile(existing);
+    }
     String? previousToken;
     if (isBaseUriChanged && oldCredentialKey != null) {
       previousToken = await _readProfileCredential(
@@ -379,6 +389,9 @@ class BrokerProfileManagerController {
         }
 
         // 1. Fence: nothing may keep speaking for this exact incarnation.
+        if (ref.exists(brokerRouteCoordinatorProvider)) {
+          ref.read(brokerRouteCoordinatorProvider).retireProfile(existing);
+        }
         stage = _ProfileDeletionStage.activeSelection;
         final activeProfile = ref.read(activeBrokerProfileProvider);
         final activeStore = ref.read(activeBrokerProfileStoreProvider);

@@ -5,6 +5,10 @@ export type WsAuthTicketPrincipal =
   | { kind: 'peer'; peerId: string; authGeneration: number; roles: string[] };
 
 export interface WsAuthTicketBinding {
+  /** Runtime-issued tickets are bound to both target and browser origin. */
+  targetOrigin?: string;
+  clientOrigin?: string;
+  audience?: 'session' | 'connection-check';
   tool: string;
   sessionId: string;
   params: Record<string, string>;
@@ -56,13 +60,16 @@ export class WsAuthTicketRegistry {
   }
 
   /** Consumes before returning, so a failed or aborted upgrade cannot replay it. */
-  consume(wsAuthTicket: string, tool: string, sessionId: string): WsAuthTicketBinding | undefined {
+  consume(wsAuthTicket: string, tool: string, sessionId: string, context?: { targetOrigin: string; clientOrigin?: string; audience?: 'session' | 'connection-check' }): WsAuthTicketBinding | undefined {
     const normalized = wsAuthTicket.trim();
     if (!normalized) return undefined;
     const stored = this.tickets.get(normalized);
     this.tickets.delete(normalized);
     if (!stored || stored.expiresAt <= this.now()) return undefined;
     if (stored.tool !== tool || stored.sessionId !== sessionId) return undefined;
+    if (stored.targetOrigin !== undefined && stored.targetOrigin !== context?.targetOrigin) return undefined;
+    if (stored.clientOrigin !== context?.clientOrigin) return undefined;
+    if ((stored.audience ?? 'session') !== (context?.audience ?? 'session')) return undefined;
     const { expiresAt: _expiresAt, ...binding } = stored;
     return { ...binding, params: { ...binding.params } };
   }

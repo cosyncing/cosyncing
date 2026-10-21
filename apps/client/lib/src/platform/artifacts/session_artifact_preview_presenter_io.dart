@@ -8,7 +8,10 @@ import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifac
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_preview_html_policy.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_preview_result.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_file_browser.dart';
+import 'package:cosyncing_client/src/features/storage/data/device_file_registry.dart';
+import 'package:cosyncing_client/src/features/storage/data/managed_file_access.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as path;
 
 /// Default stale preview retention window.
@@ -27,13 +30,25 @@ Future<SessionArtifactPreviewPresentationResult> showSessionArtifactPreview(
   SessionArtifactUriLauncher? uriLauncher,
 }) async {
   final launcher = uriLauncher ?? const SessionArtifactPlatformUriLauncher();
+  final releaseSource = ManagedFileAccess.shared.acquire(
+    artifact.cachedFilePath,
+  );
   try {
     if (Platform.isLinux || Platform.isWindows) {
       final previewPath = await prepareSessionArtifactPreviewFilePath(
         artifact: artifact,
       );
+      if (previewPath != artifact.cachedFilePath && context.mounted) {
+        await ProviderScope.containerOf(context, listen: false)
+            .read(deviceFileRegistryProvider)
+            .register(
+              location: previewPath,
+              label: artifact.fileName,
+              category: 'temporary',
+            );
+      }
       final uri = Uri.file(previewPath);
-      return openDesktopPreviewFallbackInBrowser(
+      return await openDesktopPreviewFallbackInBrowser(
         launchCandidateUri: uri,
         allowedLocalFileUri: uri,
         uriLauncher: launcher,
@@ -71,6 +86,8 @@ Future<SessionArtifactPreviewPresentationResult> showSessionArtifactPreview(
   } on Object {
     // Never hand the original, unsandboxed file to a browser on prep failure.
     return const SessionArtifactPreviewPresentationResult.unsupported();
+  } finally {
+    releaseSource();
   }
 
   return const SessionArtifactPreviewPresentationResult.unsupported();
@@ -83,15 +100,26 @@ openArtifactPreviewUriInBrowser(
   Uri uri, {
   required SessionArtifactUriLauncher uriLauncher,
 }) async {
-  final launchResult = await uriLauncher.launchUri(uri);
-  return launchResult.launched
-      ? SessionArtifactPreviewPresentationResult.externalOpenFallback(uri)
-      : SessionArtifactPreviewPresentationResult.externalOpenFailed(
-          uri,
-          error:
-              launchResult.errorMessage ??
-              'No launch result from external URI launcher.',
-        );
+  final access = ManagedFileAccess.shared;
+  final release = uri.scheme == 'file'
+      ? access.acquire(uri.toFilePath())
+      : null;
+  try {
+    final launchResult = await uriLauncher.launchUri(uri);
+    if (launchResult.launched && uri.scheme == 'file') {
+      access.retainForSession(uri.toFilePath());
+    }
+    return launchResult.launched
+        ? SessionArtifactPreviewPresentationResult.externalOpenFallback(uri)
+        : SessionArtifactPreviewPresentationResult.externalOpenFailed(
+            uri,
+            error:
+                launchResult.errorMessage ??
+                'No launch result from external URI launcher.',
+          );
+  } finally {
+    release?.call();
+  }
 }
 
 /// Opens the prepared copy in a desktop browser after validating the launch
@@ -204,10 +232,15 @@ Future<String> prepareSessionArtifactPreviewFilePath({
       buildSessionArtifactPreviewFileName(artifact: artifact),
     ),
   );
-  await previewFile.writeAsString(
-    prepareInteractiveHtmlDocument(sourceHtml),
-    flush: true,
-  );
+  if (!ManagedFileAccess.shared.inUse(previewFile.path)) {
+    await ManagedFileAccess.shared.remove(
+      previewFile.path,
+      () => previewFile.writeAsString(
+        prepareInteractiveHtmlDocument(sourceHtml),
+        flush: true,
+      ),
+    );
+  }
   return previewFile.path;
 }
 
@@ -292,10 +325,12 @@ Future<void> cleanupSessionArtifactPreviewTempStorage({
   final cutoff = (now ?? DateTime.now()).subtract(retention);
   final previewEntries = effectivePreviewRoot.listSync(followLinks: false);
   for (final entry in previewEntries) {
-    _deleteIfStaleSessionArtifactPreviewTempEntry(
-      entry: entry,
-      cutoff: cutoff,
-    );
+    if (!ManagedFileAccess.shared.inUseTree(entry.path)) {
+      _deleteIfStaleSessionArtifactPreviewTempEntry(
+        entry: entry,
+        cutoff: cutoff,
+      );
+    }
   }
 }
 

@@ -5,6 +5,8 @@ import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profi
 import 'package:cosyncing_client/src/features/connection/data/broker_http_transport.dart';
 import 'package:cosyncing_client/src/features/connection/model/broker_auth_probe.dart';
 import 'package:cosyncing_client/src/features/connection/model/broker_gate_state.dart';
+import 'package:cosyncing_client/src/features/connection/model/broker_route_context.dart';
+import 'package:cosyncing_client/src/features/connection/provider/broker_route_providers.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/platform/clock/app_clock.dart';
 import 'package:flutter/foundation.dart';
@@ -102,15 +104,44 @@ class BrokerGateController extends AsyncNotifier<BrokerGateState> {
       }
     }
 
-    final result = await ref
-        .read(brokerAuthProbeProvider)
-        .probe(
-          baseUrl: profile.baseUri,
-          credential: credential,
-          credentialKind: credentialKey == null
-              ? BrokerCredentialKind.sharedToken
-              : brokerCredentialKindForKey(credentialKey),
+    var probe = ref.read(brokerAuthProbeProvider);
+    var origin = profile.baseUri;
+    if (probe is RealBrokerAuthProbe && profile.incarnationId != null) {
+      try {
+        final route = await ref
+            .read(brokerRouteCoordinatorProvider)
+            .resolve(profile, alternates: true);
+        origin = route.context.origin;
+        probe = RealBrokerAuthProbe.forRoute(route);
+      } on Object catch (error) {
+        final result =
+            error is BrokerRouteException &&
+                error.code == 'AUTHORIZATION_REVOKED'
+            ? BrokerGateState.unauthorized(
+                credentialIssue: credential == null
+                    ? BrokerGateCredentialIssue.missing
+                    : BrokerGateCredentialIssue.rejected,
+                detail: error.toString(),
+                brokerUrl: origin,
+              )
+            : BrokerGateState.unreachable(
+                detail: error.toString(),
+                brokerUrl: origin,
+              );
+        return result.bindProfile(
+          id: profile.id,
+          displayName: profile.displayName,
+          baseUri: profile.baseUri,
         );
+      }
+    }
+    final result = await probe.probe(
+      baseUrl: origin,
+      credential: credential,
+      credentialKind: credentialKey == null
+          ? BrokerCredentialKind.sharedToken
+          : brokerCredentialKindForKey(credentialKey),
+    );
     return result.bindProfile(
       id: profile.id,
       displayName: profile.displayName,

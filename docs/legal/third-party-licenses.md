@@ -12,7 +12,7 @@ checksums. Bun is an external requirement installed directly from upstream or
 reused on the host; no runtime archive or embedded-runtime broker is distributed
 in that release. Its notices therefore omit Bun's licence section.
 
-The optional compiled-notice generator retains the exact pinned Bun 1.3.14
+The optional compiled-notice generator retains the exact pinned Bun 1.4.3
 licence for ephemeral native tests and any future approved native distribution.
 It does not make that blocked distribution eligible for publication.
 

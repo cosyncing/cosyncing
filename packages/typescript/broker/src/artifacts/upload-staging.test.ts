@@ -114,6 +114,24 @@ describe('a staged reference claimed by a prompt that has not committed', () => 
     staging.rollbackPreparedPromptFiles('codex', 'claims', first);
     const retry = claim('second');
     expect(retry.files.map((file) => readFileSync(file.brokerPath!, 'utf8'))).toEqual(['abc']);
+    // A process stop loses the in-memory active set, not the durable claim.
+    // Expiry and explicit cleanup cannot remove an uncertain prompt's bytes.
+    const home = join(root, 'claims');
+    expireOnlyRecord(home);
+    age(retry.files[0]!.brokerPath!, AGED);
+    const restarted = new UploadStaging({ home });
+    expect(uploadCode(() => restarted.status('codex', 'claims', upload.uploadId, identity))).toBe('UPLOAD_EXPIRED');
+    expect(restarted.sweepExpired(Number.MAX_SAFE_INTEGER)).toBe(0);
+    expect(restarted.sweepInboxes().removed).toBe(0);
+    const inventory = [];
+    for await (const object of restarted.storageObjects(() => [])) inventory.push(object);
+    const held = inventory.find((object) => object.uploadId === upload.uploadId)!;
+    expect(held).toMatchObject({ eligible: false, reason: 'IN_USE' });
+    expect(restarted.storageRemoveBatch([held], () => [])[0]!.outcome).toBe('IN_USE');
+    expect(readFileSync(retry.files[0]!.brokerPath!, 'utf8')).toBe('abc');
+    restarted.rollbackPreparedPromptFiles('codex', 'claims', retry);
+    expect(restarted.sweepExpired(Number.MAX_SAFE_INTEGER)).toBe(1);
+    expect(existsSync(retry.files[0]!.brokerPath!)).toBe(false);
   });
 });
 
@@ -141,8 +159,15 @@ describe('the inbox sweep is bounded', () => {
     age(delivered, AGED);
     const bulk = join(home, 'uploads', 'bulk-tool', 'bulk-session');
     mkdirSync(bulk, { recursive: true });
-    // The cap counts `.json` names before reading them; an unreadable record protects nothing.
-    for (let index = 0; index <= INBOX_PROTECTED_RECORD_CAP; index += 1) writeFileSync(join(bulk, `bulk-${index}.json`), '{}');
+    // Valid expired records exercise the cap itself. Unreadable records now
+    // independently make protection incomplete and also abort collection.
+    for (let index = 0; index <= INBOX_PROTECTED_RECORD_CAP; index += 1) {
+      writeFileSync(join(bulk, `bulk-${index}.json`), JSON.stringify({
+        uploadId:`fixture-${index}`,identity,tool:'pi',sessionId:'cap',name:'aged.txt',
+        mimeType:'text/plain',offset:0,expectedSize:0,createdAt:0,updatedAt:0,
+        expiresAt:0,dataPath:delivered,state:'ready',
+      }));
+    }
 
     const aborted = staging.sweepInboxes();
     expect([aborted.aborted, aborted.removed, existsSync(delivered)]).toEqual([true, 0, true]);

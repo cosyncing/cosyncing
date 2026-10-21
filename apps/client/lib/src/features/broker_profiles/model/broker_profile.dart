@@ -14,6 +14,7 @@ class BrokerProfile {
     this.updatedAt,
     this.lastUsedAt,
     this.credentialKey,
+    this.sourceIdentity,
   });
 
   /// Unique identifier for this profile.
@@ -49,6 +50,10 @@ class BrokerProfile {
   /// Key into secure storage for the broker token, if any.
   final String? credentialKey;
 
+  /// Verified logical server and principal binding, independent of its route.
+  /// Null retains the legacy endpoint boundary until migration completes.
+  final String? sourceIdentity;
+
   /// Returns a copy with optional overrides.
   ///
   /// Set [clearCredentialKey] to remove the secure-storage reference. Passing
@@ -64,6 +69,7 @@ class BrokerProfile {
     DateTime? lastUsedAt,
     String? credentialKey,
     bool clearCredentialKey = false,
+    String? sourceIdentity,
   }) {
     return BrokerProfile(
       id: id ?? this.id,
@@ -76,6 +82,7 @@ class BrokerProfile {
       credentialKey: clearCredentialKey
           ? null
           : credentialKey ?? this.credentialKey,
+      sourceIdentity: sourceIdentity ?? this.sourceIdentity,
     );
   }
 

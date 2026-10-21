@@ -61,14 +61,13 @@ class _MessageRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final artifactDescriptor = SessionArtifactDescriptor.fromMessage(message);
     final artifactAction =
-        artifactDescriptor != null && artifactDescriptor.isDownloadable
+        artifactDescriptor != null &&
+            (artifactDescriptor.isDownloadable || artifactDescriptor.isRemoved)
         ? _TranscriptArtifactDownloadAction(
             descriptor: artifactDescriptor,
             actionState: artifactActionState,
             hasActiveBrokerClient: hasActiveBrokerClient,
-            onDownload: () => controller.downloadArtifact(
-              artifactDescriptor,
-            ),
+            onDownload: () => controller.downloadArtifact(artifactDescriptor),
           )
         : null;
     final requestId = onExtractRequestId(message);
@@ -203,6 +202,12 @@ class _TranscriptArtifactDownloadAction extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final l10n = AppLocalizations.of(context);
+    if (descriptor.isRemoved) {
+      return Text(
+        l10n.fileRemovedFromServer,
+        style: Theme.of(context).textTheme.bodySmall,
+      );
+    }
     final theme = Theme.of(context);
     final tokens = context.tokens;
     final isBusy = _artifactActionIsBusy(actionState.phase);
@@ -255,25 +260,21 @@ class _TranscriptArtifactDownloadAction extends ConsumerWidget {
           ),
           if (stateLabel.isNotEmpty) ...[
             const SizedBox(height: 4),
-            Text(
-              stateLabel,
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: actionState.phase == SessionArtifactActionPhase.error
-                    ? tokens.statusError
-                    : tokens.textSecondary,
+            ContextualDetails(
+              label: stateLabel,
+              detail: actionState.phase == SessionArtifactActionPhase.error
+                  ? actionState.message
+                  : null,
+              child: Text(
+                stateLabel,
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: actionState.phase == SessionArtifactActionPhase.error
+                      ? tokens.statusError
+                      : tokens.textSecondary,
+                ),
               ),
             ),
           ],
-          if (actionState.phase == SessionArtifactActionPhase.error &&
-              actionState.message.trim().isNotEmpty)
-            Material(
-              type: MaterialType.transparency,
-              child: ExpansionTile(
-                tilePadding: EdgeInsets.zero,
-                title: Text(l10n.technicalDetails),
-                children: [Text(actionState.message)],
-              ),
-            ),
         ],
       ),
     );
@@ -433,14 +434,10 @@ class _MessageContextRegionState extends ConsumerState<_MessageContextRegion> {
   }
 
   Future<void> _copyText(BuildContext context) async {
-    await Clipboard.setData(
-      ClipboardData(text: _messageCopyText(message)),
-    );
+    await Clipboard.setData(ClipboardData(text: _messageCopyText(message)));
     if (context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(AppLocalizations.of(context).messageCopied),
-        ),
+        SnackBar(content: Text(AppLocalizations.of(context).messageCopied)),
       );
     }
   }
@@ -596,9 +593,7 @@ class _MessageDetailsDialog extends StatelessWidget {
             if (duration != null)
               _DialogMetadata(
                 label: l10n.duration,
-                value: l10n.millisecondsCount(
-                  duration.toStringAsFixed(0),
-                ),
+                value: l10n.millisecondsCount(duration.toStringAsFixed(0)),
               ),
             if (message.id case final id?)
               _DialogMetadata(label: l10n.messageId, value: id),
@@ -636,10 +631,11 @@ String _terminalSummaryFromMessage(
   AgentMessage message,
 ) {
   final command = _firstMessageValue(message, const ['command', 'cmd']);
-  final exitCode = _firstMessageValue(
-    message,
-    const ['exitCode', 'code', 'status'],
-  );
+  final exitCode = _firstMessageValue(message, const [
+    'exitCode',
+    'code',
+    'status',
+  ]);
   final source = _firstMessageValue(message, const ['source', 'agent', 'id']);
   final summaryParts = <String>[
     if (command.isNotEmpty) command,
@@ -655,10 +651,12 @@ String _terminalSummaryFromMessage(
 }
 
 String _terminalOutputText(AgentMessage message) {
-  final output = _firstMessageValue(
-    message,
-    const ['output', 'stdout', 'stderr', 'text'],
-  );
+  final output = _firstMessageValue(message, const [
+    'output',
+    'stdout',
+    'stderr',
+    'text',
+  ]);
   if (output.isNotEmpty) {
     return output;
   }
@@ -666,10 +664,7 @@ String _terminalOutputText(AgentMessage message) {
   return _stringifyMessageValue(message.raw['body']);
 }
 
-String _firstMessageValue(
-  AgentMessage message,
-  List<String> keys,
-) {
+String _firstMessageValue(AgentMessage message, List<String> keys) {
   final value = _firstMessageValueRaw(message: message, keys: keys);
   return _stringifyMessageValue(value);
 }
@@ -702,12 +697,7 @@ String _stringifyMessageValue(Object? value) {
   return value.toString();
 }
 
-enum _RequestActionOutcomeState {
-  pending,
-  submitting,
-  sent,
-  failed,
-}
+enum _RequestActionOutcomeState { pending, submitting, sent, failed }
 
 String _requestOutcomeLabel(
   AppLocalizations l10n,
@@ -774,10 +764,7 @@ List<_PermissionApprovalOption> _permissionApprovalOptions(
 }
 
 class _RequestOutcomeBadge extends StatelessWidget {
-  const _RequestOutcomeBadge({
-    required this.state,
-    required this.label,
-  });
+  const _RequestOutcomeBadge({required this.state, required this.label});
 
   final _RequestActionOutcomeState state;
   final String label;
@@ -842,9 +829,7 @@ ButtonStyle _transcriptActionButtonStyle(BuildContext context) {
     minimumSize: WidgetStatePropertyAll(
       Size(0, _transcriptActionTargetExtent(context)),
     ),
-    padding: const WidgetStatePropertyAll(
-      EdgeInsets.symmetric(horizontal: 8),
-    ),
+    padding: const WidgetStatePropertyAll(EdgeInsets.symmetric(horizontal: 8)),
     tapTargetSize: MaterialTapTargetSize.shrinkWrap,
     visualDensity: VisualDensity.standard,
   );
@@ -1739,9 +1724,7 @@ class _QuestionRequestActionsState extends State<_QuestionRequestActions>
     final l10n = AppLocalizations.of(context);
     final tokens = context.tokens;
     return InputDecorator(
-      key: ValueKey(
-        'session-detail-question-typed-${widget.requestId}-$index',
-      ),
+      key: ValueKey('session-detail-question-typed-${widget.requestId}-$index'),
       decoration: InputDecoration(
         border: InputBorder.none,
         filled: true,
@@ -1751,9 +1734,9 @@ class _QuestionRequestActionsState extends State<_QuestionRequestActions>
       ),
       child: SelectableText(
         text,
-        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-          color: tokens.textPrimary,
-        ),
+        style: Theme.of(
+          context,
+        ).textTheme.bodyMedium?.copyWith(color: tokens.textPrimary),
       ),
     );
   }

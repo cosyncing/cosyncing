@@ -107,7 +107,7 @@ SQLite 快照，并在 7.4.23 及更高版本上通过 Broker 托管的专用回
 
 ## 前置要求
 
-服务器使用 [Bun](https://bun.sh) 1.3.14 或更高版本运行。一键安装脚本会按需安装 Bun；
+服务器使用 [Bun](https://bun.sh) 1.4.3 或更高版本运行。一键安装脚本会按需安装 Bun；
 无需预装 Node.js/npm。Broker 默认只允许本机访问。跨设备使用需要由操作者单独
 配置代理、隧道、VPN、Mesh 网络或
 其他[连接方式](docs/connectivity/README.md)（英文）。
@@ -230,7 +230,7 @@ Broker 由你运行，跑在你自己的机器和账号下。Broker 状态存储
 
 ## 开发
 
-仓库在 `.fvmrc` 固定 Flutter 3.44.3，在 `package.json` 固定 Bun 1.3.14。命令一律在仓库根
+仓库在 `.fvmrc` 固定 Flutter 3.44.3，在 `package.json` 固定 Bun 1.4.3。命令一律在仓库根
 目录执行。
 
 ```bash

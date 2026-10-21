@@ -17,6 +17,18 @@ library;
 /// Dynamic path segments use `{id}` placeholders, matching the broker's
 /// `BROKER_ROUTES` registry exactly.
 const List<String> brokerRoutes = <String>[
+  '/api/connection/identity-proof',
+  '/api/connection/check',
+  '/api/connection/check/ws',
+  '/api/connection/configuration',
+  '/api/storage',
+  '/api/storage/scans',
+  '/api/storage/scans/{id}',
+  '/api/storage/items',
+  '/api/storage/cleanup-plans',
+  '/api/storage/cleanup-jobs',
+  '/api/storage/cleanup-jobs/{id}',
+  '/api/storage/cleanup-jobs/{id}/cancel',
   '/api/agents',
   '/api/agents/{id}/models',
   '/api/agents/{id}/modes',
@@ -124,6 +136,8 @@ const List<String> brokerIntegrationRoutes = <String>[
 /// malformed (`ACK_INVALID`) from unknown-scope (`ACK_UNKNOWN_TARGET`)
 /// receipts.
 const List<String> brokerErrorCodes = <String>[
+  'NO_INVENTORY',
+  'STORAGE_UNAVAILABLE',
   'AUTH_REQUIRED',
   'BAD_PARAM',
   'ACK_UNKNOWN_TARGET',

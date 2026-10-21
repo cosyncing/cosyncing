@@ -6531,7 +6531,7 @@
     }
   },
   "storageTitle": "Storage",
-  "storageSubtitle": "Manage local session cache",
+  "storageSubtitle": "Manage cache, downloads and artifacts",
   "storageCacheTitle": "Session cache",
   "storageDataTitle": "App data",
   "storageDataDescription": "Drafts, queued messages, connections and preferences are kept when you clear the cache.",
@@ -6653,7 +6653,13 @@
   "updatesCurrent": "Up to date",
   "updatesUnknown": "Version unknown",
   "updatesOffline": "Offline · Last observed {version}",
-  "@updatesOffline": {"placeholders": {"version": {"type": "String"}}},
+  "@updatesOffline": {
+    "placeholders": {
+      "version": {
+        "type": "String"
+      }
+    }
+  },
   "updatesNoServers": "No saved servers",
   "updatesLegacy": "This server needs a one-time manual update to enable in-app updates.",
   "updatesSetup": "Use the signed all-in-one installer once to enable internal updates for this app. Standalone apps use Download.",
@@ -6683,22 +6689,85 @@
   "updatesCheckFailed": "Could not check for updates",
   "updatesReviewChanged": "The update plan changed or is no longer eligible. Check and review it again.",
   "updatesLastChecked": "Last checked {time}",
-  "@updatesLastChecked": {"placeholders": {"time": {"type": "String"}}},
+  "@updatesLastChecked": {
+    "placeholders": {
+      "time": {
+        "type": "String"
+      }
+    }
+  },
   "updatesServerManual": "Update this server manually; in-app installation is unavailable.",
   "updatesManual": "This release uses Download on this platform.",
   "updatesRestartToFinish": "Restart this app to finish the installed update.",
   "updatesAppVersions": "Cosyncing {from} → {to}",
-  "@updatesAppVersions": {"placeholders": {"from": {"type": "String"}, "to": {"type": "String"}}},
+  "@updatesAppVersions": {
+    "placeholders": {
+      "from": {
+        "type": "String"
+      },
+      "to": {
+        "type": "String"
+      }
+    }
+  },
   "updatesServerDetails": "{address}\n{status}",
-  "@updatesServerDetails": {"placeholders": {"address": {"type": "String"}, "status": {"type": "String"}}},
+  "@updatesServerDetails": {
+    "placeholders": {
+      "address": {
+        "type": "String"
+      },
+      "status": {
+        "type": "String"
+      }
+    }
+  },
   "updatesProgressVersions": "{from} → {to}\n{phase}",
-  "@updatesProgressVersions": {"placeholders": {"from": {"type": "String"}, "to": {"type": "String"}, "phase": {"type": "String"}}},
+  "@updatesProgressVersions": {
+    "placeholders": {
+      "from": {
+        "type": "String"
+      },
+      "to": {
+        "type": "String"
+      },
+      "phase": {
+        "type": "String"
+      }
+    }
+  },
   "updatesVersionChange": "{from} → {to}",
-  "@updatesVersionChange": {"placeholders": {"from": {"type": "String"}, "to": {"type": "String"}}},
+  "@updatesVersionChange": {
+    "placeholders": {
+      "from": {
+        "type": "String"
+      },
+      "to": {
+        "type": "String"
+      }
+    }
+  },
   "sessionComposerSendShortcut": "Send prompt ({shortcut})",
-  "@sessionComposerSendShortcut": {"placeholders": {"shortcut": {"type": "String"}}},
+  "@sessionComposerSendShortcut": {
+    "placeholders": {
+      "shortcut": {
+        "type": "String"
+      }
+    }
+  },
   "usageRankingMetrics": "{tokens} tokens  {cost} · {share}",
-  "@usageRankingMetrics": {"placeholders": {"tokens": {"type": "String"}, "cost": {"type": "String"}, "share": {"type": "String"}}},
+  "@usageRankingMetrics": {
+    "placeholders": {
+      "tokens": {
+        "type": "String"
+      },
+      "cost": {
+        "type": "String"
+      },
+      "share": {
+        "type": "String"
+      }
+    }
+  },
   "workspaceCloseSelectedTabs": "Close {count} selected tabs",
   "overviewQuotaChoose": "Choose providers",
   "overviewQuotaAll": "All quotas",
@@ -6706,9 +6775,343 @@
   "sessionQuestionRecover": "Reply to earlier question",
   "sessionQuestionRecoveryHint": "This question predates this connection. Your reply will be sent as a follow-up message to the agent.",
   "sessionQuestionHistorical": "Earlier question · live answer state unavailable",
-  "@workspaceCloseSelectedTabs": {"placeholders": {"count": {"type": "int"}}},
+  "@workspaceCloseSelectedTabs": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "workspaceActiveTab": "Active tab",
   "sessionQuestionFollowUpSent": "Follow-up reply sent",
+  "showTechnicalDetails": "Show technical details",
+  "technicalDetailsHint": "Long-press, right-click or press Shift+F10 for technical details.",
+  "copyDetails": "Copy details",
+  "technicalDetailsHelp": "For diagnostic items, long-press, right-click or press Shift+F10 to open technical details.",
+  "storageDevice": "This device",
+  "storageServer": "Server",
+  "storageDeviceScope": "All saved connections on this device",
+  "storageFiles": "Files and artifacts",
+  "storageTemporary": "Previews and temporary files",
+  "storageFilesHelp": "Only app-owned copies are managed here. Save as exports remain outside cleanup. The original may no longer be available.",
+  "storageTemporaryHelp": "Eligible after 24 hours; open previews and transfers are protected.",
+  "storageDatabaseEstimate": "Logical database estimates; clearing rows may not reduce the database file immediately.",
+  "storageMemory": "Memory copies · Reloading clears these copies; this does not free disk space.",
+  "storageUnavailable": "Unavailable",
+  "storagePartial": "Partial measurement",
+  "storageEmpty": "No managed copies",
+  "storageLoading": "Measuring storage…",
+  "storageMeasuredAt": "Measured {time}",
+  "@storageMeasuredAt": {
+    "placeholders": {
+      "time": {
+        "type": "String"
+      }
+    }
+  },
+  "storageUsage": "{bytes} · {count, plural, one {1 file} other {{count} files}} · {removable} removable",
+  "@storageUsage": {
+    "placeholders": {
+      "bytes": {
+        "type": "String"
+      },
+      "count": {
+        "type": "int"
+      },
+      "removable": {
+        "type": "String"
+      }
+    }
+  },
+  "storageReview": "Review files",
+  "storageAll": "All ages",
+  "storageOlder7": "Older than 7 days",
+  "storageOlder30": "Older than 30 days",
+  "storageSearch": "Search names",
+  "storageNewest": "Newest first",
+  "storageLargest": "Largest first",
+  "storageSelectAll": "Select all eligible matches, including later pages",
+  "storageSelection": "{count} selected",
+  "@storageSelection": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "storageNext": "Next page",
+  "storagePrevious": "Previous page",
+  "storageProtected": "In use or protected",
+  "storageConfirm": "Remove {count} app-owned copies from this device? Estimated: {bytes}. The original may no longer exist. Drafts, queued messages and exports are preserved.",
+  "@storageConfirm": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      },
+      "bytes": {
+        "type": "String"
+      }
+    }
+  },
+  "storageRemoving": "Removing selected copies…",
+  "storageCancelRemaining": "Cancel remaining",
+  "storageResult": "Removed {removed} · Already missing {missing} · Skipped {skipped} · Failed {failed} · Freed {bytes}",
+  "@storageResult": {
+    "placeholders": {
+      "removed": {
+        "type": "int"
+      },
+      "missing": {
+        "type": "int"
+      },
+      "skipped": {
+        "type": "int"
+      },
+      "failed": {
+        "type": "int"
+      },
+      "bytes": {
+        "type": "String"
+      }
+    }
+  },
+  "storageRetryFailed": "Review failed items again",
+  "storageFailed": "Storage could not be measured or changed. Refresh and try again.",
+  "storageOwnerRequired": "Owner access required for server storage",
+  "storageUpdateServer": "Update server to manage its storage",
+  "storageServerScope": "Only {server}; accepted cleanup continues if you leave this page.",
+  "@storageServerScope": {
+    "placeholders": {
+      "server": {
+        "type": "String"
+      }
+    }
+  },
+  "storageStoredFiles": "Delete stored files",
+  "storageServerConfirm": "Remove {count} files from {server}, affecting {sessions} sessions? Estimated reclaimable space: {bytes}. Other devices will lose access. An original may no longer exist. Copies already saved on devices and external exports remain.",
+  "@storageServerConfirm": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      },
+      "server": {
+        "type": "String"
+      },
+      "sessions": {
+        "type": "int"
+      },
+      "bytes": {
+        "type": "String"
+      }
+    }
+  },
+  "storageCheckingResult": "Checking cleanup result…",
+  "storageStale": "Last measurement is stale. Refresh before deleting.",
+  "fileRemovedFromServer": "File removed from server",
+  "routesTitle": "Addresses",
+  "routesManage": "Manage addresses",
+  "routesAdd": "Add address",
+  "routesLabel": "Address label",
+  "routesOrigin": "Server address",
+  "routesCanonical": "Canonical address: {address}",
+  "@routesCanonical": {
+    "placeholders": {
+      "address": {
+        "type": "String"
+      }
+    }
+  },
+  "routesInvalid": "Enter an HTTP or HTTPS host and port without credentials, a path, query, or fragment.",
+  "routesMode": "Connection mode",
+  "routesAutomatic": "Automatic",
+  "routesFixed": "Fixed address",
+  "routesAutomaticHelp": "Automatic uses only enabled, verified addresses, each with its saved Direct or proxy setting.",
+  "routesTest": "Test connection",
+  "routesTestAll": "Test all",
+  "routesNotTested": "Not tested",
+  "routesTesting": "Testing…",
+  "routesAvailable": "Available",
+  "routesInUse": "In use",
+  "routesDisabled": "Disabled",
+  "routesNotVerified": "Not verified",
+  "routesUnavailable": "Unavailable on this device",
+  "routesNoAddress": "No enabled address",
+  "routesFailed": "Could not verify this connection",
+  "routesIdentityChanged": "Server identity changed",
+  "routesSignIn": "Needs sign-in",
+  "routesWebSocketFailed": "WebSocket unavailable",
+  "routesLatency": "{milliseconds} ms",
+  "@routesLatency": {
+    "placeholders": {
+      "milliseconds": {
+        "type": "String"
+      }
+    }
+  },
+  "routesChecked": "Checked at {time}",
+  "@routesChecked": {
+    "placeholders": {
+      "time": {
+        "type": "String"
+      }
+    }
+  },
+  "routesStale": "Previous measurement",
+  "routesVerifyTitle": "Verify this server",
+  "routesVerifyBody": "Approve this destination only if it is your server. Compare this identity with the server or a verified pairing. HTTP connections retain their existing transport restrictions.",
+  "routesApprove": "Approve destination",
+  "routesVerifyOriginal": "Verify the original address before reusing its credentials at another address.",
+  "routesSaveUnverified": "Save as not verified",
+  "routesKeepPrevious": "The previous address remains saved. This address cannot receive saved credentials until verified.",
+  "routesRemove": "Remove address",
+  "routesDisable": "Disable address",
+  "routesEnable": "Enable address",
+  "routesReplacement": "The next connection will use {address}. Transfers may pause; partial files and drafts are kept.",
+  "@routesReplacement": {
+    "placeholders": {
+      "address": {
+        "type": "String"
+      }
+    }
+  },
+  "routesDisconnect": "This will disconnect the server. Its drafts, files, and credentials remain saved.",
+  "routesAdvanced": "Advanced connection settings",
+  "proxyDirect": "Direct",
+  "proxyLabel": "Proxy",
+  "proxyDeviceOnly": "Applies on this device",
+  "proxyManage": "Manage proxy profiles",
+  "proxyAdd": "Add proxy profile",
+  "proxyName": "Proxy name",
+  "proxyProtocol": "Protocol",
+  "proxyHost": "Host",
+  "proxyPort": "Port",
+  "proxyAuthentication": "Username and password",
+  "proxyUsername": "Username",
+  "proxyPassword": "Password",
+  "proxyReveal": "Show password",
+  "proxyDns": "SOCKS5 resolves destination names through the proxy. It never falls back to Direct.",
+  "proxyMissing": "Proxy setup required",
+  "proxySignIn": "Proxy sign-in required",
+  "proxyAffected": "Affected addresses",
+  "proxyRemove": "Remove proxy profile",
+  "proxyRemoveBody": "These addresses will remain blocked until you choose another proxy or explicitly select Direct.",
+  "proxyBrowser": "Custom proxies are unavailable in browsers. Use a browser-managed path or choose another approved address.",
+  "routesConfigureServer": "Advertised addresses and browser origins",
+  "routesAdvertised": "Advertised server origins (one per line)",
+  "routesTrustedBrowsers": "Approved browser client origins (one per line)",
+  "routesOwnerOnly": "Only the server owner can change these lists. Advertising an address does not create a network tunnel or approve a browser origin.",
+  "routesMergeTitle": "Merge saved servers",
+  "routesMergeReview": "Review duplicate server",
+  "routesMergeKeep": "Keep this saved server",
+  "routesMergeSameAccess": "Same verified server and access",
+  "routesAccessOwner": "Owner access",
+  "routesAccessPeer": "Paired device access",
+  "routesMergeImpact": "Drafts: {drafts} · Pending sends: {sends} · Transfers: {transfers}",
+  "routesMergeConflict": "Choose connection for {origin}",
+  "routesMergeProxyHelp": "The other connection stays saved and disabled. A proxy requirement is never replaced with Direct.",
+  "routesMergeHelp": "Open tabs and addresses are combined. Different drafts remain available in Recovered drafts. Pending sends stop for review; remembered driving access is not transferred.",
+  "routesMerge": "Merge",
+  "routesRecoveredTitle": "Recovered drafts",
+  "routesRecoveredFrom": "Draft from {name}",
+  "routesRecoveredCopied": "Copied draft",
+  "routesMergeCleanupPending": "Local secret cleanup will resume when you reopen address settings.",
+  "@routesMergeImpact": {
+    "placeholders": {
+      "drafts": {
+        "type": "String"
+      },
+      "sends": {
+        "type": "String"
+      },
+      "transfers": {
+        "type": "String"
+      }
+    }
+  },
+  "@routesMergeConflict": {
+    "placeholders": {
+      "origin": {
+        "type": "String"
+      }
+    }
+  },
+  "@routesRecoveredFrom": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "storagePhysicalDatabase": "Database and WAL on disk",
+  "storagePhysicalDatabaseHelp": "Physical size, shown separately from logical estimates. Clearing cached rows may not shrink these files.",
+  "proxyBrowserPath": "Use browser-managed connection",
+  "storageUnmanaged": "Other files in the app cache",
+  "storageUnmanagedHelp": "Unregistered and active temporary files are shown for information and kept.",
+  "storageCacheConfirm": "This device: {snapshots} transcript and roster snapshots ({logicalBytes}, logical estimate), and {files} eligible temporary files ({fileBytes}). Drafts, queued sends, settings, downloads and exports are kept. Database files may not shrink immediately.",
+  "@storageCacheConfirm": {
+    "placeholders": {
+      "snapshots": {
+        "type": "int"
+      },
+      "logicalBytes": {
+        "type": "String"
+      },
+      "files": {
+        "type": "int"
+      },
+      "fileBytes": {
+        "type": "String"
+      }
+    }
+  },
+  "routesMixedContent": "This HTTPS app cannot use an HTTP address. Use an HTTPS route.",
+  "routesBrowserBlocked": "The browser could not connect. Check origin permissions, TLS, and network access.",
+  "routesProxyUnreachable": "Proxy unavailable. Check its address and network connection.",
+  "routesTLSFailed": "TLS verification failed. Check the server certificate.",
+  "routesIncompatible": "This server needs a compatible app or broker version.",
+  "routesOutcomeUnknown": "A previous action may have completed before the address changed. Check the session before repeating it.",
+  "@routesOutcomeUnknown": {
+    "description": "Persistent notice after a route change leaves an attempted action without a confirmed result."
+  },
+  "proxyProtocolHttp": "HTTP",
+  "proxyProtocolSocks5": "SOCKS5",
+  "storageSnapshotUsage": "{bytes} · {count, plural, one {1 snapshot} other {{count} snapshots}} · {removable} removable",
+  "storageSummary": "{bytes} managed · {removable} removable",
+  "storagePartialSummary": "Measured subtotal: {bytes} · Removable: {removable}",
+  "storageDeviceSummaryHelp": "Database sizes are logical estimates. Memory copies and unmanaged files are listed separately.",
+  "@storageSnapshotUsage": {
+    "placeholders": {
+      "bytes": {
+        "type": "String"
+      },
+      "count": {
+        "type": "int"
+      },
+      "removable": {
+        "type": "String"
+      }
+    }
+  },
+  "@storageSummary": {
+    "placeholders": {
+      "bytes": {
+        "type": "String"
+      },
+      "removable": {
+        "type": "String"
+      }
+    }
+  },
+  "@storagePartialSummary": {
+    "placeholders": {
+      "bytes": {
+        "type": "String"
+      },
+      "removable": {
+        "type": "String"
+      }
+    }
+  },
   "updatesUpdateApp": "Update app",
   "updatesUpdateServer": "Update server",
   "updatesUpdateServers": "{count, plural, =1{Update 1 server} other{Update {count} servers}}",

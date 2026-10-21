@@ -3,6 +3,7 @@
 #
 
 list(APPEND FLUTTER_PLUGIN_LIST
+  connectivity_plus
   desktop_drop
   desktop_webview_window
   file_selector_windows

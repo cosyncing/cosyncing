@@ -117,7 +117,7 @@ sync와 파일 입력은 지원하지 않습니다. [Grok Build](docs/supported_
 
 ## 사전 요구 사항
 
-서버는 [Bun](https://bun.sh) 1.3.14 이상으로 실행됩니다. 한 줄 설치 스크립트가 필요할 때 Bun을
+서버는 [Bun](https://bun.sh) 1.4.3 이상으로 실행됩니다. 한 줄 설치 스크립트가 필요할 때 Bun을
 설치합니다. Node.js/npm은 필요하지 않습니다.
 Broker는 기본적으로 로컬 전용입니다. 여러 기기에서 쓰려면 프록시, 터널, VPN, 메시
 네트워크 등 [운영자가 관리하는 연결 방법](docs/connectivity/README.md)이 필요합니다. 간단한 사설
@@ -250,7 +250,7 @@ Broker는 여러분의 컴퓨터에서, 여러분의 계정 권한으로 실행�
 
 ## 개발
 
-저장소는 `.fvmrc`에 Flutter 3.44.3을, `package.json`에 Bun 1.3.14을 고정합니다. 명령은 저장소
+저장소는 `.fvmrc`에 Flutter 3.44.3을, `package.json`에 Bun 1.4.3을 고정합니다. 명령은 저장소
 루트에서 실행하세요.
 
 ```bash

@@ -19,16 +19,22 @@ final sessionDetailInitialHistoryTimeoutProvider = Provider<Duration>(
 );
 
 extension _SessionDetailBootstrap on SessionDetailController {
-  Future<void> _attachOnce(SessionDetailAttachIntent intent) {
+  Future<void> _attachOnce(
+    SessionDetailAttachIntent intent, {
+    SessionRouteContinuation? routeContinuation,
+  }) {
     final cancellation = _TransportAttachCancellation();
     _transportAttachCancellations.add(cancellation);
-    final body = _attachOnceBody(intent);
+    final body = _attachOnceBody(intent, routeContinuation: routeContinuation);
     return cancellation.settle(body).whenComplete(() {
       _transportAttachCancellations.remove(cancellation);
     });
   }
 
-  Future<void> _attachOnceBody(SessionDetailAttachIntent intent) async {
+  Future<void> _attachOnceBody(
+    SessionDetailAttachIntent intent, {
+    SessionRouteContinuation? routeContinuation,
+  }) async {
     final attempt = ++_bootstrapAttempt;
     _abortBootstrapActionRefresh();
     final actionAbort = Completer<void>();
@@ -223,7 +229,14 @@ extension _SessionDetailBootstrap on SessionDetailController {
       // socket is full-authority on some adapters. So the unreadable-mode check
       // applies here too — it is a fact about the session, not about what this
       // attach wanted.
-      var attachRequest = intent == SessionDetailAttachIntent.backgroundObserve
+      var attachRequest = routeContinuation != null
+          ? _InteractiveAttachRequest(
+              mode: routeContinuation.mode,
+              reason: routeContinuation.reason,
+              readOnly:
+                  routeContinuation.readOnly || _rosterAttachModeUnreadable,
+            )
+          : intent == SessionDetailAttachIntent.backgroundObserve
           ? _InteractiveAttachRequest(readOnly: _rosterAttachModeUnreadable)
           : await _interactiveAttachRequest(source);
       if (!_isCurrentBootstrapAttempt(attempt) ||
@@ -232,7 +245,8 @@ extension _SessionDetailBootstrap on SessionDetailController {
         return;
       }
 
-      if (intent == SessionDetailAttachIntent.interactive &&
+      if (routeContinuation == null &&
+          intent == SessionDetailAttachIntent.interactive &&
           attachRequest.mode == null &&
           !attachRequest.readOnly &&
           !ref
@@ -295,7 +309,7 @@ extension _SessionDetailBootstrap on SessionDetailController {
         return;
       }
 
-      if (attachRequest.mode != null) {
+      if (attachRequest.mode != null && routeContinuation == null) {
         // Restoring Drive is the same ownership boundary as an explicit Take
         // over, and an explicit live attach also changes mutation authority.
         // Never let a retryable prompt from the previous owner replay into the
@@ -331,7 +345,11 @@ extension _SessionDetailBootstrap on SessionDetailController {
       }
 
       if (attachMode != null) {
-        await connection.reattach(mode: attachMode, reason: attachReason);
+        await connection.reattach(
+          mode: attachMode,
+          reason: attachReason,
+          ownerRevision: routeContinuation?.ownerRevision,
+        );
       } else if (existingConnection != null) {
         // Reset a reused connection to the bare Observe/shared-owner attach.
         // SessionConnection deliberately preserves its mode across network

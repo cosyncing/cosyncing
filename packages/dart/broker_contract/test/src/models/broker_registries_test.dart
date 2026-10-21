@@ -4,7 +4,7 @@ import 'package:test/test.dart';
 void main() {
   group('brokerRoutes', () {
     test('has the expected route count', () {
-      expect(brokerRoutes, hasLength(74));
+      expect(brokerRoutes, hasLength(86));
     });
 
     test('contains the aggregated usage-report route', () {
@@ -60,8 +60,8 @@ void main() {
   });
 
   group('brokerErrorCodes', () {
-    test('has 107 entries', () {
-      expect(brokerErrorCodes, hasLength(107));
+    test('has 109 entries', () {
+      expect(brokerErrorCodes, hasLength(109));
       expect(brokerErrorCodes, contains('AUTH_REQUIRED'));
       expect(
         brokerErrorCodes,

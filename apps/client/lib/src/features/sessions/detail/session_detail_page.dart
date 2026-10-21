@@ -10,6 +10,7 @@ import 'package:cosyncing_client/src/app/shortcuts/app_shortcuts.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/design/components/adaptive_picker.dart';
+import 'package:cosyncing_client/src/design/components/contextual_details.dart';
 import 'package:cosyncing_client/src/design/derived_theme.dart';
 import 'package:cosyncing_client/src/design/window_size_class.dart';
 import 'package:cosyncing_client/src/errors/localized_user_facing_error.dart';
@@ -154,7 +155,8 @@ part 'session_side_panel.dart';
 /// Module G5 adds artifact descriptor-driven download/fetch affordances.
 /// Module G6 adds artifact persistence/export wiring.
 /// Module G7 adds HTML artifact preview plumbing.
-/// Module J29 adds in-page Chat/Terminal/Artifacts/Debug tabs for session work surfaces.
+/// Module J29 adds in-page Chat/Terminal/Artifacts/Debug tabs for session
+/// work surfaces.
 /// Module K11 adds read-only terminal-tab polishing (bounded latest output,
 /// show-all/show-latest toggle, and copy-visible).
 /// Module N2 adds capability-driven fork and clone session actions.
@@ -324,10 +326,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _registerSidePanel();
     });
-    _key = SessionDetailKey(
-      tool: widget.tool,
-      sessionId: widget.sessionId,
-    );
+    _key = SessionDetailKey(tool: widget.tool, sessionId: widget.sessionId);
     _awaitingRetirementHandoff =
         ref.read(sessionDetailRetirementLedgerProvider).pendingFor(_key) !=
         null;
@@ -409,9 +408,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
       return;
     }
     _initialAttachDeferred = false;
-    final controller = ref.read(
-      sessionDetailControllerProvider(_key).notifier,
-    );
+    final controller = ref.read(sessionDetailControllerProvider(_key).notifier);
     unawaited(controller.attach());
     // DR1b: an open session is resident, so this composer may be brand new
     // while the controller behind it never disconnected and will therefore
@@ -679,7 +676,8 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
         state == AppLifecycleState.detached) {
       _suspendLiveOnlyTransport();
     }
-    // Background/inactive/hidden/detached lifecycle cancels ASR (discard partial)
+    // Background/inactive/hidden/detached lifecycle cancels ASR (discard
+    // partial)
     // and releases the mic. It must not continue recording silently.
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive ||
@@ -904,10 +902,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
       if (staged == null ||
           staged.generation != generation ||
           surface.token >= staged.value.token) {
-        _stagedComposingDraftSurface = (
-          value: surface,
-          generation: generation,
-        );
+        _stagedComposingDraftSurface = (value: surface, generation: generation);
       }
       return;
     }
@@ -1011,10 +1006,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
       if (staged == null ||
           staged.generation != generation ||
           draft.at >= staged.value.at) {
-        _stagedComposingRemoteDraft = (
-          value: draft,
-          generation: generation,
-        );
+        _stagedComposingRemoteDraft = (value: draft, generation: generation);
       }
       return;
     }
@@ -1122,10 +1114,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
     // broker clears shared draft state as part of accepting the prompt.
     _draftSyncTimer?.cancel();
     _draftSyncTimer = null;
-    _pendingPromptClear = (
-      text: submittedText,
-      revision: submittedRevision,
-    );
+    _pendingPromptClear = (text: submittedText, revision: submittedRevision);
     setState(() => _isSendingPrompt = true);
     final success = await controller.sendPrompt(
       trimmedPrompt,
@@ -1347,9 +1336,8 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
 
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (context) => _TranscriptExportConfirmDialog(
-        preflight: preflight,
-      ),
+      builder: (context) =>
+          _TranscriptExportConfirmDialog(preflight: preflight),
     );
     if (!mounted || confirmed != true) {
       return;
@@ -1391,10 +1379,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
     if (!await _establishDraftDurabilityBarrier() || !mounted) return;
 
     context.go(
-      sessionDetailLocation(
-        tool: created.tool,
-        sessionId: created.id,
-      ),
+      sessionDetailLocation(tool: created.tool, sessionId: created.id),
     );
   }
 
@@ -1552,9 +1537,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
     if (line != null) {
       ref
           .read(filePaneAnchorProvider.notifier)
-          .update(
-            (anchors) => {...anchors, pane.key: line},
-          );
+          .update((anchors) => {...anchors, pane.key: line});
     }
     unawaited(
       ref.read(filePanesControllerProvider.notifier).open(_key, path).then((_) {
@@ -1707,10 +1690,14 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
   }
 
   Future<void> _loadLiveStateArchive() async {
+    final source = RosterSource.of(ref.read(activeBrokerProfileProvider));
     final archived = await ref
         .read(sessionLiveStateViewStoreProvider)
         .loadArchived(_key);
-    if (!mounted) return;
+    if (!mounted ||
+        source != RosterSource.of(ref.read(activeBrokerProfileProvider))) {
+      return;
+    }
     setState(() {
       _archivedLiveState = archived;
       _liveStateArchiveLoaded = true;
@@ -1737,9 +1724,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
     );
   }
 
-  void _scheduleArchivedLiveStateReconciliation(
-    List<_LiveStateItem> items,
-  ) {
+  void _scheduleArchivedLiveStateReconciliation(List<_LiveStateItem> items) {
     if (!_liveStateArchiveLoaded || _archivedLiveState.isEmpty) return;
     final current = {for (final item in items) item.id: item};
     final staleKeys = <String>{
@@ -1932,11 +1917,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
         _modelPreferenceApplyScheduled) {
       return;
     }
-    if (_resolvePersistedModel(
-          candidate,
-          models,
-          authoritativeCurrent,
-        ) ==
+    if (_resolvePersistedModel(candidate, models, authoritativeCurrent) ==
         null) {
       return;
     }
@@ -2022,9 +2003,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
     if (key == null) return;
     _persistedModelCandidate = model;
     final store = ref.read(sessionModelPreferenceStoreProvider);
-    unawaited(
-      store.save(key, model).catchError((Object _, StackTrace _) {}),
-    );
+    unawaited(store.save(key, model).catchError((Object _, StackTrace _) {}));
     // Per-tool fallback: lets a brand-new session (whose lineage key cannot
     // match yet) inherit the last model picked for this tool on this broker.
     unawaited(
@@ -2146,10 +2125,11 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
       final authoritative = info.title.trim();
       return authoritative.isEmpty ? null : authoritative;
     }
-    return knownSessionTitle(
-      [openTitle, _rosterTitle(), _cachedRosterTitle()],
-      sessionId: widget.sessionId,
-    );
+    return knownSessionTitle([
+      openTitle,
+      _rosterTitle(),
+      _cachedRosterTitle(),
+    ], sessionId: widget.sessionId);
   }
 
   void _ensureCurrentSessionTab(
@@ -2420,31 +2400,31 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
       // connection owns the resolver from before that credential mutation.
       // Rebind from the controller's committed outcome, after secure storage
       // and the active-profile transaction have both succeeded.
-      ..listen<BrokerCredentialsState>(
-        brokerCredentialsControllerProvider,
-        (previous, next) {
-          final committed =
-              (previous?.isBusy ?? false) &&
-              !next.isBusy &&
-              (next.notice == BrokerCredentialNotice.tokenSaved ||
-                  next.notice == BrokerCredentialNotice.tokenRemoved ||
-                  next.notice == BrokerCredentialNotice.signedOut);
-          if (!committed) return;
-          final background =
-              !_isPageForeground &&
-              (_requiresForegroundTransport || _initialAttachDeferred);
-          if (background) _initialAttachDeferred = true;
-          unawaited(
-            ref
-                .read(sessionDetailControllerProvider(_key).notifier)
-                .rebindBrokerClient(
-                  intent: background
-                      ? SessionDetailAttachIntent.backgroundObserve
-                      : null,
-                ),
-          );
-        },
-      )
+      ..listen<BrokerCredentialsState>(brokerCredentialsControllerProvider, (
+        previous,
+        next,
+      ) {
+        final committed =
+            (previous?.isBusy ?? false) &&
+            !next.isBusy &&
+            (next.notice == BrokerCredentialNotice.tokenSaved ||
+                next.notice == BrokerCredentialNotice.tokenRemoved ||
+                next.notice == BrokerCredentialNotice.signedOut);
+        if (!committed) return;
+        final background =
+            !_isPageForeground &&
+            (_requiresForegroundTransport || _initialAttachDeferred);
+        if (background) _initialAttachDeferred = true;
+        unawaited(
+          ref
+              .read(sessionDetailControllerProvider(_key).notifier)
+              .rebindBrokerClient(
+                intent: background
+                    ? SessionDetailAttachIntent.backgroundObserve
+                    : null,
+              ),
+        );
+      })
       ..listen<SessionStatus?>(
         sessionDetailControllerProvider(
           _key,
@@ -2879,12 +2859,10 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                     bottomPadding: 0,
                     child: _DraftConflictBanner(
                       conflict: state.draftConflict!,
-                      onKeepLocal: () => unawaited(
-                        controller.resolveDraftConflictKeepLocal(),
-                      ),
-                      onUseShared: () => unawaited(
-                        controller.resolveDraftConflictUseShared(),
-                      ),
+                      onKeepLocal: () =>
+                          unawaited(controller.resolveDraftConflictKeepLocal()),
+                      onUseShared: () =>
+                          unawaited(controller.resolveDraftConflictUseShared()),
                     ),
                   ),
                 Expanded(
@@ -3003,9 +2981,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                         showTerminalTab: showTerminalTab,
                         builder: () => _PageTabContent(
                           child: _TerminalPanel(
-                            key: const Key(
-                              'session-detail-tab-panel-terminal',
-                            ),
+                            key: const Key('session-detail-tab-panel-terminal'),
                             messages: state.terminalOutputMessages,
                           ),
                         ),
@@ -3117,6 +3093,9 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
     _applyingRemoteDraft = true;
     _promptController.clear();
     _applyingRemoteDraft = false;
+    _archivedLiveState = const {};
+    _liveStateArchiveLoaded = false;
+    unawaited(_loadLiveStateArchive());
     final background =
         !_isPageForeground &&
         (_requiresForegroundTransport || _initialAttachDeferred);

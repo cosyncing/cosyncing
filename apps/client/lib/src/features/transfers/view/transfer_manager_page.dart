@@ -4,6 +4,8 @@ import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/app/router/session_routes.dart';
 import 'package:cosyncing_client/src/design/components/adaptive_picker.dart';
+import 'package:cosyncing_client/src/design/components/contextual_details.dart';
+import 'package:cosyncing_client/src/errors/diagnostic_details.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/sessions.dart';
 import 'package:cosyncing_client/src/features/transfers/data/local_transfer_file_opener.dart';
@@ -832,218 +834,240 @@ class _TransferRow extends ConsumerWidget {
         : '${_transferStatusLabel(l10n, transfer.status)} - $primaryDetail - '
               '$progressLabel';
 
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SizedBox(
-            width: 48,
-            child: Checkbox(
-              key: ValueKey('transfer-manager-select-${transfer.id}'),
-              value: isSelected,
-              onChanged: (value) {
-                if (value == null) {
-                  return;
-                }
-                onSelectionChanged(transfer.id, selected: value);
-              },
+    return ContextualDetails(
+      label: transfer.fileName,
+      detailsBuilder: isFailed
+          ? () => [
+              transfer.message,
+              if (transfer.error case final error?) error,
+            ].join('\n')
+          : null,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              width: 48,
+              child: Checkbox(
+                key: ValueKey('transfer-manager-select-${transfer.id}'),
+                value: isSelected,
+                onChanged: (value) {
+                  if (value == null) {
+                    return;
+                  }
+                  onSelectionChanged(transfer.id, selected: value);
+                },
+              ),
             ),
-          ),
-          _TransferStatusIcon(status: transfer.status),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                SelectionArea(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        '${_transferDirectionLabel(l10n, transfer.direction)}: '
-                        '${transfer.fileName}',
-                        style: theme.textTheme.bodyMedium,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        detailLabel,
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: isFailed
-                              ? theme.colorScheme.error
-                              : theme.colorScheme.onSurfaceVariant,
-                        ),
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ],
-                  ),
-                ),
-                if (localPathLabel != null) ...[
-                  const SizedBox(height: 4),
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Expanded(
-                        child: Text(
-                          localPathLabel,
-                          style: theme.textTheme.bodySmall?.copyWith(
-                            color: theme.colorScheme.onSurfaceVariant,
-                          ),
+            _TransferStatusIcon(status: transfer.status),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  SelectionArea(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          [
+                            _transferDirectionLabel(l10n, transfer.direction),
+                            transfer.fileName,
+                          ].join(': '),
+                          style: theme.textTheme.bodyMedium,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
-                      ),
-                      const SizedBox(width: 6),
-                      IconButton(
-                        key: ValueKey('transfer-manager-copy-${transfer.id}'),
-                        tooltip: l10n.copyPath,
-                        icon: const Icon(Icons.content_copy, size: 18),
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(
-                          minWidth: 48,
-                          minHeight: 48,
+                        const SizedBox(height: 4),
+                        Text(
+                          detailLabel,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: isFailed
+                                ? theme.colorScheme.error
+                                : theme.colorScheme.onSurfaceVariant,
+                          ),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
                         ),
-                        onPressed: () =>
-                            _copyTransferLocalPath(context, localPath),
-                      ),
-                      IconButton(
-                        key: ValueKey('transfer-manager-open-${transfer.id}'),
-                        tooltip: l10n.openFile,
-                        icon: const Icon(Icons.open_in_new, size: 18),
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(
-                          minWidth: 48,
-                          minHeight: 48,
-                        ),
-                        onPressed: () => _openTransferLocalPath(
-                          context,
-                          localTransferFileOpener,
-                          localPath!,
-                        ),
-                      ),
-                      IconButton(
-                        key: ValueKey('transfer-manager-reveal-${transfer.id}'),
-                        tooltip: l10n.revealInFolder,
-                        icon: const Icon(Icons.folder_open_outlined, size: 18),
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(
-                          minWidth: 48,
-                          minHeight: 48,
-                        ),
-                        // See docs/architecture/client-ui.md
-                        onPressed: () => _revealTransferLocalPath(
-                          context,
-                          localTransferFileOpener,
-                          localPath!,
-                        ),
-                      ),
-                      IconButton(
-                        key: ValueKey(
-                          'transfer-manager-preview-${transfer.id}',
-                        ),
-                        tooltip: l10n.previewText,
-                        icon: const Icon(Icons.text_snippet_outlined, size: 18),
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(
-                          minWidth: 48,
-                          minHeight: 48,
-                        ),
-                        onPressed: () => _previewTransferLocalText(
-                          context,
-                          localTransferFileOpener,
-                          localPath!,
-                          transfer,
-                        ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
-                ],
-                const SizedBox(height: 2),
-                if (transfer.canSelectFileToResumeUpload &&
-                    isOwningBrokerProfile) ...[
-                  const SizedBox(height: 2),
-                  Row(
-                    children: [
-                      const SizedBox(width: 8),
-                      Semantics(
-                        label: l10n.transferResumeSelectFile,
-                        enabled: hasActiveBrokerClient,
-                        hint: hasActiveBrokerClient
-                            ? l10n.transferResumeSelectHint
-                            : l10n.transferResumeConnectHint,
-                        button: true,
-                        child: Tooltip(
-                          message: hasActiveBrokerClient
-                              ? l10n.transferResumeSelectFile
-                              : l10n.transferResumeConnectHint,
-                          child: TextButton(
-                            key: ValueKey(
-                              'transfer-manager-select-file-to-resume-'
-                              '${transfer.id}',
+                  if (localPathLabel != null) ...[
+                    const SizedBox(height: 4),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          child: Text(
+                            localPathLabel,
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: theme.colorScheme.onSurfaceVariant,
                             ),
-                            onPressed: hasActiveBrokerClient
-                                ? () => onSelectFileToResumeUpload(transfer.id)
-                                : null,
-                            child: Text(l10n.transferResumeSelectFile),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                           ),
                         ),
-                      ),
-                    ],
+                        const SizedBox(width: 6),
+                        IconButton(
+                          key: ValueKey('transfer-manager-copy-${transfer.id}'),
+                          tooltip: l10n.copyPath,
+                          icon: const Icon(Icons.content_copy, size: 18),
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(
+                            minWidth: 48,
+                            minHeight: 48,
+                          ),
+                          onPressed: () =>
+                              _copyTransferLocalPath(context, localPath),
+                        ),
+                        IconButton(
+                          key: ValueKey('transfer-manager-open-${transfer.id}'),
+                          tooltip: l10n.openFile,
+                          icon: const Icon(Icons.open_in_new, size: 18),
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(
+                            minWidth: 48,
+                            minHeight: 48,
+                          ),
+                          onPressed: () => _openTransferLocalPath(
+                            context,
+                            localTransferFileOpener,
+                            localPath!,
+                          ),
+                        ),
+                        IconButton(
+                          key: ValueKey(
+                            'transfer-manager-reveal-${transfer.id}',
+                          ),
+                          tooltip: l10n.revealInFolder,
+                          icon: const Icon(
+                            Icons.folder_open_outlined,
+                            size: 18,
+                          ),
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(
+                            minWidth: 48,
+                            minHeight: 48,
+                          ),
+                          // See docs/architecture/client-ui.md
+                          onPressed: () => _revealTransferLocalPath(
+                            context,
+                            localTransferFileOpener,
+                            localPath!,
+                          ),
+                        ),
+                        IconButton(
+                          key: ValueKey(
+                            'transfer-manager-preview-${transfer.id}',
+                          ),
+                          tooltip: l10n.previewText,
+                          icon: const Icon(
+                            Icons.text_snippet_outlined,
+                            size: 18,
+                          ),
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(
+                            minWidth: 48,
+                            minHeight: 48,
+                          ),
+                          onPressed: () => _previewTransferLocalText(
+                            context,
+                            localTransferFileOpener,
+                            localPath!,
+                            transfer,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                  const SizedBox(height: 4),
+                  if (transfer.canSelectFileToResumeUpload &&
+                      isOwningBrokerProfile) ...[
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        const SizedBox(width: 8),
+                        Semantics(
+                          label: l10n.transferResumeSelectFile,
+                          enabled: hasActiveBrokerClient,
+                          hint: hasActiveBrokerClient
+                              ? l10n.transferResumeSelectHint
+                              : l10n.transferResumeConnectHint,
+                          button: true,
+                          child: Tooltip(
+                            message: hasActiveBrokerClient
+                                ? l10n.transferResumeSelectFile
+                                : l10n.transferResumeConnectHint,
+                            child: TextButton(
+                              key: ValueKey(
+                                'transfer-manager-select-file-to-resume-'
+                                '${transfer.id}',
+                              ),
+                              onPressed: hasActiveBrokerClient
+                                  ? () =>
+                                        onSelectFileToResumeUpload(transfer.id)
+                                  : null,
+                              child: Text(l10n.transferResumeSelectFile),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                  ],
+                  IconButton(
+                    key: ValueKey(
+                      'transfer-manager-open-session-${transfer.id}',
+                    ),
+                    tooltip: l10n.openSession,
+                    icon: const Icon(Icons.terminal_outlined, size: 18),
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(
+                      minWidth: 48,
+                      minHeight: 48,
+                    ),
+                    onPressed: isOwningBrokerProfile
+                        ? () => _openTransferSession(context, transfer)
+                        : null,
                   ),
-                  const SizedBox(height: 2),
+                  IconButton(
+                    key: ValueKey('transfer-manager-details-${transfer.id}'),
+                    tooltip: l10n.transferDetails,
+                    icon: const Icon(Icons.info_outline, size: 18),
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(
+                      minWidth: 48,
+                      minHeight: 48,
+                    ),
+                    onPressed: () => _showTransferDetails(
+                      context,
+                      transfer,
+                      localTransferFileOpener,
+                      isOwningBrokerProfile: isOwningBrokerProfile,
+                    ),
+                  ),
                 ],
-                IconButton(
-                  key: ValueKey('transfer-manager-open-session-${transfer.id}'),
-                  tooltip: l10n.openSession,
-                  icon: const Icon(Icons.terminal_outlined, size: 18),
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(
-                    minWidth: 48,
-                    minHeight: 48,
-                  ),
-                  onPressed: isOwningBrokerProfile
-                      ? () => _openTransferSession(context, transfer)
-                      : null,
-                ),
-                IconButton(
-                  key: ValueKey('transfer-manager-details-${transfer.id}'),
-                  tooltip: l10n.transferDetails,
-                  icon: const Icon(Icons.info_outline, size: 18),
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(
-                    minWidth: 48,
-                    minHeight: 48,
-                  ),
-                  onPressed: () => _showTransferDetails(
-                    context,
-                    transfer,
-                    localTransferFileOpener,
-                    isOwningBrokerProfile: isOwningBrokerProfile,
-                  ),
-                ),
-              ],
+              ),
             ),
-          ),
-          if (canRetry) ...[
-            const SizedBox(width: 8),
-            TextButton(
-              key: ValueKey('transfer-manager-retry-${transfer.id}'),
-              onPressed: () => onRetryTransfer(transfer.id),
-              child: Text(l10n.retry),
-            ),
+            if (canRetry) ...[
+              const SizedBox(width: 8),
+              TextButton(
+                key: ValueKey('transfer-manager-retry-${transfer.id}'),
+                onPressed: () => onRetryTransfer(transfer.id),
+                child: Text(l10n.retry),
+              ),
+            ],
+            if (canCancel) ...[
+              const SizedBox(width: 8),
+              TextButton(
+                key: ValueKey('transfer-manager-cancel-${transfer.id}'),
+                onPressed: () => onCancelTransfer(transfer.id),
+                child: Text(l10n.cancel),
+              ),
+            ],
           ],
-          if (canCancel) ...[
-            const SizedBox(width: 8),
-            TextButton(
-              key: ValueKey('transfer-manager-cancel-${transfer.id}'),
-              onPressed: () => onCancelTransfer(transfer.id),
-              child: Text(l10n.cancel),
-            ),
-          ],
-        ],
+        ),
       ),
     );
   }
@@ -1092,191 +1116,180 @@ Future<void> _showTransferDetails(
   await showDialog<void>(
     context: context,
     builder: (dialogContext) {
-      return AlertDialog(
-        title: Text(
-          l10n.transferDetailsTitle(transfer.fileName),
-          key: ValueKey('transfer-manager-details-title-${transfer.id}'),
-        ),
-        content: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 520),
-          child: SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                SelectionArea(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      _TransferDetailsRow(
-                        label: l10n.direction,
-                        value: _transferDirectionLabel(
-                          l10n,
-                          transfer.direction,
-                        ),
-                      ),
-                      _TransferDetailsRow(
-                        label: l10n.status,
-                        value: _transferStatusLabel(l10n, transfer.status),
-                      ),
-                      if (progressLabel.isNotEmpty)
+      return ContextualDetails(
+        label: transfer.fileName,
+        detailsBuilder: () => [
+          transfer.message,
+          if (transfer.error case final error?) error,
+        ].join('\n'),
+        child: AlertDialog(
+          title: Text(
+            l10n.transferDetailsTitle(transfer.fileName),
+            key: ValueKey('transfer-manager-details-title-${transfer.id}'),
+          ),
+          content: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 520),
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SelectionArea(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
                         _TransferDetailsRow(
-                          label: l10n.progress,
-                          value: progressLabel,
+                          label: l10n.direction,
+                          value: _transferDirectionLabel(
+                            l10n,
+                            transfer.direction,
+                          ),
                         ),
-                      _TransferDetailsRow(
-                        label: l10n.tool,
-                        value: transfer.sessionKey.tool,
-                      ),
-                      _TransferDetailsRow(
-                        label: l10n.sessionId,
-                        value: transfer.sessionKey.sessionId,
-                      ),
-                      _TransferDetailsRow(
-                        label: l10n.brokerProfile,
-                        value:
-                            transfer.brokerProfileId ??
-                            l10n.legacyUnscopedTransfer,
-                      ),
-                      _TransferDetailsRow(
-                        label: l10n.transferId,
-                        value: transfer.id,
-                      ),
-                      _TransferDetailsRow(
-                        label: l10n.actionKey,
-                        value: transfer.actionKey,
-                      ),
-                      if (sourceUrl != null)
                         _TransferDetailsRow(
-                          label: l10n.sourceUrl,
-                          value: sourceUrl,
+                          label: l10n.status,
+                          value: _transferStatusLabel(l10n, transfer.status),
                         ),
-                      if (exportedPath != null)
+                        if (progressLabel.isNotEmpty)
+                          _TransferDetailsRow(
+                            label: l10n.progress,
+                            value: progressLabel,
+                          ),
                         _TransferDetailsRow(
-                          label: l10n.exportedPath,
-                          value: exportedPath,
+                          label: l10n.tool,
+                          value: transfer.sessionKey.tool,
                         ),
-                      if (cachedPath != null)
                         _TransferDetailsRow(
-                          label: l10n.cachedPath,
-                          value: cachedPath,
+                          label: l10n.sessionId,
+                          value: transfer.sessionKey.sessionId,
                         ),
-                      _TransferDetailsRow(
-                        label: l10n.created,
-                        value: createdAtText,
-                      ),
-                      _TransferDetailsRow(
-                        label: l10n.updated,
-                        value: updatedAtText,
-                      ),
-                      if (transfer.message.trim().isNotEmpty ||
-                          (transfer.error?.trim().isNotEmpty ?? false))
-                        ExpansionTile(
-                          tilePadding: EdgeInsets.zero,
-                          title: Text(l10n.technicalDetails),
-                          children: [
-                            if (transfer.message.trim().isNotEmpty)
-                              _TransferDetailsRow(
-                                label: l10n.message,
-                                value: transfer.message,
-                              ),
-                            if (transfer.error?.trim().isNotEmpty ?? false)
-                              _TransferDetailsRow(
-                                label: l10n.errorLabel,
-                                value: transfer.error!,
-                              ),
-                          ],
+                        _TransferDetailsRow(
+                          label: l10n.brokerProfile,
+                          value:
+                              transfer.brokerProfileId ??
+                              l10n.legacyUnscopedTransfer,
                         ),
-                    ],
+                        _TransferDetailsRow(
+                          label: l10n.transferId,
+                          value: transfer.id,
+                        ),
+                        _TransferDetailsRow(
+                          label: l10n.actionKey,
+                          value: transfer.actionKey,
+                        ),
+                        if (sourceUrl != null)
+                          _TransferDetailsRow(
+                            label: l10n.sourceUrl,
+                            value: sanitizeDiagnosticText(sourceUrl),
+                          ),
+                        if (exportedPath != null)
+                          _TransferDetailsRow(
+                            label: l10n.exportedPath,
+                            value: exportedPath,
+                          ),
+                        if (cachedPath != null)
+                          _TransferDetailsRow(
+                            label: l10n.cachedPath,
+                            value: cachedPath,
+                          ),
+                        _TransferDetailsRow(
+                          label: l10n.created,
+                          value: createdAtText,
+                        ),
+                        _TransferDetailsRow(
+                          label: l10n.updated,
+                          value: updatedAtText,
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-                IconButton(
-                  key: ValueKey(
-                    'transfer-manager-details-open-session-${transfer.id}',
+                  IconButton(
+                    key: ValueKey(
+                      'transfer-manager-details-open-session-${transfer.id}',
+                    ),
+                    tooltip: l10n.openSession,
+                    icon: const Icon(Icons.terminal_outlined),
+                    onPressed: isOwningBrokerProfile
+                        ? () {
+                            Navigator.of(dialogContext).pop();
+                            WidgetsBinding.instance.addPostFrameCallback((_) {
+                              if (context.mounted) {
+                                _openTransferSession(context, transfer);
+                              }
+                            });
+                          }
+                        : null,
+                    padding: const EdgeInsets.all(8),
                   ),
-                  tooltip: l10n.openSession,
-                  icon: const Icon(Icons.terminal_outlined),
-                  onPressed: isOwningBrokerProfile
-                      ? () {
-                          Navigator.of(dialogContext).pop();
-                          WidgetsBinding.instance.addPostFrameCallback((_) {
-                            if (context.mounted) {
-                              _openTransferSession(context, transfer);
-                            }
-                          });
-                        }
-                      : null,
-                  padding: const EdgeInsets.all(8),
-                ),
-                if (localPath != null) ...[
-                  const SizedBox(height: 12),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [
-                      IconButton(
-                        key: ValueKey(
-                          'transfer-manager-details-copy-${transfer.id}',
+                  if (localPath != null) ...[
+                    const SizedBox(height: 12),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        IconButton(
+                          key: ValueKey(
+                            'transfer-manager-details-copy-${transfer.id}',
+                          ),
+                          tooltip: l10n.copyPath,
+                          icon: const Icon(Icons.content_copy),
+                          onPressed: () =>
+                              _copyTransferLocalPath(context, localPath),
+                          padding: const EdgeInsets.all(8),
                         ),
-                        tooltip: l10n.copyPath,
-                        icon: const Icon(Icons.content_copy),
-                        onPressed: () =>
-                            _copyTransferLocalPath(context, localPath),
-                        padding: const EdgeInsets.all(8),
-                      ),
-                      IconButton(
-                        key: ValueKey(
-                          'transfer-manager-details-open-${transfer.id}',
+                        IconButton(
+                          key: ValueKey(
+                            'transfer-manager-details-open-${transfer.id}',
+                          ),
+                          tooltip: l10n.openFile,
+                          icon: const Icon(Icons.open_in_new),
+                          onPressed: () => _openTransferLocalPath(
+                            context,
+                            localTransferFileOpener,
+                            localPath,
+                          ),
+                          padding: const EdgeInsets.all(8),
                         ),
-                        tooltip: l10n.openFile,
-                        icon: const Icon(Icons.open_in_new),
-                        onPressed: () => _openTransferLocalPath(
-                          context,
-                          localTransferFileOpener,
-                          localPath,
+                        IconButton(
+                          key: ValueKey(
+                            'transfer-manager-details-reveal-${transfer.id}',
+                          ),
+                          tooltip: l10n.revealInFolder,
+                          icon: const Icon(Icons.folder_open_outlined),
+                          onPressed: () => _revealTransferLocalPath(
+                            context,
+                            localTransferFileOpener,
+                            localPath,
+                          ),
+                          padding: const EdgeInsets.all(8),
                         ),
-                        padding: const EdgeInsets.all(8),
-                      ),
-                      IconButton(
-                        key: ValueKey(
-                          'transfer-manager-details-reveal-${transfer.id}',
+                        IconButton(
+                          key: ValueKey(
+                            'transfer-manager-details-preview-${transfer.id}',
+                          ),
+                          tooltip: l10n.previewText,
+                          icon: const Icon(Icons.text_snippet_outlined),
+                          onPressed: () => _previewTransferLocalText(
+                            context,
+                            localTransferFileOpener,
+                            localPath,
+                            transfer,
+                          ),
+                          padding: const EdgeInsets.all(8),
                         ),
-                        tooltip: l10n.revealInFolder,
-                        icon: const Icon(Icons.folder_open_outlined),
-                        onPressed: () => _revealTransferLocalPath(
-                          context,
-                          localTransferFileOpener,
-                          localPath,
-                        ),
-                        padding: const EdgeInsets.all(8),
-                      ),
-                      IconButton(
-                        key: ValueKey(
-                          'transfer-manager-details-preview-${transfer.id}',
-                        ),
-                        tooltip: l10n.previewText,
-                        icon: const Icon(Icons.text_snippet_outlined),
-                        onPressed: () => _previewTransferLocalText(
-                          context,
-                          localTransferFileOpener,
-                          localPath,
-                          transfer,
-                        ),
-                        padding: const EdgeInsets.all(8),
-                      ),
-                    ],
-                  ),
+                      ],
+                    ),
+                  ],
                 ],
-              ],
+              ),
             ),
           ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text(l10n.close),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: Text(l10n.close),
-          ),
-        ],
       );
     },
   );

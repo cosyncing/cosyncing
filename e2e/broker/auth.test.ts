@@ -57,6 +57,18 @@ type Method = 'GET' | 'HEAD' | 'POST' | 'PATCH' | 'DELETE';
  * method fails closed for everyone else.
  */
 const AUTHORIZATION: Record<string, Partial<Record<Method, Rule>>> = {
+  '/api/connection/identity-proof': { POST: 'public' },
+  '/api/connection/check': { GET: 'observe' },
+  '/api/connection/check/ws': { GET: 'observe' },
+  '/api/connection/configuration': { GET: 'owner', POST: 'owner' },
+  '/api/storage': { GET: 'owner' },
+  '/api/storage/scans': { POST: 'owner' },
+  '/api/storage/scans/{id}': { GET: 'owner' },
+  '/api/storage/items': { GET: 'owner' },
+  '/api/storage/cleanup-plans': { POST: 'owner' },
+  '/api/storage/cleanup-jobs': { POST: 'owner' },
+  '/api/storage/cleanup-jobs/{id}': { GET: 'owner' },
+  '/api/storage/cleanup-jobs/{id}/cancel': { POST: 'owner' },
   '/api/health': { GET: 'public', HEAD: 'public' },
   '/api/agents': { GET: 'observe' },
   '/api/agents/{id}/models': { GET: 'observe' },
@@ -205,7 +217,10 @@ async function observedVerdict(response: globalThis.Response): Promise<{ verdict
   const detail = `${response.status} ${text.slice(0, 120)}`;
   // A stream with no ticket is refused AFTER the route policy passed: streams
   // take only a one-use ticket, never a long-lived credential.
-  if (response.status === 401 && body?.error === 'valid WebSocket authorization ticket required') {
+  if (response.status === 401 && [
+    'valid WebSocket authorization ticket required',
+    'Valid connection-check ticket required',
+  ].includes(body?.error)) {
     return { verdict: 'allowed', detail };
   }
   if (response.status === 401) return { verdict: 'unauthenticated', detail };

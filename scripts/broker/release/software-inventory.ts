@@ -2,11 +2,11 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { dirname, join, parse, resolve } from 'node:path';
 import { PRODUCT_IDENTITY } from '../../../packages/typescript/protocol/src/product.ts';
-import { MINIMUM_BUN_RUNTIME_VERSION } from '../../../packages/typescript/broker/src/runtime/application-identity.ts';
+import { MINIMUM_BUN_RUNTIME_VERSION, PINNED_BUN_RUNTIME_VERSION } from '../../../packages/typescript/broker/src/runtime/application-identity.ts';
 
 const ROOT = resolve(import.meta.dir, '../../..');
-const BUN_LICENSE_PATH = join(ROOT, 'docs/legal/bun-1.3.14-LICENSE.md');
-const BUN_LICENSE_SHA256 = '2c6160ec8fb853f7e8f97d9b249e756c9b0ac44860a68b6bf4f1b0bcbc5c3741';
+const BUN_LICENSE_PATH = join(ROOT, `docs/legal/bun-${PINNED_BUN_RUNTIME_VERSION}-LICENSE.md`);
+const BUN_LICENSE_SHA256 = '056696884250b0d682365260cf1487a6501b1665a343ec60e23a1e647043c572';
 
 interface PackageJson {
   name?: string;
@@ -174,7 +174,7 @@ function pinnedBunLicenseText(): string {
   const text = readFileSync(BUN_LICENSE_PATH, 'utf8').replace(/\r\n/g, '\n');
   const digest = createHash('sha256').update(text).digest('hex');
   if (digest !== BUN_LICENSE_SHA256) {
-    throw new Error(`Bun 1.3.14 license hash mismatch: ${digest}`);
+    throw new Error(`Bun ${PINNED_BUN_RUNTIME_VERSION} license hash mismatch: ${digest}`);
   }
   return text.trim();
 }
@@ -220,7 +220,7 @@ export function createThirdPartyNotices(inventory: CompiledSoftwareInventory): s
   const lines = [
     `Third-party notices for cosyncing broker ${inventory.version}`,
     '',
-    'Bun 1.3.14 runtime',
+    `Bun ${PINNED_BUN_RUNTIME_VERSION} runtime`,
     '==================',
     '',
     pinnedBunLicenseText(),

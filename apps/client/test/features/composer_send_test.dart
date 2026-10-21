@@ -3,8 +3,15 @@
 // F04a — Sending from the composer, through the real App: the optimistic
 // bubble and its echo, a refused prompt, the send chords, the model and
 // permission chips, Stop, and the slash palette.
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:broker_contract/broker_contract.dart';
+import 'package:broker_crypto/broker_crypto.dart';
+import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/components/adaptive_picker.dart';
+import 'package:cosyncing_client/src/features/connection/model/broker_routes.dart';
+import 'package:cosyncing_client/src/features/connection/provider/broker_route_providers.dart';
 import 'package:cosyncing_client/src/platform/speech/speech_input_state.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -16,6 +23,7 @@ import '../support/feature/composer_wire.dart';
 import '../support/feature/cosyncing_app.dart';
 import '../support/feature/fake_speech.dart';
 import '../support/feature/roster_driver.dart';
+import '../support/feature/server_routes_wire.dart';
 import '../support/feature/session_driver.dart';
 import '../support/feature/session_wire.dart';
 import '../support/feature/transcript_wire.dart';
@@ -134,9 +142,12 @@ void main() {
             f.tester.getRect(composer).bottom,
             closeTo(scenario.viewport.size.height - 300 - 8, 1),
           );
-          final details = find.text('Technical details');
+          final details = find.byKey(
+            const Key('session-error-diagnostic-item'),
+          );
           await f.tester.ensureVisible(details);
-          await app.tap(details);
+          await app.openTechnicalDetails(details);
+          await app.tapKey('contextual-details-close');
           expect(f.tester.takeException(), isNull);
           expect(sendButton.hitTestable(), findsOneWidget);
           expect(app.composerText, 'Keep this if refused');
@@ -231,9 +242,10 @@ void main() {
         expect(f.tester.takeException(), isNull);
         expect(sendButton.hitTestable(), findsOneWidget);
         expect(f.tester.getRect(sendButton).bottom, lessThan(400));
-        final details = find.text('Technical details');
+        final details = find.byKey(const Key('session-error-diagnostic-item'));
         await f.tester.ensureVisible(details);
-        await app.tap(details);
+        await app.openTechnicalDetails(details);
+        await app.tapKey('contextual-details-close');
         expect(f.tester.takeException(), isNull);
         expect(sendButton.hitTestable(), findsOneWidget);
         expect(app.composerText, 'ship it');
@@ -348,9 +360,7 @@ void main() {
           userRow(
             'another device said this',
             key: 'n1',
-            extra: {
-              'clientKey': 'ca.other-device.0',
-            },
+            extra: {'clientKey': 'ca.other-device.0'},
           ),
         );
         expect(app.bubbles('original words'), 1);
@@ -361,9 +371,7 @@ void main() {
           userRow(
             'original words, normalised',
             key: 'n2',
-            extra: {
-              'clientKey': id,
-            },
+            extra: {'clientKey': id},
           ),
         );
         expect(app.bubbles('original words'), 0);
@@ -394,27 +402,26 @@ void main() {
   });
 
   group('the send keys', () {
-    featureTest(
-      'Ctrl+Enter sends on Linux and plain Enter only adds a line',
-      (f) async {
-        final (app, _, desk) = await openComposer(f);
-        expect(
-          app.tester.widget<IconButton>(sendButton).tooltip,
-          'Send prompt (Ctrl+Enter)',
-        );
-        await app.type('first line');
-        await app.chord(LogicalKeyboardKey.enter);
-        expect(desk.prompts, isEmpty);
-        expect(app.composerText, 'first line');
+    featureTest('Ctrl+Enter sends on Linux and plain Enter only adds a line', (
+      f,
+    ) async {
+      final (app, _, desk) = await openComposer(f);
+      expect(
+        app.tester.widget<IconButton>(sendButton).tooltip,
+        'Send prompt (Ctrl+Enter)',
+      );
+      await app.type('first line');
+      await app.chord(LogicalKeyboardKey.enter);
+      expect(desk.prompts, isEmpty);
+      expect(app.composerText, 'first line');
 
-        await app.chord(
-          LogicalKeyboardKey.enter,
-          modifiers: [LogicalKeyboardKey.controlLeft],
-        );
-        expect(desk.promptTexts, ['first line']);
-        expect(app.composerText, isEmpty);
-      },
-    );
+      await app.chord(
+        LogicalKeyboardKey.enter,
+        modifiers: [LogicalKeyboardKey.controlLeft],
+      );
+      expect(desk.promptTexts, ['first line']);
+      expect(app.composerText, isEmpty);
+    });
 
     featureTest(
       'Command+Enter is the macOS send chord and Control+Enter is not',
@@ -952,6 +959,122 @@ void main() {
 
   group('delivery across a reconnect', () {
     featureTest(
+      'route failover reconciles one lost prompt acknowledgement, retains the '
+      'next draft and focus, and never replays an uncertain command',
+      (f) async {
+        final studio = f.network.add('http://studio.test:7734')
+          ..addSession('s1', 'Route delivery');
+        final tunnel = f.network.add('https://tunnel.test')
+          ..addSession('s1', 'Route delivery');
+        const review = SlashCommand(
+          name: '/review',
+          kind: SlashCommandKind.action,
+        );
+        final first = ComposerDesk(studio)
+          ..answer = PromptAnswer.hold
+          ..commands = const [review];
+        final alternate = ComposerDesk(tunnel)..commands = const [review];
+        final identity = await PairingCrypto.generateIdentityKeyPair();
+        RoutesDesk(identity, f.now)
+          ..add(studio)
+          ..add(tunnel);
+        final saved = await f.storage.seedServer(studio);
+        final server = BrokerRouteServer(
+          profileId: saved.id,
+          incarnation: saved.incarnationId!,
+          legacyOrigin: studio.baseUri,
+          identityPublicKey: identity.publicKey,
+          principalId: 'owner',
+          lastSuccessfulRouteId: 'studio',
+          addresses: [
+            for (final (id, broker) in [('studio', studio), ('tunnel', tunnel)])
+              BrokerAddress(
+                id: id,
+                origin: broker.baseUri,
+                label: id,
+                order: id == 'studio' ? 0 : 1,
+                verifiedIdentity: identity.publicKey,
+                legacyTrusted: id == 'studio',
+              ),
+          ],
+        );
+        await f.storage.database.customStatement(
+          'INSERT OR REPLACE INTO broker_route_servers VALUES (?,?,?)',
+          [saved.id, saved.incarnationId, jsonEncode(server.toJson())],
+        );
+        final app = await f.launch();
+        await app.openFromRoster('s1', cwd: '/work/studio');
+        final coordinator = app.container.read(brokerRouteCoordinatorProvider);
+        unawaited(coordinator.testAll(saved));
+        await app.pumpUntil(
+          () => coordinator.status(saved)?.observations['tunnel'] != null,
+          reason: 'The alternate is independently ready before the failure',
+        );
+        await app.tapKey('session-detail-composer-menu');
+        await app.tapKey('session-detail-command-picker-button');
+        await app.tapKey('session-detail-command-picker');
+        await app.tap(find.text('/review').last);
+        await app.tapKey('session-detail-command-send-button');
+        expect(
+          first.others.where((frame) => frame['kind'] == 'command'),
+          hasLength(1),
+        );
+        await app.send('Was this accepted?');
+        final prompt = first.prompts.single;
+        final id = prompt['clientMessageId']! as String;
+        // Both addresses reach the same durable acceptance journal. The first
+        // acknowledgement was lost; the alternate answers this id as duplicate.
+        first.acknowledged.add(id);
+        alternate.acknowledged.add(id);
+        await app.type('Keep this next draft');
+        await app.focusComposer();
+        final focus = f.tester.widget<TextField>(promptField).focusNode!;
+        alternate
+          ..draftText = first.draftText
+          ..draftRevision = first.draftRevision
+          ..draftUpdateId = first.draftUpdateId;
+        studio.reachable = false;
+        for (final socket in studio.socketsFor('s1')) {
+          socket.drop();
+        }
+        await app.pumpUntil(
+          () => coordinator.status(saved)?.activeRouteId == 'tunnel',
+          reason: 'The failed route hands off to its ready alternate',
+        );
+        await app.pumpUntil(
+          () => alternate.attaches > 0,
+          reason: 'The session reattaches through the selected route',
+        );
+        await app.pumpUntil(
+          () => alternate.prompts.length == 1,
+          reason: 'The new route reconciles delivery through the same account',
+        );
+        await app.pumpUntil(
+          () => app.canSend,
+          reason: 'The next draft remains sendable after reconciliation',
+        );
+        expect(coordinator.status(saved)!.activeRouteId, 'tunnel');
+        expect(alternate.prompts.single['clientMessageId'], id);
+        expect(app.bubbles('Was this accepted?'), 1);
+        expect(app.composerText, 'Keep this next draft');
+        expect(focus.hasFocus, isTrue);
+        expect(
+          alternate.others.where((frame) => frame['kind'] == 'command'),
+          isEmpty,
+        );
+        expect(first.prompts, hasLength(1));
+        await app.waitFor(
+          find.text(
+            AppLocalizations.of(
+              f.tester.element(promptField),
+            ).routesOutcomeUnknown,
+          ),
+        );
+        expect(f.tester.takeException(), isNull);
+      },
+    );
+
+    featureTest(
       'a prompt the broker never answered is replayed with the same id after '
       "a reconnect, and the broker's duplicate answer leaves one bubble",
       (f) async {
@@ -1034,30 +1157,27 @@ void main() {
       },
     );
 
-    featureTest(
-      'sending the app to the background cancels listening, and a '
-      'recognizer failure is shown to the user',
-      (f) async {
-        final speech = FakeSpeechInput();
-        final studio = f.network.add('http://studio.test:7734')
-          ..addSession('s1', 'Fix login');
-        ComposerDesk(studio);
-        await f.storage.seedServer(studio);
-        final app = await f.launch(overrides: [speech.providerOverride]);
-        await app.openFromRoster('s1', cwd: '/work/studio');
-        speech.listening();
-        await app.settle();
-        await app.background();
-        expect(speech.cancelCalls, isPositive);
-        expect(speech.current, isA<SpeechInputIdle>());
-        await app.foreground();
+    featureTest('sending the app to the background cancels listening, and a '
+        'recognizer failure is shown to the user', (f) async {
+      final speech = FakeSpeechInput();
+      final studio = f.network.add('http://studio.test:7734')
+        ..addSession('s1', 'Fix login');
+      ComposerDesk(studio);
+      await f.storage.seedServer(studio);
+      final app = await f.launch(overrides: [speech.providerOverride]);
+      await app.openFromRoster('s1', cwd: '/work/studio');
+      speech.listening();
+      await app.settle();
+      await app.background();
+      expect(speech.cancelCalls, isPositive);
+      expect(speech.current, isA<SpeechInputIdle>());
+      await app.foreground();
 
-        await app.tapKey('session-detail-voice-input-button');
-        await app.tapKey('voice-policy-platform-service');
-        speech.unavailable('Microphone permission was denied.');
-        await app.settle();
-        expect(find.text('Microphone permission was denied.'), findsOneWidget);
-      },
-    );
+      await app.tapKey('session-detail-voice-input-button');
+      await app.tapKey('voice-policy-platform-service');
+      speech.unavailable('Microphone permission was denied.');
+      await app.settle();
+      expect(find.text('Microphone permission was denied.'), findsOneWidget);
+    });
   });
 }

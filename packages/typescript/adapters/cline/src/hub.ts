@@ -167,10 +167,15 @@ async function openOwnerFile(root: string, path: string): Promise<FileHandle | u
     if ((stat.mode & 0o077) !== 0) return undefined;
     const [rootTarget, pathTarget] = await Promise.all([realpath(root), realpath(path)]);
     if (!pathContained(rootTarget, pathTarget)) return undefined;
-    return handle;
+    const accepted = handle;
+    handle = undefined; // Ownership passes to the caller only after every check.
+    return accepted;
   } catch {
-    await handle?.close().catch(() => undefined);
     return undefined;
+  } finally {
+    // Rejected permissions, type, size and path checks return without throwing.
+    // They still own the descriptor and must not leave it to garbage collection.
+    await handle?.close().catch(() => undefined);
   }
 }
 

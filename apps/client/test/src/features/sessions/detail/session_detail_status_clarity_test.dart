@@ -80,9 +80,7 @@ void main() {
       tester,
     ) async {
       await tester.pumpWidget(
-        buildSessionDetailTestPage(
-          events: [controlEvent(healthySyncedShared)],
-        ),
+        buildSessionDetailTestPage(events: [controlEvent(healthySyncedShared)]),
       );
       await tester.pumpAndSettle();
 
@@ -189,9 +187,7 @@ void main() {
 
     testWidgets('selection does not consume scrolling', (tester) async {
       await tester.pumpWidget(
-        buildSessionDetailTestPage(
-          events: [controlEvent(healthySyncedShared)],
-        ),
+        buildSessionDetailTestPage(events: [controlEvent(healthySyncedShared)]),
       );
       await tester.pumpAndSettle();
       await openStatus(tester);
@@ -443,7 +439,6 @@ void main() {
         }
 
         for (final label in const [
-          'Technical details',
           'Detach',
           'Fork at latest',
           'Export transcript',
@@ -666,17 +661,14 @@ void main() {
               ? hungA
               : ScriptedSessionDetailConnection(
                   events: [
-                    controlEvent(
-                      const {
-                        'drive': {'state': 'driving', 'supported': true},
-                        'terminalSync': {
-                          'supported': false,
-                          'syncAvailable': false,
-                          'active': false,
-                        },
+                    controlEvent(const {
+                      'drive': {'state': 'driving', 'supported': true},
+                      'terminalSync': {
+                        'supported': false,
+                        'syncAvailable': false,
+                        'active': false,
                       },
-                      title: 'Owned at endpoint B',
-                    ),
+                    }, title: 'Owned at endpoint B'),
                   ],
                 );
           created.add(connection);

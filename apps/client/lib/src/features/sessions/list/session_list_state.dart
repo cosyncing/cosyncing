@@ -24,7 +24,8 @@ final class RosterSource {
   /// The broker [profile] currently points at.
   factory RosterSource.ofProfile(BrokerProfile profile) => RosterSource(
     profileId: profile.id,
-    endpoint: normalizedBrokerEndpoint(profile.baseUri),
+    endpoint:
+        profile.sourceIdentity ?? normalizedBrokerEndpoint(profile.baseUri),
     incarnationId: profile.incarnationId,
   );
 

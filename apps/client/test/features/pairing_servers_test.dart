@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:ui' show PointerDeviceKind, SemanticsAction;
+
 // F01 — Pairing, the connection gate, and saved servers.
 //
 // Every scenario runs the real App against wire-level fake brokers
@@ -6,11 +9,16 @@
 // inbox and time are fake. Waits are bounded pumps of fake time; nothing
 // sleeps on the wall clock.
 import 'package:broker_contract/broker_contract.dart';
+import 'package:broker_crypto/broker_crypto.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/provider/broker_profile_providers.dart';
 import 'package:cosyncing_client/src/features/connection/data/active_broker_profile_store.dart';
+import 'package:cosyncing_client/src/features/connection/data/broker_route_store.dart';
+import 'package:cosyncing_client/src/features/connection/model/broker_route_context.dart';
+import 'package:cosyncing_client/src/features/connection/model/broker_routes.dart';
+import 'package:cosyncing_client/src/features/connection/provider/broker_route_providers.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/pairing/controller/installer_pairing_handoff_controller.dart';
 import 'package:cosyncing_client/src/features/pairing/data/transport_pairing_store.dart';
@@ -22,13 +30,17 @@ import 'package:cosyncing_client/src/features/settings/view/settings_common.dart
 import 'package:cosyncing_client/src/local/app_database.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_participants.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart' show kSecondaryMouseButton;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../support/feature/app_driver.dart';
 import '../support/feature/cosyncing_app.dart';
 import '../support/feature/fake_broker.dart';
 import '../support/feature/roster_driver.dart';
+import '../support/feature/server_routes_wire.dart';
+import '../support/feature/session_driver.dart';
 import '../support/feature/store_faults.dart';
 
 final AppLocalizations en = lookupAppLocalizations(const Locale('en'));
@@ -37,6 +49,1150 @@ final AppLocalizations zh = lookupAppLocalizations(const Locale('zh'));
 const _addressField = Key('connection-server-address-field');
 
 void main() {
+  featureTest(
+    'proxy profiles recover secret publication, retain required bindings and '
+    'block a removed profile without Direct fallback',
+    (f) async {
+      final studio = f.network.add('http://studio.test:7734')
+        ..addSession('s1', 'Proxy review');
+      final tunnel = f.network.add('https://tunnel.test')
+        ..addSession('s1', 'Proxy review');
+      final identity = await PairingCrypto.generateIdentityKeyPair();
+      RoutesDesk(identity, f.now)
+        ..add(studio)
+        ..add(tunnel);
+      final saved = await f.storage.seedServer(studio, displayName: 'Studio');
+      final server = BrokerRouteServer(
+        profileId: saved.id,
+        incarnation: saved.incarnationId!,
+        legacyOrigin: studio.baseUri,
+        identityPublicKey: identity.publicKey,
+        principalId: 'owner',
+        addresses: [
+          BrokerAddress(
+            id: 'lan',
+            origin: studio.baseUri,
+            label: 'LAN',
+            order: 0,
+            verifiedIdentity: identity.publicKey,
+            legacyTrusted: true,
+          ),
+        ],
+      );
+      await f.storage.database.customStatement(
+        'INSERT OR REPLACE INTO broker_route_servers VALUES (?,?,?)',
+        [saved.id, saved.incarnationId, jsonEncode(server.toJson())],
+      );
+      final keyring = FaultySecureCredentialBackend();
+      var app = await f.launch(
+        initialLocation: brokerProfilesRoute,
+        viewport: FeatureViewport.phone,
+        overrides: [proxyCredentialBackendProvider.overrideWithValue(keyring)],
+      );
+      f.tester.view.physicalSize = const Size(360, 900);
+      Future<void> addresses() async {
+        await app.go(brokerProfilesRoute);
+        await app.tap(
+          find.descendant(
+            of: AppDriver.savedServer(saved.id),
+            matching: find.text('Studio'),
+          ),
+        );
+        await app.waitFor(find.text(en.routesMode));
+      }
+
+      Future<void> add(String name, {bool auth = false}) async {
+        await app.tap(find.text(en.proxyAdd));
+        await app.enterText(find.widgetWithText(TextField, en.proxyName), name);
+        await app.enterText(
+          find.widgetWithText(TextField, en.proxyHost),
+          '127.0.0.1',
+        );
+        await app.enterText(
+          find.widgetWithText(TextField, en.proxyPort),
+          '1080',
+        );
+        if (auth) {
+          await app.tap(
+            find.byType(DropdownButtonFormField<BrokerProxyProtocol>),
+          );
+          await app.tap(find.text('SOCKS5').last);
+          await app.tap(find.text(en.proxyAuthentication));
+          await app.enterText(
+            find.widgetWithText(TextField, en.proxyUsername),
+            'fixture-user',
+          );
+          await app.enterText(
+            find.widgetWithText(TextField, en.proxyPassword),
+            'fixture-secret',
+          );
+        }
+      }
+
+      await addresses();
+      await app.captureReview('addresses-360');
+      await app.tap(find.text(en.proxyManage));
+      await add('HTTP desk');
+      await app.tap(find.widgetWithText(FilledButton, en.save));
+      await app.waitFor(find.text('HTTP desk'));
+      await add('SOCKS desk', auth: true);
+      await app.captureReview('proxy-editor-360');
+      keyring.reads.fail = true;
+      await app.tap(find.widgetWithText(FilledButton, en.save));
+      await app.waitFor(find.text(en.routesFailed));
+      final pending = await f.storage.database
+          .customSelect(
+            'SELECT count(*) AS n FROM broker_proxy_secret_journal',
+          )
+          .getSingle();
+      expect(pending.read<int>('n'), 1);
+      keyring.reads.fail = false;
+      app = await f.restart(initialLocation: brokerProfilesRoute);
+      final store = app.container.read(brokerRouteStoreProvider);
+      await app.pumpUntil(
+        () => app.activeServer != null,
+        reason: 'Startup completes pending proxy publication before hydration',
+      );
+      final profiles = await store.proxies();
+      expect(profiles, hasLength(2));
+      final socks = profiles.singleWhere((p) => p.name == 'SOCKS desk');
+      expect((await store.proxySecret(socks))!.password, 'fixture-secret');
+      expect(
+        (await store.read(
+          saved.id,
+          saved.incarnationId!,
+        ))!.addresses.single.proxyId,
+        isNull,
+      );
+      await addresses();
+      await app.tapKey('address-menu-LAN');
+      await app.tap(find.text(en.edit));
+      await app.tap(find.text(en.routesAdvanced));
+      await app.tap(find.byType(DropdownButtonFormField<String>));
+      await app.tap(find.text('SOCKS desk').last);
+      await app.tap(find.widgetWithText(TextButton, en.routesTest));
+      await app.waitFor(find.text(en.routesAvailable));
+      await app.tap(find.widgetWithText(FilledButton, en.save));
+      await app.waitFor(find.text(en.routesMode));
+      final bound = (await store.read(saved.id, saved.incarnationId!))!;
+      expect(bound.addresses.single.proxyId, socks.id);
+      await app.tapKey('address-menu-LAN');
+      await app.tap(find.text(en.routesFixed).last);
+      await app.waitFor(find.text(en.routesMode));
+      app = await f.restart(initialLocation: brokerProfilesRoute);
+      await addresses();
+      await app.tap(find.text(en.proxyManage));
+      final row = find.ancestor(
+        of: find.text('SOCKS desk'),
+        matching: find.byType(SettingsRow),
+      );
+      await app.tap(
+        find.descendant(of: row, matching: find.byTooltip(en.proxyRemove)),
+      );
+      await app.waitFor(find.text(en.proxyRemoveBody));
+      expect(find.text('LAN'), findsOneWidget);
+      await app.captureReview('proxy-removal-360');
+      keyring.deletes.fail = true;
+      await app.tap(find.widgetWithText(FilledButton, en.proxyRemove));
+      await app.waitFor(find.text(en.routesFailed));
+      expect(
+        await app.container.read(brokerRouteStoreProvider).proxy(socks.id),
+        isNull,
+      );
+      keyring.deletes.fail = false;
+      await f.tester.pageBack();
+      await app.waitFor(find.text(en.routesMode));
+      await app.tap(find.widgetWithText(TextButton, en.routesTestAll));
+      await app.waitFor(find.text(en.proxyMissing));
+      final after = studio.requests.length;
+      await app.elapse(const Duration(seconds: 16));
+      expect(
+        studio.requests.length,
+        after,
+        reason: 'A missing required proxy cannot use the destination directly',
+      );
+      expect(
+        (await app.container
+                .read(brokerRouteStoreProvider)
+                .read(saved.id, saved.incarnationId!))!
+            .addresses
+            .single
+            .proxyId,
+        socks.id,
+      );
+      // A separately configured Direct alternate is eligible only in Automatic.
+      // It never changes the failed address's required binding.
+      await app.tap(find.text(en.routesAdd));
+      await app.enterText(
+        find.widgetWithText(TextField, en.routesLabel),
+        'Tunnel',
+      );
+      await app.enterText(
+        find.widgetWithText(TextField, en.routesOrigin),
+        tunnel.baseUri.origin,
+      );
+      await app.tap(find.widgetWithText(TextButton, en.routesTest));
+      await app.waitFor(find.text(en.routesAvailable));
+      await app.tap(find.widgetWithText(FilledButton, en.save));
+      await app.waitFor(find.text('Tunnel'));
+      await app.tap(find.widgetWithText(TextButton, en.routesTestAll));
+      final coordinator = app.container.read(brokerRouteCoordinatorProvider);
+      expect(
+        coordinator.status(saved)!.activeRouteId,
+        isNull,
+        reason: 'Fixed mode cannot select a separately tested Direct path',
+      );
+      await app.tap(find.byType(DropdownButton<BrokerRouteMode>));
+      await app.tap(find.text(en.routesAutomatic).last);
+      await app.pumpUntil(
+        () => coordinator.status(saved)?.activeRouteId != null,
+        reason: 'Automatic can use the explicitly approved Direct alternate',
+      );
+      final repaired = (await app.container
+          .read(brokerRouteStoreProvider)
+          .read(saved.id, saved.incarnationId!))!;
+      expect(
+        repaired.addresses.singleWhere((a) => a.label == 'LAN').proxyId,
+        socks.id,
+      );
+      expect(
+        repaired.addresses.singleWhere((a) => a.label == 'Tunnel').proxyId,
+        isNull,
+      );
+      await app.tap(find.text(en.proxyManage));
+      await app.waitFor(find.text('HTTP desk'));
+      expect(find.text('SOCKS desk'), findsNothing);
+      expect(
+        await keyring.read(socks.credentialKey!),
+        isNull,
+        reason: 'Reopening management completes interrupted secret retirement',
+      );
+      expect(f.tester.takeException(), isNull);
+    },
+  );
+
+  featureTest(
+    'shared proxy failures coalesce concurrent tests and network recovery '
+    'without probing inactive saved servers',
+    (f) async {
+      final identity = await PairingCrypto.generateIdentityKeyPair();
+      const proxy = BrokerProxyProfile(
+        id: 'shared',
+        name: 'Office proxy',
+        protocol: BrokerProxyProtocol.http,
+        host: '127.0.0.1',
+        port: 8080,
+        generation: 1,
+      );
+      await f.storage.database.customStatement(
+        'INSERT INTO broker_proxy_profiles VALUES (?,?)',
+        [proxy.id, jsonEncode(proxy.toJson())],
+      );
+      final paths = [
+        for (var index = 0; index < 12; index++)
+          f.network.add('https://route-$index.test'),
+      ];
+      final holds = [
+        for (final path in paths)
+          path.hold('POST', '/api/connection/identity-proof'),
+      ];
+      for (final hold in holds) {
+        addTearDown(hold.release);
+      }
+      final saved = await f.storage.seedServer(
+        paths.first,
+        displayName: 'Studio',
+      );
+      final server = BrokerRouteServer(
+        profileId: saved.id,
+        incarnation: saved.incarnationId!,
+        legacyOrigin: paths.first.baseUri,
+        identityPublicKey: identity.publicKey,
+        principalId: 'owner',
+        addresses: [
+          for (var index = 0; index < paths.length; index++)
+            BrokerAddress(
+              id: 'route-$index',
+              origin: paths[index].baseUri,
+              label: 'Path $index',
+              order: index,
+              verifiedIdentity: identity.publicKey,
+              proxyId: proxy.id,
+            ),
+        ],
+      );
+      await f.storage.database.customStatement(
+        'INSERT OR REPLACE INTO broker_route_servers VALUES (?,?,?)',
+        [saved.id, saved.incarnationId, jsonEncode(server.toJson())],
+      );
+      final inactive = <FakeBroker>[];
+      for (var index = 0; index < 9; index++) {
+        final broker = f.network.add('https://inactive-$index.test');
+        inactive.add(broker);
+        await f.storage.seedServer(broker, active: false);
+      }
+      final app = await f.launch(initialLocation: brokerProfilesRoute);
+      await app.tap(
+        find.descendant(
+          of: AppDriver.savedServer(saved.id),
+          matching: find.text('Studio'),
+        ),
+      );
+      final coordinator = app.container.read(brokerRouteCoordinatorProvider);
+      List<FakeBrokerRequest> proofs() => [
+        for (final path in paths)
+          ...path.requestsTo('/api/connection/identity-proof'),
+      ];
+      await app.pumpUntil(
+        () => proofs().length == 3,
+        reason: 'Only three shared-proxy operations are admitted',
+      );
+      final rounds = [coordinator.testAll(saved), coordinator.testAll(saved)];
+      coordinator
+        ..foreground(value: false)
+        ..networkChanged()
+        ..foreground(value: true);
+      await app.pumpUntil(
+        () => proofs().where((r) => !r.cancelled).length == 3,
+        reason: 'Recovery replaces cancelled work within the same budget',
+      );
+      expect(proofs().where((r) => r.cancelled).length, 3);
+      for (final hold in holds) {
+        hold.release(const FakeBrokerResponse(407, {'error': 'Proxy login'}));
+      }
+      await app.pumpUntil(
+        () => coordinator.status(saved)!.testing.isEmpty,
+        reason: 'One shared failure backs off the remaining destinations',
+      );
+      await Future.wait(rounds);
+      expect(proofs().length, 6);
+      expect(coordinator.status(saved)!.activeRouteId, isNull);
+      expect(proofs().every((request) => request.anonymous), isTrue);
+      coordinator.foreground(value: false);
+      await app.elapse(const Duration(minutes: 2));
+      expect(proofs().length, 6);
+      // Existing attention subscriptions keep their policy. The new route
+      // machinery must add no health, proof, readiness or socket-ticket work.
+      expect(
+        inactive
+            .expand((broker) => broker.requests)
+            .where((request) => request.path != '/api/attention-events'),
+        isEmpty,
+      );
+      // With no open session, closing address management must still allow the
+      // selected server to recover. Other saved servers remain dormant.
+      await f.tester.pageBack();
+      await f.tester.pump();
+      final wire = RoutesDesk(identity, f.now);
+      for (final path in paths) {
+        wire.add(path);
+        path.reachable = false;
+      }
+      coordinator.foreground(value: true);
+      await app.pumpUntil(
+        () => coordinator.status(saved)!.testing.isEmpty,
+        reason: 'The selected server finishes its unavailable recovery round',
+      );
+      for (final path in paths) {
+        path.reachable = true;
+      }
+      await app.pumpUntil(
+        () => coordinator.status(saved)!.activeRouteId != null,
+        reason:
+            'The selected server retries without an open session or manager',
+      );
+      expect(
+        inactive
+            .expand((broker) => broker.requests)
+            .where((request) => request.path != '/api/attention-events'),
+        isEmpty,
+      );
+      expect(f.tester.takeException(), isNull);
+    },
+  );
+
+  featureTest(
+    'legacy sessions reconnect after network changes without identity probes '
+    'or losing their draft',
+    (f) async {
+      final studio = f.network.add('http://studio.test:7734')
+        ..addSession('s1', 'Legacy notes');
+      final saved = await f.storage.seedServer(studio);
+      final app = await f.launch();
+      await app.openFromRoster('s1', cwd: '/work/studio');
+      final input = find.byKey(const Key('session-detail-prompt-input'));
+      await app.enterText(input, 'Keep my legacy draft');
+      final coordinator = app.container.read(brokerRouteCoordinatorProvider);
+      Future<void> reconnect(void Function() change) async {
+        final before = studio.socketsFor('s1').length;
+        change();
+        await app.pumpUntil(
+          () =>
+              studio.socketsFor('s1').length > before &&
+              studio.socketsFor('s1').last.isConnected,
+          reason: 'The original legacy address reconnects',
+        );
+        expect(
+          f.tester.widget<TextField>(input).controller!.text,
+          'Keep my legacy draft',
+        );
+      }
+
+      await reconnect(coordinator.networkChanged);
+      coordinator
+        ..foreground(value: false)
+        ..networkChanged();
+      await reconnect(() => coordinator.foreground(value: true));
+      await f.tester.pump(const Duration(minutes: 2));
+      expect(studio.requestsTo('/api/connection/identity-proof'), isEmpty);
+      expect(coordinator.status(saved)!.activeRouteId, isNotNull);
+      expect(f.tester.takeException(), isNull);
+    },
+  );
+
+  featureTest(
+    'automatic routes require two meaningful wins and preserve the working '
+    'path during editor tests',
+    (f) async {
+      final studio = f.network.add(
+        'http://studio.test:7734',
+        ownerToken: 'owner-secret',
+      )..addSession('s1', 'Route notes');
+      final tunnel = f.network.add(
+        'https://tunnel.test',
+        ownerToken: 'owner-secret',
+      )..addSession('s1', 'Route notes');
+      final identity = await PairingCrypto.generateIdentityKeyPair();
+      final wire = RoutesDesk(identity, f.now)
+        ..add(studio)
+        ..add(tunnel);
+      final saved = await f.storage.seedServer(
+        studio,
+        displayName: 'Studio',
+        ownerToken: 'owner-secret',
+      );
+      final server = BrokerRouteServer(
+        profileId: saved.id,
+        incarnation: saved.incarnationId!,
+        legacyOrigin: studio.baseUri,
+        identityPublicKey: identity.publicKey,
+        principalId: 'owner',
+        credentialReference: saved.credentialKey,
+        lastSuccessfulRouteId: 'studio',
+        addresses: [
+          BrokerAddress(
+            id: 'studio',
+            origin: studio.baseUri,
+            label: 'LAN',
+            order: 0,
+            verifiedIdentity: identity.publicKey,
+            legacyTrusted: true,
+          ),
+          BrokerAddress(
+            id: 'tunnel',
+            origin: tunnel.baseUri,
+            label: 'Tunnel',
+            order: 1,
+            verifiedIdentity: identity.publicKey,
+          ),
+        ],
+      );
+      await f.storage.database.customStatement(
+        'INSERT OR REPLACE INTO broker_route_servers VALUES (?,?,?)',
+        [saved.id, saved.incarnationId, jsonEncode(server.toJson())],
+      );
+      final app = await f.launch();
+      final coordinator = app.container.read(brokerRouteCoordinatorProvider);
+      Future<void> waitPrecisely(bool Function() ready, String reason) async {
+        for (var step = 0; step < 4000 && !ready(); step++) {
+          await app.flushRealAsync();
+          await f.tester.pump(const Duration(milliseconds: 5));
+        }
+        expect(ready(), isTrue, reason: reason);
+      }
+
+      await waitPrecisely(
+        () => coordinator.status(saved)?.activeRouteId == 'studio',
+        'The last successful address connects first',
+      );
+      await app.go(brokerProfilesRoute);
+      await app.tap(
+        find.descendant(
+          of: AppDriver.savedServer(saved.id),
+          matching: find.text('Studio'),
+        ),
+      );
+      await app.waitFor(find.text(en.routesTestAll));
+      await waitPrecisely(
+        () => coordinator.status(saved)!.testing.isEmpty,
+        'Initial address observations finish',
+      );
+      Future<void> round(int lan, int alternate) async {
+        wire.latency[studio.baseUri.origin] = Duration(milliseconds: lan);
+        wire.latency[tunnel.baseUri.origin] = Duration(milliseconds: alternate);
+        final before = wire.checkRequests;
+        await f.tester.tap(find.widgetWithText(TextButton, en.routesTestAll));
+        await f.tester.pump();
+        await waitPrecisely(
+          () =>
+              wire.checkRequests >= before + 6 &&
+              coordinator.status(saved)!.testing.isEmpty &&
+              f.tester
+                      .widget<TextButton>(
+                        find.widgetWithText(TextButton, en.routesTestAll),
+                      )
+                      .onPressed !=
+                  null,
+          'The explicit round completes through HTTP and WS',
+        );
+      }
+
+      await round(100, 85);
+      await round(100, 85);
+      expect(coordinator.status(saved)!.activeRouteId, 'studio');
+      await round(100, 75);
+      expect(coordinator.status(saved)!.activeRouteId, 'studio');
+      await round(100, 75);
+      await waitPrecisely(
+        () => coordinator.status(saved)!.activeRouteId == 'tunnel',
+        'Two fresh 25 ms improvements choose Tunnel',
+      );
+      await round(50, 75);
+      await round(50, 75);
+      expect(
+        coordinator.status(saved)!.activeRouteId,
+        'tunnel',
+        reason: 'The latency switch cooldown prevents immediate reversal',
+      );
+      await f.tester.pump(const Duration(seconds: 31));
+      await waitPrecisely(
+        () => coordinator.status(saved)!.activeRouteId == 'studio',
+        'A persistent improvement may switch after cooldown',
+      );
+      // Testing an edited address must not retire the still-saved path.
+      await app.tapKey('address-menu-LAN');
+      await app.tap(find.text(en.edit));
+      await app.enterText(
+        find.widgetWithText(TextField, en.routesOrigin),
+        'https://unreachable.test',
+      );
+      await app.tap(find.text(en.routesTest));
+      await app.waitFor(find.text(en.routesFailed));
+      expect(coordinator.status(saved)!.activeRouteId, 'studio');
+      await app.dismissModal();
+      final hanging = f.network.add(
+        'https://slow-route.test',
+        ownerToken: 'owner-secret',
+      )..addSession('s1', 'Route notes');
+      wire.add(hanging);
+      await app.tap(find.text(en.routesAdd));
+      await app.enterText(
+        find.widgetWithText(TextField, en.routesLabel),
+        'Slow path',
+      );
+      await app.enterText(
+        find.widgetWithText(TextField, en.routesOrigin),
+        hanging.baseUri.origin,
+      );
+      await app.tap(find.text(en.routesTest));
+      await app.waitFor(find.text(en.routesAvailable));
+      await app.tap(find.widgetWithText(FilledButton, en.save));
+      final held = hanging.hold('GET', '/api/connection/check');
+      addTearDown(held.release);
+      await f.tester.tap(find.widgetWithText(TextButton, en.routesTestAll));
+      await waitPrecisely(
+        () =>
+            held.arrivals > 0 &&
+            !coordinator.status(saved)!.testing.contains('tunnel') &&
+            coordinator.status(saved)!.observations['tunnel'] != null,
+        'The approved alternate is ready while another path hangs',
+      );
+      await app.go(sessionsRoute);
+      await app.openFromRoster('s1', cwd: '/work/studio');
+      final composer = find.byKey(const Key('session-detail-prompt-input'));
+      await app.enterText(composer, 'Keep this draft during recovery');
+      studio.reachable = false;
+      for (final socket in studio.socketsFor('s1')) {
+        socket.drop();
+      }
+      await waitPrecisely(
+        () =>
+            coordinator.status(saved)!.activeRouteId == 'tunnel' &&
+            tunnel.socketsFor('s1').any((socket) => socket.isConnected),
+        'Hard failure reconnects through the ready alternate '
+        'before the held response',
+      );
+      expect(
+        f.tester.widget<TextField>(composer).controller!.text,
+        'Keep this draft during recovery',
+      );
+      expect(held.arrivals, greaterThan(0));
+      held.release();
+      await waitPrecisely(
+        () => coordinator.status(saved)!.testing.isEmpty,
+        'The released round finishes',
+      );
+      final beforeNormalClose = wire.checkRequests;
+      final attachments = tunnel.socketsFor('s1').length;
+      tunnel.socketsFor('s1').last.drop(code: 1000);
+      await waitPrecisely(
+        () =>
+            tunnel.socketsFor('s1').length > attachments &&
+            tunnel.socketsFor('s1').last.isConnected,
+        'A normal close uses the existing session reconnect path',
+      );
+      expect(
+        wire.checkRequests,
+        beforeNormalClose,
+        reason:
+            'Normal closure does not declare the route dead '
+            'or start preflights',
+      );
+      expect(
+        wire.brokers
+            .expand((b) => b.requestsTo('/api/connection/identity-proof'))
+            .every((r) => r.anonymous),
+        isTrue,
+        reason: 'Reused probe pools never put credentials on identity proofs',
+      );
+      expect(f.tester.takeException(), isNull);
+    },
+  );
+
+  featureTest(
+    'verified address changes preserve the logical server and draft after '
+    'relaunch',
+    (f) async {
+      final studio = f.network.add(
+        'http://studio.test:7734',
+        ownerToken: 'owner-secret',
+      )..addSession('s1', 'Route notes');
+      final tunnel = f.network.add(
+        'https://tunnel.test',
+        ownerToken: 'owner-secret',
+      )..addSession('s1', 'Route notes');
+      final routes =
+          RoutesDesk(await PairingCrypto.generateIdentityKeyPair(), f.now)
+            ..add(studio)
+            ..add(tunnel);
+      final saved = await f.storage.seedServer(
+        studio,
+        displayName: 'Studio',
+        ownerToken: 'owner-secret',
+      );
+      final credentials = FaultyCredentialStore(f.storage.credentials);
+      var app = await f.launch(
+        overrides: [credentialStoreProvider.overrideWithValue(credentials)],
+      );
+      await app.openFromRoster('s1', cwd: '/work/studio');
+      await app.enterText(
+        find.byKey(const Key('session-detail-prompt-input')),
+        'Keep this exact draft across addresses',
+      );
+      await app.go(brokerProfilesRoute);
+      await app.tap(
+        find.descendant(
+          of: AppDriver.savedServer(saved.id),
+          matching: find.text('Studio'),
+        ),
+      );
+      await app.waitFor(find.text(en.routesMode));
+      await app.tapKey('address-menu-studio.test');
+      await app.tap(find.text(en.routesTest));
+      await app.waitFor(find.text(en.routesVerifyTitle));
+      expect(
+        studio
+            .requestsTo('/api/connection/identity-proof')
+            .every((r) => r.anonymous),
+        isTrue,
+      );
+      expect(
+        studio.requestsTo('/api/connection/check'),
+        isEmpty,
+        reason: 'A self-reported key cannot authorize credential reuse',
+      );
+      final checkFrame = studio.connectionCheckFrame!;
+      studio.connectionCheckFrame = (request) {
+        final frame = checkFrame(request);
+        credentials.reads.fail = true;
+        return frame;
+      };
+      await app.tap(find.text(en.routesApprove));
+      await app.waitFor(find.text(en.routesFailed));
+      expect(app.activeServer!.sourceIdentity, isNull);
+      final interrupted = await f.storage.database
+          .customSelect('SELECT state FROM broker_route_migrations')
+          .getSingle();
+      expect(interrupted.read<String>('state'), 'prepared');
+      // The durable intent survives a stop while secure storage is unavailable.
+      // Relaunch completes the same migration before restoring any old source.
+      credentials.reads.fail = false;
+      studio.connectionCheckFrame = checkFrame;
+      app = await f.restart(initialLocation: brokerProfilesRoute);
+      await app.pumpUntil(
+        () => app.activeServer?.sourceIdentity != null,
+        reason: 'The verified account migration becomes durable',
+      );
+      expect(app.activeServer!.id, saved.id);
+      expect(app.activeServer!.incarnationId, saved.incarnationId);
+      final boundSource = app.activeServer!.sourceIdentity;
+      final drafts = await f.storage.database
+          .select(f.storage.database.sessionDraftRows)
+          .get();
+      expect(
+        drafts.any(
+          (d) => d.draftText == 'Keep this exact draft across addresses',
+        ),
+        isTrue,
+      );
+      expect(tunnel.requests, isEmpty);
+      await app.tap(
+        find.descendant(
+          of: AppDriver.savedServer(saved.id),
+          matching: find.text('Studio'),
+        ),
+      );
+      await app.waitFor(find.text(en.routesMode));
+      await app.tap(find.text(en.routesAdd));
+      await app.enterText(
+        find.widgetWithText(TextField, en.routesLabel),
+        'Tunnel',
+      );
+      await app.enterText(
+        find.widgetWithText(TextField, en.routesOrigin),
+        'https://tunnel.test/private?token=never-send',
+      );
+      expect(find.text(en.routesInvalid), findsOneWidget);
+      expect(tunnel.requests, isEmpty);
+      await app.enterText(
+        find.widgetWithText(TextField, en.routesOrigin),
+        'https://tunnel.test',
+      );
+      await app.tap(find.text(en.routesTest));
+      await app.waitFor(find.text(en.routesAvailable));
+      expect(
+        tunnel.requestsTo('/api/connection/identity-proof').single.anonymous,
+        isTrue,
+      );
+      expect(
+        tunnel
+            .requestsTo('/api/connection/check')
+            .every((r) => r.ownerToken == 'owner-secret'),
+        isTrue,
+      );
+      await app.tap(find.widgetWithText(FilledButton, en.save));
+      await app.waitFor(find.text('Tunnel'));
+      await app.tapKey('address-menu-Tunnel');
+      await app.tap(find.text(en.routesFixed).last);
+      await app.pumpUntil(
+        () => tunnel.requestsTo('/api/sessions').isNotEmpty,
+        reason: 'Fixed address routes the active server through Tunnel',
+      );
+      expect(app.activeServer!.sourceIdentity, boundSource);
+      expect((await app.savedServers()).length, 1);
+      app = await f.restart();
+      await app.openFromRoster('s1', cwd: '/work/studio');
+      await app.waitFor(find.byKey(const Key('session-detail-prompt-input')));
+      expect(
+        f.tester
+            .widget<TextField>(
+              find.byKey(const Key('session-detail-prompt-input')),
+            )
+            .controller!
+            .text,
+        'Keep this exact draft across addresses',
+      );
+      expect(app.activeServer!.sourceIdentity, boundSource);
+      // Disabling/removing an address changes reachability, never ownership.
+      final boundProfile = app.activeServer!;
+      final coordinator = app.container.read(brokerRouteCoordinatorProvider);
+      await app.go(brokerProfilesRoute);
+      await app.tap(
+        find.descendant(
+          of: AppDriver.savedServer(saved.id),
+          matching: find.text('Studio'),
+        ),
+      );
+      await app.waitFor(find.text(en.routesMode));
+      await app.tapKey('address-menu-Tunnel');
+      await app.tap(find.text(en.routesDisable));
+      await app.waitFor(find.text(en.routesDisconnect));
+      await app.tap(find.widgetWithText(FilledButton, en.routesDisable));
+      await app.pumpUntil(
+        () => coordinator.status(boundProfile)?.activeRouteId == null,
+        reason: 'Disabling the fixed address disconnects without fallback',
+      );
+      expect((await app.savedServers()).single.id, saved.id);
+      for (final label in ['Tunnel', 'studio.test']) {
+        await app.tapKey('address-menu-$label');
+        await app.tap(find.text(en.routesRemove));
+        await app.waitFor(find.text(en.routesDisconnect));
+        await app.tap(find.widgetWithText(FilledButton, en.routesRemove));
+        await app.waitForAbsent(find.byKey(Key('address-menu-$label')));
+      }
+      final emptyRoutes = await app.container
+          .read(brokerRouteStoreProvider)
+          .read(saved.id, saved.incarnationId!);
+      expect(emptyRoutes!.addresses, isEmpty);
+      expect((await app.savedServers()).single.sourceIdentity, boundSource);
+      expect(
+        (await f.storage.database
+                .select(f.storage.database.sessionDraftRows)
+                .get())
+            .any(
+              (draft) =>
+                  draft.draftText == 'Keep this exact draft across addresses',
+            ),
+        isTrue,
+      );
+      expect(routes.checkRequests, greaterThan(0));
+      expect(
+        f.network.sockets
+            .where((s) => s.url.path == '/api/connection/check/ws')
+            .every((s) => !s.isConnected),
+        isTrue,
+      );
+      expect(f.tester.takeException(), isNull);
+    },
+  );
+
+  featureTest(
+    'duplicate verified servers preserve conflicting drafts and pause pending '
+    'sends across restart',
+    (f) async {
+      final studio = f.network.add(
+        'http://studio.test:7734',
+        ownerToken: 'owner-secret',
+      )..addSession('s1', 'Notes');
+      final tunnel = f.network.add(
+        'https://tunnel.test',
+        ownerToken: 'owner-secret',
+      )..addSession('s1', 'Notes');
+      RoutesDesk(await PairingCrypto.generateIdentityKeyPair(), f.now)
+        ..add(studio)
+        ..add(tunnel);
+      final first = await f.storage.seedServer(
+        studio,
+        displayName: 'Studio',
+        ownerToken: 'owner-secret',
+      );
+      final second = await f.storage.seedServer(
+        tunnel,
+        displayName: 'Tunnel copy',
+        ownerToken: 'owner-secret',
+        active: false,
+      );
+      final db = f.storage.database;
+      const sharedProxy = BrokerProxyProfile(
+        id: 'shared-office-proxy',
+        name: 'Office proxy',
+        protocol: BrokerProxyProtocol.http,
+        host: '127.0.0.1',
+        port: 3128,
+        generation: 1,
+      );
+      await db.customStatement(
+        'INSERT INTO broker_proxy_profiles VALUES (?,?)',
+        [sharedProxy.id, jsonEncode(sharedProxy.toJson())],
+      );
+      for (final (profile, text, message) in [
+        (first, 'Keep the Studio draft', 'pending-studio'),
+        (second, 'Recover the Tunnel draft', 'pending-tunnel'),
+      ]) {
+        final source = RosterSource.ofProfile(profile).storageKey;
+        await db
+            .into(db.sessionDraftRows)
+            .insert(
+              SessionDraftRowsCompanion.insert(
+                brokerProfileId: source,
+                tool: 'codex',
+                sessionId: 's1',
+                draftText: text,
+                updatedAt: f.now(),
+              ),
+            );
+        await db.customStatement(
+          'INSERT INTO session_outbox_rows '
+          '(client_message_id,broker_profile_id,tool,session_id,'
+          'kind,payload_json,'
+          'status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)',
+          [
+            message,
+            source,
+            'codex',
+            's1',
+            'prompt',
+            '{"kind":"prompt","text":"pending"}',
+            'queued',
+            f.now().millisecondsSinceEpoch ~/ 1000,
+            f.now().millisecondsSinceEpoch ~/ 1000,
+          ],
+        );
+      }
+      String updateScope(BrokerProfile p) => jsonEncode([
+        p.id,
+        p.incarnationId,
+        p.sourceIdentity ?? p.baseUri.toString(),
+        p.credentialKey,
+      ]);
+      await db
+          .into(db.appSettingRows)
+          .insert(
+            AppSettingRowsCompanion.insert(
+              key: 'updates.v1',
+              value: jsonEncode({
+                'schemaVersion': 1,
+                'servers': {
+                  updateScope(first): <String, dynamic>{},
+                  updateScope(second): <String, dynamic>{},
+                },
+                'operation': {
+                  'id': 'preserved-update-operation',
+                  'phase': 'running',
+                  'steps': [
+                    {
+                      'id': 'preserved-step-id',
+                      'profileId': second.id,
+                      'scope': updateScope(second),
+                      'phase': 'ready',
+                      'jobId': 'already-accepted-job',
+                    },
+                  ],
+                },
+              }),
+              updatedAt: f.now(),
+            ),
+          );
+      var app = await f.launch(initialLocation: brokerProfilesRoute);
+      for (final profile in [first, second]) {
+        await app.tap(
+          find.descendant(
+            of: AppDriver.savedServer(profile.id),
+            matching: find.text(profile.displayName),
+          ),
+        );
+        await app.waitFor(find.text(en.routesMode));
+        await app.tapKey('address-menu-${profile.baseUri.host}');
+        await app.tap(find.text(en.routesTest));
+        await app.waitFor(find.text(en.routesVerifyTitle));
+        await app.tap(find.text(en.routesApprove));
+        await app.pumpUntil(
+          () => f.tester
+              .widget<PopupMenuButton<String>>(
+                find.byKey(Key('address-menu-${profile.baseUri.host}')),
+              )
+              .enabled,
+          reason: 'Each original address finishes verification and migration',
+        );
+        expect(
+          (await f.storage.profiles.getById(profile.id))!.sourceIdentity,
+          isNotNull,
+        );
+        if (profile == first) {
+          await f.tester.pageBack();
+          await app.settle();
+        }
+      }
+      await app.tap(find.text(en.routesAdd));
+      await app.enterText(
+        find.widgetWithText(TextField, en.routesLabel),
+        'Office path',
+      );
+      await app.enterText(
+        find.widgetWithText(TextField, en.routesOrigin),
+        studio.baseUri.origin,
+      );
+      await app.tap(find.text(en.routesAdvanced));
+      await app.tap(find.byType(DropdownButtonFormField<String>));
+      await app.tap(find.text(sharedProxy.name).last);
+      await app.tap(find.widgetWithText(TextButton, en.routesTest));
+      await app.waitFor(find.text(en.routesAvailable));
+      await app.tap(find.widgetWithText(FilledButton, en.save));
+      await app.waitFor(find.text(en.routesMergeReview));
+      await app.tap(find.text(en.routesMergeReview));
+      await app.waitFor(find.text(en.routesMergeTitle));
+      expect(find.text('Studio'), findsWidgets);
+      expect(find.text('Tunnel copy'), findsWidgets);
+      expect(
+        f.tester
+            .widget<FilledButton>(
+              find.widgetWithText(FilledButton, en.routesMerge),
+            )
+            .onPressed,
+        isNull,
+        reason: 'Conflicting Direct/proxy paths require an explicit choice',
+      );
+      await app.tap(find.byType(DropdownButton<String>).last);
+      await app.tap(find.text('Office path · Office proxy').last);
+      await app.tap(find.widgetWithText(FilledButton, en.routesMerge));
+      await app.waitFor(find.text(en.routesRecoveredTitle));
+      expect((await app.savedServers()).length, 1);
+      expect(
+        app.activeServer!.id,
+        first.id,
+        reason: 'The active server is the default survivor',
+      );
+      await app.waitFor(find.text(en.routesRecoveredTitle));
+      await app.tap(find.text(en.routesRecoveredTitle));
+      await app.waitFor(find.text('Recover the Tunnel draft'));
+      await app.tap(find.text(en.routesRecoveredFrom('Tunnel copy')));
+      final clipboard = app.captureClipboard();
+      await app.tap(find.text(en.copyText));
+      expect(clipboard, ['Recover the Tunnel draft']);
+      final queued = await db.select(db.sessionOutboxRows).get();
+      expect(queued.map((r) => r.clientMessageId).toSet(), {
+        'pending-studio',
+        'pending-tunnel',
+      });
+      expect(queued.every((r) => r.status == 'failed'), isTrue);
+      expect(
+        (await db.select(db.sessionDraftRows).get()).single.draftText,
+        'Keep the Studio draft',
+      );
+      expect(await f.storage.token(first.credentialKey!), 'owner-secret');
+      expect(await f.storage.token(second.credentialKey!), isNull);
+      final routes = app.container.read(brokerRouteStoreProvider);
+      final mergedRoutes = (await routes.read(first.id, first.incarnationId!))!;
+      final sameOrigin = mergedRoutes.addresses.where(
+        (a) => a.origin == studio.baseUri,
+      );
+      expect(sameOrigin, hasLength(2));
+      expect(sameOrigin.singleWhere((a) => a.enabled).proxyId, sharedProxy.id);
+      expect(sameOrigin.singleWhere((a) => !a.enabled).proxyId, isNull);
+      expect(
+        await routes.proxy(sharedProxy.id),
+        isNotNull,
+        reason: 'Removing one merged server never removes a reusable profile',
+      );
+      final updateRow = await db
+          .customSelect(
+            "SELECT value FROM app_setting_rows WHERE key='updates.v1'",
+          )
+          .getSingle();
+      final update = jsonDecode(updateRow.read<String>('value')) as Map;
+      expect((update['servers'] as Map).keys, [updateScope(app.activeServer!)]);
+      final operation = update['operation'] as Map;
+      expect(operation['phase'], 'paused');
+      expect(
+        (operation['steps'] as List).single,
+        containsPair('profileId', first.id),
+      );
+      expect(
+        (operation['steps'] as List).single,
+        containsPair('jobId', 'already-accepted-job'),
+      );
+      expect(
+        (operation['steps'] as List).single,
+        containsPair('id', 'preserved-step-id'),
+      );
+      app = await f.restart(initialLocation: brokerProfilesRoute);
+      expect((await app.savedServers()).single.id, first.id);
+      await app.tap(
+        find.descendant(
+          of: AppDriver.savedServer(first.id),
+          matching: find.text('Studio'),
+        ),
+      );
+      await app.waitFor(find.text(en.routesRecoveredTitle));
+      await app.tap(find.text(en.routesRecoveredTitle));
+      await app.waitFor(find.text('Recover the Tunnel draft'));
+      expect(studio.requestsTo('/api/sessions/codex/s1/prompt'), isEmpty);
+      expect(f.tester.takeException(), isNull);
+    },
+  );
+
+  featureTest(
+    'contextual diagnostics preserve actions, snapshot and sanitized clipboard',
+    (f) async {
+      final studio = f.network.add('http://studio.test:7734')
+        ..respondNext(
+          'GET',
+          '/api/broker/health',
+          FakeBrokerResponse.error(
+            503,
+            'DETAIL_FIXTURE',
+            'Transport failed\nAuthorization: Bearer owner-secret\n'
+                'https://user:password@example.test/file?'
+                'token=signed-secret#fragment\n'
+                'https://example.test/api/media-previews/media-path-secret\n'
+                '/api/media-previews/relative-media-secret\n'
+                'http://127.0.0.1:17734/abcdefghijklmnopqrstuvwx\n'
+                '{"password":"proxy-secret","api_key":"nested-secret",'
+                '"wsAuthTicket":"ticket-secret"}',
+          ),
+        );
+      await f.storage.seedServer(studio, displayName: 'Studio');
+      final app = await f.launch(initialLocation: brokerDevicesSettingsRoute);
+      final owner = find.byKey(const Key('broker-gate-diagnostic-item'));
+      await app.waitFor(find.byKey(const Key('broker-gate-unreachable')));
+      expect(find.text(en.brokerGateTechnicalDetails), findsNothing);
+      final before = studio.requests.length;
+      // A recognized hold on Retry opens the owner's details and never retries.
+      await f.tester.longPress(find.byKey(const Key('broker-gate-retry')));
+      await app.settle();
+      expect(studio.requests.length, before);
+      final details = find.byKey(const Key('contextual-details-text'));
+      final captured = f.tester.widget<SelectableText>(details).data!;
+      for (final secret in [
+        'owner-secret',
+        'password@',
+        'signed-secret',
+        'proxy-secret',
+        'nested-secret',
+        'media-path-secret',
+        'relative-media-secret',
+        'abcdefghijklmnopqrstuvwx',
+        'ticket-secret',
+      ]) {
+        expect(captured, isNot(contains(secret)));
+      }
+      expect(captured, contains('DETAIL_FIXTURE'));
+      final clipboard = app.captureClipboard();
+      await app.tapKey('contextual-details-copy');
+      expect(clipboard, [captured]);
+      await app.tapKey('contextual-details-close');
+
+      // Focus returns to the owning item; keyboard access needs no pointer.
+      await f.tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await f.tester.sendKeyEvent(LogicalKeyboardKey.f10);
+      await f.tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await app.settle();
+      expect(details, findsOneWidget);
+      await app.tapKey('contextual-details-close');
+
+      final pointer = await f.tester.createGesture(
+        kind: PointerDeviceKind.mouse,
+        buttons: kSecondaryMouseButton,
+      );
+      await pointer.down(f.tester.getTopLeft(owner) + const Offset(8, 8));
+      await pointer.up();
+      await app.settle();
+      expect(details, findsOneWidget);
+      await app.tapKey('contextual-details-close');
+
+      final semantics = f.tester.ensureSemantics();
+      await app.settle();
+      final node = f.tester.getSemantics(
+        find.descendant(of: owner, matching: find.byType(Semantics)).first,
+      );
+      final actions = node.getSemanticsData().customSemanticsActionIds!;
+      node.owner!.performAction(
+        node.id,
+        SemanticsAction.customAction,
+        actions.single,
+      );
+      await app.settle();
+      expect(details, findsOneWidget);
+      semantics.dispose();
+      await app.tapKey('contextual-details-close');
+
+      // Ordinary Retry still acts once after all contextual input paths.
+      await app.tapKey('broker-gate-retry');
+      await app.waitFor(find.byKey(const Key('broker-gate-connected')));
+      expect(f.tester.takeException(), isNull);
+    },
+  );
+
   group('first connection', () {
     featureTest(
       'a fresh install offers only the way to connect and asks no server for '
@@ -90,16 +1246,19 @@ void main() {
             hasLength(probesBefore + 1),
             reason: '"$typed" probes $server',
           );
-          expect(app.activeServer?.id, server, reason: typed);
+          expect(app.activeServer?.id, isNot(server), reason: typed);
           expect(app.activeServer?.baseUri.toString(), server);
-          expect(await f.storage.activeServer.getActiveProfileId(), server);
+          expect(
+            await f.storage.activeServer.getActiveProfileId(),
+            app.activeServer!.id,
+          );
           expect(
             find.text(en.connectionConnectedMachine(broker.machine)),
             findsOneWidget,
           );
         }
         expect(
-          (await app.savedServers()).map((s) => s.id).toSet(),
+          (await app.savedServers()).map((s) => s.baseUri.toString()).toSet(),
           brokers.keys.toSet(),
         );
 
@@ -108,11 +1267,11 @@ void main() {
         await app.enterText(find.byKey(_addressField), '');
         await app.tap(find.widgetWithText(FilledButton, en.connectionConnect));
         await app.waitFor(find.text(en.connectionConnectedTitle));
-        expect(app.activeServer?.id, 'http://127.0.0.1:7734');
+        expect(app.activeServer?.baseUri.toString(), 'http://127.0.0.1:7734');
         await app.enterText(find.byKey(_addressField), 'desk.test');
         await f.tester.testTextInput.receiveAction(TextInputAction.done);
         await app.pumpUntil(
-          () => app.activeServer?.id == 'http://desk.test:7734',
+          () => app.activeServer?.baseUri.toString() == 'http://desk.test:7734',
           reason: 'Enter connects to desk.test',
         );
 
@@ -158,21 +1317,20 @@ void main() {
         f.network.add('http://sick.test:7734').healthy = false;
         await f.storage.seedServer(studio);
         final app = await f.launch(initialLocation: connectionRoute);
-        expect(app.activeServer?.id, 'http://studio.test:7734');
+        expect(app.activeServer?.baseUri.toString(), 'http://studio.test:7734');
 
         await app.connectTo('offline.test');
         expect(find.text(en.connectionFailedTitle), findsOneWidget);
         expect(find.text(en.connectionBrokerUnreachable), findsOneWidget);
         app.expectNoRawErrorLeak();
-        expect(app.activeServer?.id, 'http://studio.test:7734');
+        expect(app.activeServer?.baseUri.toString(), 'http://studio.test:7734');
 
         await app.connectTo('sick.test');
         expect(find.text(en.connectionBrokerUnhealthy), findsOneWidget);
-        expect(app.activeServer?.id, 'http://studio.test:7734');
-        expect(
-          (await app.savedServers()).map((s) => s.id),
-          ['http://studio.test:7734'],
-        );
+        expect(app.activeServer?.baseUri.toString(), 'http://studio.test:7734');
+        expect((await app.savedServers()).map((s) => s.id), [
+          'http://studio.test:7734',
+        ]);
 
         await app.tap(find.widgetWithText(TextButton, en.connectionReset));
         expect(find.text(en.connectionIdleTitle), findsOneWidget);
@@ -199,7 +1357,7 @@ void main() {
         silent.release();
         await app.tapKey('connection-retry');
         await app.waitFor(find.text(en.connectionConnectedTitle));
-        expect(app.activeServer?.id, 'http://mute.test:7734');
+        expect(app.activeServer?.baseUri.toString(), 'http://mute.test:7734');
       },
     );
 
@@ -223,10 +1381,9 @@ void main() {
         await app.settle();
         expect(find.text(en.connectionIdleTitle), findsOneWidget);
         expect(app.activeServer, isNull);
-        expect(
-          (await app.savedServers()).map((s) => s.id),
-          ['http://other.test:7734'],
-        );
+        expect((await app.savedServers()).map((s) => s.id), [
+          'http://other.test:7734',
+        ]);
 
         held = slow.hold('GET', '/api/health');
         await app.connectTo('slow.test');
@@ -240,10 +1397,9 @@ void main() {
           await f.storage.activeServer.getActiveProfileId(),
           'http://other.test:7734',
         );
-        expect(
-          (await app.savedServers()).map((s) => s.id),
-          ['http://other.test:7734'],
-        );
+        expect((await app.savedServers()).map((s) => s.id), [
+          'http://other.test:7734',
+        ]);
       },
     );
 
@@ -278,10 +1434,7 @@ void main() {
         );
         expect(studioRow.displayName, 'Studio desk');
         expect(studioRow.createdAt.toUtc(), DateTime.utc(2026, 6, 25));
-        expect(
-          studioRow.credentialKey,
-          'broker-token:http://studio.test:7734',
-        );
+        expect(studioRow.credentialKey, 'broker-token:http://studio.test:7734');
         expect(studioRow.lastUsedAt!.isAfter(DateTime.utc(2026, 7)), isTrue);
         expect(
           await f.storage.token('broker-token:http://studio.test:7734'),
@@ -310,7 +1463,7 @@ void main() {
 
         final probes = studio.requestsTo('/api/health').length;
         app = await f.restart();
-        expect(app.activeServer?.id, 'http://studio.test:7734');
+        expect(app.activeServer?.baseUri.toString(), 'http://studio.test:7734');
         await app.pumpUntil(
           () => studio.requests.any(
             (r) => r.path == '/api/sessions' && r.uri.hasQuery,
@@ -373,10 +1526,7 @@ void main() {
           find.byKey(const Key('pairing-import-button')),
         );
         await app.settle();
-        expect(
-          Theme.of(f.tester.element(direct)).brightness,
-          Brightness.dark,
-        );
+        expect(Theme.of(f.tester.element(direct)).brightness, Brightness.dark);
       },
     );
   });
@@ -425,12 +1575,12 @@ void main() {
         _expectNoJargon(app, card);
         app.expectNoRawErrorLeak();
         await app.openGateTechnicalDetails();
-        final detail = find.byKey(const Key('broker-gate-detail'));
-        expect(f.tester.widget<Text>(detail).data, contains(rawLeakSentinel));
+        final detail = find.byKey(const Key('contextual-details-text'));
         expect(
-          find.ancestor(of: detail, matching: find.byType(SelectionArea)),
-          findsOneWidget,
+          f.tester.widget<SelectableText>(detail).data,
+          contains(rawLeakSentinel),
         );
+        await app.tapKey('contextual-details-close');
 
         // A 503 is still "can't reach", never a credential problem; Retry
         // re-probes and recovers once the server answers.
@@ -628,15 +1778,21 @@ void main() {
       'a paired device authenticates with its peer token and an owner with '
       'the owner token, on the probe and on every REST call',
       (f) async {
-        final studio = f.network.add(
-          'http://studio.test:7734',
-          ownerToken: 'owner-studio',
-        )..peerTokens.add('peer-phone');
+        final studio =
+            f.network.add(
+                'http://studio.test:7734',
+                ownerToken: 'owner-studio',
+              )
+              ..peerTokens.add('peer-phone')
+              ..addSession('peer-notes', 'Peer notes');
         final desk = f.network.add(
           'http://desk.test:7734',
           ownerToken: 'owner-desk',
         );
-        await f.storage.seedServer(studio, peerToken: 'peer-phone');
+        final peer = await f.storage.seedServer(
+          studio,
+          peerToken: 'peer-phone',
+        );
         await f.storage.seedServer(
           desk,
           ownerToken: 'owner-desk',
@@ -656,6 +1812,24 @@ void main() {
         );
         _expectAuthenticatedAs(desk, owner: 'owner-desk');
         expect(find.byKey(const Key('broker-auth-barrier')), findsNothing);
+
+        await app.go(pairingRoute);
+        await app.importPairing(
+          '{"brokerUrl":"${studio.baseUri}","token":"owner-studio"}',
+        );
+        await app.pumpUntil(
+          () =>
+              app.activeServer?.baseUri == studio.baseUri &&
+              app.activeServer?.id != peer.id,
+          reason: 'Owner import creates separate access from a legacy peer',
+        );
+        expect(await app.savedServers(), hasLength(3));
+        final retained = (await app.savedServers()).singleWhere(
+          (p) => p.id == peer.id,
+        );
+        expect(retained.credentialKey, peer.credentialKey);
+        expect(await f.storage.token(peer.credentialKey!), 'peer-phone');
+        expect(app.activeServer!.credentialKey, startsWith('broker-token:'));
       },
     );
 
@@ -879,17 +2053,17 @@ void main() {
         for (final (payload, server, name, token) in rows) {
           await app.importPairing(payload);
           expect(find.text(en.pairingSuccess), findsOneWidget, reason: payload);
-          expect(app.activeServer?.id, server);
+          expect(app.activeServer?.baseUri.toString(), server);
           final saved = (await app.savedServers()).firstWhere(
-            (s) => s.id == server,
+            (s) => s.baseUri.toString() == server,
           );
           expect(saved.displayName, name);
           expect(
             saved.credentialKey,
-            token == null ? isNull : 'broker-token:$server',
+            token == null ? isNull : 'broker-token:${saved.id}',
           );
           if (token != null) {
-            expect(await f.storage.token('broker-token:$server'), token);
+            expect(await f.storage.token(saved.credentialKey!), token);
           }
           // A pairing link is a one-use secret: it does not linger on screen.
           expect(
@@ -901,19 +2075,19 @@ void main() {
 
         // Re-pairing a saved server keeps its age and credential slot.
         final before = (await app.savedServers()).firstWhere(
-          (s) => s.id == 'https://desk.test:9443',
+          (s) => s.baseUri.toString() == 'https://desk.test:9443',
         );
         await app.importPairing(
           '{"brokerUrl":"https://desk.test:9443","token":"rotated"}',
         );
         final after = (await app.savedServers()).firstWhere(
-          (s) => s.id == 'https://desk.test:9443',
+          (s) => s.baseUri.toString() == 'https://desk.test:9443',
         );
         expect(after.createdAt, before.createdAt);
         expect(after.credentialKey, before.credentialKey);
         expect(after.displayName, 'Workstation');
         expect(
-          await f.storage.token('broker-token:https://desk.test:9443'),
+          await f.storage.token(after.credentialKey!),
           'rotated',
         );
       },
@@ -980,10 +2154,15 @@ void main() {
         await app.waitFor(find.text(en.pairingDeviceSuccess));
 
         const server = 'http://studio.test:7734';
-        expect(app.activeServer?.id, server);
+        expect(app.activeServer?.baseUri.toString(), server);
         expect(app.activeServer?.displayName, studio.brokerId);
-        expect(app.activeServer?.credentialKey, 'broker-peer-token:$server');
-        final peerToken = await f.storage.token('broker-peer-token:$server');
+        expect(
+          app.activeServer?.credentialKey,
+          'broker-peer-token:${app.activeServer!.id}',
+        );
+        final peerToken = await f.storage.token(
+          app.activeServer!.credentialKey!,
+        );
         expect(peerToken, 'peer-token-${offer.pairingId}');
         final acceptRequest = studio.requests.firstWhere(
           (r) => r.method == 'POST',
@@ -1023,7 +2202,7 @@ void main() {
         await app.importPairing(offer.qr, brokerUrl: 'studio.test');
         await app.waitFor(find.text(en.pairingDeviceSuccess));
         expect(offer.acceptCalls, 1);
-        expect(app.activeServer?.id, 'http://studio.test:7734');
+        expect(app.activeServer?.baseUri.toString(), 'http://studio.test:7734');
       },
     );
 
@@ -1149,10 +2328,7 @@ void main() {
             (studio.requests.lastWhere((r) => r.method == 'POST').body!
                     as Map)['peerId']
                 as String;
-        expect(
-          await pairing.read('${studio.brokerId}:$firstPeer'),
-          isNull,
-        );
+        expect(await pairing.read('${studio.brokerId}:$firstPeer'), isNull);
         expect(app.activeServer, isNull);
 
         // Paired, but activation fails: the paired credential is kept.
@@ -1163,14 +2339,20 @@ void main() {
             (studio.requests.lastWhere((r) => r.method == 'POST').body!
                     as Map)['peerId']
                 as String;
+        expect(await pairing.read('${studio.brokerId}:$secondPeer'), isNotNull);
+        final saved = await app.savedServers();
         expect(
-          await pairing.read('${studio.brokerId}:$secondPeer'),
-          isNotNull,
+          saved,
+          hasLength(2),
+          reason: 'A new peer never adopts owner authority or its data',
         );
         expect(
-          (await app.savedServers()).single.credentialKey,
-          'broker-peer-token:$server',
+          saved.singleWhere((p) => p.id == server).credentialKey,
+          'broker-token:$server',
         );
+        final paired = saved.singleWhere((p) => p.id != server);
+        expect(paired.credentialKey, 'broker-peer-token:${paired.id}');
+        expect(await f.storage.token(paired.credentialKey!), isNotNull);
         expect(app.activeServer, isNull);
       },
     );
@@ -1207,7 +2389,7 @@ void main() {
         await app.waitFor(find.text(en.pairingDeviceSuccess));
         expect(find.byKey(const Key('fake-camera-view')), findsNothing);
         expect(offer.acceptCalls, 1, reason: 'one detection, one import');
-        expect(app.activeServer?.id, 'http://studio.test:7734');
+        expect(app.activeServer?.baseUri.toString(), 'http://studio.test:7734');
       },
     );
 
@@ -1329,8 +2511,9 @@ void main() {
 
           accept.release();
           await app.waitForAbsent(find.byKey(barrier));
-          expect(app.activeServer?.id, url);
-          final key = 'broker-peer-token:$url';
+          expect(app.activeServer?.baseUri.toString(), url);
+          final savedId = app.activeServer!.id;
+          final key = 'broker-peer-token:$savedId';
           expect(app.activeServer?.credentialKey, key);
           final token = await f.storage.token(key);
           expect(token, 'peer-token-${offer.pairingId}');
@@ -1342,7 +2525,8 @@ void main() {
 
           final relaunched = await f.restart();
           expect(find.byKey(barrier), findsNothing);
-          expect(relaunched.activeServer?.id, url);
+          expect(relaunched.activeServer?.id, savedId);
+          expect(relaunched.activeServer?.baseUri.toString(), url);
           expect(offer.acceptCalls, 1);
         },
       );
@@ -1442,7 +2626,7 @@ void main() {
 
         final app = await f.launch();
         await app.pumpUntil(
-          () => app.activeServer?.id == local,
+          () => app.activeServer?.baseUri.toString() == local,
           reason: 'the fresh offer is redeemed',
         );
         expect(stale.acceptCalls, 0);
@@ -1484,7 +2668,7 @@ void main() {
         inbox.failDiscard = false;
         await app.tap(find.text(en.installerPairingRetry));
         await app.pumpUntil(
-          () => app.activeServer?.id == local,
+          () => app.activeServer?.baseUri.toString() == local,
           reason: 'the offer is redeemed after Try again',
         );
         expect(offer.acceptCalls, 1);
@@ -1523,7 +2707,7 @@ void main() {
         keyring.ready = true;
         await app.tap(find.text(en.installerPairingRetry));
         await app.pumpUntil(
-          () => app.activeServer?.id == local,
+          () => app.activeServer?.baseUri.toString() == local,
           reason: 'the offer is redeemed once the keyring is ready',
         );
         expect(offer.acceptCalls, 1);
@@ -1579,7 +2763,7 @@ void main() {
 
         broker.reachable = true;
         await app.pumpUntil(
-          () => app.activeServer?.id == local,
+          () => app.activeServer?.baseUri.toString() == local,
           reason: 'the offer is redeemed once the broker answers',
           every: const Duration(milliseconds: 500),
           steps: 80,
@@ -1624,7 +2808,7 @@ void main() {
         health.release();
         await app.tap(find.text(en.installerPairingRetry));
         await app.pumpUntil(
-          () => app.activeServer?.id == local,
+          () => app.activeServer?.baseUri.toString() == local,
           reason: 'the offer is redeemed after Try again',
         );
         expect(offer.acceptCalls, 1);
@@ -1640,7 +2824,7 @@ void main() {
 
         final offer = await installerOffer(f, broker, notify: true);
         await app.pumpUntil(
-          () => app.activeServer?.id == local,
+          () => app.activeServer?.baseUri.toString() == local,
           reason: 'the open client rechecks its inbox and redeems the offer',
         );
         expect(offer.acceptCalls, 1);
@@ -1740,7 +2924,7 @@ void main() {
         active.sets.failNext = true;
         await app.useSavedServer(labUrl);
         expect(find.text(en.brokerProfileActivateFailed), findsOneWidget);
-        expect(app.activeServer?.id, studioUrl);
+        expect(app.activeServer?.baseUri.toString(), studioUrl);
         await app.waitForAbsent(find.byType(SnackBar));
 
         await app.useSavedServer(labUrl);
@@ -1763,19 +2947,19 @@ void main() {
         }
 
         await pick(studioUrl);
-        expect(app.activeServer?.id, studioUrl);
+        expect(app.activeServer?.baseUri.toString(), studioUrl);
         expect(option(labUrl), findsNothing, reason: 'the menu closed');
 
         final writes = active.sets.calls;
         await pick(studioUrl);
-        expect(app.activeServer?.id, studioUrl);
+        expect(app.activeServer?.baseUri.toString(), studioUrl);
         expect(option(studioUrl), findsNothing, reason: 'the menu closed');
         expect(active.sets.calls, writes, reason: 'nothing to switch');
 
         active.sets.failNext = true;
         await pick(labUrl);
         expect(find.text(en.brokerProfileActivateFailed), findsOneWidget);
-        expect(app.activeServer?.id, studioUrl);
+        expect(app.activeServer?.baseUri.toString(), studioUrl);
         await app.waitForAbsent(find.byType(SnackBar));
 
         // Lab is deleted elsewhere (another window) while the menu is open.
@@ -1786,7 +2970,7 @@ void main() {
         );
         await app.tap(option(labUrl));
         expect(find.text(en.brokerProfileActivateFailed), findsOneWidget);
-        expect(app.activeServer?.id, studioUrl);
+        expect(app.activeServer?.baseUri.toString(), studioUrl);
       },
     );
 
@@ -1990,7 +3174,8 @@ void main() {
           () => studio.requestsTo('/api/sessions').length > rosterAsks,
           reason: 'the re-added server is asked for its roster',
         );
-        expect(app.activeServer?.id, studioUrl);
+        expect(app.activeServer?.baseUri.toString(), studioUrl);
+        expect(app.activeServer?.id, isNot(saved.id));
         expect(app.activeServer?.incarnationId, isNot(saved.incarnationId));
         expect(app.activeServer?.credentialKey, isNull);
         expect(find.text(en.sessionRosterCachedReconnecting), findsNothing);
@@ -2054,7 +3239,7 @@ void main() {
         }
 
         await failedDelete(active.clears, 'the in-use mark cannot be cleared');
-        expect(app.activeServer?.id, studioUrl);
+        expect(app.activeServer?.baseUri.toString(), studioUrl);
 
         await failedDelete(
           credentials.deletes,
@@ -2102,7 +3287,7 @@ void main() {
         await app.openConnection();
         await app.connectTo(studioUrl);
         await app.pumpUntil(
-          () => app.activeServer?.id == studioUrl,
+          () => app.activeServer?.baseUri.toString() == studioUrl,
           reason: 'the server is added back',
         );
 
@@ -2115,9 +3300,7 @@ void main() {
 
         studio.hold('GET', '/api/sessions');
         final relaunched = await f.restart();
-        await relaunched.waitFor(
-          find.text(en.sessionRosterCachedReconnecting),
-        );
+        await relaunched.waitFor(find.text(en.sessionRosterCachedReconnecting));
         final cached = await f.storage.database
             .customSelect('SELECT rows_json FROM roster_snapshot_rows')
             .get();

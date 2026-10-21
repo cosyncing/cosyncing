@@ -21,6 +21,7 @@ dependencies:
     path: ../../packages/dart/broker_contract
   broker_crypto:
     path: ../../packages/dart/broker_crypto
+  connectivity_plus: ^7.3.2
   cupertino_icons: ^1.0.8
   desktop_drop:
     path: ../../packages/dart/desktop_drop
