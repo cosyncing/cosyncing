@@ -36,17 +36,17 @@ class PickerOption<T> {
   final Key? key;
 }
 
-/// Quiet value control with a titled, button-width popup on every screen.
+/// Quiet value control with an anchored choice popup on every screen.
 class AdaptivePicker<T> extends StatefulWidget {
-  /// Creates a picker, optionally with a whole settings row as its trigger.
+  /// Creates a picker with an optional custom value control.
   const AdaptivePicker({
     required this.value,
     required this.options,
     required this.onChanged,
     this.title,
+    this.searchable,
     this.trigger,
     this.placeholder = '',
-    this.searchable,
     super.key,
   });
 
@@ -59,17 +59,17 @@ class AdaptivePicker<T> extends StatefulWidget {
   /// Commits an explicit selection; null disables the trigger.
   final ValueChanged<T>? onChanged;
 
-  /// Localized setting name for the popup heading.
+  /// Localized setting name for assistive technology.
   final String? title;
 
-  /// Optional whole-row trigger content.
+  /// Whether to show search. Defaults to on for eight or more choices.
+  final bool? searchable;
+
+  /// Optional custom value control.
   final Widget? trigger;
 
   /// Localized placeholder when no value is selected.
   final String placeholder;
-
-  /// Overrides the automatic search field for lists of eight or more choices.
-  final bool? searchable;
 
   @override
   State<AdaptivePicker<T>> createState() => _AdaptivePickerState<T>();
@@ -99,7 +99,7 @@ class _AdaptivePickerState<T> extends State<AdaptivePicker<T>> {
         value: widget.value,
         options: widget.options,
         title: widget.title,
-        searchable: widget.searchable,
+        searchable: widget.searchable ?? widget.options.length >= 8,
       ),
     );
     if (!mounted) return;
@@ -117,6 +117,7 @@ class _AdaptivePickerState<T> extends State<AdaptivePicker<T>> {
     return Semantics(
       button: true,
       expanded: _open,
+      label: widget.title,
       child: Material(
         color: _open
             ? t.accent.withValues(alpha: .12)
@@ -175,8 +176,8 @@ class _PickerPopup<T> extends StatefulWidget {
     required this.anchor,
     required this.value,
     required this.options,
+    required this.searchable,
     this.title,
-    this.searchable,
   });
   final Rect anchor;
 
@@ -186,9 +187,9 @@ class _PickerPopup<T> extends StatefulWidget {
   /// Choices in display order.
   final List<PickerOption<T>> options;
 
-  /// Localized setting name for the popup heading.
+  /// Localized setting name for assistive technology.
   final String? title;
-  final bool? searchable;
+  final bool searchable;
   @override
   State<_PickerPopup<T>> createState() => _PickerPopupState<T>();
 }
@@ -234,7 +235,6 @@ class _PickerPopupState<T> extends State<_PickerPopup<T>> {
     final t = context.tokens;
     final l10n = AppLocalizations.of(context);
     final media = MediaQuery.of(context);
-    final searchable = widget.searchable ?? widget.options.length >= 8;
     _initialSize ??= media.size;
     _initialTextSize ??= media.textScaler.scale(14);
     final available = math.max(
@@ -244,8 +244,8 @@ class _PickerPopupState<T> extends State<_PickerPopup<T>> {
           widget.anchor.bottom -
           16,
     );
-    final minimum =
-        56 + (widget.title == null ? 0 : 40) + (searchable ? 56 : 0);
+    final chromeHeight = 16 + (widget.searchable ? 56 : 0);
+    final minimum = 56 + chromeHeight;
     if (_initialSize != media.size ||
         _initialTextSize != media.textScaler.scale(14) ||
         widget.anchor.top < media.padding.top ||
@@ -263,12 +263,12 @@ class _PickerPopupState<T> extends State<_PickerPopup<T>> {
           ),
         )
         .toList();
-    return CustomSingleChildLayout(
+    final popup = CustomSingleChildLayout(
       delegate: _PickerLayout(
         widget.anchor,
         media.padding,
         media.viewInsets.bottom,
-        options.length * 56.0 + minimum - 40,
+        math.max(1, options.length) * 56.0 + chromeHeight,
       ),
       child: Material(
         key: const Key('adaptive-picker-popup'),
@@ -288,28 +288,7 @@ class _PickerPopupState<T> extends State<_PickerPopup<T>> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              if (widget.title != null)
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        widget.title!,
-                        style: Theme.of(context).textTheme.labelLarge,
-                      ),
-                    ),
-                    IconButton(
-                      tooltip: l10n.close,
-                      onPressed: () => Navigator.pop(context),
-                      icon: const Icon(Icons.close, size: 16),
-                      constraints: const BoxConstraints.tightFor(
-                        width: 40,
-                        height: 40,
-                      ),
-                      padding: EdgeInsets.zero,
-                    ),
-                  ],
-                ),
-              if (searchable)
+              if (widget.searchable)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 8),
                   child: TextField(
@@ -453,6 +432,12 @@ class _PickerPopupState<T> extends State<_PickerPopup<T>> {
         ),
       ),
     );
+    return Semantics(
+      namesRoute: widget.title != null,
+      label: widget.title,
+      explicitChildNodes: true,
+      child: popup,
+    );
   }
 }
 
@@ -474,7 +459,10 @@ class _PickerLayout extends SingleChildLayoutDelegate {
         ? anchor.top - safe.top - 16
         : size.height - math.max(safe.bottom, keyboard) - anchor.bottom - 16;
     final width = math
-        .min(anchor.width, size.width - safe.horizontal - 16)
+        .min(
+          anchor.width,
+          size.width - safe.horizontal - 16,
+        )
         .clamp(0.0, double.infinity);
     return BoxConstraints(
       minWidth: width,
@@ -485,7 +473,7 @@ class _PickerLayout extends SingleChildLayoutDelegate {
 
   @override
   Offset getPositionForChild(Size size, Size childSize) => Offset(
-    anchor.left.clamp(
+    (anchor.right - childSize.width).clamp(
       safe.left + 8,
       math.max(safe.left + 8, size.width - safe.right - childSize.width - 8),
     ),

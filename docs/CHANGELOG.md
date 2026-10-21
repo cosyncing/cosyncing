@@ -43,6 +43,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Settings choice controls highlight only the selected value, leaving labels
+  and descriptions clear. Dropdowns match the button width and omit repeated
+  headings. Fixed settings choices such as themes no longer show a search field.
 - Typing an answer to an inline question on a phone keeps the main prompt
   composer out of the answer area while preserving its draft.
 - Hide and unhide sessions respond immediately while the broker saves the

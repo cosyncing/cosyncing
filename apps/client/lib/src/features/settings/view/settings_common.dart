@@ -188,8 +188,9 @@ class SettingsPageBody extends StatelessWidget {
 
 /// One settings line: what it is, why it matters, and its control.
 ///
-/// Below [stackBelowWidth] a wide [trailing] control (a select, a button)
+/// Below [stackBelowWidth] a wide [trailing] control (such as a button)
 /// moves under the text at full width instead of squeezing the label.
+/// Selects stay beside the label, each taking up to half the row on phones.
 class SettingsRow extends StatelessWidget {
   /// Creates a settings row.
   const SettingsRow({
@@ -253,23 +254,27 @@ class SettingsRow extends StatelessWidget {
       builder: (context, constraints) {
         var trailing = this.trailing;
         final leading = this.leading;
-        if (trailing is SettingsSelect && constraints.maxWidth < 440) {
-          return trailing.buildRow(context, title: title, subtitle: subtitle);
-        }
+        final compactSelect =
+            trailing is SettingsSelect && constraints.maxWidth < 440;
         if (trailing is SettingsSelect && title is Text) {
           trailing = trailing.withTitle((title as Text).data);
         }
         final stacked =
             trailing != null &&
             stackTrailing &&
+            !compactSelect &&
             constraints.maxWidth < stackBelowWidth;
         final head = Row(
+          // Keep the popup below descriptions, including with enlarged text.
+          crossAxisAlignment: trailing is SettingsSelect && subtitle != null
+              ? CrossAxisAlignment.end
+              : CrossAxisAlignment.center,
           children: [
             if (leading != null) ...[leading, const SizedBox(width: 12)],
             Expanded(child: text),
             if (trailing != null && !stacked) ...[
               const SizedBox(width: 16),
-              trailing,
+              if (compactSelect) Flexible(child: trailing) else trailing,
             ],
           ],
         );
@@ -403,7 +408,7 @@ class SettingsSwitchRow extends StatelessWidget {
 /// One choice in a [SettingsSelect].
 typedef SettingsSelectOption<T> = PickerOption<T>;
 
-/// Quiet shared selector; settings rows become the full trigger on phones.
+/// Quiet shared selector; only the value control opens the choice popup.
 class SettingsSelect<T> extends StatelessWidget {
   /// Creates a selector using the shared anchored popup.
   const SettingsSelect({
@@ -427,7 +432,7 @@ class SettingsSelect<T> extends StatelessWidget {
   /// Desktop trigger width.
   final double width;
 
-  /// Popup heading inherited from the settings row.
+  /// Accessible label inherited from the settings row.
   final String? title;
 
   /// Attaches the surrounding settings label without changing the value.
@@ -440,85 +445,13 @@ class SettingsSelect<T> extends StatelessWidget {
     title: label,
   );
 
-  /// Builds the whole-row phone trigger.
-  Widget buildRow(
-    BuildContext context, {
-    required Widget title,
-    Widget? subtitle,
-  }) {
-    final option = options.where((o) => o.value == value).firstOrNull;
-    final t = context.tokens;
-    return AdaptivePicker<T>(
-      key: key,
-      value: value,
-      options: options,
-      onChanged: onChanged,
-      title: title is Text ? title.data : null,
-      trigger: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 12),
-        child: Row(
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  DefaultTextStyle(
-                    style: Theme.of(context).textTheme.bodyMedium!,
-                    child: title,
-                  ),
-                  if (subtitle != null)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 4),
-                      child: DefaultTextStyle(
-                        style: Theme.of(
-                          context,
-                        ).textTheme.bodySmall!.copyWith(color: t.textTertiary),
-                        child: subtitle,
-                      ),
-                    ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 12),
-            Flexible(
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  if (option?.leading case final leading?) ...[
-                    leading,
-                    const SizedBox(width: 8),
-                  ],
-                  Flexible(
-                    child: Text(
-                      option?.label ?? '',
-                      key: const Key('picker-current-value'),
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: onChanged == null ? t.textTertiary : t.accent,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Icon(
-                    Icons.keyboard_arrow_down,
-                    size: 16,
-                    color: t.textTertiary,
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) => SizedBox(
     width: width,
     child: AdaptivePicker<T>(
       value: value,
       title: title,
+      searchable: false,
       options: options,
       onChanged: onChanged,
     ),

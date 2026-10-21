@@ -20,7 +20,7 @@ import { join } from 'node:path';
 import { runCli } from '../../src/cli/cli.ts';
 import { runDshConnectCommand, runDshDisconnectCommand, runDshStatusCommand } from '../../src/cli/dsh-commands.ts';
 import { BUILD_INFO, type BuildInfo } from '../../src/runtime/build-info.ts';
-import { dshSessionsPath, loadDshCookie, listDshEnrollments } from '../../src/security/dsh-credentials.ts';
+import { dshSessionsPath, loadDshCookie, listDshEnrollments, saveDshCookie } from '../../src/security/dsh-credentials.ts';
 
 const results: Array<{ name: string; ok: boolean }> = [];
 function check(name: string, ok: boolean, detail = ''): void {
@@ -269,15 +269,22 @@ async function callCli(args: string[]): Promise<{ code: number; stdout: string; 
     connected.exitCode === 0 && io.out.includes(authority),
     JSON.stringify({ code: connected.exitCode, out: io.out, err: io.err }));
 
+  // An expiry containing "3080" must not be mistaken for the configured host.
+  const target = dshSessionsPath(home);
+  const scope = listDshEnrollments(target)[0]!.scope;
+  const issued = loadDshCookie(scope, target)!;
+  const expiresAt = 1_760_003_080_000;
+  saveDshCookie(scope, { ...issued, expiresAt }, target);
+
   const status = writers();
   await runDshStatusCommand(
     { ...status.options, env: configured, json: true },
     { now: () => 1_760_000_000_000 },
   );
+  const reported = JSON.parse(status.out);
   check('status reports the configured host, not 3080, and finds that enrollment',
-    status.out.includes(new URL(host.baseUrl).host)
-      && status.out.includes('3080') === false
-      && status.out.includes('"enrolled": true'),
+    reported.host === authority && reported.enrolled === true
+      && reported.enrollments[0]?.expiresAt === expiresAt,
     JSON.stringify(status.out));
 
   const gone = writers();
@@ -293,8 +300,9 @@ async function callCli(args: string[]): Promise<{ code: number; stdout: string; 
     json: true,
     env: { COSYNCING_DSH_BASE_URL: 'http://127.0.0.1:19844', HOME: home },
   });
+  const empty = JSON.parse(quiet.out);
   check('a configured alternate with nothing enrolled is still reported as itself',
-    quiet.out.includes('127.0.0.1:19844') && quiet.out.includes('3080') === false,
+    empty.host === '127.0.0.1:19844' && empty.enrolled === false,
     JSON.stringify(quiet.out));
 
   host.stop();
