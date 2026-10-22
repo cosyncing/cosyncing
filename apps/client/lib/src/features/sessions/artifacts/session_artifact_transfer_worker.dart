@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:broker_client/broker_client.dart';
+import 'package:broker_client_flutter/broker_client_flutter.dart';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:broker_crypto/broker_crypto.dart';
 import 'package:cosyncing_client/src/errors/user_facing_error.dart';
@@ -14,7 +15,9 @@ import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifac
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_file_background_download.dart';
 import 'package:cosyncing_client/src/features/sessions/attachments/session_attachment_picker.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_detail_state.dart';
+import 'package:cosyncing_client/src/features/sessions/detail/session_notification_hooks.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
+import 'package:cosyncing_client/src/features/settings/controller/locale_controller.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -71,6 +74,7 @@ class SessionArtifactTransferWorkerResult {
     this.exportedPath,
     this.stagedUpload,
     this.message = '',
+    this.detail,
   });
 
   /// Transfer ledger id.
@@ -91,6 +95,9 @@ class SessionArtifactTransferWorkerResult {
   /// User-facing detail or error message.
   final String message;
 
+  /// Raw diagnostic, shown only through Technical details. Never persisted.
+  final String? detail;
+
   /// Whether the worker completed or successfully started useful file work.
   ///
   /// [SessionArtifactTransferWorkerOutcome.enqueuedInBackground] counts as
@@ -101,6 +108,12 @@ class SessionArtifactTransferWorkerResult {
       outcome == SessionArtifactTransferWorkerOutcome.cached ||
       outcome == SessionArtifactTransferWorkerOutcome.enqueuedInBackground;
 }
+
+/// Raw errors retained only for explicit Technical details in this app run.
+final sessionArtifactTransferDetailsProvider =
+    StateProvider<Map<String, String>>(
+      (ref) => {},
+    );
 
 /// App provider for foreground artifact transfer execution.
 final sessionArtifactTransferWorkerProvider =
@@ -121,6 +134,11 @@ final sessionArtifactTransferWorkerProvider =
           .watch(brokerClientProvider)
           .maybeWhen(data: (value) => value, orElse: () => null);
       final fileService = ref.watch(sessionArtifactFileServiceProvider);
+      final l10n = resolveAppLocalizations(
+        ref.watch(localeControllerProvider).valueOrNull,
+      );
+      late final SessionArtifactTransferWorker worker;
+      final details = ref.read(sessionArtifactTransferDetailsProvider.notifier);
       final transferController = ref.read(
         sessionArtifactTransferControllerProvider.notifier,
       );
@@ -143,12 +161,22 @@ final sessionArtifactTransferWorkerProvider =
           engine != null &&
           engine.isSupported &&
           finalizer != null) {
+        final lifecycle = ref.watch(
+          sessionNotificationLifecycleMonitorProvider,
+        );
+        bool isForeground() =>
+            lifecycle.currentState == BrokerAppLifecycleState.resumed;
+        hub!.isForeground = isForeground;
         final coordinator = SessionFileBackgroundDownloadCoordinator(
-          hub: hub!,
+          hub: hub,
           transferController: transferController,
           finalizer: finalizer,
           brokerProfileId: brokerProfileId,
           brokerClient: brokerClient,
+          isForeground: isForeground,
+          onReadyToSave: (id) async {
+            await worker.saveCachedTransfer(id, cancelOnDismiss: true);
+          },
         );
         // Reconcile any download that completed while the app was gone, and
         // start listening for live task updates. Fails safe off-device.
@@ -157,13 +185,16 @@ final sessionArtifactTransferWorkerProvider =
         backgroundCoordinator = coordinator;
       }
 
-      return SessionArtifactTransferWorker(
+      return worker = SessionArtifactTransferWorker(
         brokerProfileId: brokerProfileId,
         brokerClient: brokerClient,
         fileService: fileService,
         transferController: transferController,
         sessionAttachmentPicker: ref.read(sessionAttachmentPickerProvider),
         backgroundCoordinator: backgroundCoordinator,
+        cachedCopyRemovedMessage: l10n.transferCachedCopyRemoved,
+        onFailureDetail: (id, detail) =>
+            details.state = {...details.state, id: detail},
       );
     });
 
@@ -181,6 +212,9 @@ class SessionArtifactTransferWorker {
     this.brokerClient,
     this.sessionAttachmentPicker,
     this.backgroundCoordinator,
+    this.onFailureDetail,
+    this.cachedCopyRemovedMessage =
+        'The cached copy was removed. Download the file again.',
   });
 
   /// Broker REST client used for chunked uploads.
@@ -201,6 +235,12 @@ class SessionArtifactTransferWorker {
 
   /// File cache/export backend.
   final SessionArtifactFileService fileService;
+
+  /// Localized recovery when device cleanup has removed a cached copy.
+  final String cachedCopyRemovedMessage;
+
+  /// In-memory diagnostic sink; the ledger keeps only the friendly message.
+  final void Function(String id, String detail)? onFailureDetail;
 
   /// Transfer ledger controller.
   final SessionArtifactTransferController transferController;
@@ -261,6 +301,99 @@ class SessionArtifactTransferWorker {
       fileName: fileName,
       mimeType: mimeType,
       hasActiveBrokerClient: hasActiveBrokerClient,
+    );
+  }
+
+  /// Saves an existing cached copy. A row-tap cancellation keeps its state;
+  /// cancellation of the automatic post-download picker marks it canceled.
+  Future<SessionArtifactTransferWorkerResult> saveCachedTransfer(
+    String transferId, {
+    bool cancelOnDismiss = false,
+  }) async {
+    try {
+      var cached = cachedFileForTransfer(transferId);
+      final destination = await fileService.exportCachedArtifact(cached);
+      if (destination == null) {
+        if (cancelOnDismiss) {
+          transferController.markCanceled(
+            transferId,
+            message: 'Save destination canceled',
+          );
+        }
+        return SessionArtifactTransferWorkerResult(
+          transferId: transferId,
+          outcome: SessionArtifactTransferWorkerOutcome.canceled,
+          cachedFile: cached,
+        );
+      }
+      cached = _withExportedName(cached, destination);
+      final message = 'Saved ${cached.fileName}';
+      transferController.markExported(
+        transferId,
+        cached,
+        exportedPath: destination,
+        message: message,
+      );
+      return SessionArtifactTransferWorkerResult(
+        transferId: transferId,
+        outcome: SessionArtifactTransferWorkerOutcome.completed,
+        cachedFile: cached,
+        exportedPath: destination,
+        message: message,
+      );
+    } on Object catch (error) {
+      final failure = describeFailure(
+        error,
+        lead: "Couldn't save this artifact.",
+      );
+      final message =
+          error is StateError && error.message == cachedCopyRemovedMessage
+          ? cachedCopyRemovedMessage
+          : failure.message;
+      onFailureDetail?.call(transferId, failure.detail ?? message);
+      transferController.markFailed(transferId, message);
+      return SessionArtifactTransferWorkerResult(
+        transferId: transferId,
+        outcome: SessionArtifactTransferWorkerOutcome.failed,
+        message: message,
+        detail: failure.detail,
+      );
+    }
+  }
+
+  SessionArtifactCachedFile _withExportedName(
+    SessionArtifactCachedFile cached,
+    String destination,
+  ) {
+    final service = fileService;
+    final name = service is ArtifactExportNames
+        ? (service as ArtifactExportNames).exportedNameFor(destination)
+        : null;
+    if (name == null || name == cached.fileName) return cached;
+    return SessionArtifactCachedFile(
+      cachedFilePath: cached.cachedFilePath,
+      fileName: name,
+      byteLength: cached.byteLength,
+      contentType: cached.contentType,
+      artifactKey: cached.artifactKey,
+      contentHash: cached.contentHash,
+    );
+  }
+
+  /// Validates the local copy for Save and Share without requiring a server.
+  SessionArtifactCachedFile cachedFileForTransfer(String transferId) {
+    final transfer = transferController.transferById(transferId);
+    final path = transfer?.cachedFilePath;
+    if (transfer == null || path == null || !cachedArtifactFileExists(path)) {
+      throw StateError(cachedCopyRemovedMessage);
+    }
+    return SessionArtifactCachedFile(
+      cachedFilePath: path,
+      fileName: transfer.fileName,
+      contentType: transfer.contentType,
+      byteLength: transfer.byteLength ?? 0,
+      artifactKey: transfer.artifactKey,
+      contentHash: transfer.contentHash,
     );
   }
 
@@ -939,6 +1072,10 @@ class SessionArtifactTransferWorker {
       );
     } on Object catch (e) {
       final message = _uploadFailureMessage(e);
+      final detail = describeFailure(
+        e,
+        lead: "Couldn't upload this file.",
+      ).detail;
       if (e is BrokerException) {
         final code = e.error?.code;
         if (code == 'UPLOAD_EXPIRED' || code == 'UPLOAD_NOT_FOUND') {
@@ -953,6 +1090,7 @@ class SessionArtifactTransferWorker {
             transferId: transferId,
             outcome: SessionArtifactTransferWorkerOutcome.failed,
             message: message,
+            detail: detail,
           );
         }
       }
@@ -961,6 +1099,7 @@ class SessionArtifactTransferWorker {
         transferId: transferId,
         outcome: SessionArtifactTransferWorkerOutcome.failed,
         message: message,
+        detail: detail,
       );
     } finally {
       _unregisterCancellationToken(transferId, cancellationToken);
@@ -1140,7 +1279,7 @@ class SessionArtifactTransferWorker {
 
     try {
       cancellationToken.throwIfCanceled();
-      final cached = fileService is ResumableSessionArtifactFileService
+      var cached = fileService is ResumableSessionArtifactFileService
           ? await (fileService as ResumableSessionArtifactFileService)
                 .cacheSessionFileResumable(
                   tool: sessionKey.tool,
@@ -1199,6 +1338,7 @@ class SessionArtifactTransferWorker {
         );
       }
 
+      cached = _withExportedName(cached, destination);
       final message = 'Saved ${cached.fileName}';
       transferController.markExported(
         transferId,
@@ -1221,15 +1361,17 @@ class SessionArtifactTransferWorker {
         message: e.message,
       );
     } on Object catch (e) {
-      final message = userFacingMessage(
+      final failure = describeFailure(
         e,
         lead: "Couldn't download this file.",
       );
+      final message = failure.message;
       transferController.markFailed(transferId, message);
       return SessionArtifactTransferWorkerResult(
         transferId: transferId,
         outcome: SessionArtifactTransferWorkerOutcome.failed,
         message: message,
+        detail: failure.detail,
       );
     } finally {
       _unregisterCancellationToken(transferId, cancellationToken);
@@ -1279,7 +1421,7 @@ class SessionArtifactTransferWorker {
 
     try {
       cancellationToken.throwIfCanceled();
-      final cached = await fileService.cacheArtifact(
+      var cached = await fileService.cacheArtifact(
         descriptor,
         checkpoint: _downloadCheckpoint(transferId),
         onCheckpoint: (checkpoint) =>
@@ -1316,6 +1458,7 @@ class SessionArtifactTransferWorker {
         );
       }
 
+      cached = _withExportedName(cached, destination);
       final message = 'Saved ${cached.fileName}';
       transferController.markExported(
         transferId,
@@ -1338,15 +1481,17 @@ class SessionArtifactTransferWorker {
         message: e.message,
       );
     } on Object catch (e) {
-      final message = userFacingMessage(
+      final failure = describeFailure(
         e,
         lead: "Couldn't save this artifact.",
       );
+      final message = failure.message;
       transferController.markFailed(transferId, message);
       return SessionArtifactTransferWorkerResult(
         transferId: transferId,
         outcome: SessionArtifactTransferWorkerOutcome.failed,
         message: message,
+        detail: failure.detail,
       );
     } finally {
       _unregisterCancellationToken(transferId, cancellationToken);
@@ -1449,15 +1594,17 @@ class SessionArtifactTransferWorker {
         message: e.message,
       );
     } on Object catch (e) {
-      final message = userFacingMessage(
+      final failure = describeFailure(
         e,
         lead: "Couldn't prepare this artifact preview.",
       );
+      final message = failure.message;
       transferController.markFailed(transferId, message);
       return SessionArtifactTransferWorkerResult(
         transferId: transferId,
         outcome: SessionArtifactTransferWorkerOutcome.failed,
         message: message,
+        detail: failure.detail,
       );
     } finally {
       _unregisterCancellationToken(transferId, cancellationToken);
@@ -1529,12 +1676,17 @@ class SessionArtifactTransferWorker {
     try {
       return await withPinnedBrokerRoute(brokerClient, action);
     } on Object catch (error) {
-      final message = '$error';
+      final failure = describeFailure(
+        error,
+        lead: "Couldn't transfer this file.",
+      );
+      final message = failure.message;
       transferController.markFailed(transferId, message);
       return SessionArtifactTransferWorkerResult(
         transferId: transferId,
         outcome: SessionArtifactTransferWorkerOutcome.failed,
         message: message,
+        detail: failure.detail,
       );
     }
   }

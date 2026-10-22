@@ -44,7 +44,8 @@ class MainActivity : FlutterActivity() {
      * or while an update downloads: the download runs in the engine.
      */
     override fun shouldDestroyEngineWithHost(): Boolean =
-        !BackgroundConnectionService.isRunning && !UpdateDownloadService.isActive
+        !isChangingConfigurations && !FileExport.isPending &&
+            !BackgroundConnectionService.isRunning && !UpdateDownloadService.isActive
 
     /**
      * A notification tapped after this activity was closed starts a new one.
@@ -65,6 +66,12 @@ class MainActivity : FlutterActivity() {
         // Bound to the application, not this activity: the app can switch the
         // connection off while no activity is open.
         val application = applicationContext
+        FileExport.attach(this)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.cosyncing.client/file_export")
+            .setMethodCallHandler { call, result ->
+                if (call.method == "saveAs") FileExport.saveAs(application, call, result)
+                else result.notImplemented()
+            }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, backgroundConnectionChannel)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
@@ -161,11 +168,18 @@ class MainActivity : FlutterActivity() {
      * and the next activity registers its own.
      */
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        FileExport.detach(this)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, updateChannel)
             .setMethodCallHandler(null)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, notificationsChannel)
             .setMethodCallHandler(null)
         super.cleanUpFlutterEngine(flutterEngine)
+    }
+
+    @Deprecated("Activity result API required by FlutterActivity")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        FileExport.onActivityResult(applicationContext, requestCode, resultCode, data)
     }
 
     override fun onDestroy() {

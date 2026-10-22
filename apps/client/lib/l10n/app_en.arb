@@ -7127,5 +7127,18 @@
         "type": "int"
       }
     }
+  },
+  "share": "Share",
+  "transferStatusSaved": "Saved",
+  "transferStatusDownloaded": "Downloaded",
+  "transferSavedToDevice": "Saved to device: {fileName}",
+  "transferCachedCopyRemoved": "The cached copy was removed. Download the file again.",
+  "transferShareFailed": "Couldn't share this file. Try again.",
+  "@transferSavedToDevice": {
+    "placeholders": {
+      "fileName": {
+        "type": "String"
+      }
+    }
   }
 }

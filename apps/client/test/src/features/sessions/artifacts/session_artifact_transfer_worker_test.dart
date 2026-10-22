@@ -9,8 +9,11 @@ import 'package:broker_crypto/broker_crypto.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/sessions.dart';
+import 'package:cosyncing_client/src/features/settings/data/ui_preferences_store.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import '../../../../support/in_memory_ui_preferences_store.dart';
 
 SessionAttachment _testAttachment(
   String name,
@@ -470,6 +473,9 @@ void main() {
               (ref) => profileAt('alpha.invalid'),
             ),
             sessionArtifactFileServiceProvider.overrideWithValue(fileService),
+            uiPreferencesStoreProvider.overrideWithValue(
+              InMemoryUiPreferencesStore(),
+            ),
           ],
         );
         addTearDown(alphaContainer.dispose);
@@ -493,6 +499,9 @@ void main() {
             ),
             brokerClientProvider.overrideWith((ref) async => brokerClient),
             sessionArtifactFileServiceProvider.overrideWithValue(fileService),
+            uiPreferencesStoreProvider.overrideWithValue(
+              InMemoryUiPreferencesStore(),
+            ),
           ],
         );
         addTearDown(betaContainer.dispose);

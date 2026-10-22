@@ -11,6 +11,15 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Fixed
+
+- Android downloads open the system Save as screen, and cached files offer
+  Save and Share. Downloads that finish while the app is in the background
+  remain available to save later.
+- Android workspace downloads keep reporting progress after switching servers
+  or reconnecting, instead of staying at 0 bytes.
+- Artifact Technical details show the underlying save or preview error.
+
 ## 0.8.1 — 2026-10-22
 
 ### Fixed

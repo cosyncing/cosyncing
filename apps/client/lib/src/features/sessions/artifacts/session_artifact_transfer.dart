@@ -124,6 +124,20 @@ class SessionArtifactTransfer {
   /// User-selected/exported path when a download completes.
   final String? exportedPath;
 
+  /// Android document destinations cannot be passed to filesystem actions.
+  bool get exportedToContentUri =>
+      Uri.tryParse(exportedPath ?? '')?.scheme == 'content';
+
+  /// Filesystem copy for Copy path, Open with, Reveal and Preview.
+  String? get localFilePath {
+    final exported = exportedPath?.trim();
+    if (exported != null && exported.isNotEmpty && !exportedToContentUri) {
+      return exported;
+    }
+    final cached = cachedFilePath?.trim();
+    return cached == null || cached.isEmpty ? null : cached;
+  }
+
   /// MIME type when known.
   final String? contentType;
 
@@ -465,11 +479,16 @@ final sessionArtifactTransferControllerProvider =
 class SessionArtifactTransferController
     extends Notifier<List<SessionArtifactTransfer>> {
   var _sequence = 0;
+  late Future<void> _hydration;
+
+  /// Initial durable ledger load, before native restart reconciliation.
+  Future<void> get ready => _hydration;
   Future<void> _persistenceQueue = Future<void>.value();
 
   @override
   List<SessionArtifactTransfer> build() {
-    unawaited(hydrate());
+    _hydration = hydrate();
+    unawaited(_hydration);
     return const [];
   }
 
@@ -757,6 +776,7 @@ class SessionArtifactTransferController
       id,
       (transfer, now) => transfer.copyWith(
         status: SessionArtifactTransferStatus.completed,
+        fileName: artifact.fileName,
         cachedFilePath: artifact.cachedFilePath,
         exportedPath: exportedPath,
         contentType: artifact.contentType,

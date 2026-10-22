@@ -2099,5 +2099,18 @@
         "type": "int"
       }
     }
+  },
+  "share": "共有",
+  "transferStatusSaved": "保存済み",
+  "transferStatusDownloaded": "ダウンロード済み",
+  "transferSavedToDevice": "端末に保存済み：{fileName}",
+  "transferCachedCopyRemoved": "キャッシュされたコピーが削除されました。ファイルをもう一度ダウンロードしてください。",
+  "transferShareFailed": "このファイルを共有できませんでした。もう一度お試しください。",
+  "@transferSavedToDevice": {
+    "placeholders": {
+      "fileName": {
+        "type": "String"
+      }
+    }
   }
 }

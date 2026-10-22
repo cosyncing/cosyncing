@@ -33,6 +33,7 @@ import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profi
 import 'package:cosyncing_client/src/features/connection/data/active_broker_profile_store.dart';
 import 'package:cosyncing_client/src/features/connection/data/broker_http_transport.dart';
 import 'package:cosyncing_client/src/features/pairing/controller/installer_pairing_handoff_controller.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/background_downloader_engine.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_detail_connection.dart';
 import 'package:cosyncing_client/src/features/settings/data/ui_preferences_store.dart';
 import 'package:cosyncing_client/src/features/storage/data/device_storage_providers.dart';
@@ -262,6 +263,9 @@ class FeatureContext {
         ),
         brokerNetworkChangesProvider.overrideWithValue(const Stream.empty()),
         localStorageFileBackendProvider.overrideWithValue(StorageFiles()),
+        // Widget tests have no OS process; scenarios that exercise native
+        // downloads install a process-shaped single-subscription fake instead.
+        sessionFileBackgroundDownloaderProvider.overrideWithValue(null),
         ...overrides,
       ],
     );

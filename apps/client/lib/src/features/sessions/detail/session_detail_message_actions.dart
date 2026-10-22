@@ -263,7 +263,7 @@ class _TranscriptArtifactDownloadAction extends ConsumerWidget {
             ContextualDetails(
               label: stateLabel,
               detail: actionState.phase == SessionArtifactActionPhase.error
-                  ? actionState.message
+                  ? (actionState.detail ?? actionState.message)
                   : null,
               child: Text(
                 stateLabel,

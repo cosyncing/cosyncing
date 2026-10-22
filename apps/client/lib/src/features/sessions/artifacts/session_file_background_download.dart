@@ -156,6 +156,16 @@ class SessionFileBackgroundUpdateHub {
   /// Native engine shared by all coordinators in this process.
   final SessionFileBackgroundDownloader engine;
   final _records = <String, BackgroundDownloadRecord>{};
+
+  /// Explicit downloads in this launch that may offer Save as on completion.
+  final saveWhenFinished = <String>{};
+
+  /// Reads the app-wide monitor even when the active coordinator belongs to
+  /// another broker. A background completion must never prompt on a later
+  /// server switch. Installed by the worker; no provider dependency or new
+  /// lifecycle subscription is added to this process-lifetime hub.
+  bool Function()? isForeground;
+  final _finalizing = <String>{};
   final _stream = StreamController<BackgroundDownloadRecord>.broadcast();
   StreamSubscription<BackgroundDownloadRecord>? _subscription;
   bool _disposed = false;
@@ -168,6 +178,10 @@ class SessionFileBackgroundUpdateHub {
     if (!_disposed) {
       _subscription ??= engine.updates().listen((record) {
         _records[record.taskId] = record;
+        if (record.status == BackgroundDownloadTaskStatus.complete &&
+            !(isForeground?.call() ?? false)) {
+          saveWhenFinished.remove(record.taskId);
+        }
         _stream.add(record);
       }, onError: _stream.addError);
     }
@@ -177,6 +191,7 @@ class SessionFileBackgroundUpdateHub {
   /// Drops both the retained update and the native tracking record.
   Future<void> forget(String taskId) async {
     _records.remove(taskId);
+    saveWhenFinished.remove(taskId);
     await engine.forget(taskId);
   }
 
@@ -202,6 +217,8 @@ class SessionFileBackgroundDownloadCoordinator {
     required this.finalizer,
     required this.brokerProfileId,
     required this.brokerClient,
+    this.isForeground,
+    this.onReadyToSave,
   });
 
   /// Native download engine seam.
@@ -228,7 +245,13 @@ class SessionFileBackgroundDownloadCoordinator {
   final BrokerClient? brokerClient;
 
   StreamSubscription<BackgroundDownloadRecord>? _updatesSubscription;
-  final _finalizing = <String>{};
+
+  /// Reads the existing app-wide lifecycle monitor at completion time.
+  final bool Function()? isForeground;
+
+  /// Opens Save as after the finalization guard has been released.
+  final Future<void> Function(String transferId)? onReadyToSave;
+
   bool _disposed = false;
 
   /// Whether native background downloads are available here.
@@ -245,6 +268,8 @@ class SessionFileBackgroundDownloadCoordinator {
     try {
       listen();
       await engine.ensureStarted();
+      if (_disposed) return;
+      await transferController.ready;
       if (_disposed) return;
       await reconcile();
     } on Object {
@@ -339,6 +364,7 @@ class SessionFileBackgroundDownloadCoordinator {
         transferController.markFailed(transferId, message);
         return _failed(transferId, message);
       }
+      hub.saveWhenFinished.add(transferId);
       return SessionArtifactTransferWorkerResult(
         transferId: transferId,
         outcome: SessionArtifactTransferWorkerOutcome.enqueuedInBackground,
@@ -448,9 +474,10 @@ class SessionFileBackgroundDownloadCoordinator {
       await hub.forget(record.taskId);
       return;
     }
-    if (!_finalizing.add(record.taskId)) {
+    if (!hub._finalizing.add(record.taskId)) {
       return;
     }
+    var readyToSave = false;
     try {
       final downloadedPath = record.filePath;
       if (downloadedPath == null) {
@@ -472,9 +499,19 @@ class SessionFileBackgroundDownloadCoordinator {
         cached,
         message: 'Downloaded ${cached.fileName}',
       );
+      final requestedSave = hub.saveWhenFinished.remove(record.taskId);
+      readyToSave =
+          requestedSave &&
+          (isForeground?.call() ?? false) &&
+          cachedFileSaveSupportedOn(defaultTargetPlatform);
       await hub.forget(record.taskId);
     } finally {
-      _finalizing.remove(record.taskId);
+      hub._finalizing.remove(record.taskId);
+    }
+    if (readyToSave &&
+        (isForeground?.call() ?? false) &&
+        onReadyToSave != null) {
+      unawaited(onReadyToSave!(record.taskId));
     }
   }
 

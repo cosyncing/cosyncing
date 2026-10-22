@@ -134,7 +134,7 @@ class _ArtifactTransferRowState extends ConsumerState<_ArtifactTransferRow> {
     final progressLabel = _sessionDetailTransferProgressLabel(l10n, transfer);
     final statusLabel = _sessionDetailTransferStatusLabel(
       l10n,
-      transfer.status,
+      transfer,
     );
     final detailLabel = switch ((isFailed, progressLabel.isEmpty)) {
       (true, true) => '$statusLabel — ${l10n.transferFailed}',
@@ -149,7 +149,7 @@ class _ArtifactTransferRowState extends ConsumerState<_ArtifactTransferRow> {
     );
     final focusBorderColor = _hasFocus
         ? theme.colorScheme.primary
-        : Colors.transparent;
+        : context.tokens.surface.withValues(alpha: 0);
 
     return Focus(
       focusNode: _focusNode,
@@ -171,10 +171,10 @@ class _ArtifactTransferRowState extends ConsumerState<_ArtifactTransferRow> {
         child: DecoratedBox(
           decoration: BoxDecoration(
             border: Border.all(color: focusBorderColor),
-            borderRadius: BorderRadius.circular(8),
+            borderRadius: BorderRadius.circular(context.tokens.radiusSm),
           ),
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 12),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -198,7 +198,7 @@ class _ArtifactTransferRowState extends ConsumerState<_ArtifactTransferRow> {
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
-                      const SizedBox(height: 2),
+                      const SizedBox(height: 4),
                       SelectionArea(
                         child: Text(
                           detailLabel,
@@ -209,22 +209,9 @@ class _ArtifactTransferRowState extends ConsumerState<_ArtifactTransferRow> {
                       ),
                       if (localPathLabel != null) ...[
                         const SizedBox(height: 4),
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Expanded(
-                              child: SelectionArea(
-                                child: Text(
-                                  localPathLabel,
-                                  style: theme.textTheme.bodySmall?.copyWith(
-                                    color: theme.colorScheme.onSurfaceVariant,
-                                  ),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 6),
+                        TransferLocalFileActions(
+                          label: localPathLabel,
+                          actions: [
                             IconButton(
                               key: ValueKey(
                                 'session-detail-transfer-copy-${transfer.id}',
@@ -299,6 +286,10 @@ class _ArtifactTransferRowState extends ConsumerState<_ArtifactTransferRow> {
                               ),
                             ),
                           ],
+                        ),
+                        CachedTransferActions(
+                          transfer: transfer,
+                          keyPrefix: 'session-detail-transfer',
                         ),
                       ],
                     ],
@@ -510,19 +501,8 @@ Future<void> _showSessionTransferTextPreviewDialog(
   );
 }
 
-String? _sessionDetailTransferLocalPath(SessionArtifactTransfer transfer) {
-  final exportedPath = transfer.exportedPath?.trim();
-  if (exportedPath != null && exportedPath.isNotEmpty) {
-    return exportedPath;
-  }
-
-  final cachedPath = transfer.cachedFilePath?.trim();
-  if (cachedPath != null && cachedPath.isNotEmpty) {
-    return cachedPath;
-  }
-
-  return null;
-}
+String? _sessionDetailTransferLocalPath(SessionArtifactTransfer transfer) =>
+    transfer.localFilePath;
 
 String? _sessionDetailTransferLocalPathLabel(
   AppLocalizations l10n,
@@ -534,7 +514,9 @@ String? _sessionDetailTransferLocalPathLabel(
     return null;
   }
   if (exportedPath != null && exportedPath.isNotEmpty) {
-    return l10n.transferSavedPath(path);
+    return transfer.exportedToContentUri
+        ? l10n.transferSavedToDevice(transfer.fileName)
+        : l10n.transferSavedPath(path);
   }
   return l10n.transferCachedPath(path);
 }
@@ -550,12 +532,20 @@ String _sessionDetailTransferDirectionLabel(
 
 String _sessionDetailTransferStatusLabel(
   AppLocalizations l10n,
-  SessionArtifactTransferStatus status,
-) => switch (status) {
+  SessionArtifactTransfer transfer,
+) => switch (transfer.status) {
   SessionArtifactTransferStatus.queued => l10n.transferStatusQueued,
   SessionArtifactTransferStatus.running => l10n.transferStatusRunning,
-  SessionArtifactTransferStatus.cached => l10n.transferStatusCached,
-  SessionArtifactTransferStatus.completed => l10n.transferStatusComplete,
+  SessionArtifactTransferStatus.cached =>
+    !kIsWeb && defaultTargetPlatform == TargetPlatform.android
+        ? l10n.transferStatusDownloaded
+        : l10n.transferStatusCached,
+  SessionArtifactTransferStatus.completed =>
+    !kIsWeb &&
+            defaultTargetPlatform == TargetPlatform.android &&
+            transfer.exportedPath != null
+        ? l10n.transferStatusSaved
+        : l10n.transferStatusComplete,
   SessionArtifactTransferStatus.canceled => l10n.transferStatusCanceled,
   SessionArtifactTransferStatus.failed => l10n.transferStatusFailed,
 };
@@ -779,7 +769,7 @@ class _ArtifactSurfaceMessage extends ConsumerWidget {
     return ContextualDetails(
       label: name,
       detail: actionState.phase == SessionArtifactActionPhase.error
-          ? actionState.message
+          ? (actionState.detail ?? actionState.message)
           : null,
       child: Padding(
         key: ValueKey('session-detail-artifact-summary-item-$sourceId'),
@@ -839,22 +829,9 @@ class _ArtifactSurfaceMessage extends ConsumerWidget {
               ),
             const SizedBox(height: 8),
             if (localPathLabel != null && localTransfer != null) ...[
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(
-                    child: SelectionArea(
-                      child: Text(
-                        localPathLabel,
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
+              TransferLocalFileActions(
+                label: localPathLabel,
+                actions: [
                   IconButton(
                     key: ValueKey(
                       'session-detail-artifact-local-copy-$sourceId',
@@ -921,6 +898,11 @@ class _ArtifactSurfaceMessage extends ConsumerWidget {
                     ),
                   ),
                 ],
+              ),
+              CachedTransferActions(
+                transfer: localTransfer,
+                keyPrefix: 'session-detail-artifact-local',
+                actionId: sourceId,
               ),
               const SizedBox(height: 8),
             ],

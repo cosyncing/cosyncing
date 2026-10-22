@@ -251,6 +251,7 @@ extension _SessionDetailArtifactActions on SessionDetailController {
           SessionArtifactActionState(
             phase: SessionArtifactActionPhase.error,
             message: result.message,
+            detail: result.detail,
           ),
         );
         return false;
@@ -290,6 +291,7 @@ extension _SessionDetailArtifactActions on SessionDetailController {
       SessionArtifactActionState(
         phase: SessionArtifactActionPhase.error,
         message: result.message,
+        detail: result.detail,
       ),
     );
     return null;

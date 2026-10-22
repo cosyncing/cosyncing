@@ -14,6 +14,7 @@ import 'package:cosyncing_client/src/features/storage/data/managed_file_access.d
 import 'package:cosyncing_client/src/features/storage/data/managed_memory_files.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as path_util;
 import 'package:path_provider/path_provider.dart';
@@ -78,6 +79,7 @@ class SessionArtifactActionState {
   const SessionArtifactActionState({
     required this.phase,
     this.message = '',
+    this.detail,
   });
 
   /// Current phase.
@@ -85,6 +87,9 @@ class SessionArtifactActionState {
 
   /// Supplemental message for the current phase.
   final String message;
+
+  /// Raw failure diagnostic for the explicit Technical details disclosure.
+  final String? detail;
 }
 
 /// Cooperative cancellation signal for artifact file operations.
@@ -484,6 +489,96 @@ final class FileSelectorArtifactSaveTargetProvider
   }
 }
 
+/// Whether the released native client can save a cached file to the device.
+bool cachedFileSaveSupportedOn(TargetPlatform platform) => switch (platform) {
+  TargetPlatform.android ||
+  TargetPlatform.linux ||
+  TargetPlatform.macOS ||
+  TargetPlatform.windows => true,
+  TargetPlatform.iOS || TargetPlatform.fuchsia => false,
+};
+
+/// Checks a cached filesystem copy at the native file-service boundary.
+bool cachedArtifactFileExists(String path) =>
+    !kIsWeb && File(path).existsSync();
+
+/// Exports a local cached file without reading its contents into Dart memory.
+// ignore: one_member_abstracts
+abstract interface class ArtifactExportTarget {
+  /// Returns a destination path/URI, or null when the user cancels.
+  Future<String?> export({
+    required String sourcePath,
+    required String suggestedName,
+    String? mimeType,
+  });
+}
+
+/// Desktop save picker and filesystem copy.
+final class FileSelectorArtifactExportTarget implements ArtifactExportTarget {
+  /// Creates a target with the existing desktop save picker.
+  const FileSelectorArtifactExportTarget(this.picker, {this.cancellationToken});
+
+  /// Local path picker.
+  final ArtifactSaveTargetProvider picker;
+
+  /// Keeps desktop cancellation between destination selection and copying.
+  final SessionArtifactCancellationToken? cancellationToken;
+
+  @override
+  Future<String?> export({
+    required String sourcePath,
+    required String suggestedName,
+    String? mimeType,
+  }) async {
+    final destination = await picker.pickSavePath(
+      suggestedName: suggestedName,
+      mimeType: mimeType,
+    );
+    cancellationToken?.throwIfCanceled();
+    if (destination == null) return null;
+    await File(sourcePath).copy(destination);
+    return destination;
+  }
+}
+
+/// Optional display names returned by document providers that rename a file.
+// ignore: one_member_abstracts
+abstract interface class ArtifactExportNames {
+  /// Actual destination name, when the platform reported it.
+  String? exportedNameFor(String destination);
+}
+
+/// Android Storage Access Framework save picker and streamed native copy.
+final class AndroidArtifactExportTarget
+    implements ArtifactExportTarget, ArtifactExportNames {
+  /// Creates the app-owned platform boundary.
+  AndroidArtifactExportTarget();
+
+  final _names = <String, String>{};
+
+  @override
+  String? exportedNameFor(String destination) => _names[destination];
+
+  static const _channel = MethodChannel('com.cosyncing.client/file_export');
+
+  @override
+  Future<String?> export({
+    required String sourcePath,
+    required String suggestedName,
+    String? mimeType,
+  }) async {
+    final result = await _channel.invokeMapMethod<String, dynamic>('saveAs', {
+      'sourcePath': sourcePath,
+      'suggestedName': suggestedName,
+      'mimeType': mimeType,
+    });
+    final uri = result?['uri'] as String?;
+    final name = result?['displayName'] as String?;
+    if (uri != null && name != null && name.isNotEmpty) _names[uri] = name;
+    return uri;
+  }
+}
+
 /// Reports byte progress from cache/export operations.
 typedef SessionArtifactProgressCallback =
     void Function({required int bytesTransferred, int? totalBytes});
@@ -590,6 +685,9 @@ final sessionArtifactFileServiceProvider = Provider<SessionArtifactFileService>(
       downloadBackend: downloadBackend,
       onCompleted: ref.watch(deviceFileRegistryProvider).register,
       cacheDirectoryProvider: const TemporaryArtifactCacheDirectoryProvider(),
+      exportTarget: defaultTargetPlatform == TargetPlatform.android
+          ? AndroidArtifactExportTarget()
+          : null,
       saveTargetProvider: FileSelectorArtifactSaveTargetProvider(
         typeLabel: artifactSaveTypeLabel(
           appLocale: ref.watch(localeControllerProvider).valueOrNull,
@@ -988,17 +1086,20 @@ final class DefaultSessionArtifactFileService
     implements
         SessionArtifactFileService,
         ResumableSessionArtifactFileService,
-        BackgroundSessionDownloadFinalizer {
+        BackgroundSessionDownloadFinalizer,
+        ArtifactExportNames {
   /// Creates a [DefaultSessionArtifactFileService].
   const DefaultSessionArtifactFileService({
     required ArtifactDownloadBackend? downloadBackend,
     required ArtifactCacheDirectoryProvider cacheDirectoryProvider,
     required ArtifactSaveTargetProvider saveTargetProvider,
+    ArtifactExportTarget? exportTarget,
     ArtifactCopyCompleted? onCompleted,
   }) : this._(
          downloadBackend: downloadBackend,
          cacheDirectoryProvider: cacheDirectoryProvider,
          saveTargetProvider: saveTargetProvider,
+         exportTarget: exportTarget,
          onCompleted: onCompleted,
        );
 
@@ -1006,9 +1107,19 @@ final class DefaultSessionArtifactFileService
     required this._downloadBackend,
     required this._cacheDirectoryProvider,
     required this._saveTargetProvider,
+    this._exportTarget,
     this._onCompleted,
   });
 
+  @override
+  String? exportedNameFor(String destination) {
+    return switch (_exportTarget) {
+      final ArtifactExportNames target => target.exportedNameFor(destination),
+      _ => null,
+    };
+  }
+
+  final ArtifactExportTarget? _exportTarget;
   final ArtifactDownloadBackend? _downloadBackend;
   final ArtifactCacheDirectoryProvider _cacheDirectoryProvider;
   final ArtifactSaveTargetProvider _saveTargetProvider;
@@ -1706,19 +1817,19 @@ final class DefaultSessionArtifactFileService
     cancellationToken?.throwIfCanceled();
     final release = ManagedFileAccess.shared.acquire(artifact.cachedFilePath);
     try {
-      final selectedPath = await _saveTargetProvider.pickSavePath(
-        suggestedName: artifact.fileName,
-        mimeType: artifact.contentType,
-      );
+      final destination =
+          await (_exportTarget ??
+                  FileSelectorArtifactExportTarget(
+                    _saveTargetProvider,
+                    cancellationToken: cancellationToken,
+                  ))
+              .export(
+                sourcePath: artifact.cachedFilePath,
+                suggestedName: artifact.fileName,
+                mimeType: artifact.contentType,
+              );
       cancellationToken?.throwIfCanceled();
-      if (selectedPath == null) {
-        return null;
-      }
-
-      final source = File(artifact.cachedFilePath);
-      await source.copy(selectedPath);
-      cancellationToken?.throwIfCanceled();
-      return selectedPath;
+      return destination;
     } finally {
       release();
     }
