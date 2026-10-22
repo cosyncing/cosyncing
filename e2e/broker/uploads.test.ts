@@ -195,6 +195,54 @@ class StagingSweepBarrier {
   }
 }
 
+test('owner storage measures staged and delivered attachments and removes only expired owned bytes', async () => {
+  const broker=await startBroker({name:'upload-storage-review',token:true,env:{COSYNCING_TEST_UPLOAD_SWEEP_MS:'86400000'}});
+  const client=broker.client();
+  try {
+    const cwd=join(broker.paths.root,'workspace');mkdirSync(cwd);
+    const pi=await PiBridgeSession.open(client,{cwd,title:'Storage review'});
+    const live=await stage(client,pi,'waiting.txt',Buffer.from('waiting'));
+    const expired=await begin(client,pi,'abandoned.txt',9);
+    expect((await patch(client,pi,expired,0,Buffer.from('abandoned'))).status).toBe(200);
+    expireStagingRecord(broker,expired);
+    const stream=await client.attach('pi',pi.id,{mode:'resume'});
+    await stream.waitForKind('history');
+    expect((await stream.sendAndAwait({kind:'prompt',text:'Keep the attachment',files:[
+      {name:'delivered.txt',mimeType:'text/plain',data:b64('delivered')},
+    ]})).kind).toBe('ack');
+    const delivered=join(inboxOf(cwd),'delivered.txt');
+    const aged=(Date.now()-90*DAY_MS)/1000;utimesSync(delivered,aged,aged);
+    const outside=join(cwd,'workspace-original.txt');writeFileSync(outside,'original');
+    const started=await client.post('/api/storage/scans');
+    let progress=started.body;
+    for(let i=0;progress.state==='running'&&i<10;i++)progress=(await client.get(`/api/storage/scans/${started.body.scanId}?waitMs=10000`)).body;
+    expect(progress.state).toBe('completed');
+    const inventory=(await client.get('/api/storage')).body;
+    const staging=await client.get(`/api/storage/items?inventoryId=${inventory.inventoryId}&category=staging`);
+    expect(staging.body.items.find((item:any)=>item.label==='waiting.txt')).toMatchObject({eligible:false,reason:'RETENTION',size:7});
+    expect(staging.body.items.find((item:any)=>item.label==='abandoned.txt')).toMatchObject({eligible:true,size:9});
+    const stored=await client.get(`/api/storage/items?inventoryId=${inventory.inventoryId}&category=stored-files`);
+    expect(stored.body.items).toHaveLength(1);
+    expect(stored.body.items[0]).toMatchObject({label:'delivered.txt',eligible:true,size:9});
+    for(const category of ['staging','stored-files']) {
+      const plan=(await client.post('/api/storage/cleanup-plans',{inventoryId:inventory.inventoryId,
+        mode:category==='staging'?'cache':'stored-files',filter:{category},selectAll:true})).body;
+      expect(plan.itemCount).toBe(1);
+      if(category==='staging')expect(plan.skippedCount).toBe(1);
+      const accepted=(await client.post('/api/storage/cleanup-jobs',{planId:plan.planId,idempotencyKey:`storage-upload-${category}-001`})).body;
+      let job=accepted;
+      for(let i=0;!['completed','partial','canceled'].includes(job.state)&&i<10;i++)job=(await client.get(`/api/storage/cleanup-jobs/${accepted.jobId}?waitMs=10000`)).body;
+      expect(job).toMatchObject({state:'completed',removed:1,failed:0,reclaimedBytes:9});
+    }
+    expect(readFileSync(join(inboxOf(cwd),live.name),'utf8')).toBe('waiting');
+    expect((await client.get(`${uploadsPath(pi)}/${live.uploadId}`)).status).toBe(200);
+    expect((await client.get(`${uploadsPath(pi)}/${expired}`)).status).toBe(404);
+    expect(existsSync(delivered)).toBe(false);
+    expect(readFileSync(outside,'utf8')).toBe('original');
+    stream.close();
+  } finally {client.closeAll();await broker.stop();}
+});
+
 describe('chunked uploads, staged attachments and inbox collection', () => {
   let broker: Broker;
   let owner: BrokerClient;

@@ -16,6 +16,7 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  opendirSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -38,6 +39,8 @@ import {
   type UploadPatchResult,
   type UploadStatus,
 } from '@cosyncing/protocol';
+import { assertNoSymlinkComponents } from '../security/secure-files.ts';
+import type { ArtifactStorageObject, ArtifactStorageRemoval } from './artifact-store.ts';
 import { setupStateHome } from '../installation/setup-state.ts';
 import { PRODUCT_IDENTITY } from '@cosyncing/protocol';
 
@@ -740,7 +743,7 @@ export class UploadStaging {
   commitPreparedPromptFiles(tool: string, sessionId: string, prepared: PreparedPromptFiles): void {
     for (const claimed of prepared.staged) {
       try {
-        const record = this.loadRecordById(tool, sessionId, claimed.uploadId);
+        const record = this.loadRecordById(tool, sessionId, claimed.uploadId, true);
         if (record.claimedClientMessageId !== claimed.clientMessageId) continue;
         this.deleteMetadata(tool, sessionId, claimed.uploadId);
       } catch {
@@ -762,7 +765,7 @@ export class UploadStaging {
     }
     for (const claimed of prepared.staged) {
       try {
-        const record = this.loadRecordById(tool, sessionId, claimed.uploadId);
+        const record = this.loadRecordById(tool, sessionId, claimed.uploadId, true);
         if (record.claimedClientMessageId !== claimed.clientMessageId) continue;
         writeJsonAtomically(this.recordPath(tool, sessionId, claimed.uploadId), {
           ...record,
@@ -819,7 +822,7 @@ export class UploadStaging {
     return record;
   }
 
-  private loadRecordById(tool: string, sessionId: string, uploadId: string): UploadRecord {
+  private loadRecordById(tool: string, sessionId: string, uploadId: string, allowExpiredClaim = false): UploadRecord {
     const { metaPath, dataPath } = this.resolvePaths(tool, sessionId, uploadId);
     let record: UploadRecord;
     try {
@@ -838,10 +841,13 @@ export class UploadStaging {
     }
     if (
       Date.now() > record.expiresAt
+      && !(allowExpiredClaim && record.claimedClientMessageId !== undefined)
       && !this.activeClaims.has(record.uploadId)
       && !this.activeCompletions.has(record.uploadId)
     ) {
-      this.deleteRecord(record);
+      // Expiry denies ordinary access, but a durable uncertain-send claim
+      // remains protected until delivery reconciliation commits or rolls back.
+      if (record.claimedClientMessageId === undefined) this.deleteRecord(record);
       throw new UploadError('UPLOAD_EXPIRED', 'upload session has expired', 410);
     }
     try {
@@ -1050,25 +1056,32 @@ export class UploadStaging {
     const root = join(this.home, 'uploads');
     let toolDirs: string[] = [];
     try {
+      assertNoSymlinkComponents(root);
       toolDirs = readdirSync(root);
-    } catch {
-      return protectedPaths;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'ENOENT' ? protectedPaths : undefined;
     }
     let inspected = 0;
     for (const toolDir of toolDirs) {
       const toolRoot = join(root, toolDir);
       let sessionDirs: string[] = [];
       try {
+        assertNoSymlinkComponents(toolRoot);
+        if(!lstatSync(toolRoot).isDirectory())continue;
         sessionDirs = readdirSync(toolRoot);
-      } catch {
+      } catch (error) {
+        if((error as NodeJS.ErrnoException).code !== 'ENOENT')return undefined;
         continue;
       }
       for (const sessionDir of sessionDirs) {
         const sessionRoot = join(toolRoot, sessionDir);
         let names: string[] = [];
         try {
+          assertNoSymlinkComponents(sessionRoot);
+          if(!lstatSync(sessionRoot).isDirectory())continue;
           names = readdirSync(sessionRoot);
-        } catch {
+        } catch (error) {
+          if((error as NodeJS.ErrnoException).code !== 'ENOENT')return undefined;
           continue;
         }
         for (const name of names) {
@@ -1076,16 +1089,18 @@ export class UploadStaging {
           inspected += 1;
           if (inspected > INBOX_PROTECTED_RECORD_CAP) return undefined;
           try {
+            assertNoSymlinkComponents(join(sessionRoot,name));
             const record = readUploadRecord(join(sessionRoot, name));
             if (
               record.expiresAt > now
+              || record.claimedClientMessageId !== undefined
               || this.activeClaims.has(record.uploadId)
               || this.activeCompletions.has(record.uploadId)
             ) {
               protectedPaths.add(this.canonicalInboxPath(record.dataPath));
             }
           } catch {
-            /* an unreadable record protects nothing; sweepExpired removes it */
+            return undefined; // Incomplete ownership analysis protects the inbox.
           }
         }
       }
@@ -1319,6 +1334,157 @@ export class UploadStaging {
     }
   }
 
+  /** Inventory only the staging registry and registered inbox roots. Every
+   * 64 metadata reads yield; file bodies and arbitrary workspaces are untouched. */
+  async *storageObjects(liveCwds: () => Iterable<string>): AsyncIterable<ArtifactStorageObject> {
+    const now = Date.now();
+    const roots = this.loadInboxRoots().roots;
+    const readyPaths = new Set<string>();
+    let inspected = 0, incomplete = false;
+    const entries = function* (root: string): Iterable<Dirent> {
+      try {
+        assertNoSymlinkComponents(root);
+        const directory = opendirSync(root);
+        try { for (;;) { const item=directory.readSync(); if(!item)break; yield item; } }
+        finally { directory.closeSync(); }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+    };
+    const uploads = join(this.home,'uploads');
+    const unavailable = (key:string,category:'stored-files'|'staging'):ArtifactStorageObject => ({
+      key,version:'unavailable',blobVersion:'',filePath:'',contentHash:key,
+      label:category==='staging'?'Upload staging':'Managed attachments',size:null,createdAt:0,
+      tool:'',sessionId:'',category,eligible:false,reason:'UNAVAILABLE',storageSource:'upload',
+    });
+    try {
+      outer: for(const tool of entries(uploads)) {
+        if(!tool.isDirectory())continue;
+        for(const session of entries(join(uploads,tool.name))) {
+          if(!session.isDirectory())continue;
+          const root=join(uploads,tool.name,session.name);
+          for(const entry of entries(root)) {
+            if(!entry.name.endsWith('.json'))continue;
+            if(++inspected>INBOX_PROTECTED_RECORD_CAP){incomplete=true;break outer;}
+            if(inspected%64===0)await new Promise<void>((resolve)=>setImmediate(resolve));
+            const meta=join(root,entry.name);
+            try {
+              assertNoSymlinkComponents(meta);
+              const record=readUploadRecord(meta);
+              if(this.recordPath(record.tool,record.sessionId,record.uploadId)!==meta)throw new Error('Ownership changed');
+              if(record.state==='ready')readyPaths.add(resolve(record.dataPath));
+              const file=this.storageFile(record.dataPath,record,roots);
+              const reason=record.claimedClientMessageId!==undefined||this.activeClaims.has(record.uploadId)||this.activeCompletions.has(record.uploadId)
+                ? 'IN_USE' : record.expiresAt>now?'RETENTION':file===undefined?'ALREADY_MISSING':undefined;
+              yield {key:`upload:${record.uploadId}`,version:this.storageVersion(record,file?.version??''),
+                blobVersion:file?.version??'',filePath:record.dataPath,contentHash:`upload-file:${resolve(record.dataPath)}`,
+                label:record.name,size:file?.size??0,createdAt:record.createdAt,tool:record.tool,sessionId:record.sessionId,
+                category:'staging',eligible:reason===undefined,reason,storageSource:'upload',uploadId:record.uploadId};
+            } catch { incomplete=true; yield unavailable(`upload-record:${meta}`,'staging'); }
+          }
+        }
+      }
+    } catch { incomplete=true; }
+    if(incomplete)yield unavailable('upload-inspection-incomplete','staging');
+    // A ready upload is already represented above. Delivered attachments lose
+    // their upload metadata, but their registered inbox ownership survives.
+    const live = new Set([...liveCwds()].map((cwd)=>resolve(cwd)));
+    for(const cwd of roots) {
+      const inbox=this.resolveSweepableInbox(cwd);
+      if(!inbox){yield unavailable(`inbox-unavailable:${cwd}`,'stored-files');continue;}
+      try {
+        for(const entry of entries(inbox)) {
+          if(++inspected%64===0)await new Promise<void>((resolve)=>setImmediate(resolve));
+          const location=join(inbox,entry.name);
+          if(!entry.isFile() || readyPaths.has(resolve(location)))continue;
+          try {
+            const file=this.storageFile(location,undefined,[cwd]);
+            if(!file)continue;
+            const age=now-file.modified;
+            const reason=incomplete?'UNAVAILABLE':live.has(resolve(cwd))&&age<this.inboxGraceMs?'IN_USE':
+              this.inboxRetentionMs<=0||age<=this.inboxRetentionMs?'RETENTION':undefined;
+            yield {key:`inbox:${location}`,version:file.version,blobVersion:file.version,filePath:location,
+              contentHash:`upload-file:${resolve(location)}`,label:entry.name,size:file.size,createdAt:file.modified,
+              tool:'',sessionId:'',category:'stored-files',eligible:reason===undefined,reason,
+              storageSource:'inbox',inboxCwd:cwd};
+          } catch { yield unavailable(`inbox-file:${location}`,'stored-files'); }
+        }
+      } catch { yield unavailable(`inbox-unavailable:${cwd}`,'stored-files'); }
+    }
+  }
+
+  private storageVersion(record:UploadRecord,fileVersion:string):string {
+    return JSON.stringify([record.uploadId,record.state,record.updatedAt,record.expiresAt,
+      record.offset,record.claimedClientMessageId??null,fileVersion]);
+  }
+
+  private storageFile(location:string,record:UploadRecord|undefined,roots:readonly string[]):
+      {size:number;version:string;modified:number}|undefined {
+    const file=resolve(location);
+    const expected=record?.state==='uploading'
+      ? this.resolvePaths(record.tool,record.sessionId,record.uploadId).dataPath : undefined;
+    if(expected!==undefined) {
+      if(file!==expected)throw new Error('Unmanaged upload');
+    } else if(!roots.some((cwd)=>this.resolveSweepableInbox(cwd)===dirname(file))) {
+      throw new Error('Unregistered inbox');
+    }
+    assertNoSymlinkComponents(file);
+    let stat;
+    try {stat=lstatSync(file);} catch(error) {
+      if((error as NodeJS.ErrnoException).code==='ENOENT')return;throw error;
+    }
+    if(!stat.isFile())throw new Error('Unmanaged upload');
+    return {size:stat.size,modified:stat.mtimeMs,
+      version:`${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`};
+  }
+
+  /** One bounded batch shares a complete claim snapshot without repeatedly
+   * walking every upload record for each selected inbox file. */
+  storageRemoveBatch(objects:ArtifactStorageObject[],liveCwds:()=>Iterable<string>):ArtifactStorageRemoval[] {
+    if(!objects.length)return [];
+    const protectedPaths=objects.some((object)=>object.storageSource==='inbox')
+      ? this.protectedInboxPaths(Date.now()):new Set<string>();
+    const roots=this.loadInboxRoots().roots;
+    const live=[...liveCwds()];
+    return objects.map((object)=>this.storageRemove(object,()=>live,protectedPaths,roots));
+  }
+
+  /** Synchronous admission shares the claim/completion boundary: neither can
+   * begin between protection validation and unlinking. A failed unlink leaves
+   * its metadata available for the next explicit review. */
+  private storageRemove(object:ArtifactStorageObject,liveCwds:()=>Iterable<string>,
+      protectedPaths:Set<string>|undefined,roots:readonly string[]):ArtifactStorageRemoval {
+    const result=(outcome:ArtifactStorageRemoval['outcome'],reclaimedBytes=0)=>({key:object.key,outcome,reclaimedBytes});
+    let reclaimed=0;
+    try {
+      if(object.storageSource==='upload') {
+        if(!object.uploadId)return result('IN_USE');
+        const meta=this.recordPath(object.tool,object.sessionId,object.uploadId);
+        assertNoSymlinkComponents(meta);
+        if(!existsSync(meta))return result('ALREADY_MISSING');
+        const record=readUploadRecord(meta);
+        if(record.uploadId!==object.uploadId||record.tool!==object.tool||record.sessionId!==object.sessionId||record.dataPath!==object.filePath)return result('OBJECT_CHANGED');
+        if(record.expiresAt>Date.now()||record.claimedClientMessageId!==undefined||this.activeClaims.has(record.uploadId)||this.activeCompletions.has(record.uploadId))return result('IN_USE');
+        const file=this.storageFile(record.dataPath,record,roots);
+        if(file && this.storageVersion(record,file.version)!==object.version)return result('OBJECT_CHANGED');
+        if(file){unlinkSync(record.dataPath);reclaimed=file.size;}
+        unlinkSync(meta);
+        return result(file?'REMOVED':'ALREADY_MISSING',reclaimed);
+      }
+      const cwd=object.inboxCwd;
+      if(!cwd||!roots.includes(cwd))return result('IN_USE');
+      if(!protectedPaths||protectedPaths.has(this.canonicalInboxPath(object.filePath)))return result('IN_USE');
+      const file=this.storageFile(object.filePath,undefined,[cwd]);
+      if(!file)return result('ALREADY_MISSING');
+      if(file.version!==object.version)return result('OBJECT_CHANGED');
+      const age=Date.now()-file.modified;
+      if(this.inboxRetentionMs<=0||age<=this.inboxRetentionMs ||
+          [...liveCwds()].some((live)=>resolve(live)===resolve(cwd))&&age<this.inboxGraceMs)return result('IN_USE');
+      unlinkSync(object.filePath);
+      return result('REMOVED',file.size);
+    } catch {return result('FAILED',reclaimed);}
+  }
+
   sweepExpired(now = Date.now()): number {
     const root = join(this.home, 'uploads');
     let removed = 0;
@@ -1354,6 +1520,7 @@ export class UploadStaging {
             const record = readUploadRecord(join(sessionRoot, name));
             if (
               record.expiresAt > now
+              || record.claimedClientMessageId !== undefined
               || this.activeClaims.has(record.uploadId)
               || this.activeCompletions.has(record.uploadId)
             ) {

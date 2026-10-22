@@ -46,7 +46,7 @@ class HealthProbeResult {
   /// [LocalizedFailure.detail]; it is never the primary copy.
   final LocalizedFailure? error;
 
-  /// Raw, untranslated diagnostic for a "Technical details" disclosure.
+  /// Raw, untranslated diagnostic for the affected item’s details action.
   final String? detail;
 
   /// Whether the broker answered but failed its own health check.

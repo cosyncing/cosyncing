@@ -4,6 +4,7 @@ import 'package:broker_client/broker_client.dart';
 import 'package:broker_client_flutter/broker_client_flutter.dart';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/src/features/connection/data/broker_http_transport.dart';
+import 'package:cosyncing_client/src/features/connection/data/broker_route_transport.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 /// App-facing connection states for the session detail shell.
@@ -22,6 +23,21 @@ enum SessionDetailConnectionStatus {
 
   /// The connection was closed.
   closed,
+}
+
+/// Existing socket attach policy carried to another verified route of the
+/// same server. It grants no authority beyond an ordinary network reconnect.
+typedef SessionRouteContinuation = ({
+  String? mode,
+  String? reason,
+  bool readOnly,
+  SessionOwnerRevision? ownerRevision,
+});
+
+/// Optional transport capability for preserving an established attach policy.
+abstract interface class SessionRouteContinuable {
+  /// Snapshot of the current policy, including any broker-driven demotion.
+  SessionRouteContinuation get routeContinuation;
 }
 
 /// App-facing live session connection boundary.
@@ -236,14 +252,15 @@ final sessionDetailConnectionFactoryProvider =
 
 /// App-level adapter factory used by production session details.
 final sessionSocketAdapterFactoryProvider =
-    Provider<WebSocketAdapter Function(String url)>(
-      (ref) => FlutterWebSocketAdapter.new,
+    Provider<WebSocketAdapter Function(String url)?>(
+      (ref) => null,
     );
 
 /// Production [SessionDetailConnection] backed by [SessionConnection].
 class BrokerSessionDetailConnection
     implements
         SessionDetailConnection,
+        SessionRouteContinuable,
         SessionHistoryConnection,
         SessionHistoryNavigationConnection {
   /// Creates a broker-backed session detail connection.
@@ -257,11 +274,22 @@ class BrokerSessionDetailConnection
          resolver: resolver,
          tool: tool,
          sessionId: sessionId,
-         adapterFactory: adapterFactory ?? FlutterWebSocketAdapter.new,
-         dio: brokerTransportDio(transport),
+         adapterFactory:
+             resolverRoute(resolver)?.socket ??
+             adapterFactory ??
+             FlutterWebSocketAdapter.new,
+         dio: resolverRoute(resolver)?.dio() ?? brokerTransportDio(transport),
        );
 
   final SessionConnection _inner;
+
+  @override
+  SessionRouteContinuation get routeContinuation => (
+    mode: _inner.mode,
+    reason: _inner.reason,
+    readOnly: _inner.readOnly,
+    ownerRevision: _inner.ownerRevision,
+  );
 
   @override
   SessionDetailConnectionStatus get state => _mapState(_inner.state);

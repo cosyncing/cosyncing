@@ -3,6 +3,9 @@
 // All waiting is frame pumping under flutter_test's fake clock. Nothing here
 // sleeps on the wall clock, and no wait is an assertion: a condition that
 // never arrives fails with a named reason after a bounded number of frames.
+import 'dart:io';
+import 'dart:ui' as ui;
+
 import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
@@ -39,6 +42,26 @@ class AppDriver {
 
   /// The device storage the App runs over.
   final FeatureStorage storage;
+
+  /// Optional review images; ordinary suite runs perform no capture or I/O.
+  Future<void> captureReview(String name) async {
+    const directory = String.fromEnvironment('COSYNCING_REVIEW_SCREENSHOTS');
+    if (directory.isEmpty) return;
+    await settle();
+    // The root overlay includes dialogs and sheets as well as the page.
+    final element = tester.element(find.byType(Overlay).first);
+    await tester.runAsync(() async {
+      final image = await captureImage(element);
+      try {
+        final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+        final file = File('$directory/$name.png');
+        await file.parent.create(recursive: true);
+        await file.writeAsBytes(bytes!.buffer.asUint8List());
+      } finally {
+        image.dispose();
+      }
+    });
+  }
 
   /// Fake-time step of every bounded wait.
   static const Duration step = Duration(milliseconds: 50);
@@ -305,9 +328,20 @@ class AppDriver {
     await tapKey('broker-gate-save-token');
   }
 
-  /// Opens the gate's Technical details disclosure.
-  Future<void> openGateTechnicalDetails() =>
-      tapKey('broker-gate-technical-details');
+  /// Opens diagnostics from the notice's nonselectable padding.
+  Future<void> openGateTechnicalDetails() => openTechnicalDetails(
+    find.byKey(const Key('broker-gate-diagnostic-item')),
+  );
+
+  /// Long-presses an owning item without tapping its primary action.
+  Future<void> openTechnicalDetails(Finder item) async {
+    await reveal(item);
+    await tester.longPressAt(
+      tester.getTopLeft(item.first) + const Offset(4, 4),
+    );
+    await settle();
+    await waitFor(find.byKey(const Key('contextual-details-text')));
+  }
 
   // --- pairing --------------------------------------------------------------
 

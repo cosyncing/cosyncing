@@ -51,6 +51,12 @@ export class MediaPreviewTickets {
     return binding;
   }
 
+  /** Open media capabilities are leases even between range requests. */
+  referencesArtifact(tool: string, sessionId: string, artifactId: string): boolean {
+    return [...this.tickets.values()].some((binding) => binding.expiresAt > this.now()
+      && binding.tool === tool && binding.sessionId === sessionId && binding.artifactId === artifactId);
+  }
+
   revoke(ticket: string): void { this.tickets.delete(ticket); }
 }
 

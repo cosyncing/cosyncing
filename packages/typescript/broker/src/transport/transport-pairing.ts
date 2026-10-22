@@ -178,6 +178,17 @@ export class TransportPairingRegistry {
     this.load();
   }
 
+  /** Existing pairing identity, loaded once before accepting route probes. */
+  routeIdentity(): { publicKey: string; sign: (bytes: Uint8Array) => string } {
+    const keys = loadOrCreateLocalKeyStore(this.keyDir, 'broker', {
+      ensureDirectory: ensureOwnerOnlyDirectory,
+      read: readLocalKeyStoreForPermissionConvergence,
+      secureExisting: enforceOwnerOnlyFile,
+      write: atomicWriteOwnerOnly,
+    });
+    return { publicKey: keys.identity.publicKey, sign: (bytes) => signBytes(keys.identity.privateKey, bytes) };
+  }
+
   createOffer(input: { clientLabel?: string; brokerUrl?: string } = {}): {
     pairingId: string;
     qr: string;

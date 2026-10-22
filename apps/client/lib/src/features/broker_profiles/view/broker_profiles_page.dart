@@ -6,12 +6,16 @@ import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/errors/localized_user_facing_error.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/controller/broker_profile_manager_controller.dart';
+import 'package:cosyncing_client/src/features/broker_profiles/model/broker_credential.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/provider/broker_profile_providers.dart';
+import 'package:cosyncing_client/src/features/connection/provider/broker_route_providers.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
+import 'package:cosyncing_client/src/features/connection/view/broker_addresses_page.dart';
 import 'package:cosyncing_client/src/features/updates/controller/updates_controller.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_participants.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -246,6 +250,12 @@ class _ProfileRow extends ConsumerWidget {
     final theme = Theme.of(context);
     final tokens = context.tokens;
     final id = _sanitizeProfileId(profile.id);
+    final routeStatus = ref
+        .watch(brokerRouteCoordinatorProvider)
+        .status(profile);
+    final activeAddress = routeStatus?.server.addresses
+        .where((address) => address.id == routeStatus.activeRouteId)
+        .firstOrNull;
     final observation = ref
         .watch(savedServerUpdateObservationsProvider)
         .where(
@@ -276,7 +286,12 @@ class _ProfileRow extends ConsumerWidget {
           ),
           const SizedBox(width: 12),
           Expanded(
-            child: SelectionArea(
+            child: _ProfileAddressLink(
+              onTap: () => Navigator.of(context).push<void>(
+                MaterialPageRoute(
+                  builder: (_) => BrokerAddressesPage(profile: profile),
+                ),
+              ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -290,8 +305,16 @@ class _ProfileRow extends ConsumerWidget {
                     ),
                   ),
                   const SizedBox(height: 4),
+                  if (profile.credentialKey != null)
+                    Text(
+                      brokerCredentialKindForKey(profile.credentialKey!) ==
+                              BrokerCredentialKind.peerToken
+                          ? l10n.routesAccessPeer
+                          : l10n.routesAccessOwner,
+                      style: theme.textTheme.bodySmall,
+                    ),
                   Text(
-                    profile.displayAddress,
+                    activeAddress?.label ?? profile.displayAddress,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: theme.textTheme.bodySmall?.copyWith(
@@ -358,6 +381,57 @@ class _ProfileRow extends ConsumerWidget {
       ),
     );
   }
+}
+
+/// Selection owns pointer gestures; this boundary supplies one short-tap,
+/// keyboard and semantic activation without a competing tap recognizer.
+class _ProfileAddressLink extends StatefulWidget {
+  const _ProfileAddressLink({required this.child, required this.onTap});
+  final Widget child;
+  final VoidCallback onTap;
+  @override
+  State<_ProfileAddressLink> createState() => _ProfileAddressLinkState();
+}
+
+class _ProfileAddressLinkState extends State<_ProfileAddressLink> {
+  bool _focused = false;
+  bool _hovered = false;
+  @override
+  Widget build(BuildContext context) => FocusableActionDetector(
+    mouseCursor: SystemMouseCursors.click,
+    onShowFocusHighlight: (value) => setState(() => _focused = value),
+    onShowHoverHighlight: (value) => setState(() => _hovered = value),
+    shortcuts: const {
+      SingleActivator(LogicalKeyboardKey.enter): ActivateIntent(),
+      SingleActivator(LogicalKeyboardKey.space): ActivateIntent(),
+    },
+    actions: {
+      ActivateIntent: CallbackAction<ActivateIntent>(
+        onInvoke: (_) {
+          widget.onTap();
+          return null;
+        },
+      ),
+    },
+    child: Semantics(
+      button: true,
+      onTap: widget.onTap,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: _hovered ? context.tokens.surfaceHover : null,
+          border: Border.all(
+            color: _focused
+                ? Theme.of(context).colorScheme.primary
+                : Colors.transparent,
+          ),
+          borderRadius: BorderRadius.circular(context.tokens.radiusSm),
+        ),
+        child: SelectionArea(
+          child: SelectableTapRegion(onTap: widget.onTap, child: widget.child),
+        ),
+      ),
+    ),
+  );
 }
 
 class _EmptyProfileState extends StatelessWidget {
@@ -533,6 +607,7 @@ class _EditProfileDialogState extends ConsumerState<_EditProfileDialog> {
               const SizedBox(height: 12),
               TextFormField(
                 controller: _baseUriController,
+                readOnly: widget.profile.sourceIdentity != null,
                 key: const Key('broker-profile-edit-base-uri-field'),
                 decoration: InputDecoration(
                   labelText: l10n.brokerProfileBaseUrl,

@@ -102,8 +102,9 @@ async function zipChecks(check: Check, roots: string[]): Promise<void> {
   check('runtime archive: a CRC mismatch, encryption, truncation, garbage or an oversized entry is refused; a missing executable is named',
     Object.values(outcomes).every((outcome) => outcome === true), JSON.stringify(outcomes));
 
-  // The same reader against archives a real zip tool wrote, where one exists: deflated, stored, and the
-  // streamed ZIP64 shape (sizes in a data descriptor) a non-seekable writer produces.
+  // The same reader against archives a real zip tool wrote, where one exists:
+  // deflated, stored, and forced ZIP64. The byte fixtures above separately cover
+  // streamed data descriptors, including ZIP64 descriptors.
   const zip = process.platform === 'win32' ? null : Bun.which('zip');
   if (zip) {
     const root = mkdtempSync(join(tmpdir(), 'cosyncing-runtime-zip-'));
@@ -119,12 +120,17 @@ async function zipChecks(check: Check, roots: string[]): Promise<void> {
           && Buffer.compare(Buffer.from(extractZipEntry(readFileSync(out), 'bun-linux-x64/bun')), payload) === 0;
       } catch { results[label] = false; }
     }
-    const streamed = Bun.spawnSync([zip, '-q', '-fz', '-', '-'], { stdin: payload, stdout: 'pipe', stderr: 'pipe' });
+    // Write to a seekable file. Info-ZIP 3 can emit an invalid central-directory
+    // offset and omit its ZIP64 end record when stdout is a non-seekable pipe.
+    const zip64Path = join(root, 'zip64.zip');
+    const zip64 = Bun.spawnSync([zip, '-q', '-fz', zip64Path, '-'], {
+      stdin: payload, stdout: 'ignore', stderr: 'pipe',
+    });
     try {
-      results.streamedZip64 = streamed.success
-        && Buffer.compare(Buffer.from(extractZipEntry(new Uint8Array(streamed.stdout), '-')), payload) === 0;
-    } catch { results.streamedZip64 = false; }
-    check('runtime archive: archives written by the zip tool (deflated, stored, streamed ZIP64) read byte-exact',
+      results.zip64 = zip64.success
+        && Buffer.compare(Buffer.from(extractZipEntry(readFileSync(zip64Path), '-')), payload) === 0;
+    } catch { results.zip64 = false; }
+    check('runtime archive: archives written by the zip tool (deflated, stored, ZIP64) read byte-exact',
       Object.values(results).every(Boolean), JSON.stringify(results));
   }
 }
@@ -196,13 +202,13 @@ async function planChecks(check: Check): Promise<void> {
   });
   // Release pins that do not meet the floor they travel with are not used, and older compiled pins cannot.
   const stale = planBunRuntimeUpgrade({
-    minimumBunVersion: '1.3.30', runtimeVersion: '1.3.14', releaseRuntime, host: 'linux-x64', toVersion: '2.0.0',
+    minimumBunVersion: '9.9.9', runtimeVersion: '1.3.14', releaseRuntime, host: 'linux-x64', toVersion: '2.0.0',
   });
   check('runtime plan: no pinned build for this host (or none meeting the floor) is refused with install instructions',
     [noHost, unsupported, stale].every((plan) => plan.kind === 'refused' && plan.detailCode === RUNTIME_UPGRADE_REQUIRED_DETAIL
       && plan.summary.includes('https://bun.sh') && plan.summary.includes('no pinned Bun build for this host')
       && plan.summary.endsWith('Nothing was changed.'))
-      && stale.kind === 'refused' && stale.summary.includes('needs Bun 1.3.30 or newer'),
+      && stale.kind === 'refused' && stale.summary.includes('needs Bun 9.9.9 or newer'),
     JSON.stringify([noHost, unsupported, stale]));
 
   const pinned = pinnedReleaseBunRuntime();

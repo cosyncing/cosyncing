@@ -88,47 +88,40 @@ class GeneralSettingsPage extends ConsumerWidget {
             ],
           ),
           const SizedBox(height: 16),
-          SettingsSection(
-            key: const Key('settings-read-aloud-section'),
-            title: l10n.settingsReadAloudTitle,
-            child: SettingsRow(
-              stackTrailing: true,
-              key: const Key('settings-read-aloud-rate'),
-              leading: const Icon(Icons.record_voice_over_outlined),
-              title: Text(l10n.readAloudSpeed),
-              subtitle: Text(l10n.settingsReadAloudSpeedSubtitle),
-              trailing: SettingsSelect<double>(
-                key: const Key('settings-read-aloud-rate-menu'),
-                value: readAloudRate.value ?? kDefaultReadAloudRate,
-                onChanged: readAloudRate.isLoading
-                    ? null
-                    : (rate) {
-                        ref
-                            .read(readAloudRateControllerProvider.notifier)
-                            .setRate(rate);
-                      },
-                options: [
-                  for (final rate in kReadAloudRates)
-                    SettingsSelectOption(
-                      value: rate,
-                      label: formatReadAloudRate(rate),
-                    ),
-                ],
-              ),
+          SettingsRow(
+            stackTrailing: true,
+            key: const Key('settings-read-aloud-rate'),
+            leading: const Icon(Icons.record_voice_over_outlined),
+            title: Text(l10n.readAloudSpeed),
+            subtitle: Text(l10n.settingsReadAloudSpeedSubtitle),
+            trailing: SettingsSelect<double>(
+              key: const Key('settings-read-aloud-rate-menu'),
+              value: readAloudRate.value ?? kDefaultReadAloudRate,
+              onChanged: readAloudRate.isLoading
+                  ? null
+                  : (rate) {
+                      ref
+                          .read(readAloudRateControllerProvider.notifier)
+                          .setRate(rate);
+                    },
+              options: [
+                for (final rate in kReadAloudRates)
+                  SettingsSelectOption(
+                    value: rate,
+                    label: formatReadAloudRate(rate),
+                  ),
+              ],
             ),
           ),
           const SizedBox(height: 16),
-          SettingsSection(
-            title: l10n.settingsDeveloperOptionsTitle,
-            child: SwitchListTile.adaptive(
-              key: const Key('settings-show-debug-views'),
-              value: showDebugViews,
-              onChanged: (value) => ref
-                  .read(debugViewsControllerProvider.notifier)
-                  .setShowDebugViews(value: value),
-              title: Text(l10n.settingsShowDebugViewsTitle),
-              subtitle: Text(l10n.settingsShowDebugViewsSubtitle),
-            ),
+          SettingsSwitchRow(
+            tileKey: const Key('settings-show-debug-views'),
+            value: showDebugViews,
+            onChanged: (value) => ref
+                .read(debugViewsControllerProvider.notifier)
+                .setShowDebugViews(value: value),
+            title: l10n.settingsShowDebugViewsTitle,
+            subtitle: l10n.settingsShowDebugViewsSubtitle,
           ),
         ],
       ),

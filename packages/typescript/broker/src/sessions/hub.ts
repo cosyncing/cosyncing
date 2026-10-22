@@ -1037,6 +1037,12 @@ export class ManagedConn {
   /** Fan a broker-injected artifact out live AND remember it (deduped by artifact identity, never
    *  path alone) so it survives a reattach or a history-reset — neither of which replays the agent's
    *  history would include it. */
+  /** Owner cleanup updates the existing artifact placement without agent input. */
+  publishArtifactRetirement(message: AgentMessage & { type: 'file-artifact' }): void {
+    if (message.removedAt === undefined) throw new Error('Artifact retirement required');
+    this.pushArtifact(message);
+  }
+
   private pushArtifact(message: AgentMessage & { type: 'file-artifact' }): void {
     // Replace exact repeats, but keep distinct versions at the same path as durable session record.
     const key = artifactIdentity(message);

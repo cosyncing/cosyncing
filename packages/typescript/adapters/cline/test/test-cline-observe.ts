@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
 export {};
+import { EventEmitter } from 'node:events';
+import type { FSWatcher, watch } from 'node:fs';
 import type { AgentMessage, HistorySnapshotSink, SessionInfo } from '@cosyncing/adapter-api';
 import { TerminalSummaryRegistry } from '@cosyncing/adapter-api';
 import type { ClineTerminalSummary } from '../src/mapping.ts';
@@ -278,6 +280,52 @@ try {
   await connection.close();
 } finally {
   correlationTree.cleanup();
+}
+
+// A filesystem change between closing and replacing a watcher cannot be timed
+// deterministically through HTTP. Use the existing watcher seam for that gap;
+// C05/C06 in the conformance journey retain the real filesystem and wire checks.
+const watcherGapTree = buildClineFixtureTree();
+let watcherGapConnection: ClineObserveConnection | undefined;
+try {
+  const session = (await discoverClineStore({ env: { CLINE_DIR: watcherGapTree.root } }))[0];
+  if (!session) throw new Error('watcher-gap fixture discovery failed');
+  const watchers: EventEmitter[] = [];
+  let priorClosed = false;
+  const live: AgentMessage[] = [];
+  watcherGapConnection = new ClineObserveConnection({
+    session,
+    info: {
+      id: session.id, nativeId: session.nativeId, tool: 'cline', title: session.title,
+      cwd: session.cwd, status: 'idle', attachMode: 'observe',
+    },
+    watchFactory: (() => {
+      const watcher = Object.assign(new EventEmitter(), {
+        close() { priorClosed = true; },
+      });
+      if (watchers.length === 1) {
+        if (!priorClosed) throw new Error('The previous watcher must be closed');
+        watcherGapTree.writeParent([...fixtureParentMessages(), {
+          id: 'watcher-gap-answer', role: 'assistant',
+          content: [{ type: 'text', text: 'answer written during watcher replacement' }],
+        }]);
+        // Neither watcher delivers an event for this write.
+      }
+      watchers.push(watcher);
+      return watcher as unknown as FSWatcher;
+    }) as typeof watch,
+  });
+  await watcherGapConnection.getHistory();
+  watcherGapConnection.subscribe((message) => live.push(message));
+  watchers[0]!.emit('error', new Error('controlled watcher replacement'));
+  const answers = () => live.filter((message) => message.type === 'model-output'
+    && message.text === 'answer written during watcher replacement');
+  await until('the answer written during watcher replacement', () => answers().length > 0);
+  check('watcher replacement catches an append from the unwatched gap exactly once',
+    watchers.length === 2 && answers().length === 1);
+} finally {
+  await watcherGapConnection?.close();
+  watcherGapTree.cleanup();
 }
 
 const boundedRegistry = new ClinePromptCorrelationRegistry();

@@ -28,7 +28,7 @@ const _currentContract = ClientContractIdentity(
 String _scope(BrokerProfile p) => jsonEncode([
   p.id,
   p.incarnationId,
-  p.baseUri.toString(),
+  p.sourceIdentity ?? p.baseUri.toString(),
   p.credentialKey,
 ]);
 String _id() {
@@ -264,9 +264,15 @@ class UpdatesController extends AsyncNotifier<UpdatesState> {
       }),
       updatedAt: _now(),
     );
-    final write = _saveTail.then(
-      (_) => db.into(db.appSettingRows).insertOnConflictUpdate(snapshot),
-    );
+    final write = _saveTail.then((_) async {
+      if (_disposed) return;
+      await db.transaction(() async {
+        for (final row in data.servers) {
+          if (!await _stillCurrent(row.profile)) return;
+        }
+        await db.into(db.appSettingRows).insertOnConflictUpdate(snapshot);
+      });
+    });
     _saveTail = write.then<void>((_) {}, onError: (Object _) {});
     await write;
   }

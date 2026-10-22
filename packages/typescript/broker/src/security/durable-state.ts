@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { Database } from 'bun:sqlite';
 import {
   existsSync,
   lstatSync,
@@ -45,10 +46,11 @@ export interface DurableStateLayout {
 }
 
 export interface DurableSchemaSpec {
-  id: 'config' | 'broker-instance' | 'setup' | 'install' | 'schedules' | 'attention' | 'peers' | 'wake-registrations' | 'artifacts' | 'session-visibility';
+  id: 'config' | 'broker-instance' | 'setup' | 'install' | 'schedules' | 'attention' | 'peers' | 'wake-registrations' | 'artifacts' | 'session-visibility' | 'server-routes' | 'storage-operations' | 'artifact-retirements';
   root: 'state' | 'cache';
   relativePath: string;
-  versionField: 'schemaVersion' | 'version';
+  versionField: 'schemaVersion' | 'version' | 'user_version';
+  format?: 'sqlite';
   currentVersion: 1 | 2;
   sensitive: boolean;
 }
@@ -64,6 +66,9 @@ export const DURABLE_SCHEMA_REGISTRY: readonly DurableSchemaSpec[] = Object.free
   { id: 'wake-registrations', root: 'state', relativePath: 'push-wake-tokens.json', versionField: 'version', currentVersion: 2, sensitive: true },
   { id: 'session-visibility', root: 'state', relativePath: 'session-visibility.json', versionField: 'version', currentVersion: 1, sensitive: true },
   { id: 'artifacts', root: 'cache', relativePath: 'artifacts/index.json', versionField: 'version', currentVersion: 1, sensitive: true },
+  { id: 'server-routes', root: 'state', relativePath: 'server-routes.json', versionField: 'version', currentVersion: 1, sensitive: true },
+  { id: 'storage-operations', root: 'state', relativePath: 'storage-operations.sqlite', format: 'sqlite', versionField: 'user_version', currentVersion: 1, sensitive: true },
+  { id: 'artifact-retirements', root: 'cache', relativePath: 'artifacts/retirements.sqlite', format: 'sqlite', versionField: 'user_version', currentVersion: 1, sensitive: true },
 ]);
 
 export interface DurableStoreInspection {
@@ -200,7 +205,11 @@ export function durableSchemaPath(spec: DurableSchemaSpec, layout: DurableStateL
 function inspectDurableSchemaContent(spec: DurableSchemaSpec, path: string): DurableStoreInspection {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(path, 'utf8'));
+    if (spec.format === 'sqlite') {
+      const database = new Database(path, { readonly: true });
+      try { parsed = database.query('PRAGMA user_version').get(); }
+      finally { database.close(); }
+    } else parsed = JSON.parse(readFileSync(path, 'utf8'));
   } catch {
     return { id: spec.id, status: 'malformed', detailCode: `${spec.id}-malformed` };
   }

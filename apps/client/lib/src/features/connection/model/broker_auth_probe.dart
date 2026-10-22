@@ -2,8 +2,10 @@ import 'dart:async';
 
 import 'package:broker_client/broker_client.dart';
 import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_credential.dart';
 import 'package:cosyncing_client/src/features/connection/data/broker_http_transport.dart';
+import 'package:cosyncing_client/src/features/connection/data/broker_route_transport.dart';
 import 'package:cosyncing_client/src/features/connection/model/broker_gate_state.dart';
 import 'package:cosyncing_client/src/features/connection/model/broker_health_probe.dart';
 
@@ -60,6 +62,17 @@ class RealBrokerAuthProbe implements BrokerAuthProbe {
              dio: brokerTransportDio(transport),
            ));
 
+  /// Uses one captured, approved route for the entire authentication probe.
+  factory RealBrokerAuthProbe.forRoute(BrokerRouteTransport route) =>
+      RealBrokerAuthProbe(
+        clientFactory: ({required baseUrl, token, peerToken}) => BrokerClient(
+          baseUrl: baseUrl,
+          token: token,
+          peerToken: peerToken,
+          dio: route.dio(),
+        ),
+      );
+
   final BrokerClient Function({
     required String baseUrl,
     String? token,
@@ -107,12 +120,12 @@ class RealBrokerAuthProbe implements BrokerAuthProbe {
           credentialIssue: hasCredential
               ? BrokerGateCredentialIssue.rejected
               : BrokerGateCredentialIssue.missing,
-          detail: e.error?.error ?? e.message,
+          detail: failureDetail(e),
           brokerUrl: baseUrl,
         );
       }
       return BrokerGateState.unreachable(
-        detail: e.error?.error ?? e.message,
+        detail: failureDetail(e),
         brokerUrl: baseUrl,
       );
     } on TimeoutException catch (e) {

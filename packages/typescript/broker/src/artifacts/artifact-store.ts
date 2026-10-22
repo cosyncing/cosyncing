@@ -1,3 +1,4 @@
+import { ArtifactDeletionJournal, removedArtifactMessage, type ArtifactRemovalRemainder } from './artifact-deletion-journal.ts';
 import {
   closeSync,
   copyFileSync,
@@ -377,7 +378,23 @@ export function artifactCacheRoot(): string {
   );
 }
 
+/** Internal ownership/version descriptor; never sent as a deletion path. */
+export interface ArtifactStorageObject {
+  key: string; version: string; blobVersion: string; filePath: string; contentHash: string;
+  label: string; size: number | null; createdAt: number; tool: string; sessionId: string;
+  category: 'stored-files' | 'staging'; eligible: boolean; reason?: string; remainder?: boolean;
+  storageSource?: 'upload' | 'inbox'; uploadId?: string; inboxCwd?: string;
+}
+export interface ArtifactStorageRemoval {
+  key: string; outcome: 'REMOVED' | 'REFERENCE_REMOVED' | 'ALREADY_MISSING' | 'OBJECT_CHANGED' | 'IN_USE' | 'FAILED'; reclaimedBytes: number;
+}
+
 export class ArtifactStore {
+  private readonly deletionJournal: ArtifactDeletionJournal;
+  private readonly readers = new Map<string, number>();
+  private readonly nativeReaders = new Map<() => boolean, string>();
+  private readonly nativeReadersByPath = new Map<string, Set<() => boolean>>();
+
   private readonly root: string;
   private readonly blobDir: string;
   private readonly indexFile: string;
@@ -413,6 +430,8 @@ export class ArtifactStore {
         .map(normalizeBrokerSource)
         .filter((source) => source !== this.brokerSource),
     );
+    this.deletionJournal = new ArtifactDeletionJournal(join(root, 'artifacts', 'retirements.sqlite'),
+      [this.brokerSource, ...this.legacyBrokerSources]);
     this.maxBytes = positiveNumber(process.env.COSYNCING_ARTIFACT_CACHE_MAX_BYTES, DEFAULT_MAX_BYTES);
     this.maxAgeMs = positiveNumber(process.env.COSYNCING_ARTIFACT_CACHE_MAX_AGE_DAYS, DEFAULT_MAX_AGE_DAYS) * 24 * 60 * 60 * 1000;
     this.maxRecords = boundedPositiveInteger(
@@ -499,6 +518,8 @@ export class ArtifactStore {
   ): AgentMessage {
     const key = message.artifactKey;
     if (!key) return this.displayOnly(message);
+    const retired = this.deletionJournal.get(session.tool, session.id, key);
+    if (retired) return removedArtifactMessage(retired);
     const record = this.lookupRecord(session.tool, session.id, key);
     if (!record) {
       const { fetchUrl: _fetchUrl, interactionPolicy: _interactionPolicy, ...rest } = message;
@@ -587,7 +608,13 @@ export class ArtifactStore {
     options: { sessionQualified?: boolean } = {},
     authorization = INTERNAL_ARTIFACT_SCOPE,
   ): AgentMessage & { type: 'file-artifact' } {
-    const { record } = this.bytesRecord(session, message, bytes, fallbackMimeType, options);
+    let { record } = this.bytesRecord(session, message, bytes, fallbackMimeType, options);
+    const retired = this.deletionJournal.get(session.tool, session.id, record.artifactKey);
+    if (retired && !options.sessionQualified) return removedArtifactMessage(retired);
+    if (retired) {
+      const artifactKey = `${record.artifactKey}.${randomBytes(12).toString('base64url')}`;
+      record = { ...record, artifactKey, key: recordKey(this.brokerSource,session.tool,session.id,artifactKey) };
+    }
     const filePath = record.filePath;
     if (process.platform === 'win32') ensureOwnerOnlyDirectory(dirname(filePath));
     else mkdirSync(dirname(filePath), { recursive: true });
@@ -734,7 +761,10 @@ export class ArtifactStore {
     const bytes = readFileSync(fullPath);
     const contentHash = sha256(bytes);
     const rel = message.path || message.name || contentHash;
-    const artifactKey = message.artifactKey || artifactKeyFor(rel, contentHash);
+    let artifactKey = message.artifactKey || artifactKeyFor(rel, contentHash);
+    const retired = this.deletionJournal.get(session.tool,session.id,artifactKey);
+    if (retired && !options.sessionQualified) return removedArtifactMessage(retired);
+    if (retired) artifactKey = `${artifactKey}.${randomBytes(12).toString('base64url')}`;
     const filePath = this.blobPath(contentHash);
     if (process.platform === 'win32') ensureOwnerOnlyDirectory(dirname(filePath));
     else mkdirSync(dirname(filePath), { recursive: true });
@@ -780,6 +810,7 @@ export class ArtifactStore {
         record.tool === session.tool &&
         record.sessionId === session.id &&
         this.ownsSource(record.brokerSource) &&
+        !this.deletionJournal.get(record.tool,record.sessionId,record.artifactKey) &&
         record.qualifiedSource === 'managed-connection-v1' &&
         existsSync(record.filePath) &&
         (!record.expiresAt || now <= record.expiresAt)
@@ -798,7 +829,7 @@ export class ArtifactStore {
     const matching = [...byArtifactKey.values()]
       .sort((a, b) => a.createdAt - b.createdAt)
       .slice(-this.replayLimit);
-    return matching
+    const live = matching
       .map((record) => this.asMessage(
         session,
         {
@@ -821,6 +852,13 @@ export class ArtifactStore {
         record,
         brokerUrl,
       ));
+    return [
+      ...live.map((message, index) => ({ createdAt: matching[index]!.createdAt, message })),
+      ...this.deletionJournal.session(session.tool, session.id, this.replayLimit)
+        .filter((record) => record.qualified)
+        .map((record) => ({ createdAt: record.createdAt, message: removedArtifactMessage(record) })),
+    ].sort((a, b) => a.createdAt - b.createdAt)
+      .slice(-this.replayLimit).map((entry) => entry.message);
   }
 
   /**
@@ -936,7 +974,7 @@ export class ArtifactStore {
   }
 
   /** Media-only stream for a broker-issued capability. Export attachments stay download-only. */
-  serveMediaPreview(tool: string, sessionId: string, artifactKey: string, request: Request): Response {
+  serveMediaPreview(tool: string, sessionId: string, artifactKey: string, request: Request, requestActive?: () => boolean): Response {
     const rec = this.lookupRecord(tool, sessionId, artifactKey);
     if (!rec || !existsSync(rec.filePath)) return new Response('Not found', { status: 404 });
     const type = mediaPreviewType(rec.name || rec.path);
@@ -949,7 +987,7 @@ export class ArtifactStore {
       'x-content-type-options': 'nosniff',
       'content-security-policy': "default-src 'none'; sandbox",
     });
-    const response = this.rangedArtifactResponse(rec, headers, request.headers);
+    const response = this.rangedArtifactResponse(rec, headers, request.headers, request.method === 'HEAD', requestActive);
     if (response.ok) {
       // Range-heavy decoders must refresh the LRU without an index rewrite on
       // every seek. Persist at most once a minute across the store; intervening
@@ -962,8 +1000,7 @@ export class ArtifactStore {
         rec.lastAccessedAt = this.nextRecency();
       }
     }
-    return request.method === 'HEAD'
-      ? new Response(null, { status: response.status, headers: response.headers }) : response;
+    return response;
   }
 
   /**
@@ -981,6 +1018,8 @@ export class ArtifactStore {
     sigRaw: string | null,
     authorization = INTERNAL_ARTIFACT_SCOPE,
     requestHeaders?: Headers,
+    headOnly = false,
+    requestActive?: () => boolean,
   ): Response {
     const expires = Number(expiresRaw ?? 0);
     if (!expires || !sigRaw || Date.now() > expires) return new Response('artifact URL expired', { status: 403 });
@@ -1004,7 +1043,7 @@ export class ArtifactStore {
       h.set('cross-origin-resource-policy', 'same-origin');
       h.set('x-cosyncing-artifact-key', rec.artifactKey);
       h.set('x-cosyncing-content-hash', rec.contentHash);
-      return this.rangedArtifactResponse(rec, h, requestHeaders);
+      return this.rangedArtifactResponse(rec, h, requestHeaders, headOnly, requestActive);
     }
     this.commitMutation('access', () => { rec.lastAccessedAt = this.nextRecency(); }, rec.key);
     const headers = new Headers();
@@ -1021,7 +1060,7 @@ export class ArtifactStore {
       headers.set('content-disposition', `attachment; filename="${safeName}"`);
       headers.set('content-security-policy', 'sandbox');
     }
-    return this.rangedArtifactResponse(rec, headers, requestHeaders);
+    return this.rangedArtifactResponse(rec, headers, requestHeaders, headOnly, requestActive);
   }
 
   /**
@@ -1044,6 +1083,8 @@ export class ArtifactStore {
     rec: ArtifactRecord,
     headers: Headers,
     requestHeaders: Headers | undefined,
+    headOnly = false,
+    requestActive?: () => boolean,
   ): Response {
     const etag = `"${rec.contentHash}"`;
     headers.set('accept-ranges', 'bytes');
@@ -1065,22 +1106,253 @@ export class ArtifactStore {
 
     if (!range) {
       headers.set('content-length', String(rec.size));
+      if (headOnly) return new Response(null, { headers });
       // `Bun.serve` re-ranges a `BunFile` body itself whenever the REQUEST
       // carried a `Range`, rewriting a 200 into a 206 — which would silently
       // undo the stale-`if-range` decision just made above. Streaming opts out
-      // of that path; the sendfile fast path is kept for the ordinary
-      // no-range fetch, which is every fetch the client makes today.
-      const body = requestHeaders?.get('range')
-        ? Bun.file(rec.filePath).stream()
-        : Bun.file(rec.filePath);
-      return new Response(body, { headers });
+      // of that path. Ordinary downloads retain the native file-transfer path
+      // and use the server's request lifetime to protect their bytes instead.
+      return this.protectedFileResponse(rec.filePath, rec.size, headers, undefined,
+        requestHeaders?.get('range') ? undefined : requestActive);
     }
     headers.set('content-length', String(range.end - range.start + 1));
     headers.set('content-range', `bytes ${range.start}-${range.end}/${rec.size}`);
-    return new Response(Bun.file(rec.filePath).slice(range.start, range.end + 1), {
-      status: 206,
-      headers,
-    });
+    if (headOnly) return new Response(null, { status: 206, headers });
+    return this.protectedFileResponse(rec.filePath, rec.size, headers, range, requestActive);
+  }
+
+  private removeNativeReader(active: () => boolean): void {
+    const path = this.nativeReaders.get(active);
+    if (path === undefined) return;
+    this.nativeReaders.delete(active);
+    const readers = this.nativeReadersByPath.get(path)!;
+    readers.delete(active);
+    if (!readers.size) this.nativeReadersByPath.delete(path);
+  }
+
+  private isReading(path: string): boolean {
+    if (this.readers.has(path)) return true;
+    for (const active of this.nativeReadersByPath.get(path) ?? []) {
+      if (active()) return true;
+      this.removeNativeReader(active);
+    }
+    return false;
+  }
+
+  private retainNativeReader(path: string, active: () => boolean): boolean {
+    // Reap a bounded rotating batch on admission, not on an idle timer. The
+    // predicate reads Bun's live request state; it does not infer completion
+    // from elapsed time, garbage collection, or a connection-wide counter.
+    const count = Math.min(8, this.nativeReaders.size);
+    for (let index = 0; index < count; index++) {
+      const [prior, priorPath] = this.nativeReaders.entries().next().value!;
+      if (!prior()) this.removeNativeReader(prior);
+      else {
+        this.nativeReaders.delete(prior);
+        this.nativeReaders.set(prior, priorPath);
+      }
+    }
+    // Retained request metadata is bounded even under sustained concurrency.
+    // Overflow uses the backpressured streaming lease below.
+    if (this.nativeReaders.size >= 1024) return false;
+    this.nativeReaders.set(active, path);
+    let readers = this.nativeReadersByPath.get(path);
+    if (!readers) this.nativeReadersByPath.set(path, readers = new Set());
+    readers.add(active);
+    return true;
+  }
+
+  private protectedFileResponse(path: string, size: number, headers: Headers, range?: DownloadByteRange, requestActive?: () => boolean): Response {
+    let remaining = range ? range.end - range.start + 1 : size;
+    if (remaining === 0) return new Response(null, { status: range ? 206 : 200, headers });
+    if (requestActive) {
+      // This predicate is supplied only for a native TCP request. Bun's
+      // requestIP() returns null after its response completes or aborts.
+      if (!requestActive()) return new Response(null, { status: range ? 206 : 200, headers });
+      if (this.retainNativeReader(path, requestActive)) {
+        try {
+          const file = Bun.file(path);
+          return new Response(range ? file.slice(range.start, range.end + 1) : file,
+            { status: range ? 206 : 200, headers });
+        } catch (error) {
+          this.removeNativeReader(requestActive);
+          throw error;
+        }
+      }
+    }
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let closing: Promise<void> | undefined;
+    let canceled = false;
+    this.readers.set(path, (this.readers.get(path) ?? 0) + 1);
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      const count = (this.readers.get(path) ?? 1) - 1;
+      if (count) this.readers.set(path, count); else this.readers.delete(path);
+    };
+    const closeReader = () => closing ??= (async () => {
+      canceled = true;
+      try { await reader?.cancel(); } finally { release(); }
+    })();
+    // The DOM constructor type omits Bun's direct-stream extension. Keep its
+    // source checked against Bun's public type without changing global DOM types.
+    const DirectStream = ReadableStream as unknown as new (
+      source: Bun.DirectUnderlyingSource<Uint8Array>,
+    ) => ReadableStream<Uint8Array>;
+    return new Response(new DirectStream({
+      type: 'direct',
+      async pull(controller) {
+        if (canceled) return;
+        try {
+          const start = range?.start ?? 0;
+          reader = Bun.file(path).slice(start, start + remaining).stream().getReader();
+          while (remaining > 0 && !canceled) {
+            const next = await reader.read();
+            if (canceled) break;
+            if (next.done) throw new Error('Artifact body length changed');
+            remaining -= next.value.byteLength;
+            // A pending write is the socket's backpressure signal. Do not read
+            // another chunk until it drains, or after the receiver disconnects.
+            const written = controller.write(next.value);
+            if ((typeof written === 'number' ? written : await written) === 0) break;
+          }
+          if (!canceled) await controller.end();
+        } catch (error) {
+          if (!canceled) controller.close(error instanceof Error ? error : new Error('Artifact read failed'));
+        } finally {
+          await closeReader().catch(() => undefined);
+        }
+      },
+      async cancel() { await closeReader().catch(() => undefined); },
+    }), { status: range ? 206 : 200, headers });
+  }
+
+  private storageFile(path: string): { size:number; version:string } | undefined {
+    const target=resolve(path),root=resolve(this.blobDir);
+    const name=basename(target),bucket=dirname(target);
+    if(dirname(bucket)!==root || !/^[a-f0-9]{64}$/.test(name) || basename(bucket)!==name.slice(0,2)
+      || lstatSync(root).isSymbolicLink()) throw new Error('UNMANAGED');
+    const realRoot=realpathSync(root);
+    if(existsSync(bucket) && (lstatSync(bucket).isSymbolicLink() || realpathSync(bucket)!==join(realRoot,name.slice(0,2)))) throw new Error('UNMANAGED');
+    let stat;
+    try { stat=lstatSync(target); } catch(error) { if((error as NodeJS.ErrnoException).code==='ENOENT') return; throw error; }
+    if(!stat.isFile() || stat.isSymbolicLink() || realpathSync(target)!==join(realRoot,name.slice(0,2),name)) throw new Error('UNMANAGED');
+    return {size:stat.size,version:`${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`};
+  }
+
+  /** Bounded index iteration; callers yield between batches, never walk workspaces. */
+  *storageObjects(protectedSession: (tool:string,id:string,artifact:string)=>boolean): Iterable<ArtifactStorageObject> {
+    const startedAt = Date.now();
+    let remaining = this.records.size;
+    const livePaths = new Set<string>();
+    for(const rec of this.records.values()) {
+      if (remaining-- <= 0) break;
+      if (rec.createdAt > startedAt) continue;
+      if(!this.ownsSource(rec.brokerSource) || this.deletionJournal.get(rec.tool,rec.sessionId,rec.artifactKey)) continue;
+      livePaths.add(rec.filePath);
+      let file; let reason:string|undefined;
+      try { file=this.storageFile(rec.filePath); if(!file)reason='ALREADY_MISSING'; } catch { reason='UNAVAILABLE'; }
+      if(this.isReading(rec.filePath) || protectedSession(rec.tool,rec.sessionId,rec.artifactKey)) reason='IN_USE';
+      const transient=rec.deliveryClass==='export-attachment';
+      if(transient && !this.isStaleExport(rec)) reason='RETENTION';
+      yield {key:rec.key,version:`${rec.contentHash}:${rec.createdAt}`,blobVersion:file?.version??'',filePath:rec.filePath,
+        contentHash:rec.contentHash,label:rec.name,size:file?.size??null,createdAt:rec.createdAt,tool:rec.tool,sessionId:rec.sessionId,
+        category:transient?'staging':'stored-files',eligible:reason===undefined,reason};
+    }
+    let after='';
+    for(;;) {
+      const batch=this.deletionJournal.remainders(after);
+      if(!batch.length)break;
+      for(const remainder of batch) {
+        let file;let reason:string|undefined;
+        try { file=this.storageFile(remainder.path); if(!file){this.deletionJournal.resolve(remainder.path);continue;} }
+        catch {reason='UNAVAILABLE';}
+        if(livePaths.has(remainder.path) || this.isReading(remainder.path))reason='IN_USE';
+        yield {key:`remainder:${remainder.path}`,version:remainder.version,blobVersion:remainder.version,filePath:remainder.path,
+          contentHash:remainder.contentHash,label:basename(remainder.path),size:file?.size??null,createdAt:0,tool:'',sessionId:'',
+          category:'staging',eligible:reason===undefined,reason,remainder:true};
+      }
+      after=batch.at(-1)!.path;
+    }
+  }
+
+  /** One index commit per bounded batch; durable retirement precedes every unlink.
+   * An interrupted unlink stays in the journal for a later explicit retry. */
+  storageRemoveBatch(objects: ArtifactStorageObject[], protectedSession:(tool:string,id:string,artifact:string)=>boolean): ArtifactStorageRemoval[] {
+    if(objects.length>64)throw new Error('Cleanup batch exceeds limit');
+    if(!objects.length)return [];
+    const results=new Map<string,ArtifactStorageRemoval>();
+    const accepted:Array<{object:ArtifactStorageObject;record?:ArtifactRecord}>=[];
+    const remainders:ArtifactRemovalRemainder[]=[];
+    for(const object of objects) {
+      const rec=object.remainder?undefined:this.records.get(object.key);
+      let outcome:ArtifactStorageRemoval['outcome']|undefined;
+      let file;
+      try {
+        const retired = !rec && !object.remainder
+          ? this.deletionJournal.get(object.tool, object.sessionId, object.key.split('\0').at(-1)!) : undefined;
+        const sameRecord = rec && this.ownsSource(rec.brokerSource)
+          && rec.tool === object.tool && rec.sessionId === object.sessionId
+          && rec.filePath === object.filePath
+          && `${rec.contentHash}:${rec.createdAt}` === object.version;
+        const sameRetirement = retired && `${retired.contentHash}:${retired.createdAt}` === object.version;
+        if (!object.remainder && !sameRecord && !sameRetirement) outcome = 'OBJECT_CHANGED';
+        else if (this.isReading(object.filePath)
+          || (rec && (protectedSession(rec.tool,rec.sessionId,rec.artifactKey)
+            || (rec.deliveryClass === 'export-attachment' && !this.isStaleExport(rec))))) outcome='IN_USE';
+        else {
+          file=this.storageFile(object.filePath);
+          if(!file)outcome='ALREADY_MISSING';
+          else if(file.version!==object.blobVersion)outcome='OBJECT_CHANGED';
+        }
+      } catch {outcome='FAILED';}
+      if(outcome && outcome!=='ALREADY_MISSING') { results.set(object.key,{key:object.key,outcome,reclaimedBytes:0});continue; }
+      accepted.push({object,record:rec});
+      remainders.push({path:object.filePath,source:this.brokerSource,version:object.blobVersion,size:file?.size??0,contentHash:object.contentHash});
+    }
+    this.deletionJournal.retire(accepted.filter(({record})=>record && record.deliveryClass!=='export-attachment').map(({record:rec})=>({
+      key:rec!.key,tool:rec!.tool,sessionId:rec!.sessionId,artifactKey:rec!.artifactKey,contentHash:rec!.contentHash,
+      name:rec!.name,mimeType:rec!.mimeType,size:rec!.size,createdAt:rec!.createdAt,removedAt:Date.now(),
+      qualified:rec!.qualifiedSource==='managed-connection-v1',proactive:rec!.proactive,transcriptAnchor:rec!.transcriptAnchor,
+    })),remainders);
+    if(accepted.some(({record})=>record)) this.commitMutation('clear',()=>{ for(const {record} of accepted)if(record)this.records.delete(record.key); });
+    const selectedPaths=new Set(accepted.map(({object})=>object.filePath));
+    const live=new Set<string>();
+    for(const record of this.records.values())if(selectedPaths.has(record.filePath))live.add(record.filePath);
+    const reclaimed=new Map<string,number>();
+    const resolvedPaths=new Set<string>();
+    for(const {object} of accepted) {
+      let outcome:ArtifactStorageRemoval['outcome']='REMOVED';let bytes=0;
+      try {
+        if(live.has(object.filePath)){outcome='REFERENCE_REMOVED';resolvedPaths.add(object.filePath);}
+        else if(reclaimed.has(object.filePath)){outcome='REFERENCE_REMOVED';}
+        else {
+          const file=this.storageFile(object.filePath);
+          if(!file)outcome='ALREADY_MISSING';
+          else if(file.version!==object.blobVersion)outcome='OBJECT_CHANGED';
+          else {rmSync(object.filePath);bytes=file.size;reclaimed.set(object.filePath,bytes);}
+          if(outcome==='REMOVED' || outcome==='ALREADY_MISSING')resolvedPaths.add(object.filePath);
+        }
+      } catch {outcome='FAILED';}
+      results.set(object.key,{key:object.key,outcome,reclaimedBytes:bytes});
+    }
+    this.deletionJournal.resolveBatch(resolvedPaths);
+    return objects.map((object)=>results.get(object.key)!);
+  }
+
+  /** A cleanup notification addresses one retired version, never the session's
+   * complete artifact history. Replay remains available on a later attach. */
+  removedArtifact(tool: string, sessionId: string, artifactKey: string): ArtifactMessage | undefined {
+    const record = this.deletionJournal.get(tool, sessionId, artifactKey);
+    return record ? removedArtifactMessage(record) : undefined;
+  }
+
+  /** Releases retirement state after the broker listener has stopped. */
+  closeStorage(): void {
+    this.nativeReaders.clear();
+    this.nativeReadersByPath.clear();
+    this.deletionJournal.close();
   }
 
   clearSession(tool: string, sessionId: string): number {
@@ -1110,6 +1382,8 @@ export class ArtifactStore {
     brokerUrl?: string,
     authorization = INTERNAL_ARTIFACT_SCOPE,
   ): AgentMessage & { type: 'file-artifact' } {
+    const retired = this.deletionJournal.get(session.tool,session.id,rec.artifactKey);
+    if (retired) return removedArtifactMessage(retired);
     const { url: _url, interactionPolicy: _interactionPolicy, ...rest } = message;
     return {
       ...rest,
@@ -1214,6 +1488,7 @@ export class ArtifactStore {
   }
 
   private lookupRecord(tool: string, sessionId: string, artifactKey: string): ArtifactRecord | undefined {
+    if (this.deletionJournal.get(tool, sessionId, artifactKey)) return undefined;
     const found = this.findRecord(tool, sessionId, artifactKey);
     // An export from an earlier process is gone even before the start sweep removes it, and stays
     // gone if that sweep could not be persisted.
@@ -1459,7 +1734,7 @@ export class ArtifactStore {
     if (!removed.length) return;
     const liveHashes = new Set([...this.records.values()].map((r) => r.contentHash));
     for (const rec of removed) {
-      if (liveHashes.has(rec.contentHash)) continue;
+      if (liveHashes.has(rec.contentHash) || this.isReading(rec.filePath)) continue;
       try {
         rmSync(rec.filePath);
       } catch {

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
+import 'package:cosyncing_client/src/design/components/contextual_details.dart';
 import 'package:cosyncing_client/src/features/connection/model/connection_state.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/pairing/view/pairing_page.dart';
@@ -328,10 +329,7 @@ class _ConnectionMethodCard extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    title,
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
+                  Text(title, style: Theme.of(context).textTheme.titleMedium),
                   const SizedBox(height: 8),
                   Text(
                     body,
@@ -445,7 +443,11 @@ class _ConnectionStatusCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            SelectionArea(child: status),
+            ContextualDetails(
+              label: l10n.connectionFailedTitle,
+              detail: detail,
+              child: SelectionArea(child: status),
+            ),
             if (offerRetry) ...[
               const SizedBox(height: 12),
               Align(
@@ -458,17 +460,6 @@ class _ConnectionStatusCard extends StatelessWidget {
                 ),
               ),
             ],
-            if (detail != null && detail.trim().isNotEmpty)
-              ExpansionTile(
-                tilePadding: EdgeInsets.zero,
-                title: Text(l10n.brokerGateTechnicalDetails),
-                children: [
-                  Align(
-                    alignment: AlignmentDirectional.centerStart,
-                    child: SelectableText(detail),
-                  ),
-                ],
-              ),
           ],
         ),
       ),

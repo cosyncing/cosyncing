@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
+import 'package:cosyncing_client/src/design/components/contextual_details.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/view/add_server_sheet.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/view/broker_profiles_page.dart';
 import 'package:cosyncing_client/src/features/connection/data/broker_identity_store.dart';
@@ -104,32 +105,32 @@ class _BrokerDevicesSettingsPageState
 
     final isError = state.hasError;
     final color = isError ? tokens.statusError : tokens.statusWorking;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Icon(
-              isError ? Icons.error_outline : Icons.check_circle_outline,
-              color: color,
-              size: 16,
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: SelectableText(
-                message,
-                style: Theme.of(
-                  context,
-                ).textTheme.bodySmall?.copyWith(color: color),
+    return ContextualDetails(
+      label: message,
+      detail: isError ? state.detail : null,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                isError ? Icons.error_outline : Icons.check_circle_outline,
+                color: color,
+                size: 16,
               ),
-            ),
-          ],
-        ),
-        // Raw diagnostics stay out of the reading path here too, matching the
-        // connection gate's disclosure rather than appending the exception.
-        if (isError && state.detail != null)
-          SettingsTechnicalDetailsDisclosure(detail: state.detail!),
-      ],
+              const SizedBox(width: 8),
+              Expanded(
+                child: SelectableText(
+                  message,
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodySmall?.copyWith(color: color),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 

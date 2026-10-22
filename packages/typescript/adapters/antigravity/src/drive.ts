@@ -679,6 +679,14 @@ export class AgyDriveConnection extends AgyObserveConnection {
     this.launchMode = mode;
     // The posture changed with the child, so the row must change with it.
     this.publishCurrentMode();
+    proc.stdin.on('error', (error) => {
+      // A buffered write may fail after close/relaunch killed its child. Keep the
+      // listener for that old pipe, but never let it settle the new generation.
+      if (this.proc !== proc) return;
+      this.trace?.({ op: 'drive-input-error', detail: String(error) });
+      this.killChild();
+      this.onChildGone(null);
+    });
     proc.stdout.on('data', (chunk: Buffer) => this.onStdout(chunk));
     proc.stderr.on('data', (chunk: Buffer) => {
       // stderr carries the "ignoring unsupported stream input message event" warning

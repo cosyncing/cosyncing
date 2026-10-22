@@ -44,6 +44,12 @@ abstract class WebSocketAdapter {
   Future<void> close();
 }
 
+/// Optional transport evidence for distinguishing normal closure from loss.
+abstract interface class WebSocketCloseDetails {
+  /// The peer's close code, or null when no close frame was received.
+  int? get closeCode;
+}
+
 /// A fake [WebSocketAdapter] for unit tests.
 ///
 /// Does not require a live broker. Tests push messages via [simulateMessage]

@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/src/errors/diagnostic_details.dart';
 import 'package:meta/meta.dart';
 
 /// Maximum UTF-16 code units retained for one copied technical detail.
@@ -11,7 +12,7 @@ const int maxTechnicalDetailLength = 2048;
 /// The ellipsis is inside [maxTechnicalDetailLength], and applying this to an
 /// already bounded value returns it unchanged.
 String? boundedTechnicalDetail(String? detail) {
-  final value = detail?.trim();
+  final value = detail == null ? null : sanitizeDiagnosticText(detail).trim();
   if (value == null || value.isEmpty) return null;
   if (value.length <= maxTechnicalDetailLength) return value;
   return '${value.substring(0, maxTechnicalDetailLength - 1)}…';
@@ -184,6 +185,9 @@ String userFacingMessage(Object error, {required String lead}) =>
 /// The English wording for each value lives in `app_en.arb` under
 /// `failureLead<Name>`; `localizedFailureLead` maps this enum to it.
 enum FailureLead {
+  /// A previously dispatched action has no confirmed result after failover.
+  routeOutcomeUnknown,
+
   /// Reading or listing a session file failed.
   accessFile,
 
@@ -506,11 +510,7 @@ class LocalizedFailure {
   /// the app applied itself ("Reconnect before taking over this session."),
   /// where recovery advice derived from a transport failure would be a lie.
   /// Such a failure renders as the lead sentence alone.
-  const LocalizedFailure({
-    required this.lead,
-    this.kind,
-    this.detail,
-  });
+  const LocalizedFailure({required this.lead, this.kind, this.detail});
 
   /// A notice with no underlying exception: renders as [lead] alone.
   const LocalizedFailure.notice(this.lead) : kind = null, detail = null;

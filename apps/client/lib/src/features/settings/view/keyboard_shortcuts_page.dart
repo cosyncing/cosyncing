@@ -81,6 +81,8 @@ class KeyboardShortcutsPage extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 16),
+            SelectableText(l10n.technicalDetailsHelp),
+            const SizedBox(height: 16),
             ...groups,
             // Safari claims Cmd+Opt+W for Close Other Tabs. The row stays,
             // because the chord works in every other browser and on native

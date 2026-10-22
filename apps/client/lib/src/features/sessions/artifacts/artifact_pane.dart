@@ -5,6 +5,7 @@ import 'package:broker_client/broker_client.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/broker_media_source.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_html_handoff.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_media_source.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_open_with.dart';
@@ -123,10 +124,7 @@ artifactPaneReadProvider = FutureProvider.autoDispose
                   sessionId: pane.session.sessionId,
                   artifactUrl: artifact.url,
                 );
-                return FileMediaSource(
-                  uri: ticket.url,
-                  release: () => unawaited(client.releaseMediaPreview(ticket)),
-                );
+                return brokerMediaSource(client, ticket);
               },
             ),
           ),

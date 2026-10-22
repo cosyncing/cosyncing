@@ -6,7 +6,7 @@ import { readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
-import { scaled } from './wait.ts';
+import { eventually, scaled } from './wait.ts';
 
 // Flags for WSL2, where the GPU path can leave the compositor without frames.
 const BROWSER_ARGS = ['--disable-gpu', '--disable-features=Vulkan,VizDisplayCompositor'];
@@ -75,6 +75,33 @@ export async function waitForFlutter(page: Page): Promise<void> {
         bubbles: true,
       }));
     });
+  }
+}
+
+/** Flutter's semantic input receives DOM focus before its editing strategy
+ * attaches the input listener. Observe that listener before typing once; focus
+ * alone can lose input during the following framework semantics update. */
+export async function fillFlutterTextField(page: Page, name: string, value: string): Promise<void> {
+  await page.getByRole('textbox', { name, exact: true }).click();
+  const session = await page.context().newCDPSession(page);
+  try {
+    await eventually(async () => {
+      const { result } = await session.send('Runtime.evaluate', {
+        // Earlier Flutter builds expose the filled composer's name through
+        // its placeholder; newer builds keep an explicit aria-label.
+        expression: `(document.activeElement?.getAttribute('aria-label') || document.activeElement?.getAttribute('placeholder')) === ${JSON.stringify(name)} ? document.activeElement : null`,
+      });
+      if (!result.objectId) return false;
+      try {
+        const { listeners } = await session.send('DOMDebugger.getEventListeners', { objectId: result.objectId });
+        return listeners.some((listener) => listener.type === 'input');
+      } finally {
+        await session.send('Runtime.releaseObject', { objectId: result.objectId });
+      }
+    }, { what: `Flutter input handler for ${name}` });
+    await page.locator('input:focus, textarea:focus').fill(value);
+  } finally {
+    await session.detach();
   }
 }
 

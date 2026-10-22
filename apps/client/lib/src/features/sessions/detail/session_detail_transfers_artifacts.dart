@@ -45,10 +45,7 @@ class _ArtifactTransferSurface extends StatelessWidget {
             if (hiddenCount > 0) ...[
               const SizedBox(height: 8),
               SelectableText(
-                l10n.showingLatestEarlier(
-                  visibleTransfers.length,
-                  hiddenCount,
-                ),
+                l10n.showingLatestEarlier(visibleTransfers.length, hiddenCount),
                 style: theme.textTheme.bodySmall?.copyWith(
                   color: theme.colorScheme.onSurfaceVariant,
                 ),
@@ -189,10 +186,13 @@ class _ArtifactTransferRowState extends ConsumerState<_ArtifactTransferRow> {
                     children: [
                       SelectionArea(
                         child: Text(
-                          '${_sessionDetailTransferDirectionLabel(
-                            l10n,
-                            transfer.direction,
-                          )}: ${transfer.fileName}',
+                          [
+                            _sessionDetailTransferDirectionLabel(
+                              l10n,
+                              transfer.direction,
+                            ),
+                            transfer.fileName,
+                          ].join(': '),
                           style: theme.textTheme.bodyMedium,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
@@ -236,10 +236,8 @@ class _ArtifactTransferRowState extends ConsumerState<_ArtifactTransferRow> {
                                 minWidth: 48,
                                 minHeight: 48,
                               ),
-                              onPressed: () => _copyTransferLocalPath(
-                                context,
-                                localPath,
-                              ),
+                              onPressed: () =>
+                                  _copyTransferLocalPath(context, localPath),
                             ),
                             IconButton(
                               key: ValueKey(
@@ -350,9 +348,7 @@ Future<void> _copyTransferLocalPath(
   }
 
   ScaffoldMessenger.of(context).showSnackBar(
-    SnackBar(
-      content: Text(AppLocalizations.of(context).transferPathCopied),
-    ),
+    SnackBar(content: Text(AppLocalizations.of(context).transferPathCopied)),
   );
 }
 
@@ -368,18 +364,16 @@ Future<void> _openTransferLocalPath(
   }
 
   if (result.isSuccess) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(l10n.transferOpenedFile)),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(l10n.transferOpenedFile)));
     return;
   }
 
   final message = result.isUnsupported
       ? l10n.transferOpenUnsupported
       : l10n.transferOpenFailed;
-  ScaffoldMessenger.of(context).showSnackBar(
-    SnackBar(content: Text(message)),
-  );
+  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
 }
 
 Future<void> _revealTransferLocalPath(
@@ -394,18 +388,16 @@ Future<void> _revealTransferLocalPath(
   }
 
   if (result.isSuccess) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(l10n.transferRevealedInFolder)),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(l10n.transferRevealedInFolder)));
     return;
   }
 
   final message = result.isUnsupported
       ? l10n.transferRevealUnsupported
       : l10n.transferRevealFailed;
-  ScaffoldMessenger.of(context).showSnackBar(
-    SnackBar(content: Text(message)),
-  );
+  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
 }
 
 Future<void> _previewTransferLocalText(
@@ -440,9 +432,7 @@ Future<void> _previewTransferLocalText(
     (_, _, true) => l10n.transferPreviewFailed,
     _ => l10n.transferPreviewUnavailable,
   };
-  ScaffoldMessenger.of(context).showSnackBar(
-    SnackBar(content: Text(message)),
-  );
+  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
 }
 
 Future<void> _showSessionTransferTextPreviewDialog(
@@ -784,212 +774,211 @@ class _ArtifactSurfaceMessage extends ConsumerWidget {
     final localTransfer = matchingTransfer;
     final localPathLabel = localTransfer == null
         ? null
-        : _sessionDetailTransferLocalPathLabel(
-            l10n,
-            localTransfer,
-            localPath,
-          );
+        : _sessionDetailTransferLocalPathLabel(l10n, localTransfer, localPath);
 
-    return Padding(
-      key: ValueKey('session-detail-artifact-summary-item-$sourceId'),
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (name.isNotEmpty)
-            SelectionArea(
-              child: Text(
-                name,
-                style: theme.textTheme.bodyMedium,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+    return ContextualDetails(
+      label: name,
+      detail: actionState.phase == SessionArtifactActionPhase.error
+          ? actionState.message
+          : null,
+      child: Padding(
+        key: ValueKey('session-detail-artifact-summary-item-$sourceId'),
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (name.isNotEmpty)
+              SelectionArea(
+                child: Text(
+                  name,
+                  style: theme.textTheme.bodyMedium,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
-            ),
-          if (path.isNotEmpty)
-            SelectableText(
-              path,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
+            if (path.isNotEmpty)
+              SelectableText(
+                path,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
               ),
-            ),
-          if (exportAttachmentMetadata.isNotEmpty) ...[
-            const SizedBox(height: 8),
-            SelectionArea(
-              child: Wrap(
-                spacing: 8,
-                runSpacing: 4,
-                children: [
-                  for (
-                    var metadataIndex = 0;
-                    metadataIndex < exportAttachmentMetadata.length;
-                    metadataIndex++
-                  )
-                    _ArtifactMetadataChip(
-                      key: ValueKey(
-                        'session-detail-artifact-metadata-$sourceId-'
-                        '${_artifactMetadataKey(
-                          exportAttachmentMetadata[metadataIndex],
-                        )}',
+            if (exportAttachmentMetadata.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              SelectionArea(
+                child: Wrap(
+                  spacing: 8,
+                  runSpacing: 4,
+                  children: [
+                    for (
+                      var metadataIndex = 0;
+                      metadataIndex < exportAttachmentMetadata.length;
+                      metadataIndex++
+                    )
+                      _ArtifactMetadataChip(
+                        key: ValueKey(
+                          [
+                            'session-detail-artifact-metadata-$sourceId-',
+                            _artifactMetadataKey(
+                              exportAttachmentMetadata[metadataIndex],
+                            ),
+                          ].join(),
+                        ),
+                        label: exportAttachmentMetadata[metadataIndex],
                       ),
-                      label: exportAttachmentMetadata[metadataIndex],
+                  ],
+                ),
+              ),
+            ],
+            if (size != null)
+              SelectableText(
+                l10n.sessionArtifactSize(formatFileSize(l10n, size)),
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            const SizedBox(height: 8),
+            if (localPathLabel != null && localTransfer != null) ...[
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: SelectionArea(
+                      child: Text(
+                        localPathLabel,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
+                  ),
+                  const SizedBox(width: 8),
+                  IconButton(
+                    key: ValueKey(
+                      'session-detail-artifact-local-copy-$sourceId',
+                    ),
+                    tooltip: l10n.copyLocalPath,
+                    icon: const Icon(Icons.content_copy, size: 18),
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(
+                      minWidth: 48,
+                      minHeight: 48,
+                    ),
+                    onPressed: () => _copyTransferLocalPath(context, localPath),
+                  ),
+                  IconButton(
+                    key: ValueKey(
+                      'session-detail-artifact-local-open-$sourceId',
+                    ),
+                    tooltip: l10n.openFile,
+                    icon: const Icon(Icons.open_in_new, size: 18),
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(
+                      minWidth: 48,
+                      minHeight: 48,
+                    ),
+                    onPressed: () => _openTransferLocalPath(
+                      context,
+                      localTransferFileOpener,
+                      localPath!,
+                    ),
+                  ),
+                  IconButton(
+                    key: ValueKey(
+                      'session-detail-artifact-local-reveal-$sourceId',
+                    ),
+                    tooltip: l10n.revealInFolder,
+                    icon: const Icon(Icons.folder_open_outlined, size: 18),
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(
+                      minWidth: 48,
+                      minHeight: 48,
+                    ),
+                    onPressed: () => _revealTransferLocalPath(
+                      context,
+                      localTransferFileOpener,
+                      localPath!,
+                    ),
+                  ),
+                  IconButton(
+                    key: ValueKey(
+                      'session-detail-artifact-local-preview-$sourceId',
+                    ),
+                    tooltip: l10n.previewText,
+                    icon: const Icon(Icons.text_snippet_outlined, size: 18),
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(
+                      minWidth: 48,
+                      minHeight: 48,
+                    ),
+                    onPressed: () => _previewTransferLocalText(
+                      context,
+                      localTransferFileOpener,
+                      localPath!,
+                      localTransfer,
+                    ),
+                  ),
                 ],
               ),
-            ),
-          ],
-          if (size != null)
-            SelectableText(
-              l10n.sessionArtifactSize(formatFileSize(l10n, size)),
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
+              const SizedBox(height: 8),
+            ],
+            if (descriptor.isRemoved)
+              Text(
+                l10n.fileRemovedFromServer,
+                style: theme.textTheme.bodySmall,
               ),
-            ),
-          const SizedBox(height: 8),
-          if (localPathLabel != null && localTransfer != null) ...[
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(
-                  child: SelectionArea(
-                    child: Text(
-                      localPathLabel,
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
+            if (hasDownloadOrFetch || hasPreview)
+              Wrap(
+                spacing: 8,
+                children: [
+                  if (hasDownloadOrFetch)
+                    OutlinedButton(
+                      key: ValueKey(
+                        'session-detail-artifact-action-download-$sourceId',
                       ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+                      onPressed: canDownload
+                          ? () => onDownloadArtifact(descriptor)
+                          : null,
+                      child: Text(
+                        descriptor.isInlineDataUrl
+                            ? l10n.fetchDataUrl
+                            : l10n.download,
+                      ),
                     ),
-                  ),
+                  if (hasPreview)
+                    OutlinedButton(
+                      key: ValueKey(
+                        'session-detail-artifact-action-preview-$sourceId',
+                      ),
+                      onPressed: canPreview
+                          ? () => onPreviewArtifact(descriptor)
+                          : null,
+                      child: Text(l10n.preview),
+                    ),
+                ],
+              )
+            else if (!descriptor.isRemoved)
+              SelectableText(
+                l10n.sessionArtifactNoActions,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
                 ),
-                const SizedBox(width: 8),
-                IconButton(
-                  key: ValueKey(
-                    'session-detail-artifact-local-copy-$sourceId',
-                  ),
-                  tooltip: l10n.copyLocalPath,
-                  icon: const Icon(Icons.content_copy, size: 18),
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(
-                    minWidth: 48,
-                    minHeight: 48,
-                  ),
-                  onPressed: () => _copyTransferLocalPath(context, localPath),
+              ),
+            if (shouldShowActionHint) ...[
+              const SizedBox(height: 8),
+              SelectableText(
+                actionHint,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: actionState.phase == SessionArtifactActionPhase.error
+                      ? theme.colorScheme.error
+                      : theme.colorScheme.onSurfaceVariant,
                 ),
-                IconButton(
-                  key: ValueKey(
-                    'session-detail-artifact-local-open-$sourceId',
-                  ),
-                  tooltip: l10n.openFile,
-                  icon: const Icon(Icons.open_in_new, size: 18),
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(
-                    minWidth: 48,
-                    minHeight: 48,
-                  ),
-                  onPressed: () => _openTransferLocalPath(
-                    context,
-                    localTransferFileOpener,
-                    localPath!,
-                  ),
-                ),
-                IconButton(
-                  key: ValueKey(
-                    'session-detail-artifact-local-reveal-$sourceId',
-                  ),
-                  tooltip: l10n.revealInFolder,
-                  icon: const Icon(Icons.folder_open_outlined, size: 18),
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(
-                    minWidth: 48,
-                    minHeight: 48,
-                  ),
-                  onPressed: () => _revealTransferLocalPath(
-                    context,
-                    localTransferFileOpener,
-                    localPath!,
-                  ),
-                ),
-                IconButton(
-                  key: ValueKey(
-                    'session-detail-artifact-local-preview-$sourceId',
-                  ),
-                  tooltip: l10n.previewText,
-                  icon: const Icon(Icons.text_snippet_outlined, size: 18),
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(
-                    minWidth: 48,
-                    minHeight: 48,
-                  ),
-                  onPressed: () => _previewTransferLocalText(
-                    context,
-                    localTransferFileOpener,
-                    localPath!,
-                    localTransfer,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
+              ),
+            ],
           ],
-          if (hasDownloadOrFetch || hasPreview)
-            Wrap(
-              spacing: 8,
-              children: [
-                if (hasDownloadOrFetch)
-                  OutlinedButton(
-                    key: ValueKey(
-                      'session-detail-artifact-action-download-$sourceId',
-                    ),
-                    onPressed: canDownload
-                        ? () => onDownloadArtifact(descriptor)
-                        : null,
-                    child: Text(
-                      descriptor.isInlineDataUrl
-                          ? l10n.fetchDataUrl
-                          : l10n.download,
-                    ),
-                  ),
-                if (hasPreview)
-                  OutlinedButton(
-                    key: ValueKey(
-                      'session-detail-artifact-action-preview-$sourceId',
-                    ),
-                    onPressed: canPreview
-                        ? () => onPreviewArtifact(descriptor)
-                        : null,
-                    child: Text(l10n.preview),
-                  ),
-              ],
-            )
-          else
-            SelectableText(
-              l10n.sessionArtifactNoActions,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
-          if (shouldShowActionHint) ...[
-            const SizedBox(height: 8),
-            SelectableText(
-              actionHint,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: actionState.phase == SessionArtifactActionPhase.error
-                    ? theme.colorScheme.error
-                    : theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
-          ],
-          if (actionState.phase == SessionArtifactActionPhase.error &&
-              actionState.message.trim().isNotEmpty)
-            Material(
-              type: MaterialType.transparency,
-              child: ExpansionTile(
-                tilePadding: EdgeInsets.zero,
-                title: Text(l10n.technicalDetails),
-                children: [SelectableText(actionState.message)],
-              ),
-            ),
-        ],
+        ),
       ),
     );
   }

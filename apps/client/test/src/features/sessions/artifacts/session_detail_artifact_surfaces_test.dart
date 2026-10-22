@@ -81,9 +81,7 @@ void main() {
         await tester.pumpAndSettle();
 
         final download = find.byKey(
-          const Key(
-            'session-detail-chat-artifact-download-theme-artifact',
-          ),
+          const Key('session-detail-chat-artifact-download-theme-artifact'),
         );
         expect(download, findsOneWidget);
         expect(
@@ -129,39 +127,26 @@ void main() {
       expect(find.text('View in Files'), findsNothing);
     });
 
-    testWidgets(
-      'disables Fork when broker capabilities are unavailable',
-      (tester) async {
-        final brokerClient = FakeBrokerClient(
-          agents: [
-            fakeAgentInfo(
-              canFork: false,
-              canClone: false,
-            ),
-          ],
-        );
-        await tester.pumpWidget(
-          buildSessionDetailTestPage(
-            events: const [],
-            brokerClient: brokerClient,
-          ),
-        );
-        await tester.pumpAndSettle();
-        await openSessionDetailTestTab(tester, 'session-detail-tab-status');
+    testWidgets('disables Fork when broker capabilities are unavailable', (
+      tester,
+    ) async {
+      final brokerClient = FakeBrokerClient(
+        agents: [fakeAgentInfo(canFork: false, canClone: false)],
+      );
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(
+          events: const [],
+          brokerClient: brokerClient,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await openSessionDetailTestTab(tester, 'session-detail-tab-status');
 
-        final forkButton = find.byKey(
-          const Key('session-detail-fork-button'),
-        );
-        final cloneButton = find.byKey(
-          const Key('session-detail-clone-button'),
-        );
-        expect(
-          tester.widget<ListTile>(forkButton).enabled,
-          isFalse,
-        );
-        expect(cloneButton, findsNothing);
-      },
-    );
+      final forkButton = find.byKey(const Key('session-detail-fork-button'));
+      final cloneButton = find.byKey(const Key('session-detail-clone-button'));
+      expect(tester.widget<ListTile>(forkButton).enabled, isFalse);
+      expect(cloneButton, findsNothing);
+    });
 
     testWidgets(
       'fork action sets success status and records broker call when pressed',
@@ -194,32 +179,29 @@ void main() {
       },
     );
 
-    testWidgets(
-      'disables Fork when no active broker profile is selected',
-      (tester) async {
-        await tester.pumpWidget(
-          buildSessionDetailTestPage(
-            events: const [],
-            withActiveBrokerClient: false,
-          ),
-        );
-        await tester.pumpAndSettle();
+    testWidgets('disables Fork when no active broker profile is selected', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(
+          events: const [],
+          withActiveBrokerClient: false,
+        ),
+      );
+      await tester.pumpAndSettle();
 
-        // Session actions sit near the bottom of a lazy ListView, so they are
-        // only built once scrolled into view. Reaching them by tab-open alone
-        // worked until the "Usage & context" section was added above them.
-        final forkButton = find.byKey(const Key('session-detail-fork-button'));
-        final cloneButton = find.byKey(
-          const Key('session-detail-clone-button'),
-        );
-        await showSessionStatusTestItem(
-          tester,
-          const Key('session-detail-fork-button'),
-        );
-        expect(tester.widget<ListTile>(forkButton).enabled, isFalse);
-        expect(cloneButton, findsNothing);
-      },
-    );
+      // Session actions sit near the bottom of a lazy ListView, so they are
+      // only built once scrolled into view. Reaching them by tab-open alone
+      // worked until the "Usage & context" section was added above them.
+      final forkButton = find.byKey(const Key('session-detail-fork-button'));
+      final cloneButton = find.byKey(const Key('session-detail-clone-button'));
+      await showSessionStatusTestItem(
+        tester,
+        const Key('session-detail-fork-button'),
+      );
+      expect(tester.widget<ListTile>(forkButton).enabled, isFalse);
+      expect(cloneButton, findsNothing);
+    });
 
     testWidgets(
       'shows terminal and artifact summary surfaces from live/replayed events',
@@ -281,10 +263,7 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        await openSessionDetailTestTab(
-          tester,
-          'session-detail-tab-terminal',
-        );
+        await openSessionDetailTestTab(tester, 'session-detail-tab-terminal');
         expect(
           find.widgetWithText(Card, 'Terminal output (2)'),
           findsOneWidget,
@@ -305,14 +284,8 @@ void main() {
             .firstWhere((widget) => widget.data == 'live result');
         expect(terminalSummaryOutput.style?.fontFamily, 'monospace');
 
-        await openSessionDetailTestTab(
-          tester,
-          'session-detail-tab-artifacts',
-        );
-        expect(
-          find.widgetWithText(Card, 'File artifacts (2)'),
-          findsOneWidget,
-        );
+        await openSessionDetailTestTab(tester, 'session-detail-tab-artifacts');
+        expect(find.widgetWithText(Card, 'File artifacts (2)'), findsOneWidget);
         expect(find.text('live.txt'), findsOneWidget);
         expect(find.text('/tmp/live.txt'), findsOneWidget);
         expect(find.text('history.md'), findsOneWidget);
@@ -352,10 +325,7 @@ void main() {
           );
         });
 
-        await openSessionDetailTestTab(
-          tester,
-          'session-detail-tab-artifacts',
-        );
+        await openSessionDetailTestTab(tester, 'session-detail-tab-artifacts');
         expect(find.text('Produced by agent'), findsOneWidget);
         expect(
           find.byKey(const Key('session-detail-artifact-surface')),
@@ -429,10 +399,7 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        await openSessionDetailTestTab(
-          tester,
-          'session-detail-tab-terminal',
-        );
+        await openSessionDetailTestTab(tester, 'session-detail-tab-terminal');
         final terminalSurface = find.widgetWithText(
           Card,
           'Terminal output (1)',
@@ -453,14 +420,8 @@ void main() {
           findsNothing,
         );
 
-        await openSessionDetailTestTab(
-          tester,
-          'session-detail-tab-artifacts',
-        );
-        final artifactSurface = find.widgetWithText(
-          Card,
-          'File artifacts (1)',
-        );
+        await openSessionDetailTestTab(tester, 'session-detail-tab-artifacts');
+        final artifactSurface = find.widgetWithText(Card, 'File artifacts (1)');
         expect(artifactSurface, findsOneWidget);
         expect(
           find.descendant(
@@ -479,83 +440,72 @@ void main() {
       },
     );
 
-    testWidgets(
-      'shows artifact action buttons only for downloadable and'
-      ' previewable items',
-      (tester) async {
-        await tester.pumpWidget(
-          buildSessionDetailTestPage(
-            events: [
-              const MessageWireEvent(
-                seq: 1,
-                message: AgentMessage(
-                  type: AgentMessageType.fileArtifact,
-                  id: 'artifact-fetch-preview',
-                  raw: {
-                    'type': 'file-artifact',
-                    'name': 'artifact-preview.html',
-                    'path': '/tmp/artifact-preview.html',
-                    'mimeType': 'text/html',
-                    'size': 64,
-                    'fetchUrl':
-                        'https://cdn.example.net/api/sessions/opencode/session-1'
-                        '/artifact/ref-1',
-                  },
-                ),
+    testWidgets('shows artifact action buttons only for downloadable and'
+        ' previewable items', (tester) async {
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(
+          events: [
+            const MessageWireEvent(
+              seq: 1,
+              message: AgentMessage(
+                type: AgentMessageType.fileArtifact,
+                id: 'artifact-fetch-preview',
+                raw: {
+                  'type': 'file-artifact',
+                  'name': 'artifact-preview.html',
+                  'path': '/tmp/artifact-preview.html',
+                  'mimeType': 'text/html',
+                  'size': 64,
+                  'fetchUrl':
+                      'https://cdn.example.net/api/sessions/opencode/session-1'
+                      '/artifact/ref-1',
+                },
               ),
-            ],
-          ),
-        );
-        await tester.pumpAndSettle();
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
 
-        await openSessionDetailTestTab(
-          tester,
-          'session-detail-tab-artifacts',
-        );
+      await openSessionDetailTestTab(tester, 'session-detail-tab-artifacts');
 
-        final artifactSurface = find.widgetWithText(
-          Card,
-          'File artifacts (1)',
-        );
-        const downloadButtonKey = Key(
-          'session-detail-artifact-action-download-0-artifact-preview.html',
-        );
-        const previewButtonKey = Key(
-          'session-detail-artifact-action-preview-0-artifact-preview.html',
-        );
+      final artifactSurface = find.widgetWithText(Card, 'File artifacts (1)');
+      const downloadButtonKey = Key(
+        'session-detail-artifact-action-download-0-artifact-preview.html',
+      );
+      const previewButtonKey = Key(
+        'session-detail-artifact-action-preview-0-artifact-preview.html',
+      );
 
-        final downloadButton = tester.widget<OutlinedButton>(
-          find.byKey(downloadButtonKey),
-        );
-        final previewButton = tester.widget<OutlinedButton>(
-          find.byKey(previewButtonKey),
-        );
+      final downloadButton = tester.widget<OutlinedButton>(
+        find.byKey(downloadButtonKey),
+      );
+      final previewButton = tester.widget<OutlinedButton>(
+        find.byKey(previewButtonKey),
+      );
 
-        expect(downloadButton.onPressed, isNotNull);
-        expect(previewButton.onPressed, isNotNull);
-        expect(
-          find.descendant(
-            of: find.byKey(downloadButtonKey),
-            matching: find.text('Download'),
-          ),
-          findsOneWidget,
-        );
-        expect(
-          find.descendant(
-            of: find.byKey(previewButtonKey),
-            matching: find.text('Preview'),
-          ),
-          findsOneWidget,
-        );
-        expect(artifactSurface, findsOneWidget);
-      },
-    );
+      expect(downloadButton.onPressed, isNotNull);
+      expect(previewButton.onPressed, isNotNull);
+      expect(
+        find.descendant(
+          of: find.byKey(downloadButtonKey),
+          matching: find.text('Download'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(previewButtonKey),
+          matching: find.text('Preview'),
+        ),
+        findsOneWidget,
+      );
+      expect(artifactSurface, findsOneWidget);
+    });
 
     testWidgets(
       'Chat artifact card exposes Download and saves exact reference',
-      (
-        tester,
-      ) async {
+      (tester) async {
         final fileService = FakeSessionArtifactFileService()
           ..mockCachedFile = const SessionArtifactCachedFile(
             cachedFilePath: '/tmp/cache/chat-report.txt',
@@ -616,9 +566,7 @@ void main() {
 
     testWidgets(
       'inline Chat artifact stays downloadable without network fetch',
-      (
-        tester,
-      ) async {
+      (tester) async {
         final fileService = FakeSessionArtifactFileService()
           ..exportedPath = '/tmp/exported/inline.txt';
         await tester.pumpWidget(
@@ -763,7 +711,10 @@ void main() {
       await tester.tap(find.byKey(actionKey));
       await tester.pumpAndSettle();
       expect(find.text('文件操作失败。请重试。'), findsOneWidget);
-      expect(find.text('技术详情'), findsOneWidget);
+      expect(find.text('技术详情'), findsNothing);
+      await tester.longPress(find.text('文件操作失败。请重试。'));
+      await tester.pumpAndSettle();
+      expect(find.byType(SelectableText), findsWidgets);
     });
 
     testWidgets(
@@ -802,10 +753,7 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        await openSessionDetailTestTab(
-          tester,
-          'session-detail-tab-artifacts',
-        );
+        await openSessionDetailTestTab(tester, 'session-detail-tab-artifacts');
 
         const downloadButtonKey = Key(
           'session-detail-artifact-action-download-0-transcript.html',
@@ -857,10 +805,7 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        await openSessionDetailTestTab(
-          tester,
-          'session-detail-tab-artifacts',
-        );
+        await openSessionDetailTestTab(tester, 'session-detail-tab-artifacts');
 
         const previewButtonKey = Key(
           'session-detail-artifact-action-preview-0-browser-preview.html',
@@ -875,51 +820,47 @@ void main() {
       },
     );
 
-    testWidgets(
-      'shows inline data URL action with fetch action label',
-      (tester) async {
-        await tester.pumpWidget(
-          buildSessionDetailTestPage(
-            events: [
-              const MessageWireEvent(
-                seq: 1,
-                message: AgentMessage(
-                  type: AgentMessageType.fileArtifact,
-                  id: 'artifact-inline',
-                  raw: {
-                    'type': 'file-artifact',
-                    'name': 'inline-snippet.txt',
-                    'url': 'data:text/plain;base64,SGVsbG8=',
-                  },
-                ),
+    testWidgets('shows inline data URL action with fetch action label', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(
+          events: [
+            const MessageWireEvent(
+              seq: 1,
+              message: AgentMessage(
+                type: AgentMessageType.fileArtifact,
+                id: 'artifact-inline',
+                raw: {
+                  'type': 'file-artifact',
+                  'name': 'inline-snippet.txt',
+                  'url': 'data:text/plain;base64,SGVsbG8=',
+                },
               ),
-            ],
-          ),
-        );
-        await tester.pumpAndSettle();
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
 
-        await openSessionDetailTestTab(
-          tester,
-          'session-detail-tab-artifacts',
-        );
+      await openSessionDetailTestTab(tester, 'session-detail-tab-artifacts');
 
-        const downloadButtonKey = Key(
-          'session-detail-artifact-action-download-0-inline-snippet.txt',
-        );
-        final downloadButton = tester.widget<OutlinedButton>(
-          find.byKey(downloadButtonKey),
-        );
+      const downloadButtonKey = Key(
+        'session-detail-artifact-action-download-0-inline-snippet.txt',
+      );
+      final downloadButton = tester.widget<OutlinedButton>(
+        find.byKey(downloadButtonKey),
+      );
 
-        expect(downloadButton.onPressed, isNotNull);
-        expect(
-          find.descendant(
-            of: find.byKey(downloadButtonKey),
-            matching: find.text('Fetch embedded data'),
-          ),
-          findsOneWidget,
-        );
-      },
-    );
+      expect(downloadButton.onPressed, isNotNull);
+      expect(
+        find.descendant(
+          of: find.byKey(downloadButtonKey),
+          matching: find.text('Fetch embedded data'),
+        ),
+        findsOneWidget,
+      );
+    });
 
     testWidgets(
       'shows local artifact actions when a matching download transfer has '
@@ -971,10 +912,7 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        await openSessionDetailTestTab(
-          tester,
-          'session-detail-tab-artifacts',
-        );
+        await openSessionDetailTestTab(tester, 'session-detail-tab-artifacts');
 
         expect(
           find.byKey(
@@ -1098,10 +1036,7 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        await openSessionDetailTestTab(
-          tester,
-          'session-detail-tab-artifacts',
-        );
+        await openSessionDetailTestTab(tester, 'session-detail-tab-artifacts');
 
         await tester.tap(
           find.byKey(
@@ -1150,14 +1085,12 @@ void main() {
         expect(fileOpener.openedPaths, [
           '/tmp/exported/artifact-path-preference.txt',
         ]);
-        expect(
-          fileOpener.revealedPaths,
-          ['/tmp/exported/artifact-path-preference.txt'],
-        );
-        expect(
-          fileOpener.previewedPaths,
-          ['/tmp/exported/artifact-path-preference.txt'],
-        );
+        expect(fileOpener.revealedPaths, [
+          '/tmp/exported/artifact-path-preference.txt',
+        ]);
+        expect(fileOpener.previewedPaths, [
+          '/tmp/exported/artifact-path-preference.txt',
+        ]);
       },
     );
 
@@ -1219,10 +1152,7 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        await openSessionDetailTestTab(
-          tester,
-          'session-detail-tab-artifacts',
-        );
+        await openSessionDetailTestTab(tester, 'session-detail-tab-artifacts');
 
         expect(
           find.byKey(
@@ -1313,10 +1243,7 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        await openSessionDetailTestTab(
-          tester,
-          'session-detail-tab-artifacts',
-        );
+        await openSessionDetailTestTab(tester, 'session-detail-tab-artifacts');
 
         await tester.tap(
           find.byKey(
@@ -1327,10 +1254,7 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        expect(
-          find.text('Text preview: artifact-preview.txt'),
-          findsOneWidget,
-        );
+        expect(find.text('Text preview: artifact-preview.txt'), findsOneWidget);
         expect(
           find.text('Path: /tmp/exported/artifact-preview.txt'),
           findsOneWidget,
@@ -1357,130 +1281,126 @@ void main() {
       },
     );
 
-    testWidgets(
-      'shows explicit blocked-preview status after preview attempt',
-      (tester) async {
-        const key = SessionDetailKey(tool: 'claude', sessionId: 'session-1');
-        const descriptor = SessionArtifactDescriptor(
-          name: 'report.html',
-          path: '/tmp/report.html',
-          mimeType: 'text/html',
-          size: 64,
-          fetchUrl:
-              'https://cdn.example.net/api/sessions/opencode/session-1'
-              '/artifact/report',
-        );
-        final connection = ScriptedSessionDetailConnection(
-          events: const [
-            MessageWireEvent(
-              seq: 1,
-              message: AgentMessage(
-                type: AgentMessageType.fileArtifact,
-                id: 'artifact-report',
-                raw: {
-                  'type': 'file-artifact',
-                  'name': 'report.html',
-                  'path': '/tmp/report.html',
-                  'size': 64,
-                  'mimeType': 'text/html',
-                  'fetchUrl':
-                      'https://cdn.example.net/api/sessions/opencode/session-1'
-                      '/artifact/report',
-                },
-              ),
-            ),
-          ],
-        );
-        final container = ProviderContainer(
-          overrides: [
-            sessionDetailConnectionFactoryProvider.overrideWithValue(
-              ({required resolver, required sessionId, required tool}) =>
-                  connection,
-            ),
-            activeBrokerProfileProvider.overrideWith(
-              (ref) => createTestBrokerProfile(),
-            ),
-            sessionArtifactTransferRepositoryProvider.overrideWithValue(
-              InMemorySessionArtifactTransferRepository(),
-            ),
-            sessionOutboxRepositoryProvider.overrideWithValue(
-              InMemorySessionOutboxRepository(),
-            ),
-            sessionTranscriptRepositoryProvider.overrideWithValue(
-              InMemorySessionTranscriptRepository(),
-            ),
-            sessionNotificationSettingsStoreProvider.overrideWithValue(
-              InMemorySessionNotificationSettingsStore(),
-            ),
-            sessionDriveIntentStoreProvider.overrideWithValue(
-              InMemorySessionDriveIntentStore(),
-            ),
-            openSessionsStoreProvider.overrideWithValue(
-              InMemoryOpenSessionsStore(),
-            ),
-          ],
-        );
-        addTearDown(container.dispose);
-
-        await tester.pumpWidget(
-          UncontrolledProviderScope(
-            container: container,
-            child: MaterialApp(
-              localizationsDelegates: AppLocalizations.localizationsDelegates,
-              supportedLocales: AppLocalizations.supportedLocales,
-              theme: ThemeData(
-                splashFactory: InkRipple.splashFactory,
-                extensions: [themeSpecById(kDefaultThemeId).light],
-              ),
-              home: const SessionDetailPage(
-                tool: 'claude',
-                sessionId: 'session-1',
-              ),
+    testWidgets('shows explicit blocked-preview status after preview attempt', (
+      tester,
+    ) async {
+      const key = SessionDetailKey(tool: 'claude', sessionId: 'session-1');
+      const descriptor = SessionArtifactDescriptor(
+        name: 'report.html',
+        path: '/tmp/report.html',
+        mimeType: 'text/html',
+        size: 64,
+        fetchUrl:
+            'https://cdn.example.net/api/sessions/opencode/session-1'
+            '/artifact/report',
+      );
+      final connection = ScriptedSessionDetailConnection(
+        events: const [
+          MessageWireEvent(
+            seq: 1,
+            message: AgentMessage(
+              type: AgentMessageType.fileArtifact,
+              id: 'artifact-report',
+              raw: {
+                'type': 'file-artifact',
+                'name': 'report.html',
+                'path': '/tmp/report.html',
+                'size': 64,
+                'mimeType': 'text/html',
+                'fetchUrl':
+                    'https://cdn.example.net/api/sessions/opencode/session-1'
+                    '/artifact/report',
+              },
             ),
           ),
-        );
-        await tester.pumpAndSettle();
-
-        final blocked =
-            SessionArtifactPreviewPresentationResult.blockedNavigation(
-              Uri.parse('https://example.com/report.zip'),
-              blockReason:
-                  SessionArtifactPreviewNavigationBlockReason.downloadLike,
-            );
-        container
-            .read(sessionDetailControllerProvider(key).notifier)
-            .recordArtifactPreviewResult(
-              descriptor,
-              opened: false,
-              message: blocked.message,
-            );
-        await tester.pumpAndSettle();
-
-        await openSessionDetailTestTab(
-          tester,
-          'session-detail-tab-artifacts',
-        );
-        expect(
-          find.descendant(
-            of: find.byKey(
-              const Key('session-detail-artifact-summary-item-0-report.html'),
-            ),
-            matching: find.text('The file action failed. Try again.'),
+        ],
+      );
+      final container = ProviderContainer(
+        overrides: [
+          sessionDetailConnectionFactoryProvider.overrideWithValue(
+            ({required resolver, required sessionId, required tool}) =>
+                connection,
           ),
-          findsOneWidget,
-        );
-        await tester.tap(
-          find.descendant(
-            of: find.byKey(
-              const Key('session-detail-artifact-summary-item-0-report.html'),
-            ),
-            matching: find.text('Technical details'),
+          activeBrokerProfileProvider.overrideWith(
+            (ref) => createTestBrokerProfile(),
           ),
-        );
-        await tester.pumpAndSettle();
-        expect(find.text(blocked.message), findsOneWidget);
-      },
-    );
+          sessionArtifactTransferRepositoryProvider.overrideWithValue(
+            InMemorySessionArtifactTransferRepository(),
+          ),
+          sessionOutboxRepositoryProvider.overrideWithValue(
+            InMemorySessionOutboxRepository(),
+          ),
+          sessionTranscriptRepositoryProvider.overrideWithValue(
+            InMemorySessionTranscriptRepository(),
+          ),
+          sessionNotificationSettingsStoreProvider.overrideWithValue(
+            InMemorySessionNotificationSettingsStore(),
+          ),
+          sessionDriveIntentStoreProvider.overrideWithValue(
+            InMemorySessionDriveIntentStore(),
+          ),
+          openSessionsStoreProvider.overrideWithValue(
+            InMemoryOpenSessionsStore(),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            theme: ThemeData(
+              splashFactory: InkRipple.splashFactory,
+              extensions: [themeSpecById(kDefaultThemeId).light],
+            ),
+            home: const SessionDetailPage(
+              tool: 'claude',
+              sessionId: 'session-1',
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final blocked =
+          SessionArtifactPreviewPresentationResult.blockedNavigation(
+            Uri.parse('https://example.com/report.zip'),
+            blockReason:
+                SessionArtifactPreviewNavigationBlockReason.downloadLike,
+          );
+      container
+          .read(sessionDetailControllerProvider(key).notifier)
+          .recordArtifactPreviewResult(
+            descriptor,
+            opened: false,
+            message: blocked.message,
+          );
+      await tester.pumpAndSettle();
+
+      await openSessionDetailTestTab(tester, 'session-detail-tab-artifacts');
+      expect(
+        find.descendant(
+          of: find.byKey(
+            const Key('session-detail-artifact-summary-item-0-report.html'),
+          ),
+          matching: find.text('The file action failed. Try again.'),
+        ),
+        findsOneWidget,
+      );
+      await tester.longPressAt(
+        tester.getTopLeft(
+              find.byKey(
+                const Key('session-detail-artifact-summary-item-0-report.html'),
+              ),
+            ) +
+            const Offset(4, 4),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining(blocked.message), findsOneWidget);
+    });
 
     testWidgets('renders artifact transfer status rows', (tester) async {
       await tester.pumpWidget(
@@ -1512,10 +1432,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await openSessionDetailTestTab(
-        tester,
-        'session-detail-tab-artifacts',
-      );
+      await openSessionDetailTestTab(tester, 'session-detail-tab-artifacts');
 
       expect(
         find.byKey(const Key('session-detail-artifact-transfer-surface')),
@@ -1523,10 +1440,7 @@ void main() {
       );
       expect(find.text('Transfers (1)'), findsOneWidget);
       expect(find.text('Download: report.html'), findsOneWidget);
-      expect(
-        find.text('Complete — 6/12 bytes'),
-        findsOneWidget,
-      );
+      expect(find.text('Complete — 6/12 bytes'), findsOneWidget);
     });
 
     testWidgets('hides transfers owned by another broker profile', (
@@ -1557,10 +1471,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await openSessionDetailTestTab(
-        tester,
-        'session-detail-tab-artifacts',
-      );
+      await openSessionDetailTestTab(tester, 'session-detail-tab-artifacts');
 
       expect(find.text('Transfers (1)'), findsNothing);
       expect(find.textContaining('private-report.html'), findsNothing);

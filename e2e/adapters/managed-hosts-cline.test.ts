@@ -51,8 +51,13 @@ async function dispose(running: Running | undefined): Promise<void> {
   await running.broker.stop();
 }
 
-const create = (running: Running, title: string, extra: Record<string, unknown> = {}) =>
-  running.client.post('/api/sessions/cline', { directory: running.fake.workspace('hub'), title, ...extra });
+const create = async (running: Running, title: string, extra: Record<string, unknown> = {}) => {
+  try {
+    return await running.client.post('/api/sessions/cline', { directory: running.fake.workspace('hub'), title, ...extra });
+  } catch (cause) {
+    throw new Error(`Cline request failed (${title})\n${running.broker.output()}`, { cause });
+  }
+};
 
 posix('the Hub the broker launches and owns', () => {
   let running: Running;

@@ -15,7 +15,7 @@
  * command asked, and in particular that it never minted an offer twice.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   mkdirSync,
   mkdtempSync,
@@ -32,11 +32,12 @@ import {
   generateIdentityKeyPair,
   generateX25519KeyPair,
   parseQrPairingPayload,
+  verifySignature,
   type DataKey,
 } from '../../packages/typescript/crypto/src/index.ts';
 import { type TransportEnvelope } from '../../packages/typescript/transport/src/index.ts';
 import { openTransportEnvelope, sealTransportEnvelope } from '../../packages/typescript/transport-wire/src/index.ts';
-import { PRODUCT_IDENTITY } from '../../packages/typescript/protocol/src/index.ts';
+import { PRODUCT_IDENTITY, BROKER_CONTRACT_REVISION, BROKER_CONTRACT_SURFACE_HASH, CLIENT_MINIMUM_BROKER_CONTRACT_REVISION } from '../../packages/typescript/protocol/src/index.ts';
 import {
   type Broker,
   type BrokerClient,
@@ -118,6 +119,94 @@ afterAll(async () => {
   await installed?.stop();
 });
 
+test('route proofs and read-only checks bind identity, caller and exact browser origins', async () => {
+  const configuration = (await owner.get('/api/connection/configuration')).body;
+  const browserOrigin = 'https://app.example.test';
+  const device = await pairDevice(owner, { peerId: 'route-check-device' });
+  const peer = owner.as({ kind: 'peer', peerToken: device.peerToken });
+  try {
+    const nonce = randomBytes(32).toString('base64url');
+    const anonymous = owner.as({ kind: 'none' });
+    const proof = await anonymous.post('/api/connection/identity-proof', { nonce, origin: broker.url });
+    expect(proof.status).toBe(200);
+    expect(proof.body.identityPublicKey).toBe(device.offer.payload.publicKey);
+    const proofBytes = new TextEncoder().encode(JSON.stringify([
+      'cosyncing/server-routes-v1', nonce, broker.url, proof.body.identityPublicKey,
+      proof.body.issuedAt, proof.body.expiresAt,
+    ]));
+    expect(verifySignature(device.offer.payload.publicKey, proofBytes, proof.body.signature)).toBe(true);
+    expect(proof.body.expiresAt - proof.body.issuedAt).toBe(15000);
+    expect(Object.keys(proof.body).sort()).toEqual(['expiresAt', 'identityPublicKey', 'issuedAt', 'nonce', 'origin', 'signature', 'version']);
+    expect((await anonymous.post('/api/connection/identity-proof', { nonce, origin: 'https://unadvertised.example.test' })).status).toBe(403);
+    expect((await anonymous.get('/api/connection/check')).status).toBe(401);
+    expect((await peer.post('/api/connection/configuration', configuration)).status).toBe(403);
+    for (const [method, path] of [
+      ['GET', '/api/storage'], ['POST', '/api/storage/scans'], ['GET', '/api/storage/scans/unknown'],
+      ['GET', '/api/storage/items'], ['POST', '/api/storage/cleanup-plans'], ['POST', '/api/storage/cleanup-jobs'],
+      ['GET', '/api/storage/cleanup-jobs/unknown'], ['POST', '/api/storage/cleanup-jobs/unknown/cancel'],
+    ] as const) expect((await peer.request(method, path, method === 'POST' ? {} : undefined)).status).toBe(403);
+    expect((await owner.get('/api/connection/check', { origin: browserOrigin })).status).toBe(403);
+    const allowed = await owner.post('/api/connection/configuration', {
+      ...configuration, trustedClientOrigins: [browserOrigin],
+    });
+    expect(allowed.status).toBe(200);
+    const preflight = await anonymous.request('OPTIONS', '/api/storage/cleanup-plans', undefined, {
+      origin: browserOrigin, 'access-control-request-method': 'POST',
+      'access-control-request-headers': 'content-type,x-cosyncing-token',
+    });
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get('access-control-allow-origin')).toBe(browserOrigin);
+    expect(preflight.headers.get('vary')).toContain('Origin');
+    const uploadPreflight = await anonymous.request('OPTIONS', '/api/sessions/pi/fixture/uploads/fixture', undefined, {
+      origin: browserOrigin, 'access-control-request-method': 'PATCH',
+      'access-control-request-headers': 'content-type,x-cosyncing-peer-token,x-cosyncing-upload-offset',
+    });
+    expect(uploadPreflight.status).toBe(204);
+    const conditionalRead = await anonymous.request('OPTIONS', '/api/sessions', undefined, {
+      origin: browserOrigin, 'access-control-request-method': 'GET',
+      'access-control-request-headers': 'x-cosyncing-token,if-none-match',
+    });
+    expect(conditionalRead.status).toBe(204);
+    expect(conditionalRead.headers.get('access-control-expose-headers')).toContain('X-Cosyncing-Content-Hash');
+    const refused = await anonymous.get('/api/connection/check', { origin: browserOrigin });
+    expect(refused.status).toBe(401);
+    expect(refused.headers.get('access-control-allow-origin')).toBe(browserOrigin);
+    expect((await owner.get('/api/connection/check', { origin: `${browserOrigin}.evil.test` })).status).toBe(403);
+    const checked = await peer.get('/api/connection/check', { origin: browserOrigin });
+    expect(checked.status).toBe(200);
+    expect(checked.body.identityPublicKey).toBe(proof.body.identityPublicKey);
+    expect(checked.body.principalId).not.toBe((await owner.get('/api/connection/check')).body.principalId);
+    const params = { clientVersion: 'e2e', contractRevision: String(BROKER_CONTRACT_REVISION),
+      minimumBrokerRevision: String(CLIENT_MINIMUM_BROKER_CONTRACT_REVISION), contractSurfaceHash: BROKER_CONTRACT_SURFACE_HASH };
+    const ticket = await peer.post('/api/ws-auth-tickets', { audience: 'connection-check', params }, { origin: browserOrigin });
+    expect(ticket.status).toBe(201);
+    const url = `${broker.wsUrl}/api/connection/check/ws?wsAuthTicket=${encodeURIComponent(ticket.body.wsAuthTicket)}`;
+    const frames: any[] = [];
+    await new Promise<void>((resolve, reject) => {
+      // Bun's native client accepts headers; the shared DOM declaration only
+      // exposes the browser constructor's protocols argument.
+      const NativeWebSocket = WebSocket as typeof WebSocket & {
+        new (url: string, options: { headers: Record<string, string> }): WebSocket;
+      };
+      const socket = new NativeWebSocket(url, { headers: { origin: browserOrigin } });
+      const deadline = setTimeout(() => { socket.close(); reject(new Error('Read-only check did not close')); }, 10000);
+      socket.onmessage = (event) => frames.push(JSON.parse(String(event.data)));
+      socket.onerror = () => { clearTimeout(deadline); reject(new Error('Read-only check failed')); };
+      socket.onclose = () => { clearTimeout(deadline); resolve(); };
+    });
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).toMatchObject({ kind: 'connection-check', principalId: checked.body.principalId,
+      identityPublicKey: checked.body.identityPublicKey, authGeneration: checked.body.authGeneration });
+    expect((await anonymous.get(`/api/connection/check/ws?wsAuthTicket=${ticket.body.wsAuthTicket}`, { origin: browserOrigin })).status).toBe(401);
+    expect((await anonymous.get('/api/sessions', { origin: browserOrigin })).status).toBe(401);
+  } finally {
+    const current = (await owner.get('/api/connection/configuration')).body;
+    await owner.post('/api/connection/configuration', { ...configuration, generation: current.generation });
+    await owner.delete(`/api/transport/peers/${device.peerId}`);
+    peer.closeAll();
+  }
+});
+
 describe('offers', () => {
   test('an offer is a v3 QR with no URL unless one is asked for, and never carries a secret', async () => {
     const urlFree = await createOffer(owner, { clientLabel: 'phone' });
@@ -137,6 +226,7 @@ describe('offers', () => {
   });
 
   test('a device redeems an offer with no credential and holds a revocable, owner-only record', async () => {
+    const previousEvents = new Set((await attentionEvents()).map((event) => event.id));
     const device = await pairDevice(owner, { peerId: 'phone-1', clientLabel: 'Test phone' });
     const status = await owner.get(`/api/transport/pairings/${device.offer.pairingId}`);
     expect(status.body.state).toBe('accepted');
@@ -159,7 +249,7 @@ describe('offers', () => {
       expect(statSync(join(broker.paths.cosyncingHome, 'transport-peers.json')).mode & 0o777).toBe(0o600);
     }
 
-    const paired = (await attentionEvents()).filter((event) => event.kind === 'device-paired');
+    const paired = (await attentionEvents()).filter((event) => event.kind === 'device-paired' && !previousEvents.has(event.id));
     expect(paired).toHaveLength(1);
     expect(paired[0].state).toBe('resolved');
     expect(paired[0].severity).toBe('informational');

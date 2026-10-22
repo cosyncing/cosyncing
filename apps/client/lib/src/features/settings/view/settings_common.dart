@@ -250,49 +250,56 @@ class SettingsRow extends StatelessWidget {
         ],
       ],
     );
-    final row = LayoutBuilder(
-      builder: (context, constraints) {
-        var trailing = this.trailing;
-        final leading = this.leading;
-        final compactSelect =
-            trailing is SettingsSelect && constraints.maxWidth < 440;
-        if (trailing is SettingsSelect && title is Text) {
-          trailing = trailing.withTitle((title as Text).data);
-        }
-        final stacked =
-            trailing != null &&
-            stackTrailing &&
-            !compactSelect &&
-            constraints.maxWidth < stackBelowWidth;
-        final head = Row(
-          // Keep the popup below descriptions, including with enlarged text.
-          crossAxisAlignment: trailing is SettingsSelect && subtitle != null
-              ? CrossAxisAlignment.end
-              : CrossAxisAlignment.center,
-          children: [
-            if (leading != null) ...[leading, const SizedBox(width: 12)],
-            Expanded(child: text),
-            if (trailing != null && !stacked) ...[
-              const SizedBox(width: 16),
-              if (compactSelect) Flexible(child: trailing) else trailing,
-            ],
+    Widget content({bool narrow = false, bool stackControl = false}) {
+      var trailing = this.trailing;
+      final leading = this.leading;
+      final compactSelect = trailing is SettingsSelect && narrow;
+      if (trailing is SettingsSelect && title is Text) {
+        trailing = trailing.withTitle((title as Text).data);
+      }
+      final stacked = trailing != null && stackControl && !compactSelect;
+      final head = Row(
+        // Keep the popup below descriptions, including with enlarged text.
+        crossAxisAlignment: trailing is SettingsSelect && subtitle != null
+            ? CrossAxisAlignment.end
+            : CrossAxisAlignment.center,
+        children: [
+          if (leading != null) ...[leading, const SizedBox(width: 12)],
+          Expanded(child: text),
+          if (trailing != null && !stacked) ...[
+            const SizedBox(width: 16),
+            if (compactSelect) Flexible(child: trailing) else trailing,
           ],
-        );
-        return ConstrainedBox(
-          constraints: const BoxConstraints(minHeight: 48),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 8),
-            child: stacked
-                ? Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [head, const SizedBox(height: 8), trailing],
-                  )
-                : head,
-          ),
-        );
-      },
-    );
+        ],
+      );
+      return ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 48),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          child: stacked
+              ? Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [head, const SizedBox(height: 8), trailing],
+                )
+              : head,
+        ),
+      );
+    }
+
+    // Only responsive controls need to defer building until layout. Ordinary
+    // text/action rows already get their width from the parent constraints.
+    final needsWidth =
+        trailing != null && (stackTrailing || trailing is SettingsSelect);
+    final row = needsWidth
+        ? LayoutBuilder(
+            builder: (context, constraints) => content(
+              narrow: constraints.maxWidth < 440,
+              stackControl:
+                  stackTrailing && constraints.maxWidth < stackBelowWidth,
+            ),
+          )
+        : content();
     final onTap = this.onTap;
     if (onTap == null) return row;
     return SettingsHoverBleed(onTap: onTap, child: row);
@@ -456,59 +463,6 @@ class SettingsSelect<T> extends StatelessWidget {
       onChanged: onChanged,
     ),
   );
-}
-
-/// Collapsed disclosure holding a raw diagnostic string.
-///
-/// Mirrors the connection gate's `_TechnicalDetails`: the diagnostic stays
-/// available and selectable for a support request, but never occupies the
-/// primary reading path.
-class SettingsTechnicalDetailsDisclosure extends StatelessWidget {
-  /// Creates the disclosure.
-  const SettingsTechnicalDetailsDisclosure({
-    required this.detail,
-    super.key,
-  });
-
-  /// Raw diagnostic text.
-  final String detail;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Theme(
-      data: theme.copyWith(
-        dividerColor: context.tokens.separator.withValues(alpha: 0),
-      ),
-      child: ExpansionTile(
-        key: const Key('settings-technical-details'),
-        tilePadding: EdgeInsets.zero,
-        childrenPadding: EdgeInsets.zero,
-        expandedCrossAxisAlignment: CrossAxisAlignment.start,
-        visualDensity: VisualDensity.compact,
-        title: Text(
-          AppLocalizations.of(context).brokerGateTechnicalDetails,
-          style: theme.textTheme.bodySmall?.copyWith(
-            color: theme.colorScheme.onSurfaceVariant,
-          ),
-        ),
-        children: [
-          Align(
-            alignment: Alignment.centerLeft,
-            child: SelectableText(
-              detail,
-              key: const Key('settings-technical-detail-text'),
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-                fontFamily: 'monospace',
-              ),
-            ),
-          ),
-          const SizedBox(height: 8),
-        ],
-      ),
-    );
-  }
 }
 
 /// Cancel action for the confirmation dialogs in Settings.

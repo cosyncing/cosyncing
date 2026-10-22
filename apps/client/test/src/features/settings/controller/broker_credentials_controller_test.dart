@@ -74,7 +74,8 @@ void main() {
         final profileB = await replacement;
 
         expect(profileB.incarnationId, isNot(profileA.incarnationId));
-        expect(await store.readBrokerToken(key), 'token-b');
+        expect(await store.readBrokerToken(key), isNull);
+        expect(await store.readBrokerToken(profileB.credentialKey!), 'token-b');
         expect(
           container.read(activeBrokerProfileProvider)?.incarnationId,
           profileB.incarnationId,
@@ -113,7 +114,11 @@ void main() {
         final profileB = await replacement;
 
         expect(profileB.incarnationId, isNot(profileA.incarnationId));
-        expect(await store.readBrokerToken(key), 'token-b-clear');
+        expect(await store.readBrokerToken(key), isNull);
+        expect(
+          await store.readBrokerToken(profileB.credentialKey!),
+          'token-b-clear',
+        );
       },
     );
 
@@ -146,7 +151,11 @@ void main() {
         final profileB = await replacement;
 
         expect(profileB.incarnationId, isNot(profileA.incarnationId));
-        expect(await store.readBrokerToken(key), 'token-b-sign-out');
+        expect(await store.readBrokerToken(key), isNull);
+        expect(
+          await store.readBrokerToken(profileB.credentialKey!),
+          'token-b-sign-out',
+        );
       },
     );
   });
@@ -166,9 +175,8 @@ Future<BrokerProfile> _replaceWithPairedProfile({
         '{ "brokerUrl": "${profileA.id}", '
         '"token": "$tokenB", "displayName": "Replacement B" }',
       );
-  return (await container
-      .read(brokerProfileRepositoryProvider)
-      .getById(profileA.id))!;
+  return (await container.read(brokerProfileRepositoryProvider).getAll())
+      .singleWhere((profile) => profile.baseUri == profileA.baseUri);
 }
 
 final class _SpyCredentialStore implements CredentialStore {

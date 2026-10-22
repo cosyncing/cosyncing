@@ -11,8 +11,20 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+## 0.8.0 — 2026-10-21
+
 ### Added
 
+- Saved servers can keep several approved addresses under one server identity,
+  with Automatic or Fixed selection, readiness checks, and device-local HTTP
+  or SOCKS5 proxy profiles on native clients. Browser clients use browser-managed
+  networking and explain unsupported proxy bindings.
+- Storage separates device cache and downloaded copies from owner-authorized
+  server cleanup. File review uses measured snapshots; accepted server cleanup
+  jobs retain their identity across reconnects and restarts. Removed server
+  artifacts keep a non-actionable entry in the conversation.
+- Status and error details support contextual gestures, keyboard access, and
+  copying a bounded, sanitized snapshot.
 - Select multiple session and file tabs with Ctrl/Command or Shift, then close
   the group with the workspace close shortcut or selection action. Undo restores
   the closed tabs and their order; sessions keep running.
@@ -34,6 +46,12 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   Source/Rendered controls remain; reopening resets document state. Remote
   resource dependencies remain blocked, and incomplete HTML stays in Source.
 
+- The broker now requires Bun 1.4.3. This fixes eager buffering of downloads
+  when a receiver pauses, keeping active files protected from cleanup with
+  bounded memory. Installer-owned runtimes update through `cosy update`;
+  an explicit `COSYNCING_BUN_BIN` override must be upgraded separately.
+- General settings use standard row typography and omit redundant section
+  headings. Diagnostic details preserve the visible status and recovery action.
 - Usage overview opens on Day, includes cost beside tokens and share in every
   ranking, and removes the integrations catalog and CSV export.
 - Send shows its keyboard shortcut in the tooltip. Background activity and
@@ -63,6 +81,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   New Codex sessions apply the app's permission default before their first prompt,
   including in untrusted folders. Existing sessions with an untrusted command
   policy show Ask permission even when an automatic reviewer is configured.
+- Cline and Grok catch up after replacing a failed filesystem watcher, so log appends
+  written during replacement no longer leave session updates stuck.
 - Codex's structured terminal question replies now settle the corresponding
   cards after reconnecting. Earlier questions without a live answer channel
   offer an explicit follow-up reply when this client can control the session.

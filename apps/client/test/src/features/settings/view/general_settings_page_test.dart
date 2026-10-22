@@ -106,7 +106,7 @@ void main() {
     expect(find.text('1.5×'), findsOneWidget);
   });
 
-  testWidgets('read-aloud speed survives compact 2.0 text in EN/ZH', (
+  testWidgets('read-aloud speed survives compact 2.0 text in every locale', (
     tester,
   ) async {
     tester.view
@@ -118,17 +118,19 @@ void main() {
         ..resetDevicePixelRatio();
     });
 
-    for (final locale in const [Locale('en'), Locale('zh')]) {
+    for (final locale in const [
+      Locale('en'),
+      Locale('zh'),
+      Locale('ja'),
+      Locale('ko'),
+      Locale('es'),
+    ]) {
       for (final brightness in Brightness.values) {
         await tester.pumpWidget(
-          subject(
-            locale: locale,
-            brightness: brightness,
-            textScale: 2,
-          ),
+          subject(locale: locale, brightness: brightness, textScale: 2),
         );
         await tester.pumpAndSettle();
-        final section = find.byKey(const Key('settings-read-aloud-section'));
+        final section = find.byKey(const Key('settings-read-aloud-rate'));
         await tester.scrollUntilVisible(section, 200);
         await tester.ensureVisible(section);
         await tester.pumpAndSettle();
@@ -157,9 +159,7 @@ void main() {
             subject(locale: locale, brightness: brightness),
           );
           await tester.pumpAndSettle();
-          final section = find.byKey(
-            const Key('settings-read-aloud-section'),
-          );
+          final section = find.byKey(const Key('settings-read-aloud-rate'));
           await tester.scrollUntilVisible(section, 200);
           await tester.ensureVisible(section);
           await tester.pumpAndSettle();

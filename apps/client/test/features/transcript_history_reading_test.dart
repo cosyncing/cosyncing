@@ -72,15 +72,15 @@ void main() {
         // The broker's own sentence is English operator prose: it may be one
         // tap away, never inside the localized line.
         expect(gapText.data, isNot(contains('bounded paging index')));
-        expect(
-          find.byKey(const Key('session-history-gap-detail')),
-          findsNothing,
+        expect(find.byKey(const Key('contextual-details-text')), findsNothing);
+        await app.openTechnicalDetails(
+          find.byKey(const Key('session-history-diagnostic-item')),
         );
-        await app.tapKey('session-history-gap-technical-details');
         final detail = f.tester.widget<SelectableText>(
-          find.byKey(const Key('session-history-gap-detail')),
+          find.byKey(const Key('contextual-details-text')),
         );
-        expect(detail.data, _resourceLimitGap['message']);
+        expect(detail.data, contains(_resourceLimitGap['message']));
+        await app.tapKey('contextual-details-close');
       });
     }
 
@@ -111,9 +111,7 @@ void main() {
       studio
           .socketsFor('s1')
           .last
-          .emit(
-            historyFrame(const [], gap: _resourceLimitGap),
-          );
+          .emit(historyFrame(const [], gap: _resourceLimitGap));
       await app.settle();
       expect(
         app.shown('Message 5'),
@@ -125,10 +123,7 @@ void main() {
         findsNothing,
       );
       expect(app.shown(l10n.sessionDetailTranscriptEmpty), 0);
-      expect(
-        find.byKey(const Key('session-history-gap-text')),
-        findsOneWidget,
-      );
+      expect(find.byKey(const Key('session-history-gap-text')), findsOneWidget);
     });
 
     featureTest('a refusal retracts a start the session had proven', (f) async {

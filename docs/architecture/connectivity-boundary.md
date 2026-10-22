@@ -31,8 +31,11 @@ loopback URL; it does not change the broker listener.
 
 A pairing offer may include a client-reachable Broker URL, such as
 `https://cosy.example.com`. That URL is a one-time locator for the client. It is
-not stored as broker configuration, reused for later offers, monitored, or
-treated as a lifecycle-owned endpoint.
+not automatically stored as broker configuration, reused for later offers, or
+treated as a lifecycle-owned endpoint. Separately, an owner can explicitly
+advertise approved origins for signed address verification. This allowlist does
+not create or operate those routes. Browser-client origins have their own
+allowlist and do not inherit trust from an advertised broker origin.
 
 The URL may also be omitted from an offer. In that case the client must obtain
 the reachable Broker URL separately before it can accept the offer. This keeps

@@ -17,6 +17,8 @@
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import type { ServerWebSocket } from 'bun';
+import { testCertificates } from './tls-ca.ts';
 
 const NEIGHBOUR_WORKER = `self.addEventListener('install', (event) => {
   event.waitUntil(caches.open('neighbour-app-cache').then((cache) =>
@@ -164,5 +166,137 @@ export class WebProxy {
     if (rewrite && upstream.status === 200) body = await rewrite(body.toString('utf8'));
     res.writeHead(upstream.status, outHeaders);
     res.end(body);
+  }
+}
+
+interface SecureRouteSocket {
+  target: string;
+  origin: string;
+  upstream?: WebSocket;
+  waiting: Array<string | Buffer>;
+}
+
+/** TLS-terminating operator route for real-browser connection journeys. */
+export class SecureWebRoute {
+  readonly requests: Array<{ path: string; authenticated: boolean }> = [];
+  readonly sockets = new Set<ServerWebSocket<SecureRouteSocket>>();
+  private readonly upstreamSockets = new Set<WebSocket>();
+  private readonly forwarding = new Set<AbortController>();
+  blockedWebSockets = false;
+  offline = false;
+  private readonly server;
+
+  constructor(upstream: string) {
+    const certificates = testCertificates();
+    this.server = Bun.serve<SecureRouteSocket>({
+      hostname: "127.0.0.1",
+      port: 0,
+      idleTimeout: 0, // Broker attention feeds use bounded long-poll requests.
+      tls: { cert: certificates.certPem, key: certificates.keyPem },
+      fetch: async (request, server) => {
+        const url = new URL(request.url);
+        this.requests.push({
+          path: url.pathname,
+          authenticated: request.headers.has("x-cosyncing-token"),
+        });
+        if (this.offline) return new Response("offline", { status: 503 });
+        if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
+          if (this.blockedWebSockets)
+            return new Response("blocked", { status: 502 });
+          if (
+            server.upgrade(request, {
+              data: {
+                target: `${upstream.replace(/^http/, "ws")}${url.pathname}${url.search}`,
+                origin: request.headers.get("origin") ?? "",
+                waiting: [],
+              },
+            })
+          )
+            return;
+          return new Response("upgrade failed", { status: 400 });
+        }
+        const headers = new Headers(request.headers);
+        headers.delete("host");
+        headers.delete("connection");
+        const abort = new AbortController();
+        this.forwarding.add(abort);
+        try {
+          return await fetch(`${upstream}${url.pathname}${url.search}`, {
+            method: request.method,
+            headers,
+            body: ["GET", "HEAD"].includes(request.method)
+              ? undefined
+              : request.body,
+            signal: AbortSignal.any([request.signal, abort.signal]),
+            redirect: "manual",
+          });
+        } catch (error) {
+          if (abort.signal.aborted || request.signal.aborted)
+            return new Response(null, { status: 499 });
+          throw error;
+        } finally {
+          this.forwarding.delete(abort);
+        }
+      },
+      websocket: {
+        open: (socket) => {
+          this.sockets.add(socket);
+          const NativeWebSocket = WebSocket as typeof WebSocket & {
+            new (
+              url: string,
+              options: { headers: Record<string, string> },
+            ): WebSocket;
+          };
+          const upstreamSocket = (socket.data.upstream = new NativeWebSocket(
+            socket.data.target,
+            {
+              headers: { origin: socket.data.origin },
+            },
+          ));
+          this.upstreamSockets.add(upstreamSocket);
+          upstreamSocket.onopen = () => {
+            for (const frame of socket.data.waiting) upstreamSocket.send(frame);
+            socket.data.waiting.length = 0;
+          };
+          upstreamSocket.onmessage = (event) => socket.send(event.data);
+          upstreamSocket.onclose = () => {
+            this.upstreamSockets.delete(upstreamSocket);
+            socket.close();
+          };
+          upstreamSocket.onerror = () => socket.close();
+        },
+        message: (socket, message) => {
+          if (socket.data.upstream?.readyState === WebSocket.OPEN)
+            socket.data.upstream.send(message);
+          else if (socket.data.waiting.length < 16)
+            socket.data.waiting.push(message);
+          else socket.close();
+        },
+        close: (socket) => {
+          socket.terminate();
+          this.sockets.delete(socket);
+          if (socket.data.upstream) {
+            (socket.data.upstream as WebSocket & { terminate(): void }).terminate();
+          }
+        },
+      },
+    });
+  }
+
+  get origin(): string {
+    return `https://127.0.0.1:${this.server.port}`;
+  }
+  stop(): void {
+    for (const abort of this.forwarding) abort.abort();
+    for (const socket of this.sockets) socket.terminate();
+    for (const socket of this.upstreamSockets) {
+      (socket as WebSocket & { terminate(): void }).terminate();
+    }
+    // Bun 1.3.14 keeps a stale pendingWebSockets count after Chromium closes
+    // these TLS sockets, even after both tracked socket sets are empty. Its
+    // stop promise then never settles. Force-close resources above and stop
+    // the listener synchronously, as the other Bun fixture servers do.
+    void this.server.stop(true);
+    this.server.unref();
   }
 }

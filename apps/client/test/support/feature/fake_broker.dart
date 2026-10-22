@@ -262,7 +262,12 @@ class FakeBrokerNetwork {
       'wss' => 'https',
       final other => other,
     };
-    return '$scheme://${uri.host.toLowerCase()}:${uri.port}';
+    final port = uri.hasPort
+        ? uri.port
+        : scheme == 'https'
+        ? 443
+        : 80;
+    return '$scheme://${uri.host.toLowerCase()}:$port';
   }
 }
 
@@ -499,6 +504,9 @@ class FakeBroker {
   /// When false, session sockets cannot be opened (the stream is down while
   /// the REST API answers).
   bool socketsAccepted = true;
+
+  /// Optional read-only route-check handshake. Never attaches a session.
+  Map<String, Object?> Function(FakeBrokerSocket)? connectionCheckFrame;
 
   /// Params the app bound into each stream ticket request, newest last.
   final List<Map<String, Object?>> ticketRequests = [];
@@ -833,6 +841,13 @@ class FakeBroker {
     }
 
     final principal = _principal(request);
+    if (request.method == 'POST' && path == '/api/connection/identity-proof') {
+      for (final route in routes) {
+        final answer = await route(request);
+        if (answer != null) return answer;
+      }
+      return const FakeBrokerResponse(404, {'error': 'Not supported'});
+    }
     if (principal == null) {
       return FakeBrokerResponse.error(
         401,
@@ -1164,7 +1179,7 @@ class FakeBroker {
 }
 
 /// A fake broker WebSocket. The app's real `SessionConnection` drives it.
-class FakeBrokerSocket implements WebSocketAdapter {
+class FakeBrokerSocket implements WebSocketAdapter, WebSocketCloseDetails {
   FakeBrokerSocket._(this.network, this.url);
 
   /// Network the socket was opened on.
@@ -1176,6 +1191,8 @@ class FakeBrokerSocket implements WebSocketAdapter {
   final _inbound = StreamController<Object?>.broadcast();
   var _connected = false;
   var _closed = false;
+  @override
+  int? closeCode;
 
   /// Frames the app sent, decoded.
   final List<Map<String, dynamic>> sent = [];
@@ -1216,6 +1233,14 @@ class FakeBrokerSocket implements WebSocketAdapter {
       throw StateError('connection refused: $rawLeakSentinel');
     }
     _connected = true;
+    if (url.path == '/api/connection/check/ws' &&
+        target.connectionCheckFrame != null) {
+      scheduleMicrotask(() {
+        emit(target.connectionCheckFrame!(this));
+        drop();
+      });
+      return;
+    }
     final session = this.session;
     if (session == null) return;
     // A real broker speaks first: hello, the session, then durable history.
@@ -1260,7 +1285,8 @@ class FakeBrokerSocket implements WebSocketAdapter {
   }
 
   /// Drops the connection from the broker side.
-  void drop() {
+  void drop({int? code}) {
+    closeCode = code;
     _connected = false;
     if (!_inbound.isClosed) unawaited(_inbound.close());
   }

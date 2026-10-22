@@ -77,7 +77,7 @@ whole agent list.
 ## Requirements
 
 - Complete the shared [installation prerequisites](../installation/prerequisites.md):
-  Bun 1.3.14 or newer for the broker host, acquired by the cosyncing installer when needed. Cross-device connectivity is an independent operator choice;
+  Bun 1.4.3 or newer for the broker host, acquired by the cosyncing installer when needed. Cross-device connectivity is an independent operator choice;
   [compare the supported topologies](../connectivity/README.md). Tokdash is optional
   but strongly recommended for quota tracking and warnings.
 - Every agent you want cosyncing to manage must meet the version in the table

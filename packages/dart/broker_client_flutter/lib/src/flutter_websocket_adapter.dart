@@ -11,7 +11,8 @@ typedef FlutterWebSocketChannelFactory = WebSocketChannel Function(String url);
 ///
 /// The adapter decodes incoming text frames into JSON objects and surfaces
 /// JSON parsing failures as stream errors.
-final class FlutterWebSocketAdapter implements WebSocketAdapter {
+final class FlutterWebSocketAdapter
+    implements WebSocketAdapter, WebSocketCloseDetails {
   /// Creates a Flutter WebSocket adapter for [url].
   ///
   /// [channelFactory] is injectable to make adapter tests deterministic and
@@ -32,9 +33,12 @@ final class FlutterWebSocketAdapter implements WebSocketAdapter {
   WebSocketChannel? _channel;
   bool _isConnected = false;
   bool _isClosed = false;
+  int? _closeCode;
 
   @override
   bool get isConnected => _isConnected && !_isClosed;
+  @override
+  int? get closeCode => _channel?.closeCode ?? _closeCode;
 
   @override
   Future<void> connect() async {
@@ -92,6 +96,7 @@ final class FlutterWebSocketAdapter implements WebSocketAdapter {
     _channelSub = null;
 
     final channel = _channel;
+    _closeCode = channel?.closeCode;
     _channel = null;
 
     await channel?.sink.close();

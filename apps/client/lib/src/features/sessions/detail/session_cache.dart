@@ -33,6 +33,13 @@ final class SessionCacheWriteAdmission {
 final class SessionCacheWriteFence {
   Future<void> _tail = Future<void>.value();
   final Set<SessionCacheWriteAdmission> _activeAdmissions = {};
+  int _generation = 0;
+
+  /// Changes whenever a cache write or clear enters the serialized boundary.
+  int get generation => _generation;
+
+  /// Inspects a settled cache without invalidating pending controller events.
+  Future<T> inspect<T>(Future<T> Function() operation) => _enqueue(operation);
 
   /// Admits pending work for one exact broker-scoped transcript.
   SessionCacheWriteAdmission admitTranscript({
@@ -76,7 +83,10 @@ final class SessionCacheWriteFence {
   }
 
   /// Runs one transcript or roster persistence operation in admission order.
-  Future<T> write<T>(Future<T> Function() operation) => _enqueue(operation);
+  Future<T> write<T>(Future<T> Function() operation) {
+    _generation++;
+    return _enqueue(operation);
+  }
 
   /// Invalidates one exact transcript, drains older writes, then deletes it.
   Future<T> clearTranscript<T>({
@@ -85,6 +95,7 @@ final class SessionCacheWriteFence {
     required String sessionId,
     required Future<T> Function() operation,
   }) {
+    _generation++;
     for (final admission in _activeAdmissions) {
       if (admission._kind == _SessionCacheAdmissionKind.transcript &&
           admission._brokerSourceKey == brokerSourceKey &&
@@ -98,6 +109,7 @@ final class SessionCacheWriteFence {
 
   /// Invalidates all transcript/roster work, drains writes, then deletes all.
   Future<T> clearAll<T>(Future<T> Function() operation) {
+    _generation++;
     for (final admission in _activeAdmissions) {
       admission._valid = false;
     }
@@ -139,6 +151,29 @@ final class SessionCacheClearReport {
   final int rosters;
 }
 
+/// A finite in-process cache confirmation; new durable writes invalidate it.
+final class SessionCacheClearPlan {
+  /// Captures counts and logical bytes after previously admitted writes settle.
+  const SessionCacheClearPlan(
+    this.generation,
+    this.snapshots,
+    this.logicalBytes,
+    this.expires,
+  );
+
+  /// Admission generation, never a filesystem version or checksum.
+  final int generation;
+
+  /// Transcript and roster snapshots included in this confirmation.
+  final int snapshots;
+
+  /// Logical stored JSON bytes; clearing need not shrink the database file.
+  final int logicalBytes;
+
+  /// The confirmation must be reviewed again after this instant.
+  final DateTime expires;
+}
+
 /// Explicit deletion boundary for rebuildable session caches.
 ///
 /// Drafts, outbox rows, open-session membership, Drive provenance, settings,
@@ -157,6 +192,32 @@ final class SessionCacheManagement {
 
   /// Shared cache-write admission boundary.
   final SessionCacheWriteFence writeFence;
+
+  /// Measures the finite cache that the next confirmation can clear.
+  Future<SessionCacheClearPlan> previewClear() => writeFence.inspect(() async {
+    final generation = writeFence.generation;
+    final row = await database.customSelect('''
+      SELECT count(*) AS n,coalesce(sum(bytes),0) AS bytes FROM (
+        SELECT length(cast(messages_json AS BLOB)) AS bytes
+          FROM session_transcript_rows
+        UNION ALL SELECT length(cast(rows_json AS BLOB))
+          FROM roster_snapshot_rows)''').getSingle();
+    return SessionCacheClearPlan(
+      generation,
+      row.read<int>('n'),
+      row.read<int>('bytes'),
+      DateTime.now().add(const Duration(minutes: 5)),
+    );
+  });
+
+  /// Refuses to widen a confirmation after another cache write was admitted.
+  Future<SessionCacheClearReport> clearReviewed(SessionCacheClearPlan plan) {
+    if (plan.generation != writeFence.generation ||
+        !DateTime.now().isBefore(plan.expires)) {
+      return Future.error(StateError('Cache changed; review it again'));
+    }
+    return clearAll();
+  }
 
   /// Removes one exact broker-source/tool/session transcript snapshot.
   Future<int> clearCurrentSession({

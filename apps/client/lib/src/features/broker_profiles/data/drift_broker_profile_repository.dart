@@ -1,8 +1,10 @@
+import 'dart:convert';
 import 'dart:math';
 
 import 'package:cosyncing_client/src/features/broker_profiles/data/broker_profile_local_data_purge.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/data/broker_profile_repository.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
+import 'package:cosyncing_client/src/features/connection/model/broker_routes.dart';
 import 'package:cosyncing_client/src/local/app_database.dart';
 import 'package:drift/drift.dart';
 
@@ -16,17 +18,39 @@ class DriftBrokerProfileRepository implements BrokerProfileRepository {
 
   @override
   Future<List<BrokerProfile>> getAll() async {
-    final rows = await database.select(database.brokerProfileRows).get();
-    final profiles = rows.map(_fromRow).toList()..sort(_compareProfiles);
+    final rows = await database.customSelect(_profileWithRoute).get();
+    final profiles = rows.map(_fromJoinedRow).toList()..sort(_compareProfiles);
     return profiles;
   }
 
+  // A single database snapshot keeps the profile and its access binding
+  // consistent, without a second browser-worker round trip during hydration.
+  static const _profileWithRoute =
+      'SELECT p.*, r.incarnation AS route_incarnation, '
+      'r.payload AS route_payload FROM broker_profile_rows p '
+      'LEFT JOIN broker_route_servers r ON r.profile=p.id';
+
   @override
   Future<BrokerProfile?> getById(String id) async {
-    final row = await (database.select(
-      database.brokerProfileRows,
-    )..where((table) => table.id.equals(id))).getSingleOrNull();
-    return row == null ? null : _fromRow(row);
+    final row = await database
+        .customSelect(
+          '$_profileWithRoute WHERE p.id=?',
+          variables: [Variable(id)],
+        )
+        .getSingleOrNull();
+    return row == null ? null : _fromJoinedRow(row);
+  }
+
+  BrokerProfile _fromJoinedRow(QueryRow row) {
+    final profile = _fromRow(database.brokerProfileRows.map(row.data));
+    if (row.readNullable<String>('route_incarnation') !=
+        profile.incarnationId) {
+      return profile;
+    }
+    final routes = BrokerRouteServer.fromJson(
+      jsonDecode(row.read<String>('route_payload')) as Map<String, dynamic>,
+    );
+    return profile.copyWith(sourceIdentity: routes.sourceIdentity);
   }
 
   /// Writes [profile], assigning a fresh incarnation when the id is new.
@@ -60,6 +84,16 @@ class DriftBrokerProfileRepository implements BrokerProfileRepository {
               _toCompanion(saved),
               mode: InsertMode.insert,
             );
+        final routes = BrokerRouteServer.initial(
+          profileId: saved.id,
+          incarnation: saved.incarnationId!,
+          origin: saved.baseUri,
+          credentialReference: saved.credentialKey,
+        );
+        await database.customStatement(
+          'INSERT INTO broker_route_servers VALUES (?,?,?)',
+          [saved.id, saved.incarnationId, jsonEncode(routes.toJson())],
+        );
         return saved;
       }
 

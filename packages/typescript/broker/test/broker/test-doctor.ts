@@ -1570,7 +1570,7 @@ try {
       },
     }));
     const windowsChecks = windowsReport.sections.flatMap((section) => section.checks);
-    const connectivity = /tailscale|serve|advertised|tunnel|vpn|mesh/i;
+    const connectivity = /\b(?:tailscale|serve|advertised|tunnel|vpn|mesh)\b/i;
     check('native Windows x64 is now a supported host rather than a refusal',
       windowsChecks.some((item) => item.id === 'host.platform'
         && item.status === 'pass' && item.detailCode === 'windows-supported'),

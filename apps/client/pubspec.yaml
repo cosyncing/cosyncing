@@ -1,7 +1,7 @@
 name: cosyncing_client
 description: "Cross-platform client for cosyncing brokers"
 publish_to: 'none'
-version: 0.7.2+29
+version: 0.8.0+30
 
 environment:
   sdk: ^3.12.2
@@ -21,6 +21,9 @@ dependencies:
     path: ../../packages/dart/broker_contract
   broker_crypto:
     path: ../../packages/dart/broker_crypto
+  # 7.1.0+ calls NWPath.isUltraConstrained, which needs the Xcode 26 SDK; the
+  # Apple builds use Xcode 16. Only interface-change events are consumed.
+  connectivity_plus: 7.0.0
   cupertino_icons: ^1.0.8
   desktop_drop:
     path: ../../packages/dart/desktop_drop
