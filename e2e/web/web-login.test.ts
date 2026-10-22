@@ -110,7 +110,9 @@ describe('web sign-in with the Server token', () => {
       expect((await broker.client().post('/api/connection/configuration', {
         ...configuration.body,
         advertisedOrigins: [broker.url, app.origin, alternate.origin, blocked.origin],
-        trustedClientOrigins: [app.origin],
+        // The app's own TLS-terminating front is not a trusted client origin:
+        // the broker sees http while this page sends an https Origin.
+        trustedClientOrigins: [],
       })).status).toBe(200);
       const page = await context.newPage();
       page.setDefaultTimeout(30_000);
@@ -143,6 +145,12 @@ describe('web sign-in with the Server token', () => {
       await page.getByRole('button', { name: 'Approve destination', exact: true }).click();
       await page.getByRole('group', { name: / In use / }).waitFor();
 
+      // Calling another address is cross-origin for this page and needs the
+      // owner's browser-origin approval.
+      const current = await broker.client().get('/api/connection/configuration');
+      expect((await broker.client().post('/api/connection/configuration', {
+        ...current.body, trustedClientOrigins: [app.origin],
+      })).status).toBe(200);
       const propose = async (label: string, origin: string) => {
         await broker.client().post('/pi/bridge/events', { id: sessionId, events: [{ t: 'status', running: false }] });
         await page.getByRole('button', { name: 'Add address', exact: true }).click();
