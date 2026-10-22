@@ -11,6 +11,17 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Fixed
+
+- The web client served through an HTTPS reverse proxy, such as Tailscale
+  serve, opens sessions again. 0.8.0 refused its requests because the page's
+  HTTPS origin differed from the plain HTTP address the broker saw. Trusted
+  browser origins now only grant cross-origin access; they no longer block
+  other requests.
+- Native clients open sessions again on an HTTPS address without an explicit
+  port, such as `https://host.example`. 0.8.0 rejected the session socket's
+  implied port 443 as a different destination and kept reconnecting.
+
 ## 0.8.0 — 2026-10-21
 
 ### Added
