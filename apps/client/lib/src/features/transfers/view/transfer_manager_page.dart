@@ -1605,7 +1605,7 @@ String _transferStatusLabel(
   SessionArtifactTransferStatus.completed =>
     !kIsWeb &&
             defaultTargetPlatform == TargetPlatform.android &&
-            transfer.exportedPath != null
+            transfer.exportedToContentUri
         ? l10n.transferStatusSaved
         : l10n.transferStatusComplete,
   SessionArtifactTransferStatus.canceled => l10n.transferStatusCanceled,

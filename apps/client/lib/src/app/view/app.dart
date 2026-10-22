@@ -134,7 +134,7 @@ class _AppState extends ConsumerState<App> {
   Widget build(BuildContext context) {
     // The native engine may have completed downloads while this process was
     // gone. Reconcile on mobile startup, before the user starts another task.
-    if (!kIsWeb &&
+    if (!ref.watch(clientIsWebProvider) &&
         (defaultTargetPlatform == TargetPlatform.android ||
             defaultTargetPlatform == TargetPlatform.iOS)) {
       ref.watch(sessionArtifactTransferWorkerProvider);
