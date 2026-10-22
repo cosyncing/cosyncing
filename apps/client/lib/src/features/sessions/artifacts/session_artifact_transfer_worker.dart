@@ -129,7 +129,8 @@ final sessionArtifactTransferWorkerProvider =
       // truly backgrounds (iOS/Android) and the file service can finalize a
       // completed download through the shared cache path. Elsewhere this is
       // null and the worker keeps the foreground resumable path unchanged.
-      final engine = ref.watch(sessionFileBackgroundDownloaderProvider);
+      final hub = ref.watch(sessionFileBackgroundUpdateHubProvider);
+      final engine = hub?.engine;
       final finalizer = fileService is BackgroundSessionDownloadFinalizer
           ? fileService as BackgroundSessionDownloadFinalizer
           : null;
@@ -143,7 +144,7 @@ final sessionArtifactTransferWorkerProvider =
           engine.isSupported &&
           finalizer != null) {
         final coordinator = SessionFileBackgroundDownloadCoordinator(
-          engine: engine,
+          hub: hub!,
           transferController: transferController,
           finalizer: finalizer,
           brokerProfileId: brokerProfileId,

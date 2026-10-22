@@ -39,6 +39,14 @@ void main() {
       peerToken: 'peer-secret',
     );
 
+    final hubs = <_FakeBackgroundEngine, SessionFileBackgroundUpdateHub>{};
+    SessionFileBackgroundUpdateHub _hubFor(_FakeBackgroundEngine engine) =>
+        hubs.putIfAbsent(engine, () {
+          final hub = SessionFileBackgroundUpdateHub(engine);
+          addTearDown(hub.dispose);
+          return hub;
+        });
+
     SessionFileBackgroundDownloadCoordinator coordinatorWith(
       _FakeBackgroundEngine engine, {
       String? brokerProfileId = 'profile-a',
@@ -46,7 +54,7 @@ void main() {
       bool withoutClient = false,
     }) {
       return SessionFileBackgroundDownloadCoordinator(
-        engine: engine,
+        hub: _hubFor(engine),
         transferController: controller,
         finalizer: finalizer ?? _FakeFinalizer(cachedFile),
         brokerProfileId: brokerProfileId,
@@ -67,6 +75,61 @@ void main() {
         backgroundCoordinator: coordinator,
       );
     }
+
+    // These controlled startup/database races cannot be driven through a UI
+    // tap: the native tracking write and startup completion are independent.
+    test('replacement uses live completion over a stale running record', () async {
+      final engine = _FakeBackgroundEngine();
+      final first = coordinatorWith(engine);
+      final result = await workerWith(first).downloadSessionFile(
+        sessionKey: sessionKey,
+        path: 'notes/report.txt',
+        fileName: 'report.txt',
+        hasActiveBrokerClient: true,
+      );
+      await first.dispose();
+      engine.records = [BackgroundDownloadRecord(
+        taskId: result.transferId,
+        status: BackgroundDownloadTaskStatus.running,
+      )];
+      engine.emit(BackgroundDownloadRecord(
+        taskId: result.transferId,
+        status: BackgroundDownloadTaskStatus.complete,
+        filePath: '/native/tmp/report.part',
+      ));
+      await pumpEventQueue();
+      final replacement = coordinatorWith(engine);
+      addTearDown(replacement.dispose);
+      await replacement.bootstrap();
+      expect(controller.transferById(result.transferId)!.status,
+          SessionArtifactTransferStatus.cached);
+    });
+
+    test('disposal during startup leaves native listener with the hub', () async {
+      final engine = _FakeBackgroundEngine()..startup = Completer<void>();
+      final first = coordinatorWith(engine);
+      final starting = first.bootstrap();
+      await first.dispose();
+      final replacement = coordinatorWith(engine);
+      addTearDown(replacement.dispose);
+      final restarting = replacement.bootstrap();
+      engine.startup!.complete();
+      await Future.wait([starting, restarting]);
+      final result = await workerWith(replacement).downloadSessionFile(
+        sessionKey: sessionKey,
+        path: 'notes/report.txt',
+        fileName: 'report.txt',
+        hasActiveBrokerClient: true,
+      );
+      engine.emit(BackgroundDownloadRecord(
+        taskId: result.transferId,
+        status: BackgroundDownloadTaskStatus.running,
+        bytesTransferred: 64,
+        totalBytes: 128,
+      ));
+      await pumpEventQueue();
+      expect(controller.transferById(result.transferId)!.bytesTransferred, 64);
+    });
 
     test(
       'downloadSessionFile enqueues a native task with auth headers and '
@@ -343,12 +406,13 @@ void main() {
 
 class _FakeBackgroundEngine implements SessionFileBackgroundDownloader {
   bool started = false;
+  Completer<void>? startup;
   bool enqueueAccepted = true;
   final enqueued = <BackgroundSessionDownloadRequest>[];
   final canceled = <String>[];
   final forgotten = <String>[];
   List<BackgroundDownloadRecord> records = const [];
-  final _updates = StreamController<BackgroundDownloadRecord>.broadcast();
+  final _updates = StreamController<BackgroundDownloadRecord>();
 
   void emit(BackgroundDownloadRecord record) => _updates.add(record);
 
@@ -358,6 +422,7 @@ class _FakeBackgroundEngine implements SessionFileBackgroundDownloader {
   @override
   Future<void> ensureStarted() async {
     started = true;
+    await startup?.future;
   }
 
   @override

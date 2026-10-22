@@ -141,8 +141,51 @@ abstract interface class SessionFileBackgroundDownloader {
   /// Drops a tracked record after it has been finalized into the ledger.
   Future<void> forget(String taskId);
 
-  /// Live status/progress updates for enqueued tasks.
+  /// Live status/progress updates for enqueued tasks. The native stream accepts
+  /// one listener per process; only [SessionFileBackgroundUpdateHub] listens.
   Stream<BackgroundDownloadRecord> updates();
+}
+
+/// Process-lifetime owner of the native engine's single-subscription stream.
+/// Keeps updates across worker replacement, including updates newer than the
+/// engine's asynchronously written tracking database.
+class SessionFileBackgroundUpdateHub {
+  /// Creates a hub without starting the native engine.
+  SessionFileBackgroundUpdateHub(this.engine);
+
+  /// Native engine shared by all coordinators in this process.
+  final SessionFileBackgroundDownloader engine;
+  final _records = <String, BackgroundDownloadRecord>{};
+  final _stream = StreamController<BackgroundDownloadRecord>.broadcast();
+  StreamSubscription<BackgroundDownloadRecord>? _subscription;
+  bool _disposed = false;
+
+  /// Latest unforgotten update for each task.
+  Iterable<BackgroundDownloadRecord> get latest => _records.values.toList();
+
+  /// Live updates for replaceable coordinators.
+  Stream<BackgroundDownloadRecord> get stream {
+    if (!_disposed) {
+      _subscription ??= engine.updates().listen((record) {
+        _records[record.taskId] = record;
+        _stream.add(record);
+      }, onError: _stream.addError);
+    }
+    return _stream.stream;
+  }
+
+  /// Drops both the retained update and the native tracking record.
+  Future<void> forget(String taskId) async {
+    _records.remove(taskId);
+    await engine.forget(taskId);
+  }
+
+  /// Releases the only native listener when the application scope is disposed.
+  Future<void> dispose() async {
+    _disposed = true;
+    await _subscription?.cancel();
+    await _stream.close();
+  }
 }
 
 /// Drives the Drift transfer ledger from native background download tasks.
@@ -154,7 +197,7 @@ abstract interface class SessionFileBackgroundDownloader {
 class SessionFileBackgroundDownloadCoordinator {
   /// Creates a [SessionFileBackgroundDownloadCoordinator].
   SessionFileBackgroundDownloadCoordinator({
-    required this.engine,
+    required this.hub,
     required this.transferController,
     required this.finalizer,
     required this.brokerProfileId,
@@ -162,7 +205,10 @@ class SessionFileBackgroundDownloadCoordinator {
   });
 
   /// Native download engine seam.
-  final SessionFileBackgroundDownloader engine;
+  SessionFileBackgroundDownloader get engine => hub.engine;
+
+  /// App-lifetime owner of native updates.
+  final SessionFileBackgroundUpdateHub hub;
 
   /// Authoritative transfer ledger.
   final SessionArtifactTransferController transferController;
@@ -183,6 +229,7 @@ class SessionFileBackgroundDownloadCoordinator {
 
   StreamSubscription<BackgroundDownloadRecord>? _updatesSubscription;
   final _finalizing = <String>{};
+  bool _disposed = false;
 
   /// Whether native background downloads are available here.
   bool get isSupported => engine.isSupported;
@@ -192,12 +239,13 @@ class SessionFileBackgroundDownloadCoordinator {
   /// engine is unavailable in this environment, the foreground path still
   /// works, so all engine errors are swallowed here.
   Future<void> bootstrap() async {
-    if (!isSupported) {
+    if (_disposed || !isSupported) {
       return;
     }
     try {
-      await engine.ensureStarted();
       listen();
+      await engine.ensureStarted();
+      if (_disposed) return;
       await reconcile();
     } on Object {
       // Engine/platform storage unavailable (e.g. under unit tests).
@@ -206,7 +254,8 @@ class SessionFileBackgroundDownloadCoordinator {
 
   /// Subscribes to live task updates. Idempotent.
   void listen() {
-    _updatesSubscription ??= engine.updates().listen(
+    if (_disposed) return;
+    _updatesSubscription ??= hub.stream.listen(
       (record) => unawaited(_reconcileRecordSafely(record)),
       onError: (Object _) {},
     );
@@ -236,6 +285,7 @@ class SessionFileBackgroundDownloadCoordinator {
 
   /// Cancels the live subscription.
   Future<void> dispose() async {
+    _disposed = true;
     await _updatesSubscription?.cancel();
     _updatesSubscription = null;
   }
@@ -256,8 +306,10 @@ class SessionFileBackgroundDownloadCoordinator {
       return _failed(transferId, message);
     }
     try {
-      await engine.ensureStarted();
+      if (_disposed) throw StateError('Download coordinator was disposed.');
       listen();
+      await engine.ensureStarted();
+      if (_disposed) throw StateError('Download coordinator was disposed.');
       final url = _downloadUrl(
         client,
         sessionKey.tool,
@@ -317,20 +369,24 @@ class SessionFileBackgroundDownloadCoordinator {
   /// Called on a fresh worker after app restart so a background-completed
   /// download finalizes its ledger row even if the app was killed mid-transfer.
   Future<void> reconcile() async {
+    if (_disposed) return;
     final List<BackgroundDownloadRecord> records;
     try {
       records = await engine.loadRecords();
+      if (_disposed) return;
     } on Object {
       // Engine/platform storage unavailable (e.g. under unit tests). Nothing
       // to reconcile.
       return;
     }
-    for (final record in records) {
+    for (final record in [...records, ...hub.latest]) {
+      if (_disposed) return;
       await _reconcileRecordSafely(record);
     }
   }
 
   Future<void> _reconcileRecord(BackgroundDownloadRecord record) async {
+    if (_disposed) return;
     final transfer = transferController.transferById(record.taskId);
     // Unknown row, or a row owned by a different broker profile: never
     // reconcile it into this profile's ledger (invariant: profile scoping).
@@ -366,12 +422,12 @@ class SessionFileBackgroundDownloadCoordinator {
         }
         // Forget even when the row was already terminal, so stale records
         // cannot accumulate in the engine's tracking database.
-        await engine.forget(record.taskId);
+        await hub.forget(record.taskId);
       case BackgroundDownloadTaskStatus.canceled:
         if (!_isTerminal(transfer)) {
           transferController.markCanceled(record.taskId);
         }
-        await engine.forget(record.taskId);
+        await hub.forget(record.taskId);
       case BackgroundDownloadTaskStatus.paused:
         // Leave the row running; a resume will produce a fresh update.
         break;
@@ -389,7 +445,7 @@ class SessionFileBackgroundDownloadCoordinator {
         _isTerminal(transfer)) {
       // A late completion for an already-settled row: drop the stale native
       // record so the engine's tracking database cannot grow unboundedly.
-      await engine.forget(record.taskId);
+      await hub.forget(record.taskId);
       return;
     }
     if (!_finalizing.add(record.taskId)) {
@@ -416,7 +472,7 @@ class SessionFileBackgroundDownloadCoordinator {
         cached,
         message: 'Downloaded ${cached.fileName}',
       );
-      await engine.forget(record.taskId);
+      await hub.forget(record.taskId);
     } finally {
       _finalizing.remove(record.taskId);
     }

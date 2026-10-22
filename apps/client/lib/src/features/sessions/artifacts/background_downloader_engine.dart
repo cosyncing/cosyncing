@@ -88,6 +88,7 @@ final class BackgroundDownloaderSessionFileDownloader
     }
   }
 
+  /// Single-subscription native stream: only the process-lifetime hub listens.
   @override
   Stream<BackgroundDownloadRecord> updates() {
     return FileDownloader().updates.asyncMap(_fromUpdate);
@@ -174,4 +175,16 @@ final sessionFileBackgroundDownloaderProvider =
     Provider<SessionFileBackgroundDownloader?>((ref) {
       final engine = BackgroundDownloaderSessionFileDownloader();
       return engine.isSupported ? engine : null;
+    });
+
+/// Process-lifetime native update subscription. Never watch broker, profile,
+/// client or file-service providers here: those rebuild during reconnects and
+/// server switches, but the native stream cannot be listened to a second time.
+final sessionFileBackgroundUpdateHubProvider =
+    Provider<SessionFileBackgroundUpdateHub?>((ref) {
+      final engine = ref.watch(sessionFileBackgroundDownloaderProvider);
+      if (engine == null) return null;
+      final hub = SessionFileBackgroundUpdateHub(engine);
+      ref.onDispose(hub.dispose);
+      return hub;
     });
