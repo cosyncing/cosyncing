@@ -10,18 +10,31 @@ public tree; historical copies live only in the private internal-docs archive.
 
 ## Required workflow profile
 
-`ci.yml` runs broker, contract, Flutter analysis/tests, web, Linux, Android,
-macOS, iOS simulator, Windows, and reusable Dart-package gates.
-`broker-release-gate.yml` builds native package evidence without publishing it.
-`nightly.yml` repeats extended deterministic checks on the protected default
-branch.
+`ci.yml` runs `bun run check` with the feature suites in
+`scripts/ci/suites.ts`: policy, broker, adapters, packaging, client (three
+shards), web, and the Windows broker lane when relevant. Separate jobs build
+Linux, Android, macOS, iOS simulator and Windows clients. The client suite also
+owns the reusable Dart packages.
+`broker-release-gate.yml` builds ephemeral native package evidence and checks
+the bundled JavaScript broker against its web sidecar, without publishing.
+`nightly.yml` repeats broker, adapter and packaging suites three times without
+retries and runs the extended client stress cases.
 
 Branch protection requires only the stable `CI required` and
 `Broker Release Gate required` aggregate jobs. Each uses `if: always()` and
-fails unless every dependency result is `success`; matrix child names are not
-repository settings. The broker/contract lane also runs the workflow audit,
-the fail-closed tracked-tree/path/content/binary policy, capability coverage,
-and trace/support-matrix checks.
+fails unless dependencies succeed or the classifier explicitly permits their
+skips; matrix child names are not repository settings. The policy suite owns
+types, contracts, workflow and public-tree audits, source boundaries, and
+trace/support-matrix checks. Capability behavior is covered by the broker
+suite. The Windows broker lane may skip changes classified as unable to affect
+it; cancellation or any unapproved skip still fails the aggregate.
+
+Follow [Tests and CI](../development/testing.md) when adding coverage. Extend
+functional scenarios in these suites, reuse their harnesses, and remove
+duplicate coverage. Do not restore the deleted verification graph or add a
+job or registry per implementation file. Measure added execution cost against
+the ten-minute hosted PR target. Retry recovery is reported as **FLAKY** and
+still needs a tracked fix; the reporting policy is not a reliability waiver.
 
 `platform-runtime.yml` is an optional scheduled/manual hosted lane for retained
 Flutter integration tests on Android emulator, macOS, and iOS simulator. It is
@@ -56,9 +69,10 @@ policy rejects compiled brokers and bundled Bun archives. Future embedded-runtim
 broker distribution still requires the separate legal approval; source CI and
 local package tests do not satisfy that gate.
 
-CI job logs follow the repository's GitHub retention setting. The main,
-nightly, and client-release gates upload `output/check` verification evidence
-for seven days when it exists. These short-lived Actions artifacts are
-diagnostic or same-run handoff material, not a public distribution channel.
+CI job logs follow the repository's GitHub retention setting. The main and
+client-release gates upload `output/check` verification evidence for seven
+days when it exists; nightly retains it for fourteen days. These short-lived
+Actions artifacts are diagnostic or same-run handoff material, not a public
+distribution channel.
 Release assets follow GitHub Release retention and are cryptographically
 inventoried by the release workflow.

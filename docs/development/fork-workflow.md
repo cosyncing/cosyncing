@@ -5,8 +5,10 @@ Fork the repository, create a topic branch, and open a pull request against
 environment secrets, and no persistent runner. CI never uses
 `pull_request_target` to execute contributor code.
 
-Keep commits focused and sign them off for DCO. Update tests and public docs in
-the same pull request. Contract changes must include generated output and typed
+Keep commits focused and sign them off for DCO. Update public docs and the
+existing functional coverage when behavior changes, following
+[Tests and CI](testing.md); a source edit does not require a new test file.
+Contract changes must include generated output and typed
 client adoption. Maintainers alone run release, signing, deployment, and stable
 promotion workflows.
 

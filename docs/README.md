@@ -22,6 +22,7 @@
 - [One-command installation: Linux, macOS and Windows](installation/script-install.md)
 - [Supported agents: versions and installation](supported_agents/README.md)
 - [Build and test](development/build-test.md)
+- [Tests and CI: functional coverage, speed and reliability](development/testing.md)
 - [Fork-based development](development/fork-workflow.md)
 - [Local data and predecessor upgrades](development/data-and-upgrades.md)
 - [Public CI architecture](ci/public-ci.md)
