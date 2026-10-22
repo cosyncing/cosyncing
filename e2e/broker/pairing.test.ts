@@ -119,7 +119,7 @@ afterAll(async () => {
   await installed?.stop();
 });
 
-test('route proofs and read-only checks bind identity, caller and exact browser origins', async () => {
+test('route proofs and read-only checks bind identity and caller; CORS trusts exact browser origins only', async () => {
   const configuration = (await owner.get('/api/connection/configuration')).body;
   const browserOrigin = 'https://app.example.test';
   const device = await pairDevice(owner, { peerId: 'route-check-device' });
@@ -145,7 +145,38 @@ test('route proofs and read-only checks bind identity, caller and exact browser 
       ['GET', '/api/storage/items'], ['POST', '/api/storage/cleanup-plans'], ['POST', '/api/storage/cleanup-jobs'],
       ['GET', '/api/storage/cleanup-jobs/unknown'], ['POST', '/api/storage/cleanup-jobs/unknown/cancel'],
     ] as const) expect((await peer.request(method, path, method === 'POST' ? {} : undefined)).status).toBe(403);
-    expect((await owner.get('/api/connection/check', { origin: browserOrigin })).status).toBe(403);
+    const params = { clientVersion: 'e2e', contractRevision: String(BROKER_CONTRACT_REVISION),
+      minimumBrokerRevision: String(CLIENT_MINIMUM_BROKER_CONTRACT_REVISION), contractSurfaceHash: BROKER_CONTRACT_SURFACE_HASH };
+    // Bun's native client accepts headers; the shared DOM declaration only
+    // exposes the browser constructor's protocols argument.
+    const NativeWebSocket = WebSocket as typeof WebSocket & {
+      new (url: string, options: { headers: Record<string, string> }): WebSocket;
+    };
+    const readOnlyCheck = (wsAuthTicket: string, origin: string) => new Promise<any[]>((resolve, reject) => {
+      const frames: any[] = [];
+      const url = `${broker.wsUrl}/api/connection/check/ws?wsAuthTicket=${encodeURIComponent(wsAuthTicket)}`;
+      const socket = new NativeWebSocket(url, { headers: { origin } });
+      const deadline = setTimeout(() => { socket.close(); reject(new Error('Read-only check did not close')); }, 10000);
+      socket.onmessage = (event) => frames.push(JSON.parse(String(event.data)));
+      socket.onerror = () => { clearTimeout(deadline); reject(new Error('Read-only check failed')); };
+      socket.onclose = () => { clearTimeout(deadline); resolve(frames); };
+    });
+    // Origin is not an access check: an untrusted page gets no CORS grant, so
+    // its browser can neither read this nor preflight a credentialed request.
+    const untrusted = await owner.get('/api/connection/check', { origin: browserOrigin });
+    expect(untrusted.status).toBe(200);
+    expect(untrusted.headers.get('access-control-allow-origin')).toBeNull();
+    const untrustedPreflight = await anonymous.request('OPTIONS', '/api/storage/cleanup-plans', undefined, {
+      origin: browserOrigin, 'access-control-request-method': 'POST',
+      'access-control-request-headers': 'content-type,x-cosyncing-token',
+    });
+    expect(untrustedPreflight.headers.get('access-control-allow-origin')).toBeNull();
+    // Behind a TLS-terminating proxy (Tailscale serve, Caddy) the broker sees
+    // http://host while its own page sends Origin: https://host.
+    const proxiedPage = broker.url.replace(/^http:/, 'https:');
+    const proxiedTicket = await peer.post('/api/ws-auth-tickets', { audience: 'connection-check', params }, { origin: proxiedPage });
+    expect(proxiedTicket.status).toBe(201);
+    expect((await readOnlyCheck(proxiedTicket.body.wsAuthTicket, proxiedPage))[0]?.kind).toBe('connection-check');
     const allowed = await owner.post('/api/connection/configuration', {
       ...configuration, trustedClientOrigins: [browserOrigin],
     });
@@ -171,29 +202,15 @@ test('route proofs and read-only checks bind identity, caller and exact browser 
     const refused = await anonymous.get('/api/connection/check', { origin: browserOrigin });
     expect(refused.status).toBe(401);
     expect(refused.headers.get('access-control-allow-origin')).toBe(browserOrigin);
-    expect((await owner.get('/api/connection/check', { origin: `${browserOrigin}.evil.test` })).status).toBe(403);
+    const lookalike = await owner.get('/api/connection/check', { origin: `${browserOrigin}.evil.test` });
+    expect(lookalike.headers.get('access-control-allow-origin')).toBeNull();
     const checked = await peer.get('/api/connection/check', { origin: browserOrigin });
     expect(checked.status).toBe(200);
     expect(checked.body.identityPublicKey).toBe(proof.body.identityPublicKey);
     expect(checked.body.principalId).not.toBe((await owner.get('/api/connection/check')).body.principalId);
-    const params = { clientVersion: 'e2e', contractRevision: String(BROKER_CONTRACT_REVISION),
-      minimumBrokerRevision: String(CLIENT_MINIMUM_BROKER_CONTRACT_REVISION), contractSurfaceHash: BROKER_CONTRACT_SURFACE_HASH };
     const ticket = await peer.post('/api/ws-auth-tickets', { audience: 'connection-check', params }, { origin: browserOrigin });
     expect(ticket.status).toBe(201);
-    const url = `${broker.wsUrl}/api/connection/check/ws?wsAuthTicket=${encodeURIComponent(ticket.body.wsAuthTicket)}`;
-    const frames: any[] = [];
-    await new Promise<void>((resolve, reject) => {
-      // Bun's native client accepts headers; the shared DOM declaration only
-      // exposes the browser constructor's protocols argument.
-      const NativeWebSocket = WebSocket as typeof WebSocket & {
-        new (url: string, options: { headers: Record<string, string> }): WebSocket;
-      };
-      const socket = new NativeWebSocket(url, { headers: { origin: browserOrigin } });
-      const deadline = setTimeout(() => { socket.close(); reject(new Error('Read-only check did not close')); }, 10000);
-      socket.onmessage = (event) => frames.push(JSON.parse(String(event.data)));
-      socket.onerror = () => { clearTimeout(deadline); reject(new Error('Read-only check failed')); };
-      socket.onclose = () => { clearTimeout(deadline); resolve(); };
-    });
+    const frames = await readOnlyCheck(ticket.body.wsAuthTicket, browserOrigin);
     expect(frames).toHaveLength(1);
     expect(frames[0]).toMatchObject({ kind: 'connection-check', principalId: checked.body.principalId,
       identityPublicKey: checked.body.identityPublicKey, authGeneration: checked.body.authGeneration });

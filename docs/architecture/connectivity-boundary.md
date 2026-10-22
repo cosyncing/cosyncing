@@ -35,7 +35,11 @@ not automatically stored as broker configuration, reused for later offers, or
 treated as a lifecycle-owned endpoint. Separately, an owner can explicitly
 advertise approved origins for signed address verification. This allowlist does
 not create or operate those routes. Browser-client origins have their own
-allowlist and do not inherit trust from an advertised broker origin.
+allowlist and do not inherit trust from an advertised broker origin. That list
+only grants cross-origin browser access (CORS) to a web client loaded from
+another address. It is not an access check: the app served through a broker's
+own route needs no entry, and requests from other origins are served without
+CORS headers rather than refused.
 
 The URL may also be omitted from an offer. In that case the client must obtain
 the reachable Broker URL separately before it can accept the offer. This keeps

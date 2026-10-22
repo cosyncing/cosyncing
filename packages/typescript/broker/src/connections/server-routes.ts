@@ -153,11 +153,11 @@ export class ServerRoutes {
     return { ...proof, signature: this.signer.sign(identityProofBytes(proof)) };
   }
 
-  allowsClient(origin: string, target: string): boolean {
+  /** Owner-approved cross-origin web clients; a page served by this broker needs no entry. */
+  trustsClient(origin: string): boolean {
     try {
-      return (
-        canonicalRouteOrigin(origin) === canonicalRouteOrigin(target) ||
-        this.config.trustedClientOrigins.includes(canonicalRouteOrigin(origin))
+      return this.config.trustedClientOrigins.includes(
+        canonicalRouteOrigin(origin)
       );
     } catch {
       return false;
@@ -195,7 +195,16 @@ const requestHeaders = [
   'x-cosyncing-upload-offset',
 ];
 
-/** Applies to API errors as well as probe success. Preflight confers no authority. */
+/**
+ * CORS for owner-trusted cross-origin web clients, on API errors as well as
+ * probe success. Preflight confers no authority. Other origins are served
+ * without CORS headers rather than refused: every data-bearing API needs a
+ * header credential or a one-use ticket, which a browser never attaches by
+ * itself, and without these headers a foreign page can neither read a response
+ * nor send a preflighted request. The broker cannot tell its own pages apart by
+ * origin anyway: behind a TLS-terminating proxy it sees `http://host` while the
+ * page sends `Origin: https://host`, and proxies may rewrite the host too.
+ */
 export function withServerRouteOrigins<T>(
   routes: ServerRoutes,
   handler: (
@@ -209,14 +218,10 @@ export function withServerRouteOrigins<T>(
     if (
       !origin ||
       !url.pathname.startsWith('/api/') ||
-      url.pathname.startsWith('/api/media-previews/')
+      url.pathname.startsWith('/api/media-previews/') ||
+      !routes.trustsClient(origin)
     )
       return handler(request, server);
-    if (!routes.allowsClient(origin, url.origin))
-      return new Response('Client origin is not approved by this server', {
-        status: 403,
-        headers: { vary: 'Origin', 'cache-control': 'no-store' },
-      });
     let response: Response | undefined;
     if (request.method === 'OPTIONS') {
       const method = request.headers.get('access-control-request-method') ?? '';

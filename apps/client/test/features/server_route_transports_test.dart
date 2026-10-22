@@ -413,6 +413,36 @@ void main() {
           wrong.close(force: true);
         }
       }
+      // Saved addresses usually omit the scheme's default port, as in
+      // https://host.example. A Direct route must still open its socket there.
+      // Tests cannot bind 443, so only the TCP target moves to the fixture's
+      // listener; URL handling and the destination check run unchanged.
+      final standardPort = BrokerRouteContext(
+        profileId: 'fixture',
+        incarnation: 'one',
+        routeId: 'standard-port',
+        routeGeneration: 1,
+        networkGeneration: 1,
+        origin: Uri.parse('https://127.0.0.1'),
+      );
+      await HttpOverrides.runWithHttpOverrides(() async {
+        final socket = routeSocketAdapter(
+          standardPort,
+          'wss://127.0.0.1/stream',
+        );
+        final frames = StreamIterator(socket.messages);
+        try {
+          await socket.connect();
+          expect(
+            await frames.moveNext().timeout(const Duration(seconds: 10)),
+            isTrue,
+          );
+          expect(frames.current, {'kind': 'ready'});
+        } finally {
+          await frames.cancel();
+          await socket.close();
+        }
+      }, _StandardPortListener(config['tlsPort'] as int));
       final control = Dio();
       final evidence = (await control.get<Map<String, dynamic>>(
         'http://127.0.0.1:${config['controlPort']}/',
@@ -483,4 +513,16 @@ void main() {
     },
     timeout: const Timeout(Duration(seconds: 90)),
   );
+}
+
+/// Stands one local TLS listener in for a host's standard HTTPS port.
+final class _StandardPortListener extends HttpOverrides {
+  _StandardPortListener(this.port);
+  final int port;
+
+  @override
+  HttpClient createHttpClient(SecurityContext? context) =>
+      super.createHttpClient(context)
+        ..connectionFactory = (uri, _, _) =>
+            SecureSocket.startConnect(uri.host, port);
 }

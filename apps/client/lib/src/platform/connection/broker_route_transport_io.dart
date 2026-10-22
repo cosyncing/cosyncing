@@ -88,10 +88,24 @@ final class _PendingProxyConnections {
 
 /// WebSockets use the same destination checks, proxy and secret generation.
 WebSocketAdapter routeSocketAdapter(BrokerRouteContext context, String url) {
+  final target = _withDefaultPort(url);
   context
     ..validatePath(native: true)
-    ..requireDestination(Uri.parse(url));
-  return _RouteWebSocket(context, url);
+    ..requireDestination(Uri.parse(target));
+  return _RouteWebSocket(context, target);
+}
+
+/// dart:io knows no default port for ws/wss: it rebuilds `wss://host/path` as
+/// `https://host:0/path`, which fails the destination check and would name
+/// port 0 to a proxy. Spell out the scheme's default port instead.
+String _withDefaultPort(String url) {
+  final uri = Uri.parse(url);
+  if (uri.hasPort) return url;
+  return switch (uri.scheme) {
+    'wss' => uri.replace(port: 443).toString(),
+    'ws' => uri.replace(port: 80).toString(),
+    _ => url,
+  };
 }
 
 /// Native streaming clients share the exact proxy and destination policy.
