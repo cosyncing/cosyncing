@@ -11,6 +11,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+## 0.8.1 — 2026-10-22
+
 ### Fixed
 
 - The web client served through an HTTPS reverse proxy, such as Tailscale
