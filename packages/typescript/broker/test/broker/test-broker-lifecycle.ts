@@ -92,6 +92,7 @@ import {
   type UpgradeServiceController,
 } from '../../src/updates/release-upgrade.ts';
 import { renderPostUpgradeChecks } from '../../src/updates/post-upgrade-check.ts';
+import { readUpgradeFailureDiagnostic, upgradeFailureDiagnosticPath } from '../../src/updates/upgrade-diagnostics.ts';
 import { preparedUpgradeInput, stageUpgradeArtifacts } from '../../src/updates/prepared-upgrade.ts';
 import { verifyUpgradeCandidate } from '../../src/updates/release-upgrade.ts';
 import { UpdateOperationStore } from '../../src/updates/update-operation-store.ts';
@@ -498,6 +499,50 @@ function installAgentSkills(m: Machine): ReturnType<typeof agentSkillTargets> {
 
 const cleanup: string[] = [];
 try {
+  {
+    // Exercise process exit as well as the returned value: an uncancelled
+    // deadline is invisible in-process, and a large doctor JSON can fill a pipe.
+    const root = mkdtempSync(join(tmpdir(), 'cosyncing-lifecycle-update-output-'));
+    cleanup.push(root);
+    const entry = join(root, 'update-child.ts');
+    const program = 'process.stderr.write("e".repeat(131072)); process.stdout.write(JSON.stringify({rows:"x".repeat(131072)}));';
+    writeFileSync(entry, `import { defaultRunBinary } from ${JSON.stringify(join(import.meta.dir, '../../src/updates/release-upgrade.ts'))};
+console.log('[update-child-ready]');
+const result = await defaultRunBinary(process.execPath, ['-e', ${JSON.stringify(program)}], 30000);
+console.log('[update-command-complete]');
+console.log(JSON.stringify({status:result.status, rows:JSON.parse(result.stdout).rows.length, stderrBytes:result.stderr.length}));`);
+    const child = Bun.spawn([process.execPath, entry], { env: isolatedBrokerFixtureEnvironment(root),
+      stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const arm = (milliseconds: number): void => {
+      clearTimeout(timer);
+      timer = setTimeout(() => child.kill('SIGKILL'), milliseconds);
+    };
+    // The command has its own 30s hang bound. Start the shorter process-exit
+    // watchdog only after it returns, so Windows process startup is not
+    // mistaken for a completed command retaining its deadline timer.
+    arm(60_000);
+    let ready = false; let completed = false; let readyText = '';
+    const capture = captureProcessOutput(child, { onAppend: (text) => {
+      readyText = (readyText + text).slice(-4096);
+      if (readyText.includes('[update-child-ready]')) ready = true;
+      if (!completed && readyText.includes('[update-command-complete]')) { completed = true; arm(10_000); }
+    } });
+    try {
+      const code = await child.exited;
+      await capture.done;
+      const output = capture.read();
+      let result: { status?: string; rows?: number; stderrBytes?: number } = {};
+      try { result = JSON.parse(output.trim().split(/\r?\n/).at(-1)!); } catch { /* retained below */ }
+      check('the updater child drains a large diagnostic report and exits without waiting for a completed deadline',
+        ready && completed && code === 0 && result.status === 'ok' && result.rows === 131072 && result.stderrBytes === 16384,
+        JSON.stringify({ code, ready, completed, output }));
+    } finally {
+      clearTimeout(timer);
+      if (child.exitCode === null) child.kill('SIGKILL');
+      await child.exited; await capture.done;
+    }
+  }
   await runDurablePermissionChecks(check);
   await runDesktopClientChecks(check);
   await runRuntimeUpgradeChecks(check);
@@ -2803,8 +2848,12 @@ try {
     artifact: { ...artifact, ...override }, keyId,
     sign: (payload) => sign(null, payload, privateKey),
   });
+  const upgradeEnvironment = (m: Machine) => isolatedBrokerFixtureEnvironment(m.root, { overrides: {
+      HOME: m.userHome, USERPROFILE: m.userHome, COSYNCING_HOME: m.home, COSYNCING_CACHE_DIR: m.cache,
+  } });
   const upgradeMachine = () => {
     const m = machine({ binaryHash: true }); cleanup.push(m.root);
+    const env = upgradeEnvironment(m);
     let active = true;
     let startFails = false;
     const service: UpgradeServiceController = {
@@ -2812,7 +2861,7 @@ try {
       async stop() { active = false; },
       async start() { if (startFails) throw new Error('fixture start failure'); active = true; },
     };
-    return { m, service, active: () => active, failStart: () => { startFails = true; } };
+    return { m, env, service, active: () => active, failStart: () => { startFails = true; } };
   };
   const fetcher = (manifest: ReleaseManifest, artifactBytes = candidate): typeof fetch =>
     (async (input: Parameters<typeof fetch>[0]) => {
@@ -2824,6 +2873,7 @@ try {
       return new Response(artifactBytes, { status: 200, headers: { 'content-length': String(artifactBytes.byteLength) } });
     }) as typeof fetch;
   const upgradeOptions = (fixture: ReturnType<typeof upgradeMachine>, manifest = signedManifest()) => ({
+    env: fixture.env,
     home: fixture.m.home,
     cacheRoot: fixture.m.cache,
     buildInfo: BUILD,
@@ -2847,7 +2897,7 @@ try {
         async stop() { active = false; },
         async start() { active = true; },
       };
-      return { m, service, active: () => active, failStart() {} };
+      return { m, env: upgradeEnvironment(m), service, active: () => active, failStart() {} };
     })();
     const rejected = await runUpgrade(upgradeOptions(fixture));
     check('upgrade requires a measured installed-binary receipt before downloading',
@@ -3328,6 +3378,7 @@ try {
       manifest = jsManifest(),
       sidecar = sidecarBytes,
     ) => ({
+      env: fixture.env,
       home: fixture.m.home,
       cacheRoot: fixture.m.cache,
       buildInfo: jsBuild,
@@ -3440,6 +3491,147 @@ try {
         check(`PR4 real served version ${reported ?? 'missing'} is checked after restart`,
           reported === '2.0.0' ? upgraded.status === 'complete' : upgraded.status === 'rolled-back', upgraded.detailCode);
       } finally { server.stop(true); }
+    }
+    for (const firstResponse of ['stalled-body', 'malformed-document'] as const) {
+      const fixture = upgradeMachine();
+      let first = true;
+      const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => {
+        if (!first) return Response.json({ version: '2.0.0' });
+        first = false;
+        if (firstResponse === 'malformed-document') return new Response('{', {
+          headers: { 'content-type': 'application/json' },
+        });
+        // Flush HTTP 200 and part of the body, then leave completion to the
+        // updater's request deadline. No timer races the request or the retry.
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) { controller.enqueue(new TextEncoder().encode('{')); },
+        }), { headers: { 'content-type': 'application/json' } });
+      } });
+      try {
+        writeBrokerConfig({ ...fixture.m.config, broker: { ...fixture.m.config.broker,
+          port: server.port!, internalUrl: server.url.origin } }, fixture.m.home);
+        const options = { ...jsUpgradeOptions(fixture), healthAttempts: undefined };
+        delete (options as Partial<typeof options>).verifyWebVersion;
+        const upgraded = await runUpgrade(options);
+        check(`CLI upgrade ${firstResponse === 'stalled-body'
+          ? 'retries a web body timeout after HTTP 200 and commits the healthy candidate'
+          : 'rolls back a complete malformed web document without treating it as a transport failure'}`,
+          firstResponse === 'stalled-body'
+            ? upgraded.status === 'complete' && readFileSync(fixture.m.binary).equals(jsBundle)
+              && !existsSync(join(fixture.m.home, 'upgrade-journal.json'))
+            : upgraded.status === 'rolled-back' && upgraded.failure?.phase === 'verifying-web'
+              && upgraded.failure.health?.statusCode === 200
+              && upgraded.failure.detail.includes('invalid version document')
+              && readFileSync(fixture.m.binary, 'utf8') === 'old-binary-v1', upgraded.summary);
+      } finally { server.stop(true); }
+    }
+    for (const readyAt of [4_500, Infinity]) {
+      const fixture = upgradeMachine();
+      let elapsed = 0;
+      const upgraded = await runUpgrade({ ...jsUpgradeOptions(fixture), healthAttempts: undefined,
+        healthClock: () => elapsed, sleep: async (milliseconds) => { elapsed += milliseconds; },
+        verifyBrokerVersion: async (_config, version) => version === '1.0.0' || elapsed >= readyAt });
+      check(`CLI upgrade ${Number.isFinite(readyAt) ? 'accepts a service starting beyond three seconds' : 'bounds an unresponsive startup and verifies rollback with a fresh budget'}`,
+        Number.isFinite(readyAt)
+          ? upgraded.status === 'complete' && elapsed === readyAt
+          : upgraded.status === 'rolled-back' && elapsed === 30_000
+            && upgraded.failure?.rollback === 'complete' && upgraded.failure.detail.includes('30000 ms')
+            && !existsSync(join(fixture.m.home, 'upgrade-journal.json')), upgraded.summary);
+    }
+    {
+      const fixture = upgradeMachine();
+      const server = Bun.serve({ hostname: '127.0.0.1', port: 0,
+        fetch: () => new Response('bad path', { status: 400 }) });
+      try {
+        writeBrokerConfig({ ...fixture.m.config, broker: { ...fixture.m.config.broker,
+          port: server.port!, internalUrl: server.url.origin } }, fixture.m.home);
+        let elapsed = 0;
+        const options = { ...jsUpgradeOptions(fixture), healthAttempts: undefined,
+          healthClock: () => elapsed, sleep: async (milliseconds: number) => { elapsed += milliseconds; } };
+        delete (options as Partial<typeof options>).verifyWebVersion;
+        writeSetupState({ serviceChoice: 'foreground' }, fixture.m.home);
+        const invoke = async (json: boolean) => {
+          let stdout = ''; let stderr = '';
+          const priorHome = process.env.COSYNCING_HOME;
+          process.env.COSYNCING_HOME = fixture.m.home;
+          try {
+            const code = await runCli(['upgrade', '--yes', ...(json ? ['--json'] : [])], {
+              buildInfo: jsBuild,
+              stdout: { write: (text) => { stdout += text; } },
+              stderr: { write: (text) => { stderr += text; } },
+              upgradeTransaction: () => runUpgrade(options),
+            });
+            return { code, stdout, stderr };
+          } finally {
+            if (priorHome === undefined) delete process.env.COSYNCING_HOME;
+            else process.env.COSYNCING_HOME = priorHome;
+          }
+        };
+        const { code, stdout, stderr } = await invoke(true);
+        const reported = JSON.parse(stdout);
+        const saved = readUpgradeFailureDiagnostic(fixture.m.home);
+        check('CLI update preserves the failing web endpoint, HTTP status and phase through successful rollback',
+          code === 3 && stderr === '' && reported.status === 'rolled-back'
+            && reported.failure?.phase === 'verifying-web'
+            && reported.failure?.health?.statusCode === 400
+            && reported.failure?.health?.endpoint === '/cosy/version.json'
+            && reported.summary.includes('HTTP 400') && reported.summary.includes('/cosy/version.json')
+            && reported.failure.rollback === 'complete' && reported.summary.includes('is answering'), stdout);
+        check('the owner-only update diagnostic survives the journal and candidate cleanup',
+          saved?.detail === reported.failure.detail
+            && saved?.fromVersion === '1.0.0' && saved?.toVersion === '2.0.0'
+            && inspectOwnerOnlyFile(upgradeFailureDiagnosticPath(fixture.m.home)).status === 'ok'
+            && !existsSync(join(fixture.m.home, 'upgrade-journal.json'))
+            && !existsSync(join(fixture.m.home, 'bin', 'cosyncing-web-2.0.0')),
+          JSON.stringify(saved));
+        const human = await invoke(false);
+        check('human update output names the failed probe and confirmed rollback instead of a generic sentence',
+          human.code === 3 && human.stderr.includes('verifying web') && human.stderr.includes('HTTP 400')
+            && human.stderr.includes('/cosy/version.json') && human.stderr.includes('is answering')
+            && human.stderr.includes(upgradeFailureDiagnosticPath(fixture.m.home)), human.stderr);
+        const inspect = fixture.service.inspect;
+        fixture.service.inspect = async () => { throw new Error('fixture scheduler query unavailable'); };
+        try {
+          const unavailable = await invoke(true);
+          const blocked = JSON.parse(unavailable.stdout);
+          check('an unreadable service state blocks before switching and reports its cause without mislabeling it as authorization',
+            unavailable.code === 1 && blocked.detailCode === 'upgrade-service-state-unavailable'
+              && blocked.failure?.phase === 'preparing' && blocked.summary.includes('fixture scheduler query unavailable')
+              && blocked.failure?.rollback === 'not-needed'
+              && !blocked.summary.includes('no longer authorized')
+              && readFileSync(fixture.m.binary, 'utf8') === 'old-binary-v1'
+              && !existsSync(join(fixture.m.home, 'upgrade-journal.json')), unavailable.stdout);
+        } finally { fixture.service.inspect = inspect; }
+        const success = await runUpgrade(jsUpgradeOptions(fixture));
+        check('a later successful update clears the obsolete failure diagnostic',
+          success.status === 'complete' && !readUpgradeFailureDiagnostic(fixture.m.home));
+      } finally { server.stop(true); }
+    }
+    {
+      const fixture = upgradeMachine();
+      const failed = await runUpgrade({ ...jsUpgradeOptions(fixture),
+        verifyBrokerVersion: async () => false });
+      check('rollback cannot report success when the restored broker does not answer',
+        failed.status === 'cleanup-required' && failed.failure?.rollback === 'incomplete'
+          && failed.failure.phase === 'verifying-broker'
+          && failed.failure.detail.includes('2.0.0') && failed.failure.rollbackDetail?.includes('1.0.0') === true
+          && existsSync(join(fixture.m.home, 'upgrade-journal.json'))
+          && existsSync(join(fixture.m.home, 'bin', 'cosyncing.previous')), failed.summary);
+      const stillUnready = await runUpgrade({ ...jsUpgradeOptions(fixture),
+        buildInfo: { ...jsBuild, version: '2.0.0' }, verifyBrokerVersion: async () => false });
+      check('a failed recovery retains the original update cause alongside its own recovery error',
+        stillUnready.fromVersion === '1.0.0' && stillUnready.toVersion === '2.0.0'
+          && stillUnready.failure?.detail === failed.failure?.detail
+          && stillUnready.failure?.phase === failed.failure?.phase
+          && stillUnready.failure?.rollback === 'incomplete'
+          && stillUnready.failure.rollbackDetail?.includes('1.0.0') === true,
+        JSON.stringify(stillUnready.failure));
+      const recovered = await runUpgrade(jsUpgradeOptions(fixture));
+      check('a later recovery verifies the restored service and retains the original failure cause',
+        recovered.recoveredInterruptedUpgrade && recovered.failure?.rollback === 'complete'
+          && recovered.failure.detail === failed.failure?.detail
+          && !existsSync(join(fixture.m.home, 'upgrade-journal.json')),
+        JSON.stringify(recovered));
     }
     for (const backend of ['systemd', 'launchd', 'windows']) {
       const fixture = upgradeMachine();
@@ -3735,7 +3927,7 @@ try {
       const fixture = upgradeMachine();
       const rolledBack = await runUpgrade({
         ...jsUpgradeOptions(fixture),
-        verifyBrokerVersion: async () => false,
+        verifyBrokerVersion: async (_config, version) => version === '1.0.0',
       });
       const state = inspectInstallState(fixture.m.home);
       check('a rolled-back upgrade leaves neither the candidate web root nor an unowned rollback copy',
@@ -3815,7 +4007,7 @@ try {
   }
   {
     const fixture = upgradeMachine();
-    const rolledBack = await runUpgrade({ ...upgradeOptions(fixture), verifyBrokerVersion: async () => false });
+    const rolledBack = await runUpgrade({ ...upgradeOptions(fixture), verifyBrokerVersion: async (_config, version) => version === '1.0.0' });
     check('failed candidate health restores the previous binary and service',
       rolledBack.exitCode === 3 && rolledBack.detailCode === 'upgrade-rolled-back'
         && readFileSync(fixture.m.binary, 'utf8') === 'old-binary-v1' && fixture.active());
@@ -3826,7 +4018,7 @@ try {
       version: 2,
       instanceId: 'broker_existing_revision17_fixture_1234567890',
     })}\n`, { mode: 0o600 });
-    const rolledBack = await runUpgrade({ ...upgradeOptions(fixture), verifyBrokerVersion: async () => false });
+    const rolledBack = await runUpgrade({ ...upgradeOptions(fixture), verifyBrokerVersion: async (_config, version) => version === '1.0.0' });
     check('a pre-existing authorization fence still permits rollback to a fence-aware broker',
       rolledBack.exitCode === 3 && rolledBack.detailCode === 'upgrade-rolled-back'
         && readFileSync(fixture.m.binary, 'utf8') === 'old-binary-v1' && fixture.active());
@@ -4061,7 +4253,7 @@ try {
       async start() { calls.push('start'); startedAt.push(pointer()); active = true; },
       versions,
     };
-    return { m, service, versionsRoot, pointer, startedAt, calls, active: () => active, failStart() {} };
+    return { m, env: upgradeEnvironment(m), service, versionsRoot, pointer, startedAt, calls, active: () => active, failStart() {} };
   };
   // The stop that has to precede a `restore` is the LAST one. The transaction stops the service before it
   // switches the binary, so an early `stop` proves nothing; what matters is that the undo stopped the
@@ -4110,7 +4302,7 @@ try {
     const fixture = versionedMachine();
     const rolledBack = await runUpgrade({
       ...upgradeOptions(fixture),
-      verifyBrokerVersion: async () => false,
+      verifyBrokerVersion: async (_config, version) => version === '1.0.0',
     });
     check('a rollback puts the pointer back before restarting, so the restored service is the old build',
       rolledBack.exitCode === 3 && rolledBack.detailCode === 'upgrade-rolled-back'
@@ -4221,6 +4413,25 @@ try {
         && fixture.pointer() === 'key-1.0.0'
         && !fixture.calls.includes('restore') && !fixture.calls.includes('apply'),
       `${recovered.detailCode}/${fixture.calls.join(',')}`);
+  }
+
+  {
+    const fixture = versionedMachine();
+    const versions = fixture.service.versions!;
+    const failed = await runUpgrade({ ...upgradeOptions(fixture), service: { ...fixture.service,
+      versions: { ...versions, plan: (...args) => {
+        const activation = versions.plan(...args)!;
+        return { ...activation, apply: async () => {
+          throw Object.assign(new Error('EACCES activating Windows service https://user:password@example.invalid/file?token=private-secret Bearer private-credential'), { code: 'EACCES' });
+        } };
+      } } } });
+    check('service activation failures retain the OS error while removing credential text from terminal and saved diagnostics',
+      failed.status === 'rolled-back' && failed.failure?.phase === 'activating-service'
+        && failed.failure.code === 'EACCES' && failed.summary.includes('EACCES')
+        && !JSON.stringify(failed).includes('private-secret') && !JSON.stringify(failed).includes('private-credential')
+        && !JSON.stringify(failed).includes('user:password')
+        && readUpgradeFailureDiagnostic(fixture.m.home)?.detail === failed.failure.detail,
+      failed.summary);
   }
 
   // CLI grammar keeps all lifecycle flags explicit and alias-aware.

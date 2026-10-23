@@ -817,7 +817,7 @@ async function upgradeChecks(check: Check, roots: string[]): Promise<void> {
     const before = f.snapshot();
     const hashes = [backend === 'systemd' ? 'service-systemd' : 'service-launchd', 'service-environment']
       .map((id) => resource(f, id)?.ownership.installedSha256);
-    const rolled = await runUpgrade({ ...dependencies(f, manifest), verifyBrokerVersion: async () => false });
+    const rolled = await runUpgrade({ ...dependencies(f, manifest), verifyBrokerVersion: async (_config, version) => version === '1.0.0' });
     check(`runtime upgrade (${backend}): a failed health check restores the broker, the service files, the launchers and the receipt`,
       rolled.exitCode === 3 && rolled.detailCode === 'upgrade-rolled-back'
         && JSON.stringify(f.snapshot()) === JSON.stringify(before)
@@ -912,7 +912,7 @@ async function upgradeChecks(check: Check, roots: string[]): Promise<void> {
     const g = fixture({ backend: 'none', layout: 'legacy', versions });
     planned.length = 0;
     const before = g.snapshot();
-    const rolled = await runUpgrade({ ...dependencies(g, manifest), verifyBrokerVersion: async () => false });
+    const rolled = await runUpgrade({ ...dependencies(g, manifest), verifyBrokerVersion: async (_config, version) => version === '1.0.0' });
     check('runtime upgrade (versioned service): a rollback restores the activation with the runtime it ran before',
       rolled.detailCode === 'upgrade-rolled-back'
         && JSON.stringify(restored) === JSON.stringify([{

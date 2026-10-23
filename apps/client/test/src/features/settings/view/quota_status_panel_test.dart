@@ -5,9 +5,18 @@ import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/design/ui_scale.dart';
 import 'package:cosyncing_client/src/features/settings/view/quota_status_panel.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  setUpAll(() async {
+    await (FontLoader('Lato')
+          ..addFont(rootBundle.load('assets/fonts/Lato-Regular.ttf'))
+          ..addFont(rootBundle.load('assets/fonts/Lato-Bold.ttf')))
+        .load();
+  });
+
   test('quota identities keep provider names separate from usage sources', () {
     expect(quotaProviderDisplayName('commandcode'), 'Command Code');
     expect(quotaProviderDisplayName('zai'), 'Z.ai');
@@ -109,6 +118,8 @@ void main() {
     Locale locale = const Locale('en'),
     Brightness brightness = Brightness.light,
     UiDensity density = UiDensity.compact,
+    bool reduceMotion = true,
+    bool tickersEnabled = true,
   }) {
     final spec = themeSpecById(kDefaultThemeId);
     final tokens = brightness == Brightness.dark ? spec.dark : spec.light;
@@ -116,19 +127,15 @@ void main() {
       locale: locale,
       localizationsDelegates: AppLocalizations.localizationsDelegates,
       supportedLocales: AppLocalizations.supportedLocales,
-      theme: buildAppTheme(
-        tokens,
-        brightness,
-        density: density.visualDensity,
+      theme: buildAppTheme(tokens, brightness, density: density.visualDensity),
+      builder: (context, child) => MediaQuery(
+        data: MediaQuery.of(context).copyWith(disableAnimations: reduceMotion),
+        child: TickerMode(enabled: tickersEnabled, child: child!),
       ),
       home: Scaffold(
         body: SingleChildScrollView(
           padding: const EdgeInsets.all(16),
-          child: QuotaStatusPanel(
-            quota: response,
-            loading: loading,
-            now: now,
-          ),
+          child: QuotaStatusPanel(quota: response, loading: loading, now: now),
         ),
       ),
     );
@@ -137,6 +144,28 @@ void main() {
   TokdashQuotaResponse freshQuota() {
     return quota(
       providers: {
+        'claude': providerJson(
+          id: 'claude',
+          buckets: [
+            bucketJson(
+              id: 'session',
+              remaining: 96,
+              resetsAt: now.add(const Duration(hours: 3)),
+            ),
+            bucketJson(
+              id: 'weekly_all',
+              label: 'Weekly',
+              remaining: 21,
+              resetsAt: now.add(const Duration(days: 1)),
+            ),
+            bucketJson(
+              id: 'weekly_scoped_fable',
+              label: 'Fable Weekly',
+              remaining: 100,
+              resetsAt: now.add(const Duration(days: 1)),
+            ),
+          ],
+        ),
         'codex': providerJson(
           id: 'codex',
           updatedAt: now.subtract(const Duration(minutes: 12)),
@@ -199,11 +228,17 @@ void main() {
             id: 'claude',
             estimated: true,
             buckets: [
-              bucketJson(id: 'session', remaining: 20),
+              bucketJson(id: 'session', remaining: 0),
               bucketJson(id: 'weekly_all', label: 'Weekly', remaining: 8),
             ],
           ),
-          'codex': providerJson(id: 'codex', buckets: [bucketJson()]),
+          'codex': providerJson(
+            id: 'codex',
+            buckets: [
+              bucketJson(remaining: 100),
+              bucketJson(id: '7d', label: 'Weekly', remaining: null),
+            ],
+          ),
         },
       );
       await tester.pumpWidget(buildSubject(response: response));
@@ -211,7 +246,70 @@ void main() {
 
       expect(find.text('Claude'), findsOneWidget);
       expect(find.text('Estimated'), findsOneWidget);
+      expect(find.text('0%'), findsOneWidget);
+      expect(find.text('100%'), findsOneWidget);
+      expect(find.text('—'), findsOneWidget);
       expect(tester.takeException(), isNull);
+
+      // Observe the painted reserve under the controlled widget clock. The
+      // app-driver journey covers reads; this visual scenario isolates motion
+      // and pause behavior from unrelated animations elsewhere in the app.
+      Future<List<int>> pixels() async => (await tester.runAsync(() async {
+        final image = await captureImage(
+          tester.element(
+            find.byKey(const Key('settings-quota-row-claude-weekly_all')),
+          ),
+        );
+        try {
+          return (await image.toByteData())!.buffer.asUint8List();
+        } finally {
+          image.dispose();
+        }
+      }))!;
+      await tester.pumpWidget(
+        buildSubject(response: response, reduceMotion: false),
+      );
+      final moving = await pixels();
+      await tester.pump(const Duration(seconds: 1));
+      expect(await pixels(), isNot(orderedEquals(moving)));
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      final inactive = await pixels();
+      await tester.pump(const Duration(seconds: 1));
+      expect(await pixels(), orderedEquals(inactive));
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pump(const Duration(seconds: 1));
+      expect(await pixels(), isNot(orderedEquals(inactive)));
+      await tester.pumpWidget(buildSubject(response: response));
+      final reduced = await pixels();
+      await tester.pump(const Duration(seconds: 1));
+      expect(await pixels(), orderedEquals(reduced));
+      await tester.pumpWidget(
+        buildSubject(
+          response: response,
+          reduceMotion: false,
+          tickersEnabled: false,
+        ),
+      );
+      final hidden = await pixels();
+      await tester.pump(const Duration(seconds: 1));
+      expect(await pixels(), orderedEquals(hidden));
+      tester.platformDispatcher.textScaleFactorTestValue = 2;
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      await tester.pumpWidget(buildSubject(response: response));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      expect(
+        tester
+            .getTopLeft(find.byKey(const Key('settings-quota-provider-codex')))
+            .dy,
+        greaterThan(
+          tester
+              .getTopLeft(
+                find.byKey(const Key('settings-quota-provider-claude')),
+              )
+              .dy,
+        ),
+      );
     });
 
     group('golden evidence', () {

@@ -1,4 +1,4 @@
-import { captureWindowsProcessSnapshot, windowsPathOwnedByCurrentUser, type WindowsProcessSnapshot } from '@cosyncing/adapter-api';
+import { captureWindowsProcessTable, windowsFfi, windowsPathOwnedByCurrentUser, type WindowsProcessSnapshot } from '@cosyncing/adapter-api';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync,
@@ -284,7 +284,22 @@ export function windowsDesktopClientRunning(snapshot: WindowsProcessSnapshot | n
 }
 
 export function desktopClientIsRunning(path: string): boolean {
-  if (process.platform === 'win32') return windowsDesktopClientRunning(captureWindowsProcessSnapshot(), path);
+  if (process.platform === 'win32') {
+    // Read actual executable paths through the OS. WMI startup and unrelated
+    // listener scans could exceed their deadline and skip a safe desktop update.
+    const native = windowsFfi();
+    const table = native ? captureWindowsProcessTable(() => native.processTable()) : null;
+    if (!table?.processesOk || !native) throw new Error('desktop-client-process-unknown');
+    const live: WindowsProcessSnapshot['processes'] = [];
+    for (const entry of table.processes) {
+      if (entry.name.toLowerCase() !== 'cosyncing.exe') continue;
+      let executable: string | null;
+      try { executable = native.processExecutablePath(entry.pid); }
+      catch { throw new Error('desktop-client-process-unknown'); }
+      if (executable !== null) live.push({ ...entry, executable });
+    }
+    return windowsDesktopClientRunning({ ...table, processes: live }, path);
+  }
   if (process.platform === 'linux') {
     for (const pid of readdirSync('/proc').filter((name) => /^\d+$/.test(name))) {
       const base = join('/proc', pid);

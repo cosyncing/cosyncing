@@ -47,6 +47,7 @@ import {
 } from '../../../adapters/claude/src/diagnostics.ts';
 import { BUILD_INFO } from '../../src/runtime/build-info.ts';
 import { runCli } from '../../src/cli/cli.ts';
+import { upgradeFailureDiagnosticPath } from '../../src/updates/upgrade-diagnostics.ts';
 import {
   translateDoctorTextToChinese,
 } from '../../src/cli/cli-i18n.ts';
@@ -1497,6 +1498,27 @@ try {
       pendingCheck?.status === 'fail' && !pending.ok && pending.summary.fail > 0
         && pendingCheck.remediation?.kind === 'command' && pendingCheck.remediation.command === 'cosyncing setup',
       JSON.stringify(pendingCheck));
+    rmSync(diagnosticPath);
+  }
+
+  {
+    const diagnosticPath = upgradeFailureDiagnosticPath(stateHome);
+    for (const rollback of ['complete', 'incomplete', 'pending', 'not-needed'] as const) {
+      atomicWriteOwnerOnly(diagnosticPath, JSON.stringify({ schemaVersion: 1,
+        recordedAt: '2026-10-23T10:00:00.000Z', fromVersion: '0.7.0', toVersion: '2.0.0',
+        phase: 'verifying-web', code: 'upgrade-health-check-failed',
+        detail: 'GET /cosy/version.json returned HTTP 400; expected version 2.0.0.', rollback }));
+      const report = observeDoctorReport(await collectDoctorReport({ buildInfo: BUILD_INFO,
+        context: aggregateContext, assetReport: inspectRuntimeAssets(), adapters: cleanAdapters, stateHome,
+        codexTuiReadiness: { status: 'ok', customSocket: false, staleCandidatePids: [], message: 'fixture-only raw message' } }));
+      const failure = report.sections.flatMap((section) => section.checks)
+        .find((item) => item.id === 'state.last-upgrade-failure');
+      check(`doctor reports the saved update cause with ${rollback} rollback`,
+        failure?.status === (rollback === 'complete' || rollback === 'not-needed' ? 'warn' : 'fail')
+          && failure.summary.includes('HTTP 400') && failure.summary.includes('/cosy/version.json')
+          && failure.evidence?.rollback === rollback && failure.remediation?.kind === 'command'
+          && failure.remediation.command === 'cosy update', JSON.stringify(failure));
+    }
     rmSync(diagnosticPath);
   }
 

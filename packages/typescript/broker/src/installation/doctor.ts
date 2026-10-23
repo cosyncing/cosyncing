@@ -70,6 +70,7 @@ import {
   type CodexTuiReadinessReport,
 } from '@cosyncing/adapter-codex/tui-presence';
 import { readSetupFailureDiagnostic, setupFailureDiagnosticPath } from './setup-transaction.ts';
+import { readUpgradeFailureDiagnostic, upgradeFailureDiagnosticPath } from '../updates/upgrade-diagnostics.ts';
 import { cliMessages, cliPaint } from '../cli/cli-i18n.ts';
 import type { SetupLanguage } from './setup-i18n.ts';
 import { diagnoseManagedRuntimeFailure } from '../runtime/managed-runtime-state.ts';
@@ -1123,6 +1124,25 @@ function setupFailureChecks(home: string, context: SetupDiagnosisContext): Setup
   }];
 }
 
+function upgradeFailureChecks(home: string, context: SetupDiagnosisContext): SetupCheck[] {
+  const failure = readUpgradeFailureDiagnostic(home);
+  if (!failure) return [];
+  const cleanupNeeded = failure.rollback === 'incomplete' || failure.rollback === 'pending';
+  return [{
+    id: 'state.last-upgrade-failure',
+    status: cleanupNeeded ? 'fail' : 'warn',
+    detailCode: `last-upgrade-${failure.code}`,
+    summary: `The last update failed during ${failure.phase.replaceAll('-', ' ')}: ${failure.detail}`
+      + (failure.rollbackDetail ? ` Recovery failed: ${failure.rollbackDetail}` : ''),
+    evidence: { recordedAt: failure.recordedAt, fromVersion: failure.fromVersion,
+      ...(failure.toVersion ? { toVersion: failure.toVersion } : {}), rollback: failure.rollback,
+      path: context.displayPath(upgradeFailureDiagnosticPath(home)) },
+    remediation: remediation('cosy update', cleanupNeeded
+      ? 'Preserve the upgrade journal and previous binary; retry the update to recover the interrupted transaction.'
+      : 'Address the reported cause, then retry the update.'),
+  }];
+}
+
 /**
  * Report every external agent host this installation has an ownership record
  * for, and say plainly whether it is still ours.
@@ -2033,6 +2053,7 @@ export async function collectDoctorReport(dependencies: DoctorDependencies): Pro
         )),
         ...agentSkillChecks(home, context),
         ...setupFailureChecks(home, context),
+        ...upgradeFailureChecks(home, context),
         ...managedHostChecks(home),
         ...durableDirectoryChecks(home, context),
         ...durableChecks(home, context),

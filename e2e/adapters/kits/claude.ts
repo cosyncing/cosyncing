@@ -32,7 +32,7 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, delimiter, join, relative, sep } from 'node:path';
+import { basename, delimiter, dirname, join, relative, sep } from 'node:path';
 import { eventually, fixturePath, type FixturePaths, type Frame, type SessionStream } from '../../harness/index.ts';
 import {
   appendRows,
@@ -499,24 +499,34 @@ function seedChild(fake: ClaudeFake, parent: SeededSession, uuid: string, title?
 // -------------------------------------------------------------------- extras
 
 /** A parent transcript's Agent tool_use row, and its child's meta + transcript. Returns what the roster and activity read. */
-function spawnSubagent(fake: ClaudeFake, parent: SeededSession, label: string, options: { background?: boolean } = {}) {
+function spawnSubagent(fake: ClaudeFake, parent: SeededSession, label: string, options: { background?: boolean; forkedSkill?: boolean } = {}) {
   const uuid = crypto.randomUUID();
   const agentId = uuid.replaceAll('-', '').slice(0, 17);
   const toolUseId = `toolu_${label}_${uuid.slice(0, 8)}`;
   const path = fake.transcriptOf(parent);
   const context = fake.contextOf(parent);
   const call = claudeAssistantRow(context, lastThreadUuid(path), `msg_agent_${uuid.slice(0, 8)}`, {
-    type: 'tool_use', id: toolUseId, name: 'Agent',
-    input: { description: label, subagent_type: 'general-purpose', prompt: `do ${label}`, ...(options.background ? { run_in_background: true } : {}) },
+    type: 'tool_use', id: toolUseId, name: options.forkedSkill ? 'Skill' : 'Agent',
+    input: options.forkedSkill ? { skill: 'code-review', args: '109' }
+      : { description: label, subagent_type: 'general-purpose', prompt: `do ${label}`, ...(options.background ? { run_in_background: true } : {}) },
   }, { stopReason: 'tool_use' });
   appendRows(path, [call]);
   const dir = join(path.replace(/\.jsonl$/, ''), 'subagents');
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, `agent-${agentId}.meta.json`), JSON.stringify({ agentType: 'general-purpose', description: label, toolUseId }));
+  writeFileSync(join(dir, `agent-${agentId}.meta.json`), JSON.stringify({ agentType: 'general-purpose', description: label,
+    ...(options.forkedSkill ? { name: 'code-review', spawnDepth: 1, requestShape: 'background', requestNonInteractive: true } : { toolUseId }) }));
+  if (options.forkedSkill) {
+    writeFileSync(join(dir, `agent-${agentId}.forked-skill.json`), JSON.stringify({ skillName: 'code-review', attributionName: 'code-review' }));
+    writeFileSync(join(dir, `agent-${agentId}.forked-skill.marker.json`), JSON.stringify({ forkedSkill: true, skillName: 'code-review' }));
+  }
   const childContext: TranscriptContext = { sessionId: context.sessionId, cwd: parent.cwd, entrypoint: 'cli' };
   const user: any = { ...claudeUserRow(childContext, null, `child prompt ${label}`), isSidechain: true, agentId };
   appendRows(join(dir, `agent-${agentId}.jsonl`), [user]);
-  if (options.background) {
+  if (options.forkedSkill) {
+    appendRows(path, [{ ...claudeToolResultRow(context, call.uuid, toolUseId,
+      'Skill "code-review" launched (forked execution, running in the background).\n\nRunning in the background as @code-review'),
+      toolUseResult: { success: true, commandName: 'code-review', status: 'forked', background: true, agentId, result: 'Running in the background as @code-review' } }]);
+  } else if (options.background) {
     appendRows(path, [claudeToolResultRow(context, call.uuid, toolUseId, `Async agent launched successfully.\nagentId: ${agentId} (internal ID)`)]);
   }
   return { agentId, toolUseId, call, childPath: join(dir, `agent-${agentId}.jsonl`) };
@@ -535,10 +545,6 @@ function taskNotification(fake: ClaudeFake, session: SeededSession, spawn: { age
     fake.appendRaw(session, [claudeUserRow(context, lastThreadUuid(path), payload, { extra: { origin: { kind: 'task-notification' } } })]);
   }
 }
-
-/** The `agent-activity` card keyed `agent:<toolUseId>`, last state first. */
-const activityOf = (stream: SessionStream, toolUseId: string): any[] =>
-  stream.messages().filter((message: any) => message.type === 'agent-activity' && message.key === `agent:${toolUseId}`);
 
 const claudeExtras: ConformanceExtra[] = [
   {
@@ -590,38 +596,105 @@ const claudeExtras: ConformanceExtra[] = [
     },
   },
   {
-    title: 'a subagent card runs while the parent waits, and is done once the parent holds its result',
+    title: 'subagents and forked skills appear, settle and replay in both roster and activity',
     async run(context) {
       const fake = context.fake as ClaudeFake;
-      const parent = fake.seedSession({ title: 'activity parent' });
-      const spawn = spawnSubagent(fake, parent, 'sweep the repo');
-      const observer = await context.client.attach('claude', parent.id);
-      await observer.waitForKind('history');
-      await observer.waitForMessage((message: any) => message.type === 'agent-activity' && message.key === `agent:${spawn.toolUseId}` && message.status === 'running');
-      const card = activityOf(observer, spawn.toolUseId).at(-1);
-      expect(card.kind).toBe('subagent');
-      expect(card.title).toBe('sweep the repo');
-      // The parent's tool_result is the end of a foreground agent.
-      fake.appendRaw(parent, [claudeToolResultRow(fake.contextOf(parent), spawn.call.uuid, spawn.toolUseId, 'the sweep is done')]);
-      await observer.waitForMessage((message: any) => message.type === 'agent-activity' && message.key === `agent:${spawn.toolUseId}` && message.status === 'done');
-      observer.close();
-    },
-  },
-  {
-    title: 'a background agent stays running past its launch ack until a task notification names it',
-    async run(context) {
-      const fake = context.fake as ClaudeFake;
-      for (const carrier of ['queue-operation', 'attachment'] as const) {
-        const parent = fake.seedSession({ title: `background parent ${carrier}` });
-        const spawn = spawnSubagent(fake, parent, `watch ${carrier}`, { background: true });
+      const parent = fake.seedSession({ title: 'subagent lifecycle' });
+      fake.setAgents([{ sessionId: claudeUuidOf(parent.id), status: 'busy' }]);
+      const streams: SessionStream[] = [];
+      try {
+        mkdirSync(join(fake.transcriptOf(parent).replace(/\.jsonl$/, ''), 'subagents'), { recursive: true });
         const observer = await context.client.attach('claude', parent.id);
+        streams.push(observer);
         await observer.waitForKind('history');
-        await observer.waitForMessage((message: any) => message.type === 'agent-activity' && message.key === `agent:${spawn.toolUseId}` && message.status === 'running');
-        // The launch ack was already read and did not finish it.
-        expect(activityOf(observer, spawn.toolUseId).every((message) => message.status !== 'done')).toBe(true);
-        taskNotification(fake, parent, spawn, carrier);
-        await observer.waitForMessage((message: any) => message.type === 'agent-activity' && message.key === `agent:${spawn.toolUseId}` && message.status === 'done');
-        observer.close();
+        const ctx = fake.contextOf(parent);
+        fake.appendRaw(parent, [claudeUserRow(ctx, lastThreadUuid(fake.transcriptOf(parent)), 'Launch the reviews in parallel.')]);
+        // One live parent and one heartbeat serve every lifecycle. Separate
+        // parents made each completion pay another watcher interval in CI.
+        const metadata = spawnSubagent(fake, parent, '/code-review metadata', { forkedSkill: true });
+        const notified = spawnSubagent(fake, parent, '/code-review notification', { forkedSkill: true });
+        const stopped = spawnSubagent(fake, parent, '/code-review stop', { forkedSkill: true });
+        rmSync(metadata.childPath.replace(/\.jsonl$/, '.forked-skill.json'));
+        rmSync(notified.childPath.replace(/\.jsonl$/, '.forked-skill.marker.json'));
+        const queued = spawnSubagent(fake, parent, 'queued background', { background: true });
+        const attached = spawnSubagent(fake, parent, 'attached background', { background: true });
+        const forks = [metadata, notified, stopped];
+        const backgrounds = [...forks, queued, attached];
+        const keyOf = (spawn: typeof metadata) => `agent:${forks.includes(spawn) ? `agent-${spawn.agentId}` : spawn.toolUseId}`;
+        const latest = (stream: SessionStream, key: string) => stream.messages().filter((m: any) => m.type === 'agent-activity' && m.key === key).at(-1);
+        const parkedAt = Date.now();
+        fake.appendRaw(parent, [claudeAssistantRow(ctx, lastThreadUuid(fake.transcriptOf(parent)), 'reviews-launched', { type: 'text', text: 'Reviews are running.' }, { at: parkedAt, stopReason: 'end_turn' })]);
+        await observer.waitForFrame((frame) => frame.kind === 'session' && frame.info?.status === 'idle' && frame.info?.updatedAt === parkedAt);
+        await eventually(() => backgrounds.every((spawn) => latest(observer, keyOf(spawn))?.status === 'running'), { what: 'background agents still running after the parent returns to Idle' });
+        let roster: any[] = [];
+        await eventually(async () => {
+          roster = await context.client.sessions({ refresh: true });
+          return roster.find((row) => row.id === parent.id)?.status === 'idle' &&
+            backgrounds.every((spawn) => roster.some((row) => row.id === claudeRowId(spawn.childPath) && row.status === 'working'));
+        }, { what: 'working background children beneath an idle parent in the roster' });
+        fake.appendRaw(parent, [claudeUserRow(ctx, lastThreadUuid(fake.transcriptOf(parent)), 'Wait for the reviews and summarize.')]);
+        const foreground = spawnSubagent(fake, parent, 'sweep the repo');
+        const spawns = [...forks, queued, attached, foreground];
+        const excluded = ['workflow-subagent', 'general-purpose'].map((agentType) => {
+          const path = join(dirname(metadata.childPath), `agent-excluded-${agentType}.jsonl`);
+          writeFileSync(path, readFileSync(metadata.childPath));
+          writeFileSync(path.replace(/\.jsonl$/, '.meta.json'), JSON.stringify({ agentType, requestShape: 'background' }));
+          return claudeRowId(path);
+        });
+        await eventually(() => spawns.every((spawn) => latest(observer, keyOf(spawn))?.status === 'running'), { what: 'all standalone subagent cards running' });
+        await eventually(async () => {
+          roster = await context.client.sessions({ refresh: true });
+          return spawns.every((spawn) => roster.some((row) => row.id === claudeRowId(spawn.childPath) && row.status === 'working'));
+        }, { what: 'every spawned child in the working roster' });
+        const parentRow = roster.find((row) => row.id === parent.id)!;
+        expect(roster.some((row) => excluded.includes(row.id))).toBe(false);
+        expect(new Set(observer.messages().filter((m: any) => m.type === 'agent-activity').map((m: any) => m.key))).toEqual(new Set(spawns.map(keyOf)));
+        expect(latest(observer, keyOf(foreground)).title).toBe('sweep the repo');
+        for (const spawn of spawns) {
+          const child = roster.find((row) => row.id === claudeRowId(spawn.childPath))!;
+          expect(child).toMatchObject({ origin: 'subagent', parentThreadId: parentRow.nativeId });
+          expect(child.title).toBe(latest(observer, keyOf(spawn)).title);
+          expect(child.control?.drive?.supported).toBe(false);
+          expect(latest(observer, keyOf(spawn))).toMatchObject({ kind: 'subagent', agentsTotal: 1 });
+          expect(observer.messages().some((m: any) => m.type === 'agent-activity' && m.key === keyOf(spawn) && m.status === 'done')).toBe(false);
+        }
+        const children = await Promise.all(forks.map(async (spawn) => {
+          const stream = await context.client.attach('claude', claudeRowId(spawn.childPath));
+          streams.push(stream);
+          expect((await stream.waitForKind('session')).info).toMatchObject({
+            origin: 'subagent', status: 'working', parentThreadId: parentRow.nativeId,
+            title: latest(observer, keyOf(spawn)).title,
+          });
+          return stream;
+        }));
+        fake.appendRaw(parent, [claudeToolResultRow(ctx, foreground.call.uuid, foreground.toolUseId, 'the sweep is done')]);
+        taskNotification(fake, parent, queued, 'queue-operation');
+        taskNotification(fake, parent, attached, 'attachment');
+        taskNotification(fake, parent, notified, 'queue-operation');
+        const metaPath = metadata.childPath.replace(/\.jsonl$/, '.meta.json');
+        writeFileSync(metaPath, JSON.stringify({ ...JSON.parse(readFileSync(metaPath, 'utf8')), finished: true }));
+        const stopId = `stop_${stopped.agentId}`;
+        const stop = claudeAssistantRow(ctx, lastThreadUuid(fake.transcriptOf(parent)), stopId, {
+          type: 'tool_use', id: stopId, name: 'TaskStop', input: { task_id: stopped.agentId },
+        }, { stopReason: 'tool_use' });
+        fake.appendRaw(parent, [stop, claudeToolResultRow(ctx, stop.uuid, stopId, 'Stopped.')]);
+        const completedAt = Date.now();
+        fake.appendRaw(parent, [claudeAssistantRow(ctx, lastThreadUuid(fake.transcriptOf(parent)), 'all-agents-done', { type: 'text', text: 'All reviews finished.' }, { at: completedAt, stopReason: 'end_turn' })]);
+        await eventually(() => spawns.every((spawn) => latest(observer, keyOf(spawn))?.status === 'done'), { what: 'every subagent activity settled' });
+        await Promise.all(children.map((stream) => stream.waitForMessage((m: any) => m.type === 'status' && m.status === 'idle')));
+        await observer.waitForFrame((frame) => frame.kind === 'session' && frame.info?.status === 'idle' && frame.info?.updatedAt === completedAt);
+        await eventually(async () => {
+          roster = await context.client.sessions({ refresh: true });
+          return spawns.every((spawn) => roster.some((row) => row.id === claudeRowId(spawn.childPath) && row.status === 'idle'));
+        }, { what: 'the completed child roster' });
+        expect(roster.find((row) => row.id === parent.id)?.updatedAt).toBe(completedAt);
+        for (const stream of streams) stream.close();
+        const reopened = await context.client.attach('claude', parent.id);
+        streams.push(reopened);
+        await eventually(() => spawns.every((spawn) => latest(reopened, keyOf(spawn))?.status === 'done'), { what: 'completed subagents reconstructed on reconnect' });
+      } finally {
+        for (const stream of streams) stream.close();
+        fake.setAgents([]);
       }
     },
   },
@@ -679,18 +752,6 @@ const claudeExtras: ConformanceExtra[] = [
         for (const file of registered) rmSync(file, { force: true });
         fake.setAgents([]);
       }
-    },
-  },
-  {
-    title: 'a hung parent-spawned subagent child row is observe-only, titled by its spawn description',
-    async run(context) {
-      const fake = context.fake as ClaudeFake;
-      const parent = fake.seedSession({ title: 'roster parent' });
-      const spawn = spawnSubagent(fake, parent, 'index the docs');
-      const child = await context.client.waitForSession((row: any) => row.id === claudeRowId(spawn.childPath));
-      expect(child.title).toBe('index the docs');
-      expect(child.origin).toBe('subagent');
-      expect(child.control?.drive?.supported).toBe(false);
     },
   },
 ];

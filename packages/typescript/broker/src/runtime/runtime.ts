@@ -11,7 +11,7 @@ import { assertSupportedBrokerHost } from './assert-supported-host.ts';
 import { canSendBackgroundMessage } from '../sessions/background-compatibility.ts';
 import os from 'node:os';
 import { appendFileSync, closeSync, createReadStream, fstatSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import type { Server, ServerWebSocket } from 'bun';
@@ -5970,7 +5970,8 @@ function statusRank(s: SessionInfo): number {
 function resolveUnder(baseDir: string, rel: string): string | null {
   const base = resolve(baseDir);
   const abs = resolve(base, rel);
-  return abs === base || abs.startsWith(base + '/') ? abs : null;
+  const within = relative(base, abs);
+  return within !== '..' && !within.startsWith('..' + sep) && !isAbsolute(within) ? abs : null;
 }
 
 /** A request looks like a static ASSET (vs. a client-side NAVIGATION) when its last path segment has a

@@ -58,6 +58,8 @@ const ACCESS_DENIED_ACE_TYPE = 0x01;
 
 /** `PROCESS_QUERY_LIMITED_INFORMATION`: enough to read a process's command line, nothing more. */
 const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+/** Read a process handle's signaled state without waiting. */
+const SYNCHRONIZE = 0x0010_0000;
 /** `PROCESSINFOCLASS` `ProcessCommandLineInformation` (Windows 8.1 and later). */
 const PROCESS_COMMAND_LINE_INFORMATION = 60;
 /** `ERROR_INVALID_PARAMETER`: `OpenProcess` names no running process. */
@@ -198,6 +200,8 @@ export interface WindowsFfi {
    * say.
    */
   processCommandLine(pid: number): string | null;
+  /** Actual Win32 executable path; null if the process exited, throws if it cannot be inspected. */
+  processExecutablePath(pid: number): string | null;
   /**
    * Every process on the host (pid 0, the idle process, excepted), read-only and without a process
    * spawned: a Toolhelp snapshot for pid, parent pid and image name, then `GetProcessTimes` for each
@@ -264,6 +268,9 @@ function load(): WindowsFfi {
     CloseHandle: { args: [FFIType.i64], returns: FFIType.bool },
     GetProcessTimes: {
       args: [FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr], returns: FFIType.bool },
+    QueryFullProcessImageNameW: {
+      args: [FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.ptr], returns: FFIType.bool },
+    WaitForSingleObject: { args: [FFIType.ptr, FFIType.u32], returns: FFIType.u32 },
     GetSystemTimeAsFileTime: { args: [FFIType.ptr], returns: FFIType.void },
   }).symbols;
   let processList: ReturnType<typeof openProcessList> | undefined;
@@ -556,6 +563,41 @@ function load(): WindowsFfi {
       } finally {
         kernel32.symbols.CloseHandle(handle as never);
       }
+    },
+
+    processExecutablePath: (pid: number): string | null => {
+      if (!Number.isSafeInteger(pid) || pid <= 0 || pid > 0xffff_ffff) throw new Error('invalid process id');
+      const handle = kernel32.symbols.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, false, pid);
+      if (!handle) {
+        const error = kernel32.symbols.GetLastError();
+        if (error === ERROR_INVALID_PARAMETER) return null;
+        throw new Error(`the process could not be opened (Windows error ${error})`);
+      }
+      try {
+        const api = (processList ??= openProcessList());
+        const exited = (): boolean => {
+          // Exit time is undefined while a process is alive, and exit code 259
+          // can also be returned by an exited application. The handle's
+          // signaled state distinguishes both cases without a blocking wait.
+          const state = api.WaitForSingleObject(handle as never, 0);
+          if (state === 0) return true;
+          if (state === 258) return false;
+          throw new Error(`the process exit state could not be read (Windows error ${kernel32.symbols.GetLastError()})`);
+        };
+        if (exited()) return null;
+        const image = new Uint16Array(32_768);
+        const length = new Uint32Array([image.length]);
+        // Flag zero requests a Win32 path, matching installer receipts rather
+        // than the native device-path spelling. The length is in characters.
+        if (!api.QueryFullProcessImageNameW(handle as never, 0, ptr(image) as never, ptr(length) as never)) {
+          const error = kernel32.symbols.GetLastError();
+          if (exited()) return null;
+          throw new Error(`the process image could not be read (Windows error ${error})`);
+        }
+        if (exited()) return null;
+        if (!length[0] || length[0] >= image.length) throw new Error('the process image came back outside its buffer');
+        return Buffer.from(image.buffer, image.byteOffset, length[0] * 2).toString('utf16le');
+      } finally { kernel32.symbols.CloseHandle(handle as never); }
     },
 
     processTable: (): WindowsProcessTableEntry[] => {

@@ -30,6 +30,9 @@ import {
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 const ROSTER_TTL_MS = 1_500;
+// Match the production sweep bound explicitly. A polling client must allow
+// the sweep it started to finish, rather than impose the generic 20s UI wait.
+const ROSTER_SWEEP_BUDGET_MS = 45_000;
 
 const line = (value: unknown): string => `${JSON.stringify(value)}\n`;
 const ids = (sessions: any[]): string[] => sessions.map((session) => session.id);
@@ -174,6 +177,10 @@ describe('the session roster', () => {
         COSYNCING_CODEX_SYNC_SERVER: '0',
         COSYNCING_ROSTER_SAFETY_RECONCILE_MS: String(HOUR),
         COSYNCING_ROSTER_TTL_MS: String(ROSTER_TTL_MS),
+        COSYNCING_ROSTER_SWEEP_BUDGET_MS: String(ROSTER_SWEEP_BUDGET_MS),
+        // Process/listener queries must fit their normal probe budget even on
+        // a fresh Windows profile, without a previously discovered module cache.
+        ...(process.platform === 'win32' ? { PSModuleAnalysisCachePath: 'NUL' } : {}),
         // A cold caller waits for its whole sweep: no early answers here (the
         // discovery-bounds suite owns those), so every correction below is one
         // this file caused on purpose.
@@ -319,32 +326,33 @@ describe('the session roster', () => {
     const corrected = await eventually(async () => {
       const poll = await rosterSnapshot(client, { window, headers: { 'if-none-match': staleEtag } });
       return poll.status === 200 && ids(poll.body.sessions).includes(appears.id) ? poll.body : undefined;
-    }, { what: 'the roster to correct itself to include the new session' });
+    }, { timeoutMs: ROSTER_SWEEP_BUDGET_MS, what: 'the roster to correct itself to include the new session' });
     expect(corrected.revision).toBeGreaterThan(stale.body.revision);
     expect(ids(corrected.sessions)).toContain(pi.recent!.id);
     expect([stale.body.complete, corrected.complete]).toEqual([true, true]);
   });
 
-  test('the delta feed wakes on the next change, carries metadata and never transcript, and skips identical rows', async () => {
+  test('bridge registration, live completion and project order reach the roster as transcript-free deltas', async () => {
+    const feed = new RosterFeed(client);
+    await feed.start();
     const open = async (name: string): Promise<string> => {
       const hello = await client.post('/pi/bridge/hello', {
         sessionFile: join(broker.paths.root, `live-${name}.jsonl`), cwd: broker.paths.home, title: `live ${name}`,
       });
       expect(hello.status).toBe(200);
-      // A bridged session enters the feed with its first frame.
+      // Admission must happen before any native frame: a quiet, newly bridged
+      // session is already discoverable by a client following this feed.
+      await feed.waitFor((delta) => delta.sessionId === hello.body.id);
       await client.post('/pi/bridge/events', {
         id: hello.body.id, events: [{ t: 'status', running: true }, { t: 'status', running: false }],
       });
       return String(hello.body.id);
     };
-    const feed = new RosterFeed(client);
-    await feed.start();
     const first = await open('first');
     const second = await open('second');
     // Settle the hellos' own deltas, so the next poll can only be answered by what follows.
     await feed.waitFor((delta) => delta.sessionId === second && delta.session?.status === 'idle');
-    await feed.start();
-
+    const completedAt = Math.max(...feed.seen.map((delta) => delta.session?.updatedAt ?? 0)) + 1_000;
     const woken = feed.request(feed.cursor, 20_000);
     const marker = `transcript-text-${crypto.randomUUID()}`;
     await client.post('/pi/bridge/events', {
@@ -355,6 +363,7 @@ describe('the session roster', () => {
         { t: 'delta', key: 'pi:answer:1', delta: marker },
         { t: 'final', key: 'pi:answer:1', text: `${marker} final` },
         { t: 'token', input: 120, output: 40, cost: 0.01 },
+        { t: 'run-summary', key: 'pi:run:1', turnId: 'turn-1', status: 'done', startedAt: completedAt - 3_000, completedAt },
         { t: 'status', running: false },
       ],
     });
@@ -364,7 +373,9 @@ describe('the session roster', () => {
     feed.cursor = batch.revision;
     feed.seen.push(...batch.deltas);
     await feed.waitFor((delta) => delta.sessionId === first && delta.session?.status === 'working');
-    await feed.waitFor((delta) => delta.sessionId === first && delta.session?.status === 'idle');
+    await feed.waitFor((delta) => delta.sessionId === first && delta.session?.status === 'idle' && delta.session?.updatedAt === completedAt);
+    const snapshot = await rosterSnapshot(client);
+    expect(snapshot.body.sessions.filter((row) => row.id === first || row.id === second).map((row) => row.id)).toEqual([first, second]);
 
     const wire = JSON.stringify(feed.seen);
     expect(wire).not.toContain(marker);
@@ -379,24 +390,6 @@ describe('the session roster', () => {
     expect(feed.of(first, from)).toEqual([]);
   });
 
-  // The Pi extension sends no frame until the user acts, so the hello itself
-  // must journal the row: otherwise the delta feed (and a client polling with
-  // its ETag, answered 304) learns of the session only at its first frame.
-  test('a freshly bridged session reaches the delta feed before its first frame', async () => {
-    const feed = new RosterFeed(client);
-    await feed.start();
-    const hello = await client.post('/pi/bridge/hello', {
-      sessionFile: join(broker.paths.root, 'live-hello-only.jsonl'), cwd: broker.paths.home, title: 'hello only',
-    });
-    const fresh = String(hello.body.id);
-    // A later change on another session: the feed has moved past the hello.
-    const sentinel = await client.post('/pi/bridge/hello', {
-      sessionFile: join(broker.paths.root, 'live-sentinel.jsonl'), cwd: broker.paths.home, title: 'sentinel',
-    });
-    await client.post('/pi/bridge/events', { id: sentinel.body.id, events: [{ t: 'status', running: true }] });
-    await feed.waitFor((delta) => delta.sessionId === sentinel.body.id);
-    expect(feed.of(fresh)).not.toEqual([]);
-  });
 
   test('a 7-day client sees an idle row age out and a deleted file leave, as transcript-free removals', async () => {
     const window = '7d';
@@ -610,7 +603,14 @@ describe('the session roster', () => {
       expect(rows.find((row) => row.id === pi.recent!.id)?.appHidden).toBe(false);
       expect((await client.delete(`/api/sessions/${parent.tool}/${encodeURIComponent(parent.id)}/cache`)).status).toBe(200);
       await broker.restart();
-      rows = (await rosterSnapshot(other, { refresh: true })).body.sessions;
+      // A cold sweep can reach its discovery budget and return an explicitly
+      // incomplete roster. Wait for the complete representation before
+      // deciding whether the persisted visibility preference survived.
+      rows = await eventually(async () => {
+        const snapshot = await rosterSnapshot(other, { refresh: true });
+        expect(snapshot.status).toBe(200);
+        return snapshot.body.complete === true ? snapshot.body.sessions : undefined;
+      }, { timeoutMs: ROSTER_SWEEP_BUDGET_MS, what: 'a complete roster after cache clearing and restart' });
       expect(rows.find((row) => row.id === parent.id)?.appHidden).toBe(true);
       expect(rows.find((row) => row.id === child.id)?.appHidden).toBe(true);
       expect((await change(parent, false)).status).toBe(200);

@@ -342,7 +342,7 @@ export async function runDesktopClientChecks(check: Check): Promise<void> {
     }
     {
       const f = fixture(); const rolledBack = await runUpgrade({ ...f.options,
-        verifyBrokerVersion: async () => false });
+        verifyBrokerVersion: async (_config, version) => version === '1.0.0' });
       check('PR6B unhealthy broker never downloads or replaces client',
         rolledBack.status === 'rolled-back' && !f.events.includes('client-download') && oldClientPreserved(f));
     }

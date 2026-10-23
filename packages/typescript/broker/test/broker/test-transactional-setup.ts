@@ -3793,12 +3793,13 @@ try {
         process.stdout.write = originalWrite;
       }
       // clack's note() box word-wraps long lines (it split the token path mid-word in
-      // practice), so compare with ANSI codes, box-drawing borders, and all whitespace
+      // practice), so compare with ANSI codes, ASCII/Unicode box borders, and all whitespace
       // stripped from both sides rather than a literal substring -- stripping the same
       // characters from both sides preserves character order, so a wrapped path still
       // reconstructs correctly.
       const squash = (text: string): string => text
         .replace(/\x1b\[[0-9;]*m/g, '')
+        .replace(/^[ \t]*\|[ \t]?|[ \t]*\|[ \t]*$/gm, '')
         .replace(/[\u2500-\u257f\u25a0-\u25ff\s]/g, '');
       const plain = squash(captured);
       check('interactive outro shows the state directory, local app URL, and one token-file instruction, never the value',

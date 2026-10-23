@@ -2157,6 +2157,7 @@ class OpenCodeConnection implements SessionConnection {
     // is always correct regardless of cwd. Note /global/event wraps each event under a `payload`
     // envelope — unwrapped in handleEvent().
     let reconnectUntil = 0;
+    let connected = false;
     while (!this.closed) {
       const streamAbort = new AbortController();
       let idleTimer: ReturnType<typeof setTimeout> | undefined;
@@ -2175,6 +2176,11 @@ class OpenCodeConnection implements SessionConnection {
         if (!res.ok || !res.body) throw new Error(`OpenCode SSE failed: ${res.status}`);
         reconnectUntil = 0;
         const reader = res.body.getReader();
+        // The native store can advance while this stream is disconnected. Read
+        // it again after subscribing, so turns completed in the gap reach the
+        // client even when the new stream has no later event to announce them.
+        if (connected) this.emit({ type: 'history-reset' });
+        connected = true;
         const decoder = new TextDecoder();
         let buf = '';
         for (;;) {

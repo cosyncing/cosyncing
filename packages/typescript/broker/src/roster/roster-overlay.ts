@@ -65,6 +65,8 @@ function outranks(candidate: LiveOverlayEntry, held: LiveOverlayEntry): boolean 
  * of a session the broker currently owns; discovery reconcile and the watcher publication boundary
  * must use it identically or the two paths would journal different rows for the same state.
  *
+ * - Activity time: retain the newest native timestamp from either source. A
+ *   completed run can reach the owner before its store snapshot catches up.
  * - Control surface: never let the live owner weaken a stronger control claim the snapshot already
  *   carries — owner control/attach/current* fields apply only at equal-or-higher
  *   {@link controlPriority}.
@@ -75,6 +77,12 @@ function outranks(candidate: LiveOverlayEntry, held: LiveOverlayEntry): boolean 
  *   Real permission/question frames on the owned connection are the route to exact Needs input.
  */
 export function overlayAuthoritativeOwner(target: SessionInfo, owner: LiveOverlayEntry): void {
+  // Native completion can reach the owner before the store/discovery catches
+  // up. A stale snapshot must not undo that recency; a newer store date wins.
+  if (owner.info.updatedAt !== undefined &&
+      (target.updatedAt === undefined || owner.info.updatedAt > target.updatedAt)) {
+    target.updatedAt = owner.info.updatedAt;
+  }
   if (controlPriority(owner.info) >= controlPriority(target)) {
     target.attachMode = owner.info.attachMode;
     if (owner.info.control) target.control = owner.info.control;

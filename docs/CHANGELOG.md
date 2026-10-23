@@ -19,6 +19,44 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - Android workspace downloads keep reporting progress after switching servers
   or reconnecting, instead of staying at 0 bytes.
 - Artifact Technical details show the underlying save or preview error.
+- File-close notices dismiss automatically and include a close button. With
+  accessible navigation enabled, Undo remains available until dismissed.
+- Windows serves the web client and its version document correctly, allowing
+  signed updates to pass web verification instead of repeatedly rolling back.
+- Failed broker updates report the failing step and underlying health or service
+  error, retain details after rollback, and expose them in `cosy doctor`. When
+  the broker was running, rollback and interrupted-update recovery confirm it
+  answers before reporting success.
+- Update startup checks use a bounded 30-second readiness window, so Windows
+  service startup is not mistaken for failure after three seconds of connection
+  refusals. Transient web response-body failures also retry within that window,
+  including timeouts after HTTP 200 headers arrive.
+- Update child commands drain their output while running and cancel completed
+  deadlines, preventing large diagnostic reports from blocking an update or
+  keeping a finished command alive until its timeout.
+- Windows desktop-running checks use native process and executable-path queries,
+  preventing slow shell probes from skipping a safe desktop update.
+- Windows service commands load their PowerShell module directly, avoiding
+  repeated module-discovery delays during setup and updates on fresh profiles.
+- Windows process and listener probes load their system modules directly so
+  cold module discovery does not consume the probe budget and delay session discovery.
+- Windows scheduled tasks explicitly retain user ownership when setup runs
+  elevated, and security checks recognize Windows' equivalent account SID aliases.
+
+### Changed
+
+- Quotas show each limit as a liquid circle, with two providers per row on
+  phones and larger screens. Window labels, remaining percentages and reset
+  times stay visible; waves pause for reduced motion and inactive views.
+
+### Fixed
+
+- Finished sessions move into the correct recent order within their project
+  as soon as their completion reaches the app, without a roster refresh.
+- Claude Code skills launched in the background appear as subagents in the
+  session roster and activity bar, including their completion state.
+- OpenCode sessions recover answers completed while their event stream was
+  reconnecting, without requiring the session to be reopened.
 
 ## 0.8.1 — 2026-10-22
 

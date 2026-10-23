@@ -321,6 +321,8 @@ export const suites: Suite[] = [
         'e2e/broker/transcript-identity.test.ts',
         'e2e/broker/mutation-idempotency.test.ts',
         'e2e/broker/request-validation.test.ts',
+        'e2e/broker/in-app-updates.test.ts',
+        'e2e/packaging/broker-upgrade.test.ts',
         'packages/typescript/broker/test/sessions/resync-replay.test.ts',
         'packages/typescript/broker/test/sessions/protocol-journal-records.test.ts',
         'e2e/broker/history-paging.test.ts',

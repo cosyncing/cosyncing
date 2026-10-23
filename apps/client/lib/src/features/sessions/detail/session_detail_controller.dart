@@ -2295,6 +2295,7 @@ class SessionDetailController
           sessionId: sessionInfo.id,
           status: sessionInfo.status,
           rosterRevisionFloor: rosterState.revision,
+          updatedAt: sessionInfo.updatedAt,
         );
   }
 
