@@ -121,7 +121,7 @@ class FakeAndroidSaveAs {
   void Function()? beforeReply;
   bool ignoreCancellation = false;
   bool deferCancellation = false;
-  Object? cancelError;
+  Exception? cancelError;
   int? _activeRequest;
   final canceledRequests = <int>[];
   final returnedRequests = <int>[];
