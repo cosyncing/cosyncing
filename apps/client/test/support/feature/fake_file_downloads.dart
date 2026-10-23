@@ -110,8 +110,11 @@ class FakeAndroidSaveAs {
   PlatformException? error;
   Completer<void>? pending;
   void Function()? onCommitted;
+  bool ignoreCancellation = false;
+  bool deferCancellation = false;
   int? _activeRequest;
   final canceledRequests = <int>[];
+  final returnedRequests = <int>[];
 
   void install() {
     const channel = MethodChannel('com.cosyncing.client/file_export');
@@ -122,7 +125,9 @@ class FakeAndroidSaveAs {
             if (call.method == 'cancelSaveAs') {
               final id = args['requestId'] as int;
               canceledRequests.add(id);
-              if (_activeRequest == id && !(pending?.isCompleted ?? true)) {
+              if (!deferCancellation &&
+                  _activeRequest == id &&
+                  !(pending?.isCompleted ?? true)) {
                 pending!.complete();
               }
               return null;
@@ -134,11 +139,14 @@ class FakeAndroidSaveAs {
             requests.add(args);
             try {
               await pending?.future;
-              if (canceledRequests.contains(id)) return null;
+              if (canceledRequests.contains(id) && !ignoreCancellation) {
+                return null;
+              }
               if (error != null) throw error!;
               if (response != null) onCommitted?.call();
               return response;
             } finally {
+              returnedRequests.add(id);
               _activeRequest = null;
             }
           });

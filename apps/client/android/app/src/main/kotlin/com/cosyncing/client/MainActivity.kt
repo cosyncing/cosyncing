@@ -33,6 +33,16 @@ class MainActivity : FlutterActivity() {
         if (reattaching && savedInstanceState == null) forwardNotificationTap()
     }
 
+    override fun onResume() {
+        super.onResume()
+        FileExport.resume(this)
+    }
+
+    override fun onPause() {
+        FileExport.pause(this)
+        super.onPause()
+    }
+
     /**
      * Attaches a new activity to the app that kept running in the background
      * rather than starting a second one beside it.

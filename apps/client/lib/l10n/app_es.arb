@@ -2113,5 +2113,6 @@
       }
     }
   },
-  "transferSaveBusy": "Hay otro archivo guardándose. Vuelve a guardar cuando termine."
+  "transferSaveBusy": "Hay otro archivo guardándose. Vuelve a guardar cuando termine.",
+  "transferSaveDeferred": "Descargado. Pulsa Guardar para elegir un destino."
 }

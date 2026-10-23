@@ -817,6 +817,7 @@ void main() {
         // A 206 carrying no validator cannot guard the next range, so resuming
         // would be unsafe: it fails closed to one un-ranged fetch.
         expect(backend.wholeFetches, 1);
+        expect(cached.fileName, 'plain.txt');
         expect(await File(cached.cachedFilePath).readAsBytes(), bytes);
       },
     );

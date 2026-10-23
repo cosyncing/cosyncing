@@ -844,10 +844,7 @@ class _TransferRow extends ConsumerWidget {
     return ContextualDetails(
       label: transfer.fileName,
       detailsBuilder: isFailed
-          ? () => [
-              transfer.message,
-              failureDetail ?? transfer.error ?? transfer.message,
-            ].join('\n')
+          ? () => transfer.technicalDetail(failureDetail)
           : null,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
@@ -1120,10 +1117,7 @@ Future<void> _showTransferDetails(
     builder: (dialogContext) {
       return ContextualDetails(
         label: transfer.fileName,
-        detailsBuilder: () => [
-          transfer.message,
-          failureDetail ?? transfer.error ?? transfer.message,
-        ].join('\n'),
+        detailsBuilder: () => transfer.technicalDetail(failureDetail),
         child: AlertDialog(
           title: Text(
             l10n.transferDetailsTitle(transfer.fileName),
@@ -1291,7 +1285,7 @@ Future<void> _showTransferDetails(
           ),
           actions: [
             TextButton(
-              onPressed: () => Navigator.of(context).pop(),
+              onPressed: () => Navigator.of(dialogContext).pop(),
               child: Text(l10n.close),
             ),
           ],

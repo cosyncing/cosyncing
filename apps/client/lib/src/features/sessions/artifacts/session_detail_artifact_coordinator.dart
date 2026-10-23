@@ -239,7 +239,14 @@ extension _SessionDetailArtifactActions on SessionDetailController {
         );
         return false;
       case SessionArtifactTransferWorkerOutcome.cached:
-        return false;
+        _setArtifactActionState(
+          actionKey,
+          const SessionArtifactActionState(
+            phase: SessionArtifactActionPhase.idle,
+          ),
+        );
+        state = state.copyWith(clearError: true);
+        return true;
       case SessionArtifactTransferWorkerOutcome.enqueuedInBackground:
         // Artifact downloads never route to the background engine; keep the
         // switch exhaustive and treat a background enqueue as started.

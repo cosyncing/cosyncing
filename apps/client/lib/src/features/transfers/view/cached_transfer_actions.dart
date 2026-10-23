@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/components/contextual_details.dart';
 import 'package:cosyncing_client/src/errors/user_facing_error.dart';
@@ -96,6 +98,35 @@ class _CachedTransferActionsState extends ConsumerState<CachedTransferActions> {
 
   void _showError(String message, String? detail) {
     final l10n = AppLocalizations.of(context);
+    if (ModalRoute.of(context)?.opaque == false) {
+      // Dialog actions need a surface above their own barrier, rather than a
+      // snackbar on the page underneath it. Raw details remain opt-in.
+      unawaited(
+        showDialog<void>(
+          context: context,
+          builder: (errorContext) => AlertDialog(
+            title: Text(widget.transfer.fileName),
+            content: Text(message),
+            actions: [
+              if (detail != null)
+                TextButton(
+                  onPressed: () => showContextualDetails(
+                    errorContext,
+                    label: widget.transfer.fileName,
+                    detail: detail,
+                  ),
+                  child: Text(l10n.technicalDetails),
+                ),
+              TextButton(
+                onPressed: () => Navigator.of(errorContext).pop(),
+                child: Text(l10n.close),
+              ),
+            ],
+          ),
+        ),
+      );
+      return;
+    }
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(
@@ -210,6 +241,13 @@ extension TransferPresentation on SessionArtifactTransfer {
     SessionArtifactTransferStatus.canceled => l10n.transferStatusCanceled,
     SessionArtifactTransferStatus.failed => l10n.transferStatusFailed,
   };
+
+  /// Distinct friendly and technical lines for explicit error disclosure.
+  String technicalDetail(String? detail) => <String?>[message, detail ?? error]
+      .whereType<String>()
+      .where((value) => value.trim().isNotEmpty)
+      .toSet()
+      .join('\n');
 
   /// Destination label while filesystem actions keep using the cached copy.
   String? localizedLocalPath(AppLocalizations l10n) {

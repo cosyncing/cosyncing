@@ -160,7 +160,9 @@ jobs:
       - if: matrix.target == 'linux'
         run: flutter build linux --debug
       - if: matrix.target == 'android'
-        run: flutter build apk --debug
+        run: |
+          flutter build apk --debug
+          ./android/gradlew -p android :app:testDebugUnitTest --console=plain
 
   apple:
     name: ${{ matrix.target }} build

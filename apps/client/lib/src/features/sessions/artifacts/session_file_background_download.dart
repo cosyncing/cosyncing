@@ -171,7 +171,10 @@ class SessionFileBackgroundUpdateHub {
   Iterable<BackgroundDownloadRecord> get latest => _records.values.toList();
 
   /// Live updates for replaceable coordinators.
-  Stream<BackgroundDownloadRecord> get stream {
+  Stream<BackgroundDownloadRecord> get stream => _stream.stream;
+
+  /// Attaches the one native subscription explicitly before engine startup.
+  void start() {
     if (!_disposed) {
       _subscription ??= engine.updates().listen((record) {
         if (record.status == BackgroundDownloadTaskStatus.complete &&
@@ -187,7 +190,6 @@ class SessionFileBackgroundUpdateHub {
         _stream.add(record);
       }, onError: _stream.addError);
     }
-    return _stream.stream;
   }
 
   /// Drops both the retained update and the native tracking record.
@@ -297,6 +299,7 @@ class SessionFileBackgroundDownloadCoordinator {
       (record) => unawaited(_reconcileRecordSafely(record)),
       onError: (Object _) {},
     );
+    hub.start();
   }
 
   /// [_reconcileRecord] with the same failure containment [reconcile] applies.
@@ -529,6 +532,7 @@ class SessionFileBackgroundDownloadCoordinator {
       readyToSave = identical(hub._saveOffers.remove(record.taskId), this);
       await hub.forget(record.taskId);
     } finally {
+      hub._saveOffers.remove(record.taskId);
       hub._finalizing.remove(record.taskId);
     }
     if (readyToSave && canOfferSave(record.taskId) && onReadyToSave != null) {
@@ -547,7 +551,7 @@ class SessionFileBackgroundDownloadCoordinator {
         _owns(transfer) &&
         !_isTerminal(transfer) &&
         (isForeground?.call() ?? false) &&
-        cachedFileSaveSupportedOn(defaultTargetPlatform);
+        defaultTargetPlatform == TargetPlatform.android;
   }
 
   bool _owns(SessionArtifactTransfer transfer) {

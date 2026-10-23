@@ -495,15 +495,6 @@ final class FileSelectorArtifactSaveTargetProvider
   }
 }
 
-/// Whether the released native client can save a cached file to the device.
-bool cachedFileSaveSupportedOn(TargetPlatform platform) => switch (platform) {
-  TargetPlatform.android ||
-  TargetPlatform.linux ||
-  TargetPlatform.macOS ||
-  TargetPlatform.windows => true,
-  TargetPlatform.iOS || TargetPlatform.fuchsia => false,
-};
-
 /// Checks a cached filesystem copy at the native file-service boundary.
 bool cachedArtifactFileExists(String path) =>
     !kIsWeb && File(path).existsSync();
@@ -523,13 +514,10 @@ abstract interface class ArtifactExportTarget {
 /// Desktop save picker and filesystem copy.
 final class FileSelectorArtifactExportTarget implements ArtifactExportTarget {
   /// Creates a target with the existing desktop save picker.
-  const FileSelectorArtifactExportTarget(this.picker, {this.cancellationToken});
+  const FileSelectorArtifactExportTarget(this.picker);
 
   /// Local path picker.
   final ArtifactSaveTargetProvider picker;
-
-  /// Keeps desktop cancellation between destination selection and copying.
-  final SessionArtifactCancellationToken? cancellationToken;
 
   @override
   Future<String?> export({
@@ -542,7 +530,7 @@ final class FileSelectorArtifactExportTarget implements ArtifactExportTarget {
       suggestedName: suggestedName,
       mimeType: mimeType,
     );
-    (cancellationToken ?? this.cancellationToken)?.throwIfCanceled();
+    cancellationToken?.throwIfCanceled();
     if (destination == null) return null;
     await File(sourcePath).copy(destination);
     return destination;
@@ -562,10 +550,12 @@ final class AndroidArtifactExportTarget
   /// Creates the app-owned platform boundary.
   AndroidArtifactExportTarget();
 
-  final _names = <String, String>{};
+  String? _lastDestination;
+  String? _lastName;
 
   @override
-  String? exportedNameFor(String destination) => _names[destination];
+  String? exportedNameFor(String destination) =>
+      destination == _lastDestination ? _lastName : null;
 
   static const _channel = MethodChannel('com.cosyncing.client/file_export');
   static int _requestSequence = 0;
@@ -607,7 +597,8 @@ final class AndroidArtifactExportTarget
     if (result == null) cancellationToken?.throwIfCanceled();
     final uri = result?['uri'] as String?;
     final name = result?['displayName'] as String?;
-    if (uri != null && name != null && name.isNotEmpty) _names[uri] = name;
+    _lastDestination = uri;
+    _lastName = (name?.isNotEmpty ?? false) ? name : null;
     return uri;
   }
 }
@@ -1611,6 +1602,9 @@ final class DefaultSessionArtifactFileService
                 bytesTransferred: 0,
               ),
             );
+            // The whole-file writer may reuse this name once the abandoned
+            // partial is gone. Release before starting it, not on return.
+            release();
             return fetchWhole(resolvedMime);
           }
           if (range == null ||
@@ -1868,10 +1862,7 @@ final class DefaultSessionArtifactFileService
     try {
       final destination =
           await (_exportTarget ??
-                  FileSelectorArtifactExportTarget(
-                    _saveTargetProvider,
-                    cancellationToken: cancellationToken,
-                  ))
+                  FileSelectorArtifactExportTarget(_saveTargetProvider))
               .export(
                 sourcePath: artifact.cachedFilePath,
                 suggestedName: artifact.fileName,

@@ -28,6 +28,7 @@ import '../support/feature/transcript_wire.dart';
 void main() {
   for (final scenario in [
     'server switch',
+    'visible inactive',
     'paused',
     'paused on other server',
     'foreground on other server',
@@ -37,6 +38,10 @@ void main() {
     'restart',
     'cancel',
     'write failure',
+    'cancel row',
+    'cancel row after reconnect',
+    'late answer',
+    'row change',
     'share',
   ]) {
     featureTest('Android workspace download: $scenario', (f) async {
@@ -126,6 +131,17 @@ void main() {
         expect(engine.listens, 1);
       }
       if (scenario == 'cancel') save.response = null;
+      if (scenario == 'cancel row' ||
+          scenario == 'cancel row after reconnect' ||
+          scenario == 'late answer') {
+        save
+          ..pending = Completer<void>()
+          ..ignoreCancellation = scenario == 'late answer';
+      }
+      if (scenario == 'row change') {
+        save.onCommitted = () =>
+            controller.markFailed(id, 'Changed while saving');
+      }
       if (scenario == 'write failure') {
         save.error = PlatformException(
           code: 'write_failed',
@@ -143,6 +159,12 @@ void main() {
           scenario == 'paused on other server') {
         app.tester.binding.handleAppLifecycleStateChanged(
           AppLifecycleState.paused,
+        );
+        await app.settle();
+      }
+      if (scenario == 'visible inactive') {
+        app.tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.inactive,
         );
         await app.settle();
       }
@@ -246,20 +268,40 @@ void main() {
         await app.switchServer(firstProfile.id);
         await app.openFromRoster('s1', cwd: '/work/studio');
       }
+      if (scenario == 'cancel row' ||
+          scenario == 'cancel row after reconnect' ||
+          scenario == 'late answer') {
+        await _nativeUntil(app, () => save.requests.length == 1);
+        if (scenario == 'cancel row after reconnect') {
+          await app.tapKey('workspace-open-drawer');
+          await app.switchServer(otherProfile.id);
+          await app.switchServer(firstProfile.id);
+        }
+      }
       final expected = switch (scenario) {
         'paused' ||
         'paused on other server' ||
         'foreground on other server' ||
         'save queue' ||
+        'cancel row' ||
+        'cancel row after reconnect' ||
+        'late answer' ||
         'share' ||
         'restart' => SessionArtifactTransferStatus.cached,
         'cancel' => SessionArtifactTransferStatus.canceled,
-        'write failure' => SessionArtifactTransferStatus.failed,
+        'write failure' || 'row change' => SessionArtifactTransferStatus.failed,
         _ => SessionArtifactTransferStatus.completed,
       };
       await _nativeUntil(app, () => _row(app, id)?.status == expected);
       final cached = _row(app, id)!.cachedFilePath!;
       expect(File(cached).existsSync(), isTrue);
+      if (scenario == 'visible inactive') {
+        expect(save.requests, hasLength(1));
+        app.tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.resumed,
+        );
+        await app.settle();
+      }
       if (scenario == 'paused' ||
           scenario == 'share' ||
           scenario == 'save queue') {
@@ -301,6 +343,24 @@ void main() {
       }
       expect(find.byKey(Key('transfer-manager-save-$id')), findsOneWidget);
       expect(find.byKey(Key('transfer-manager-share-$id')), findsOneWidget);
+      if (scenario == 'cancel row' ||
+          scenario == 'cancel row after reconnect' ||
+          scenario == 'late answer') {
+        await app.tapKey('transfer-manager-cancel-$id');
+        await _nativeUntil(
+          app,
+          () =>
+              save.canceledRequests.length == 1 &&
+              _row(app, id)?.status == SessionArtifactTransferStatus.canceled,
+        );
+        expect(_row(app, id)!.exportedPath, isNull);
+        expect(File(cached).readAsStringSync(), 'download fixture');
+        expect(save.requests, hasLength(1));
+      }
+      if (scenario == 'row change') {
+        expect(_row(app, id)!.message, 'Changed while saving');
+        expect(_row(app, id)!.exportedPath, isNull);
+      }
       if (scenario == 'paused') {
         save.response = null;
         await app.tapKey('transfer-manager-save-$id');
@@ -412,6 +472,7 @@ void main() {
               matching: find.byType(ContextualDetails),
             )
             .first;
+        await app.reveal(diagnosticRow);
         await app.tester.longPressAt(
           app.tester.getTopLeft(diagnosticRow) + const Offset(4, 4),
         );
@@ -420,6 +481,51 @@ void main() {
           find.textContaining('Document provider refused the write'),
           findsOneWidget,
         );
+        await app.tapKey('contextual-details-close');
+        save
+          ..error = null
+          ..response = null;
+        await app.tapKey('transfer-manager-save-$id');
+        expect(_row(app, id)!.status, SessionArtifactTransferStatus.failed);
+        await app.reveal(diagnosticRow);
+        await app.tester.longPressAt(
+          app.tester.getTopLeft(diagnosticRow) + const Offset(4, 4),
+        );
+        await app.settle();
+        expect(
+          find.textContaining('Document provider refused the write'),
+          findsOneWidget,
+        );
+        await app.tapKey('contextual-details-close');
+        save
+          ..response = {
+            'uri': 'content://documents/manual.md',
+            'displayName': 'manual.md',
+          }
+          ..error = PlatformException(
+            code: 'write_failed',
+            message: 'Manual provider failure',
+          );
+        await app.tapKey('transfer-manager-details-$id');
+        await app.tapKey('transfer-manager-details-save-$id');
+        await app.tap(
+          find.widgetWithText(TextButton, 'Technical details').last,
+        );
+        expect(find.textContaining('Manual provider failure'), findsOneWidget);
+        await app.tapKey('contextual-details-close');
+        await app.tap(find.widgetWithText(TextButton, 'Close').last);
+        await app.tap(find.widgetWithText(TextButton, 'Close').last);
+        expect(_row(app, id)!.status, SessionArtifactTransferStatus.failed);
+        await app.reveal(diagnosticRow);
+        await app.tester.longPressAt(
+          app.tester.getTopLeft(diagnosticRow) + const Offset(4, 4),
+        );
+        await app.settle();
+        expect(
+          find.textContaining('Document provider refused the write'),
+          findsOneWidget,
+        );
+        expect(find.textContaining('Manual provider failure'), findsNothing);
         await app.tapKey('contextual-details-close');
         save.error = null;
         await app.tapKey('transfer-manager-retry-$id');
@@ -446,6 +552,7 @@ void main() {
               matching: find.byType(ContextualDetails),
             )
             .first;
+        await app.reveal(nextDiagnosticRow);
         await app.tester.longPressAt(
           app.tester.getTopLeft(nextDiagnosticRow) + const Offset(4, 4),
         );
@@ -465,86 +572,148 @@ void main() {
     }, platform: TargetPlatform.android);
   }
 
-  featureTest(
-    'Android agent artifact uses the system Save as channel',
-    (f) async {
-      final directory = Directory.systemTemp.createTempSync(
-        'artifact-download-feature-',
-      );
-      final previousPaths = PathProviderPlatform.instance;
-      PathProviderPlatform.instance = DownloadTemporaryPaths(directory.path);
-      addTearDown(() {
-        PathProviderPlatform.instance = previousPaths;
-        if (directory.existsSync()) directory.deleteSync(recursive: true);
-      });
-      final save = FakeAndroidSaveAs()
-        ..response = {
-          'uri': 'content://documents/review.md',
-          'displayName': 'review-saved.md',
+  for (final saveOutcome in ['saved', 'busy', 'no_activity', 'cancel retry']) {
+    featureTest(
+      'Android agent artifact uses the system Save as channel: $saveOutcome',
+      (f) async {
+        final directory = Directory.systemTemp.createTempSync(
+          'artifact-download-feature-',
+        );
+        final previousPaths = PathProviderPlatform.instance;
+        PathProviderPlatform.instance = DownloadTemporaryPaths(directory.path);
+        addTearDown(() {
+          PathProviderPlatform.instance = previousPaths;
+          if (directory.existsSync()) directory.deleteSync(recursive: true);
+        });
+        final save = FakeAndroidSaveAs()
+          ..response = {
+            'uri': 'content://documents/review.md',
+            'displayName': 'review-saved.md',
+          }
+          ..install();
+        if (saveOutcome == 'cancel retry') {
+          save
+            ..pending = Completer<void>()
+            ..deferCancellation = true;
+        } else if (saveOutcome != 'saved') {
+          save.error = PlatformException(code: saveOutcome);
         }
-        ..install();
-      final broker = f.network.add('http://studio.test:7734')
-        ..addSession('s1', 'Agent artifact');
-      // FakeBroker's existing GET-file route serves real artifact bytes through
-      // the production broker client and cache service; no new route is needed.
-      broker.files['/api/sessions/codex/s1/artifact/review'] =
-          const FakeBrokerResponse.text(200, 'Review fixture', {
-            'content-type': 'text/markdown',
-            'content-length': '14',
-            'x-content-hash': 'version-1',
-          });
-      broker.transcripts['s1'] = [
-        row('file-artifact', {
-          'artifactKey': 'review',
-          'contentHash': 'version-1',
-          'name': 'review.md',
-          'mimeType': 'text/markdown',
-          'size': 14,
-          'fetchUrl':
-              '/api/sessions/codex/s1/artifact/review'
-              '?expires=4102444800&sig=fixture',
-        }),
-      ];
-      await f.storage.seedServer(broker);
-      final app = await f.launch(
-        viewport: FeatureViewport.phone,
-        overrides: [
-          sessionFileBackgroundDownloaderProvider.overrideWithValue(null),
-        ],
-      );
-      await app.tapKey('workspace-open-drawer');
-      await app.openFromRoster('s1', cwd: '/work/studio');
-      await app.tap(find.text('Download').last);
-      await _nativeUntil(app, () => save.requests.isNotEmpty);
-      final controller = app.container.read(
-        sessionArtifactTransferControllerProvider.notifier,
-      );
-      await _nativeUntil(
-        app,
-        () => app.container
-            .read(sessionArtifactTransferControllerProvider)
-            .any(
-              (row) => row.status == SessionArtifactTransferStatus.completed,
-            ),
-      );
-      expect(save.requests.single['suggestedName'], 'review.md');
-      final rows = app.container.read(
-        sessionArtifactTransferControllerProvider,
-      );
-      expect(
-        controller.transferById(rows.single.id)!.exportedPath,
-        startsWith('content:'),
-      );
-      expect(rows.single.fileName, 'review.md');
-      expect(rows.single.savedFileName, 'review-saved.md');
-      expect(rows.single.message, 'Saved review-saved.md');
-      await app.go(transfersRoute);
-      expect(find.text('Saved to device: review-saved.md'), findsWidgets);
-      expect(find.textContaining('Saved'), findsWidgets);
-      expect(app.tester.takeException(), isNull);
-    },
-    platform: TargetPlatform.android,
-  );
+        final broker = f.network.add('http://studio.test:7734')
+          ..addSession('s1', 'Agent artifact');
+        // Serve artifact bytes through the real client/cache boundary.
+        // Reuse FakeBroker's GET-file route.
+        broker.files['/api/sessions/codex/s1/artifact/review'] =
+            const FakeBrokerResponse.text(200, 'Review fixture', {
+              'content-type': 'text/markdown',
+              'content-length': '14',
+              'x-content-hash': 'version-1',
+            });
+        broker.transcripts['s1'] = [
+          row('file-artifact', {
+            'artifactKey': 'review',
+            'contentHash': 'version-1',
+            'name': 'review.md',
+            'mimeType': 'text/markdown',
+            'size': 14,
+            'fetchUrl':
+                '/api/sessions/codex/s1/artifact/review'
+                '?expires=4102444800&sig=fixture',
+          }),
+        ];
+        await f.storage.seedServer(broker);
+        final app = await f.launch(
+          viewport: FeatureViewport.phone,
+          overrides: [
+            sessionFileBackgroundDownloaderProvider.overrideWithValue(null),
+          ],
+        );
+        await app.tapKey('workspace-open-drawer');
+        await app.openFromRoster('s1', cwd: '/work/studio');
+        await app.tap(find.text('Download').last);
+        await _nativeUntil(app, () => save.requests.isNotEmpty);
+        if (saveOutcome == 'cancel retry') {
+          final id = app.container
+              .read(sessionArtifactTransferControllerProvider)
+              .single
+              .id;
+          // Hold the retry's HTTP response so the old picker reply lands
+          // while the new attempt is running, independent of filesystem speed.
+          final retry = broker.hold(
+            'GET',
+            '/api/sessions/codex/s1/artifact/review',
+          );
+          await app.go(transfersRoute);
+          await app.tapKey('transfer-manager-cancel-$id');
+          await app.tapKey('transfer-manager-retry-$id');
+          await _nativeUntil(app, () => retry.pending == 1);
+          expect(_row(app, id)!.attemptCount, 1);
+          expect(_row(app, id)!.status, SessionArtifactTransferStatus.running);
+          save.pending!.complete();
+          save
+            ..pending = null
+            ..deferCancellation = false;
+          await _nativeUntil(app, () => save.returnedRequests.isNotEmpty);
+          expect(_row(app, id)!.status, SessionArtifactTransferStatus.running);
+          retry.release();
+          await _nativeUntil(
+            app,
+            () =>
+                _row(app, id)?.status ==
+                SessionArtifactTransferStatus.completed,
+          );
+          expect(_row(app, id)!.attemptCount, 1);
+        }
+        final controller = app.container.read(
+          sessionArtifactTransferControllerProvider.notifier,
+        );
+        await _nativeUntil(
+          app,
+          () => app.container
+              .read(sessionArtifactTransferControllerProvider)
+              .any(
+                (row) =>
+                    row.status ==
+                    (saveOutcome == 'saved' || saveOutcome == 'cancel retry'
+                        ? SessionArtifactTransferStatus.completed
+                        : SessionArtifactTransferStatus.cached),
+              ),
+        );
+        if (saveOutcome != 'saved' && saveOutcome != 'cancel retry') {
+          expect(app.visibleText, isNot(contains("Couldn't")));
+          expect(find.text('Downloading…'), findsNothing);
+          await app.go(transfersRoute);
+          final id = app.container
+              .read(sessionArtifactTransferControllerProvider)
+              .single
+              .id;
+          save.error = null;
+          await app.tapKey('transfer-manager-save-$id');
+          await _nativeUntil(
+            app,
+            () =>
+                _row(app, id)?.status ==
+                SessionArtifactTransferStatus.completed,
+          );
+        }
+        expect(save.requests.first['suggestedName'], 'review.md');
+        final rows = app.container.read(
+          sessionArtifactTransferControllerProvider,
+        );
+        expect(
+          controller.transferById(rows.single.id)!.exportedPath,
+          startsWith('content:'),
+        );
+        expect(rows.single.fileName, 'review.md');
+        expect(rows.single.savedFileName, 'review-saved.md');
+        expect(rows.single.message, 'Saved review-saved.md');
+        await app.go(transfersRoute);
+        expect(find.text('Saved to device: review-saved.md'), findsWidgets);
+        expect(find.textContaining('Saved'), findsWidgets);
+        expect(app.tester.takeException(), isNull);
+      },
+      platform: TargetPlatform.android,
+    );
+  }
 }
 
 SessionArtifactTransfer? _row(AppDriver app, String id) => app.container

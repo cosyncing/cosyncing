@@ -7141,5 +7141,6 @@
       }
     }
   },
-  "transferSaveBusy": "Another save is in progress. Try Save again when it finishes."
+  "transferSaveBusy": "Another save is in progress. Try Save again when it finishes.",
+  "transferSaveDeferred": "Downloaded. Use Save to choose a destination."
 }

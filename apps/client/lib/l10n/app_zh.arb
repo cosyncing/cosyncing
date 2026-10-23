@@ -3091,5 +3091,6 @@
       }
     }
   },
-  "transferSaveBusy": "另一个文件正在保存。完成后请再次点按保存。"
+  "transferSaveBusy": "另一个文件正在保存。完成后请再次点按保存。",
+  "transferSaveDeferred": "已下载。请点按保存以选择保存位置。"
 }
