@@ -332,6 +332,12 @@ describe('delivered files in the web client', () => {
       };
       const close = async (count: number): Promise<void> => {
         await page.getByRole('button', { name: 'Close', exact: true }).last().click();
+        // Dismiss the close notice before reviewing the next file: its Close
+        // button is separate from the next preview's Close button.
+        const undo = page.getByRole('button', { name: 'Undo', exact: true });
+        await undo.waitFor();
+        await page.getByRole('button', { name: 'Close', exact: true }).last().click();
+        await undo.waitFor({ state: 'hidden' });
         await eventually(() => released.length === count, { what: 'closed preview capability to be revoked' });
         await eventually(async () => (await fetch(released[count - 1]!)).status === 403, { what: 'closed preview access to stop' });
       };

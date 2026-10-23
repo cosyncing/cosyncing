@@ -915,14 +915,24 @@ Future<void> _pumpNativeIoUntil(
   WidgetTester tester,
   bool Function() condition,
 ) async {
-  for (var turn = 0; turn < 100 && !condition(); turn++) {
+  // A count of filesystem probes is not an I/O deadline: fast probes can
+  // exhaust the count before a pending create/write finishes under load.
+  const timeout = Duration(seconds: 20);
+  final elapsed = Stopwatch()..start();
+  var turns = 0;
+  while (!condition() && elapsed.elapsed < timeout) {
     // Intentional async I/O: a synchronous probe cannot yield to file
     // callbacks.
     // ignore: avoid_slow_async_io
     await tester.runAsync(() => Directory.systemTemp.exists());
     await tester.pump();
+    turns++;
   }
-  expect(condition(), isTrue, reason: 'native media I/O completed');
+  expect(
+    condition(),
+    isTrue,
+    reason: 'native media I/O completed in ${elapsed.elapsed} ($turns turns)',
+  );
 }
 
 class _TemporaryPaths extends PathProviderPlatform {
