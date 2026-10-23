@@ -31,6 +31,7 @@ Future<void> closeWorkspacePanes(
   final state = ref.read(filePanesControllerProvider).valueOrNull;
   final controller = ref.read(filePanesControllerProvider.notifier);
   final l10n = AppLocalizations.of(context);
+  final accessibleNavigation = MediaQuery.accessibleNavigationOf(context);
   final messenger = ScaffoldMessenger.maybeOf(context);
   final label = l10n.fileClosed(
     panes.map((pane) => sidePaneLabel(pane, l10n)).join(', '),
@@ -49,6 +50,8 @@ Future<void> closeWorkspacePanes(
   messenger!.showSnackBar(
     SnackBar(
       content: Text(label),
+      persist: accessibleNavigation,
+      showCloseIcon: true,
       action: SnackBarAction(
         label: undo,
         onPressed: () {

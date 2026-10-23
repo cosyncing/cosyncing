@@ -34,7 +34,8 @@ import '../support/session_detail_page_test_harness.dart'
 
 void main() {
   featureTest(
-    'phone retains pinned documents and reader choice across chat and restart',
+    'phone retains documents across chat and restart; close notices expire '
+    'and preserve accessible Undo',
     (f) async {
       final broker = f.network.add('http://studio.test:7734')
         ..addSession('s1', 'File review');
@@ -294,6 +295,44 @@ void main() {
       await app.openFromRoster('s1', cwd: '/work/studio');
       await app.tapKey('compact-manage-files');
       expect(visibleOrder(), ['log.md', 'plan.md', 'notes.md', 'todo.md']);
+
+      await app.tapKey('compact-files-close');
+      await app.tap(find.text('plan.md').first);
+      await app.tapKey('file-viewer-close');
+      await app.waitFor(find.text('Closed plan.md'));
+      await app.waitForAbsent(find.byType(SnackBar));
+      expect(find.text('plan.md'), findsNothing);
+
+      await app.tap(find.text('log.md').first);
+      await app.tapKey('file-viewer-close');
+      await app.waitFor(find.text('Closed log.md'));
+      final closeNotice = find.descendant(
+        of: find.byType(SnackBar),
+        matching: find.byTooltip(
+          MaterialLocalizations.of(
+            app.tester.element(find.byType(SnackBar)),
+          ).closeButtonTooltip,
+        ),
+      );
+      await app.tap(closeNotice);
+      await app.waitForAbsent(find.byType(SnackBar));
+      expect(find.text('log.md'), findsNothing);
+
+      app.tester.platformDispatcher.accessibilityFeaturesTestValue =
+          const FakeAccessibilityFeatures(accessibleNavigation: true);
+      addTearDown(
+        app.tester.platformDispatcher.clearAccessibilityFeaturesTestValue,
+      );
+      await app.settle();
+      await app.tap(find.text('notes.md').first);
+      await app.tapKey('file-viewer-close');
+      await app.waitFor(find.text('Closed notes.md'));
+      await app.elapse(const Duration(seconds: 8));
+      expect(find.text('Closed notes.md'), findsOneWidget);
+      await app.tap(find.text('Undo'));
+      await app.waitForAbsent(find.byType(SnackBar));
+      expect(find.byKey(const Key('file-viewer-pane')), findsOneWidget);
+      expect(find.text('notes.md'), findsWidgets);
       expect(app.tester.takeException(), isNull);
     },
   );
@@ -876,14 +915,24 @@ Future<void> _pumpNativeIoUntil(
   WidgetTester tester,
   bool Function() condition,
 ) async {
-  for (var turn = 0; turn < 100 && !condition(); turn++) {
+  // A count of filesystem probes is not an I/O deadline: fast probes can
+  // exhaust the count before a pending create/write finishes under load.
+  const timeout = Duration(seconds: 20);
+  final elapsed = Stopwatch()..start();
+  var turns = 0;
+  while (!condition() && elapsed.elapsed < timeout) {
     // Intentional async I/O: a synchronous probe cannot yield to file
     // callbacks.
     // ignore: avoid_slow_async_io
     await tester.runAsync(() => Directory.systemTemp.exists());
     await tester.pump();
+    turns++;
   }
-  expect(condition(), isTrue, reason: 'native media I/O completed');
+  expect(
+    condition(),
+    isTrue,
+    reason: 'native media I/O completed in ${elapsed.elapsed} ($turns turns)',
+  );
 }
 
 class _TemporaryPaths extends PathProviderPlatform {

@@ -11,6 +11,11 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Fixed
+
+- File-close notices dismiss automatically and include a close button. With
+  accessible navigation enabled, Undo remains available until dismissed.
+
 ### Changed
 
 - Quotas show each limit as a liquid circle, with two providers per row on
