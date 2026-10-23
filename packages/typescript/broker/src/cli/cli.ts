@@ -653,6 +653,10 @@ async function defaultRunUpgrade(options: {
         return {
           inspect: async () => {
             const status = await provider.inspect();
+            if (!status.supported || status.active === 'unknown' || status.active === 'transitioning') {
+              throw Object.assign(new Error(`The ${provider.id} service could not confirm whether the broker is running (active=${status.active}, definition=${status.definition}); run cosy status or cosy doctor.`),
+                { code: 'upgrade-service-state-unavailable' });
+            }
             return { active: status.active === 'active', ...(status.enabled === 'disabled' ? { enabled: false } : {}) };
           },
           stop: () => provider.stop(),

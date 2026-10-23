@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, win32 } from 'node:path';
@@ -444,7 +444,8 @@ function check(name: string, ok: boolean, detail?: string): void {
     : undefined;
   check('native scheduler invocation is fixed, bounded, hidden, and carries data outside argv',
     nativeCall?.[0] === 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
-      && nativeArgs.join(' ') === '-NoLogo -NoProfile -NonInteractive -Command -'
+      && nativeArgs.slice(0, 4).join(' ') === '-NoLogo -NoProfile -NonInteractive -Command'
+      && nativeArgs[4]!.length < 512
       && !nativeArgs.join(' ').includes(identity.taskPath)
       && nativeOptions?.input === WINDOWS_TASK_SCHEDULER_POWERSHELL_SOURCE
       && nativeOptions?.windowsHide === true
@@ -455,6 +456,22 @@ function check(name: string, ok: boolean, detail?: string): void {
     WINDOWS_TASK_SCHEDULER_POWERSHELL_SOURCE.includes('function Set-OwnedTaskEnabled')
       && WINDOWS_TASK_SCHEDULER_POWERSHELL_SOURCE.includes('$definition.Settings.Enabled = $enabled')
       && !WINDOWS_TASK_SCHEDULER_POWERSHELL_SOURCE.includes('$task.Enabled = [bool] $payload.enabled'));
+}
+
+if (process.platform === 'win32') {
+  // Native process-boundary exception: the public CLI cannot request a
+  // nonexistent task. This read-only refusal proves PowerShell terminates the
+  // whole stdin script; mocks cannot reproduce its old zero-exit behavior.
+  const executor = new NativeWindowsTaskSchedulerExecutor();
+  const sid = new WindowsTaskSchedulerPowerShellBackend(executor).currentUserSid();
+  const sharedPath = `\\Cosyncing-Test-${randomUUID()}`;
+  let failure = '';
+  try {
+    executor.execute('run', { sharedPath, sid, sidFolderPath: `${sharedPath}\\${sid}`,
+      taskPath: `${sharedPath}\\${sid}\\Broker`, taskName: 'Broker', ownershipMarker: 'fixture-missing-task' });
+  } catch (error) { failure = error instanceof Error ? error.message : String(error); }
+  check('native scheduler failures keep the operation and PowerShell cause instead of returning a successful empty snapshot',
+    failure.includes('Windows Task Scheduler run failed') && failure.includes('scheduler task is missing'), failure);
 }
 
 {

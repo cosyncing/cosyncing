@@ -51,6 +51,10 @@ export const WINDOWS_TASK_SCHEDULER_POWERSHELL_SOURCE = String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
+# A fresh profile has no module-analysis cache. Discovering an unqualified
+# ConvertFrom-Json can scan every installed module on each short-lived child.
+# Load the one module this script needs directly from this PowerShell install.
+Import-Module "$PSHOME\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1" -ErrorAction Stop
 
 $operation = [Environment]::GetEnvironmentVariable('COSYNCING_SCHEDULER_OPERATION', 'Process')
 $encodedInput = [Environment]::GetEnvironmentVariable('COSYNCING_SCHEDULER_INPUT', 'Process')
@@ -66,6 +70,26 @@ if ($operation -eq 'current-user') {
 }
 $root = $scheduler.GetFolder('\')
 $notFound = -2147024894
+# Let Windows resolve any account-relative alias (for example LA) from the
+# actual user SID. Do not infer a local account from a domain SID's final RID.
+$userDescriptor = New-Object Security.AccessControl.RawSecurityDescriptor("O:$currentSid")
+$currentSidSddl = $userDescriptor.GetSddlForm([Security.AccessControl.AccessControlSections]::Owner).Substring(2)
+
+function Get-NormalizedSddl([string] $text) {
+  $descriptor = New-Object Security.AccessControl.RawSecurityDescriptor($text)
+  $owner = if ($null -eq $descriptor.Owner) { '' } else { 'O:' + $descriptor.Owner.Value }
+  $group = if ($null -eq $descriptor.Group) { '' } else { 'G:' + $descriptor.Group.Value }
+  $dacl = $descriptor.GetSddlForm([Security.AccessControl.AccessControlSections]::Access)
+  $audit = $descriptor.GetSddlForm([Security.AccessControl.AccessControlSections]::Audit)
+  # Preserve the ACL exactly, expanding only the current user's trustee token.
+  return $owner + $group + $dacl.Replace(";;;$currentSidSddl)", ";;;$currentSid)") + $audit
+}
+
+function Get-OwnedSddl {
+  # An elevated token otherwise gives newly created objects Administrators as
+  # owner. The provider requires the user to own them, so request that owner.
+  return 'O:' + [string] $payload.sid + [string] $payload.expectedSddl
+}
 
 function Get-FolderOrNull([string] $path) {
   try { return $scheduler.GetFolder($path) } catch {
@@ -107,7 +131,7 @@ function Get-FolderSnapshot($folder, [string] $path) {
   } | Sort-Object -Property name)
   return [ordered]@{
     path = $path
-    sddl = [string] $folder.GetSecurityDescriptor(7)
+    sddl = Get-NormalizedSddl ([string] $folder.GetSecurityDescriptor(7))
     childFolders = $children
     tasks = $tasks
   }
@@ -158,7 +182,7 @@ function Get-Snapshot {
       path = [string] $payload.taskPath
       ownershipMarker = Get-Marker $task
       definition = Get-TaskDefinition $task
-      taskSddl = [string] $task.GetSecurityDescriptor(7)
+      taskSddl = Get-NormalizedSddl ([string] $task.GetSecurityDescriptor(7))
       enabled = if ([bool] $task.Enabled) { 'enabled' } else { 'disabled' }
       active = if ($state -eq 4) { 'active' } elseif ($state -eq 0) { 'unknown' } else { 'inactive' }
       lastResult = [int] $task.LastTaskResult
@@ -189,8 +213,12 @@ function Test-ExpectedSddl($value) {
   # Windows fills the primary group in from the creating token -- a local account carries None (RID 513)
   # rather than its own SID -- so only the DACL and the owner are ours to predict.
   if ($null -ne $descriptor.Owner -and $descriptor.Owner.Value -ne [string] $payload.sid) { return $false }
-  try { $dacl = $descriptor.GetSddlForm([Security.AccessControl.AccessControlSections]::Access) } catch { return $false }
-  return ($dacl -eq [string] $payload.expectedSddl)
+  try {
+    $dacl = $descriptor.GetSddlForm([Security.AccessControl.AccessControlSections]::Access)
+    $expected = New-Object Security.AccessControl.RawSecurityDescriptor([string] $payload.expectedSddl)
+    $expectedDacl = $expected.GetSddlForm([Security.AccessControl.AccessControlSections]::Access)
+  } catch { return $false }
+  return ($dacl -eq $expectedDacl)
 }
 
 function Assert-EmptyFolder($folder) {
@@ -223,9 +251,9 @@ function Register-ExpectedTask($sidFolder) {
   $action.Arguments = [string] $payload.definition.arguments
   $action.WorkingDirectory = [string] $payload.definition.workingDirectory
   $task = $sidFolder.RegisterTaskDefinition(
-    [string] $payload.taskName, $definition, 6, $null, $null, 3, [string] $payload.expectedSddl
+    [string] $payload.taskName, $definition, 6, $null, $null, 3, (Get-OwnedSddl)
   )
-  $task.SetSecurityDescriptor([string] $payload.expectedSddl, 16)
+  $task.SetSecurityDescriptor((Get-OwnedSddl), 16)
 }
 
 function Set-OwnedTaskEnabled($sidFolder, $task, [bool] $enabled) {
@@ -245,13 +273,13 @@ if ($operation -eq 'inspect') {
 } elseif ($operation -eq 'reconcile') {
   $shared = Get-FolderOrNull ([string] $payload.sharedPath)
   if ($null -eq $shared) {
-    $shared = $root.CreateFolder('Cosyncing', [string] $payload.expectedSddl)
+    $shared = $root.CreateFolder(([string] $payload.sharedPath).TrimStart([char] 92), (Get-OwnedSddl))
   } elseif (-not (Test-ExpectedSddl ([string] $shared.GetSecurityDescriptor(7)))) {
     throw 'scheduler shared folder identity conflict'
   }
   $sidFolder = Get-FolderOrNull ([string] $payload.sidFolderPath)
   if ($null -eq $sidFolder) {
-    $sidFolder = $shared.CreateFolder([string] $payload.sid, [string] $payload.expectedSddl)
+    $sidFolder = $shared.CreateFolder([string] $payload.sid, (Get-OwnedSddl))
   } else {
     if (-not [bool] $payload.sidFolderOwned) { throw 'scheduler SID folder ownership conflict' }
     $foreignFolders = @($sidFolder.GetFolders(0))
@@ -262,7 +290,7 @@ if ($operation -eq 'inspect') {
       throw 'scheduler SID folder contains foreign children'
     }
     if (-not (Test-ExpectedSddl ([string] $sidFolder.GetSecurityDescriptor(7)))) {
-      $sidFolder.SetSecurityDescriptor([string] $payload.expectedSddl, 0)
+      $sidFolder.SetSecurityDescriptor((Get-OwnedSddl), 0)
     }
   }
   $task = Get-TaskOrNull $sidFolder ([string] $payload.taskName)
@@ -294,7 +322,7 @@ if ($operation -eq 'inspect') {
   }
   if ($null -ne $shared -and [bool] $payload.sharedFolderCreated) {
     Assert-EmptyFolder $shared
-    $root.DeleteFolder('Cosyncing', 0)
+    $root.DeleteFolder(([string] $payload.sharedPath).TrimStart([char] 92), 0)
   }
 } elseif ($operation -eq 'restore') {
   $prior = $payload.snapshot
@@ -304,7 +332,7 @@ if ($operation -eq 'inspect') {
     $task = Get-TaskOrNull $sidFolder ([string] $payload.taskName)
     if ($null -ne $task) { Assert-OwnedTask $task; $sidFolder.DeleteTask([string] $payload.taskName, 0) }
     if ($null -ne $sidFolder) { Assert-EmptyFolder $sidFolder; $shared.DeleteFolder([string] $payload.sid, 0) }
-    if ($null -ne $shared) { Assert-EmptyFolder $shared; $root.DeleteFolder('Cosyncing', 0) }
+    if ($null -ne $shared) { Assert-EmptyFolder $shared; $root.DeleteFolder(([string] $payload.sharedPath).TrimStart([char] 92), 0) }
   } else {
     if ($null -eq $shared) { throw 'scheduler shared folder disappeared during transaction' }
     $shared.SetSecurityDescriptor([string] $prior.shared.sddl, 0)
@@ -353,7 +381,12 @@ export class NativeWindowsTaskSchedulerExecutor implements WindowsTaskSchedulerE
     const encodedInput = Buffer.from(JSON.stringify(input), 'utf8').toString('base64');
     const result = this.spawn(
       powershellExecutable(this.env),
-      ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '-'],
+      // `-Command -` executes stdin a statement at a time: a terminating
+      // registration error can be followed by Get-Snapshot and exit zero.
+      // Evaluate the entire bounded stdin script as one unit and preserve its
+      // failure exit code, without putting the large script or payload in argv.
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+        "$ErrorActionPreference = 'Stop'; try { & ([ScriptBlock]::Create([Console]::In.ReadToEnd())); exit 0 } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"],
       {
         encoding: 'utf8',
         input: WINDOWS_TASK_SCHEDULER_POWERSHELL_SOURCE,

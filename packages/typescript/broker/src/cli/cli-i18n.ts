@@ -358,6 +358,8 @@ const ZH_HUMAN_TEXT: Readonly<Record<string, string>> = Object.freeze({
   'Rerun setup or repair to refresh the receipt-owned packaged skill.': '请重新运行 setup 或 repair，以更新收据证明归属的发行包 skill。',
   'Restore the receipt-owned packaged skill.': '请恢复收据证明归属的发行包 skill。',
   'Address the reported cause, then rerun setup.': '请处理报告的原因，然后重新运行 setup。',
+  'Address the reported cause, then retry the update.': '请处理报告的原因，然后重试更新。',
+  'Preserve the upgrade journal and previous binary; retry the update to recover the interrupted transaction.': '请保留更新日志和上一版本的程序文件；重试更新以恢复中断的事务。',
   'Cleanup from that run remains; rerun setup, which rolls the remainder back before replanning.': '上次运行仍有清理项；请重新运行 setup，它会先回滚剩余改动再重新规划。',
   // The Claude mod's doctor line. Every summary here is literal on purpose — the catalog is keyed on the
   // exact sentence, so a path interpolated into a summary could never be translated and would render in
@@ -505,6 +507,7 @@ export function translateDoctorTextToChinese(source: string): string | undefined
     ?? replaceMatch(source, /^The (.*) cosyncing skill is modified, unsafe, or lacks matching ownership evidence\.$/, (target) => `${target} cosyncing skill 已被修改、不安全或缺少匹配的归属证据。`)
     ?? replaceMatch(source, /^The last setup run failed while applying ([^:]+): (.*)$/, (action, detail) => `上次 setup 在应用 ${action} 时失败：${detail}`)
     ?? replaceMatch(source, /^The last setup run failed while in the ([^ ]+) stage: (.*)$/, (stage, detail) => `上次 setup 在 ${stage} 阶段失败：${detail}`)
+    ?? replaceMatch(source, /^The last update failed during ([^:]+): (.*)$/, (stage, detail) => `上次更新在 ${stage} 阶段失败：${detail}`)
     ?? replaceMatch(source, /^(.*) does not provide setup diagnosis\.$/, (name) => `${name} 未提供 setup 诊断。`)
     ?? replaceMatch(source, /^(.*) diagnosis failed safely\.$/, (name) => `${name} 诊断已安全失败。`)
     ?? replaceMatch(source, /^(.*) is registered in the running broker and can create sessions\.$/, (name) => `${name} 已在运行中的 broker 注册，并且可以创建会话。`)

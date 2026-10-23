@@ -30,6 +30,9 @@ import {
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 const ROSTER_TTL_MS = 1_500;
+// Match the production sweep bound explicitly. A polling client must allow
+// the sweep it started to finish, rather than impose the generic 20s UI wait.
+const ROSTER_SWEEP_BUDGET_MS = 45_000;
 
 const line = (value: unknown): string => `${JSON.stringify(value)}\n`;
 const ids = (sessions: any[]): string[] => sessions.map((session) => session.id);
@@ -174,6 +177,10 @@ describe('the session roster', () => {
         COSYNCING_CODEX_SYNC_SERVER: '0',
         COSYNCING_ROSTER_SAFETY_RECONCILE_MS: String(HOUR),
         COSYNCING_ROSTER_TTL_MS: String(ROSTER_TTL_MS),
+        COSYNCING_ROSTER_SWEEP_BUDGET_MS: String(ROSTER_SWEEP_BUDGET_MS),
+        // Process/listener queries must fit their normal probe budget even on
+        // a fresh Windows profile, without a previously discovered module cache.
+        ...(process.platform === 'win32' ? { PSModuleAnalysisCachePath: 'NUL' } : {}),
         // A cold caller waits for its whole sweep: no early answers here (the
         // discovery-bounds suite owns those), so every correction below is one
         // this file caused on purpose.
@@ -319,7 +326,7 @@ describe('the session roster', () => {
     const corrected = await eventually(async () => {
       const poll = await rosterSnapshot(client, { window, headers: { 'if-none-match': staleEtag } });
       return poll.status === 200 && ids(poll.body.sessions).includes(appears.id) ? poll.body : undefined;
-    }, { what: 'the roster to correct itself to include the new session' });
+    }, { timeoutMs: ROSTER_SWEEP_BUDGET_MS, what: 'the roster to correct itself to include the new session' });
     expect(corrected.revision).toBeGreaterThan(stale.body.revision);
     expect(ids(corrected.sessions)).toContain(pi.recent!.id);
     expect([stale.body.complete, corrected.complete]).toEqual([true, true]);
@@ -596,7 +603,14 @@ describe('the session roster', () => {
       expect(rows.find((row) => row.id === pi.recent!.id)?.appHidden).toBe(false);
       expect((await client.delete(`/api/sessions/${parent.tool}/${encodeURIComponent(parent.id)}/cache`)).status).toBe(200);
       await broker.restart();
-      rows = (await rosterSnapshot(other, { refresh: true })).body.sessions;
+      // A cold sweep can reach its discovery budget and return an explicitly
+      // incomplete roster. Wait for the complete representation before
+      // deciding whether the persisted visibility preference survived.
+      rows = await eventually(async () => {
+        const snapshot = await rosterSnapshot(other, { refresh: true });
+        expect(snapshot.status).toBe(200);
+        return snapshot.body.complete === true ? snapshot.body.sessions : undefined;
+      }, { timeoutMs: ROSTER_SWEEP_BUDGET_MS, what: 'a complete roster after cache clearing and restart' });
       expect(rows.find((row) => row.id === parent.id)?.appHidden).toBe(true);
       expect(rows.find((row) => row.id === child.id)?.appHidden).toBe(true);
       expect((await change(parent, false)).status).toBe(200);

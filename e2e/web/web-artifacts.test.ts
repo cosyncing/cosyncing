@@ -11,6 +11,7 @@
  * another broker's file even for the same native session id.
  */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -216,11 +217,22 @@ describe('delivered files in the web client', () => {
       });
       await child().locator('body[data-ready="yes"]').waitFor();
       await page.setViewportSize({ width: 390, height: 844 });
+      // The retained iframe is already ready before Flutter handles resize.
+      // Wait for the compact workspace control before acting on that layout.
+      const showSessions = page.getByRole('button', { name: 'Show sessions', exact: true });
+      await showSessions.waitFor();
       await child().locator('body[data-ready="yes"]').waitFor();
       expect(page.frames()).toHaveLength(3);
       await page.getByRole('button', { name: 'Close', exact: true }).last().click();
       await eventually(() => page.frames().length === 1, { what: 'close removes every frame' });
+      // Closing persists asynchronously, then publishes its Undo notice.
+      // Settle and dismiss it before changing layout and reopening the file.
+      const undo = page.getByRole('button', { name: 'Undo', exact: true });
+      await undo.waitFor();
+      await page.getByRole('button', { name: 'Close', exact: true }).last().click();
+      await undo.waitFor({ state: 'hidden' });
       await page.setViewportSize({ width: 1440, height: 1000 });
+      await showSessions.waitFor({ state: 'hidden' });
       await openView(page, 'Files');
       await page.getByRole('button', { name: 'Preview file', exact: true }).first().click();
       await child().locator('body[data-ready="yes"]').waitFor();
@@ -230,17 +242,25 @@ describe('delivered files in the web client', () => {
   });
 
   test.concurrent('HTML policy precedes malformed bytes and isolates embedded and external documents', async () => {
+    const requestPrefix = `/${randomUUID()}/`;
     const requests: string[] = [];
     const recorder = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch(request) {
-      requests.push(new URL(request.url).pathname);
+      const path = new URL(request.url).pathname;
+      // Only this document's URLs belong to its CSP assertion. Other loopback
+      // probes must not contaminate a recorder on a newly allocated port.
+      if (path.startsWith(requestPrefix)) requests.push(path);
       return new Response('unexpected resource', { headers: { 'access-control-allow-origin': '*' } });
     } });
+    const target = new URL(requestPrefix, recorder.url).toString();
     try {
-      expect((await fetch(recorder.url)).status).toBe(200);
-      expect(requests).toHaveLength(1);
+      for (const probe of [recorder.url, target]) {
+        const response = await fetch(probe);
+        expect(response.status).toBe(200);
+        await response.text();
+      }
+      expect(requests).toEqual([requestPrefix]);
       requests.length = 0;
       await scenario(async (f, page) => {
-        const target = recorder.url.toString();
         // Executable bytes precede the apparent head; the existing policy and
         // malformed metadata must never precede or relax the containing policy.
         writeFileSync(join(f.workspace, 'attack.xhtml'), `<script>

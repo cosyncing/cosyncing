@@ -55,8 +55,11 @@ export interface WindowsProcessSnapshot {
 const WINDOWS_SNAPSHOT_SOURCE = String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+# Do not spend a bounded probe discovering modules on a fresh profile.
+Import-Module "$PSHOME\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1" -ErrorAction Stop
 $processesOk = $true
 try {
+  Import-Module "$PSHOME\Modules\CimCmdlets\CimCmdlets.psd1" -ErrorAction Stop
   $processes = @(Get-CimInstance -ClassName Win32_Process | Where-Object { $_.ProcessId -gt 0 } | ForEach-Object {
     $created = $null
     if ($null -ne $_.CreationDate) {
@@ -73,6 +76,7 @@ try {
 } catch { $processesOk = $false; $processes = @() }
 $listenersOk = $true
 try {
+  Import-Module "$PSHOME\Modules\NetTCPIP\NetTCPIP.psd1" -ErrorAction Stop
   $listeners = @(Get-NetTCPConnection -State Listen | Where-Object { $_.OwningProcess -gt 0 -and $_.LocalPort -gt 0 } | ForEach-Object {
     [ordered]@{ port = [int]$_.LocalPort; pid = [int]$_.OwningProcess; address = [string]$_.LocalAddress }
   })

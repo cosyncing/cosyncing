@@ -241,12 +241,15 @@ export interface ProcessOutputCapture {
 
 export function captureProcessOutput(
   child: { stdout?: unknown; stderr?: unknown },
-  options: { maxChars?: number } = {},
+  options: { maxChars?: number; onAppend?: (text: string) => void } = {},
 ): ProcessOutputCapture {
   const maxChars = options.maxChars ?? 4_000;
   let captured = '';
   const append = (text: string): void => {
-    if (text) captured = (captured + text).slice(-maxChars);
+    if (text) {
+      captured = (captured + text).slice(-maxChars);
+      options.onAppend?.(text);
+    }
   };
   const drain = async (stream: unknown): Promise<void> => {
     if (!stream || typeof (stream as ReadableStream).getReader !== 'function') return;

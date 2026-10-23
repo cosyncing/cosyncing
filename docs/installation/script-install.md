@@ -429,6 +429,27 @@ installer-plus-`setup` as the only Windows update path. Nothing is broken when i
 build is restored and the broker keeps serving — but from a 0.5.1 install, update once with the
 installer and `upgrade` works from there.
 
+### When an update rolls back
+
+The updater reports the failed step, the failing broker or web endpoint, and
+the HTTP status, observed version, or service error. If the broker was running
+before the update, a completed rollback confirms that the previous broker
+answers its health check. If recovery cannot confirm that, the command preserves
+the journal and previous binary for the next `cosy update` attempt.
+
+The last broker update failure also remains in
+`%COSYNCING_HOME%\logs\last-upgrade-failure.json` on Windows
+(`$COSYNCING_HOME/logs/last-upgrade-failure.json` on Linux and macOS).
+`cosy doctor` reports that saved cause and the recovery outcome. A later
+successful update clears the record.
+
+The update command runs the updater already installed on the host. An older
+updater still uses its old startup timeout and error messages when it downloads
+a candidate containing these fixes. If it repeatedly reports only a generic
+rollback message, use the fixed release's signed installer followed by `setup`
+to acquire the new updater. The website installer follows the accepted stable
+release, so it includes the fix only after that release is promoted.
+
 ## Verifying by hand
 
 Every installer does this for you; these are the same files if you would rather check first.

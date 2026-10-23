@@ -13,6 +13,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { join } from 'node:path';
 import { atomicWriteJsonOwnerOnly } from '../../packages/typescript/broker/src/security/secure-files.ts';
+import { atomicWriteOwnerOnly } from '../../packages/typescript/broker/src/security/secure-files.ts';
 import { inspectInstallState, writeInstallState } from '../../packages/typescript/broker/src/installation/install-state.ts';
 import { type BrokerClient } from '../harness/index.ts';
 import { type InstalledBroker, startInstalledBroker } from '../harness/installed.ts';
@@ -45,11 +46,39 @@ describe('the update-management surface', () => {
   let owner: BrokerClient;
 
   beforeAll(async () => {
-    installed = await startInstalledBroker({ name: 'in-app-updates', machineLabel: 'e2e-updates' });
+    const env: Record<string, string> = {};
+    installed = await startInstalledBroker({ name: 'in-app-updates', machineLabel: 'e2e-updates', env,
+      setup: (paths) => {
+        const web = join(paths.root, 'web app');
+        atomicWriteOwnerOnly(join(web, 'index.html'), '<html>isolated update web shell</html>');
+        atomicWriteJsonOwnerOnly(join(web, 'version.json'), { version: '2.0.0' });
+        atomicWriteOwnerOnly(join(web, 'assets', 'hello world.txt'), 'nested asset');
+        atomicWriteOwnerOnly(join(paths.root, 'outside.txt'), 'must stay private');
+        env.COSYNCING_WEB_DIR = web;
+      } });
     owner = installed.owner;
   });
   afterAll(async () => {
     await installed.stop();
+  });
+
+  test('web version and shell remain reachable on the native filesystem, while traversal stays refused', async () => {
+    const base = installed.internalUrl;
+    const version = await fetch(`${base}/cosy/version.json`);
+    expect(version.status).toBe(200);
+    expect(await version.json()).toEqual({ version: '2.0.0' });
+    expect(version.headers.get('cache-control')).toBe('no-store');
+    for (const path of ['/cosy/', '/cosy/index.html', '/cosy/settings/deep-link']) {
+      const response = await fetch(base + path);
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain('isolated update web shell');
+    }
+    expect(await (await fetch(`${base}/cosy/assets/hello%20world.txt`)).text()).toBe('nested asset');
+    for (const path of ['..%2foutside.txt', '..%5coutside.txt', '%2foutside.txt', 'C:%5coutside.txt', '%zz']) {
+      const response = await fetch(`${base}/cosy/${path}`);
+      expect(response.status).toBeGreaterThanOrEqual(400);
+      expect(await response.text()).not.toContain('must stay private');
+    }
   });
 
   test('the surface is not a public discovery endpoint', async () => {
