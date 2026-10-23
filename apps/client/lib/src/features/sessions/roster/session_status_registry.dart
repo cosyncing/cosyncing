@@ -12,10 +12,14 @@ final class SessionStatusObservation {
     required this.revision,
     required this.sequence,
     required this.isLive,
+    this.updatedAt,
   });
 
   /// The observed activity status.
   final SessionStatus status;
+
+  /// Last native activity time carried with this authoritative observation.
+  final int? updatedAt;
 
   /// Roster revision this observation is ordered against.
   ///
@@ -71,8 +75,8 @@ final class SessionStatusSnapshot {
   SessionStatus? statusFor({required String tool, required String sessionId}) =>
       observations[sessionStatusKey(tool: tool, sessionId: sessionId)]?.status;
 
-  /// [sessions] with each row's status replaced by the newest authoritative
-  /// observation, when one exists.
+  /// [sessions] with each row's status and activity time replaced by the
+  /// newest authoritative observation, when one exists.
   ///
   /// A roster row is itself an observation, so this only ever moves a row
   /// forward: the registry rejected anything older than the roster revision the
@@ -82,12 +86,22 @@ final class SessionStatusSnapshot {
     List<SessionInfo>? updated;
     for (var index = 0; index < sessions.length; index++) {
       final session = sessions[index];
-      final status = statusFor(tool: session.tool, sessionId: session.id);
-      if (status == null || status == session.status) continue;
+      final observation =
+          observations[sessionStatusKey(
+            tool: session.tool,
+            sessionId: session.id,
+          )];
+      if (observation == null) continue;
+      final updatedAt = observation.updatedAt;
+      final newerActivity =
+          updatedAt != null &&
+          (session.updatedAt == null || updatedAt > session.updatedAt!);
+      if (observation.status == session.status && !newerActivity) continue;
       updated ??= List<SessionInfo>.of(sessions);
       updated[index] = SessionInfo.fromJson({
         ...session.toJson(),
-        'status': sessionStatusWireValue(status),
+        'status': sessionStatusWireValue(observation.status),
+        if (newerActivity) 'updatedAt': updatedAt,
       });
     }
     return updated ?? sessions;
@@ -180,6 +194,7 @@ class SessionStatusRegistry extends Notifier<SessionStatusSnapshot> {
               revision: revision,
               sequence: entry.value.sequence,
               isLive: true,
+              updatedAt: entry.value.updatedAt,
             ),
           ),
         ),
@@ -204,6 +219,7 @@ class SessionStatusRegistry extends Notifier<SessionStatusSnapshot> {
               revision: revision,
               sequence: ++_sequence,
               isLive: false,
+              updatedAt: session.updatedAt,
             ),
           ) ||
           changed;
@@ -223,6 +239,7 @@ class SessionStatusRegistry extends Notifier<SessionStatusSnapshot> {
     required String sessionId,
     required SessionStatus status,
     required int rosterRevisionFloor,
+    int? updatedAt,
   }) {
     if (!_adopt(source)) return;
     final changed = _record(
@@ -232,6 +249,7 @@ class SessionStatusRegistry extends Notifier<SessionStatusSnapshot> {
         revision: rosterRevisionFloor,
         sequence: ++_sequence,
         isLive: true,
+        updatedAt: updatedAt,
       ),
     );
     if (changed) _publish();
@@ -253,11 +271,27 @@ class SessionStatusRegistry extends Notifier<SessionStatusSnapshot> {
   }) {
     final current = _observations[key];
     if (current != null && !current.isSupersededBy(observation)) return false;
+    var admitted = observation;
+    // A status-only frame or a delayed older date cannot erase the latest
+    // native activity time already observed in this broker's namespace.
+    final previousAt = current?.updatedAt;
+    if (previousAt != null &&
+        (observation.updatedAt == null ||
+            previousAt > observation.updatedAt!)) {
+      admitted = SessionStatusObservation(
+        status: observation.status,
+        revision: observation.revision,
+        sequence: observation.sequence,
+        isLive: observation.isLive,
+        updatedAt: previousAt,
+      );
+    }
     _observations
       ..remove(key)
-      ..[key] = observation;
+      ..[key] = admitted;
     _evictToBound();
-    return current?.status != observation.status;
+    return current?.status != admitted.status ||
+        current?.updatedAt != admitted.updatedAt;
   }
 
   /// Least-recently-observed eviction; insertion order is observation order

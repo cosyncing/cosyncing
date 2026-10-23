@@ -783,20 +783,80 @@ void main() {
     );
 
     featureTest(
-      'a finished run marks its session ready to review until it is opened; '
-      'other sessions stay unmarked',
+      'a background session finishes, moves into recent project order, '
+      'is reviewed, and keeps following later status changes',
       (f) async {
+        final now = f.now();
         final studio = f.network.add('http://studio.test:7734')
-          ..addSession('busy', 'Refactor build', status: SessionStatus.working)
-          ..addSession('calm', 'Read the docs');
+          ..addSession(
+            'busy',
+            'Orchestration review',
+            status: SessionStatus.working,
+            updatedAt: now.subtract(const Duration(hours: 1)),
+          )
+          ..addSession(
+            'running',
+            'Other running work',
+            status: SessionStatus.working,
+            updatedAt: now.subtract(const Duration(hours: 2)),
+          )
+          ..addSession(
+            'ask',
+            'Waiting for input',
+            status: SessionStatus.needsInput,
+          )
+          ..addSession(
+            'calm',
+            'Earlier review',
+            updatedAt: now.subtract(const Duration(minutes: 5)),
+          );
         await f.storage.seedServer(studio);
         final app = await f.launch();
         await app.expandProject('/work/studio');
+        double top(String id) => app.tester.getTopLeft(app.row(id)).dy;
+        expect(top('ask'), lessThan(top('busy')));
+        expect(top('busy'), lessThan(top('running')));
+        expect(top('running'), lessThan(top('calm')));
         const busyDot = Key('session-ready-/codex/busy');
         expect(find.byKey(busyDot), findsNothing, reason: 'still working');
 
+        // Keep the running session attached in another tab. Its completion
+        // reaches the real App over the session socket before the roster feed.
+        await app.openFromRoster('busy');
+        await app.tapKey('workspace-overview-tab');
+        final socket = f.network.sockets.lastWhere(
+          (socket) => socket.attachTarget?.$2 == 'busy',
+        );
+        final reads = app.rosterReads(studio).length;
+        socket.emit({
+          'kind': 'session',
+          'info': {...socket.session!, 'status': 'idle'},
+        });
+        await app.pumpUntil(
+          () => top('busy') > top('calm'),
+          reason: 'Idle still carries the older activity time',
+        );
+        socket.emit({
+          'kind': 'session',
+          'info': {
+            ...socket.session!,
+            'status': 'idle',
+            'updatedAt': now.millisecondsSinceEpoch,
+          },
+        });
+        await app.pumpUntil(
+          () => top('running') < top('busy') && top('busy') < top('calm'),
+          reason: 'completion enters the top of the finished project rows',
+        );
+        expect(app.rosterReads(studio), hasLength(reads));
+
+        // The feed catches up and the completed background tab becomes ready
+        // to review. Opening it consumes that signal, just as in the old flow.
         studio
-          ..updateSession('busy', {'status': 'idle'})
+          ..updateSession('busy', {
+            'status': 'idle',
+            'updatedAt': now.millisecondsSinceEpoch,
+          })
           ..publishAttention(sessionId: 'busy');
         await app.pumpUntil(
           () => find.byKey(busyDot).evaluate().isNotEmpty,
@@ -813,29 +873,21 @@ void main() {
           () => find.byKey(busyDot).evaluate().isEmpty,
           reason: 'opening the session reads the completion',
         );
-      },
-    );
-
-    featureTest(
-      'rows are ordered needs-input, working, then idle, and a status change '
-      'moves the row',
-      (f) async {
-        final studio = f.network.add('http://studio.test:7734')
-          ..addSession('idle', 'Idle one', updatedAt: daysAgo(1))
-          ..addSession('work', 'Working one', status: SessionStatus.working)
-          ..addSession('ask', 'Asking one', status: SessionStatus.needsInput);
-        await f.storage.seedServer(studio);
-        final app = await f.launch();
-        await app.expandProject('/work/studio');
-        double top(String id) => app.tester.getTopLeft(app.row(id)).dy;
-
-        expect(top('ask'), lessThan(top('work')));
-        expect(top('work'), lessThan(top('idle')));
-
-        studio.updateSession('idle', {'status': 'needs-input'});
+        await app.settle();
+        var pageBuilds = 0;
+        debugOnRebuildDirtyWidget = (element, _) {
+          if (element.widget is SessionDetailPage) pageBuilds++;
+        };
+        addTearDown(() => debugOnRebuildDirtyWidget = null);
+        studio.updateSession('calm', {'status': 'needs-input'});
         await app.pumpUntil(
-          () => top('idle') < top('work'),
+          () => top('calm') < top('running'),
           reason: 'the session that now needs input moves up',
+        );
+        expect(
+          pageBuilds,
+          0,
+          reason: 'another row leaves the open result alone',
         );
       },
     );
@@ -876,40 +928,6 @@ void main() {
         reason: 'rows whose session did not change are kept as they were',
       );
     });
-
-    featureTest(
-      'another session changing leaves the open session page, and its '
-      'transcript, alone',
-      (f) async {
-        final studio = f.network.add('http://studio.test:7734')
-          ..addSession('s1', 'Fix login')
-          ..addSession('s2', 'Tidy styles');
-        await f.storage.seedServer(studio);
-        final app = await f.launch();
-        await app.openFromRoster('s1', cwd: '/work/studio');
-        await app.settle();
-        var pageBuilds = 0;
-        debugOnRebuildDirtyWidget = (element, _) {
-          if (element.widget is SessionDetailPage) pageBuilds++;
-        };
-        addTearDown(() => debugOnRebuildDirtyWidget = null);
-
-        studio.updateSession('s2', {'status': 'working'});
-        await app.pumpUntil(
-          () => app.container
-              .read(sessionListControllerProvider)
-              .sessions
-              .any((s) => s.id == 's2' && s.status == SessionStatus.working),
-          reason: "the roster takes the other session's new status",
-        );
-
-        expect(
-          pageBuilds,
-          0,
-          reason: 'the open page shows nothing of another session',
-        );
-      },
-    );
 
     featureTest(
       'the delta feed adds, renames and removes rows without another roster '
