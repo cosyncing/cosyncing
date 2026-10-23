@@ -1034,35 +1034,19 @@ SessionArtifactTransfer? _row(AppDriver app, String id) => app.container
     .read(sessionArtifactTransferControllerProvider.notifier)
     .transferById(id);
 
-// Filesystem event barriers, bounded without sleeps, as in file_previews_test.
+// Real filesystem work keeps its existing five-second budget.
 Future<void> _nativeUntil(AppDriver app, bool Function() condition) async {
-  final elapsed = Stopwatch()..start();
-  final budget = AppDriver.step * 100;
-  var advanced = Duration.zero;
-  var turns = 0;
-  while (!condition() && elapsed.elapsed < budget) {
-    // Yield to real I/O without consuming five seconds of fake application
-    // time before the OS has completed a small file operation. Advancing by
-    // measured elapsed time also services genuine app timers at their rate.
-    // ignore: avoid_slow_async_io
-    await app.tester.runAsync(() => Directory.systemTemp.exists());
-    final now = elapsed.elapsed;
-    await app.tester.pump(now - advanced);
-    advanced = now;
-    turns++;
-  }
-  final messages = app.container
-      .read(sessionArtifactTransferControllerProvider)
-      .map((row) => row.message)
-      .join(' | ');
-  expect(
-    condition(),
-    isTrue,
-    reason:
-        'native download/cache/export reached its expected state '
-        'after $turns I/O turns (${elapsed.elapsedMilliseconds}ms real). '
-        '\n${app.visibleText}\n'
-        '$messages',
+  await app.pumpNativeIoUntil(
+    condition,
+    budget: AppDriver.step * 100,
+    reason: 'native download/cache/export reached its expected state',
+    diagnostics: () {
+      final messages = app.container
+          .read(sessionArtifactTransferControllerProvider)
+          .map((row) => row.message)
+          .join(' | ');
+      return '\n${app.visibleText}\n$messages';
+    },
   );
   await app.settle();
 }

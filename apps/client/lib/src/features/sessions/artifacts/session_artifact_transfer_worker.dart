@@ -1526,6 +1526,7 @@ class SessionArtifactTransferWorker {
                 onProgress: progress,
               );
       },
+      failureLead: "Couldn't download this file.",
       validationError: hasActiveBrokerClient
           ? null
           : 'Connect to the server before downloading this file.',
@@ -1560,6 +1561,7 @@ class SessionArtifactTransferWorker {
         onProgress: progress,
       );
     },
+    failureLead: "Couldn't save this artifact.",
     validationError: !descriptor.isInlineDataUrl && !hasActiveBrokerClient
         ? 'Connect to the server before downloading this artifact.'
         : _artifactReferenceError(sessionKey, descriptor),
@@ -1572,6 +1574,7 @@ class SessionArtifactTransferWorker {
       SessionArtifactProgressCallback progress,
     )
     cache, {
+    required String failureLead,
     String? validationError,
   }) => _withCancellation(transferId, (token) async {
     final attempt = transferController.transferById(transferId)?.attemptCount;
@@ -1620,13 +1623,21 @@ class SessionArtifactTransferWorker {
           transferController.markCanceled(transferId);
         }
         return _canceledSaveResult(transferId);
-      } on Object {
+      } on Object catch (error) {
         if (token.isCanceled ||
             transferController.transferById(transferId)?.attemptCount !=
                 attempt) {
           return _canceledSaveResult(transferId);
         }
-        rethrow;
+        final failure = describeFailure(error, lead: failureLead);
+        transferController.markFailed(transferId, failure.message);
+        onFailureDetail?.call(transferId, failure.detail);
+        return SessionArtifactTransferWorkerResult(
+          transferId: transferId,
+          outcome: SessionArtifactTransferWorkerOutcome.failed,
+          message: failure.message,
+          detail: failure.detail,
+        );
       }
     }, expectedAttempt: attempt);
     if (downloaded.outcome != SessionArtifactTransferWorkerOutcome.cached ||
