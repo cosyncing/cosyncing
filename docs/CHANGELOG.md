@@ -23,6 +23,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   as soon as their completion reaches the app, without a roster refresh.
 - Claude Code skills launched in the background appear as subagents in the
   session roster and activity bar, including their completion state.
+- OpenCode sessions recover answers completed while their event stream was
+  reconnecting, without requiring the session to be reopened.
 
 ## 0.8.1 — 2026-10-22
 
