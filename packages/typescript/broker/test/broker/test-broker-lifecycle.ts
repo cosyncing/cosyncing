@@ -509,6 +509,7 @@ try {
     writeFileSync(entry, `import { defaultRunBinary } from ${JSON.stringify(join(import.meta.dir, '../../src/updates/release-upgrade.ts'))};
 console.log('[update-child-ready]');
 const result = await defaultRunBinary(process.execPath, ['-e', ${JSON.stringify(program)}], 30000);
+console.log('[update-command-complete]');
 console.log(JSON.stringify({status:result.status, rows:JSON.parse(result.stdout).rows.length, stderrBytes:result.stderr.length}));`);
     const child = Bun.spawn([process.execPath, entry], { env: isolatedBrokerFixtureEnvironment(root),
       stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
@@ -517,13 +518,15 @@ console.log(JSON.stringify({status:result.status, rows:JSON.parse(result.stdout)
       clearTimeout(timer);
       timer = setTimeout(() => child.kill('SIGKILL'), milliseconds);
     };
-    // Separate module loading from the command-exit regression. The ready
-    // event starts a budget shorter than the inner command's 30s deadline.
+    // The command has its own 30s hang bound. Start the shorter process-exit
+    // watchdog only after it returns, so Windows process startup is not
+    // mistaken for a completed command retaining its deadline timer.
     arm(60_000);
-    let ready = false; let readyText = '';
+    let ready = false; let completed = false; let readyText = '';
     const capture = captureProcessOutput(child, { onAppend: (text) => {
       readyText = (readyText + text).slice(-4096);
-      if (!ready && readyText.includes('[update-child-ready]')) { ready = true; arm(10_000); }
+      if (readyText.includes('[update-child-ready]')) ready = true;
+      if (!completed && readyText.includes('[update-command-complete]')) { completed = true; arm(10_000); }
     } });
     try {
       const code = await child.exited;
@@ -532,8 +535,8 @@ console.log(JSON.stringify({status:result.status, rows:JSON.parse(result.stdout)
       let result: { status?: string; rows?: number; stderrBytes?: number } = {};
       try { result = JSON.parse(output.trim().split(/\r?\n/).at(-1)!); } catch { /* retained below */ }
       check('the updater child drains a large diagnostic report and exits without waiting for a completed deadline',
-        ready && code === 0 && result.status === 'ok' && result.rows === 131072 && result.stderrBytes === 16384,
-        JSON.stringify({ code, ready, output }));
+        ready && completed && code === 0 && result.status === 'ok' && result.rows === 131072 && result.stderrBytes === 16384,
+        JSON.stringify({ code, ready, completed, output }));
     } finally {
       clearTimeout(timer);
       if (child.exitCode === null) child.kill('SIGKILL');
