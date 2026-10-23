@@ -108,13 +108,7 @@ import 'package:cosyncing_client/src/platform/update/web_handoff_hold.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_participants.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:flutter/foundation.dart'
-    show
-        TargetPlatform,
-        ValueListenable,
-        defaultTargetPlatform,
-        kIsWeb,
-        listEquals,
-        setEquals;
+    show TargetPlatform, ValueListenable, kIsWeb, listEquals, setEquals;
 import 'package:flutter/gestures.dart'
     show HitTestResult, PointerDownEvent, PointerScrollEvent, kPrimaryButton;
 import 'package:flutter/material.dart';

@@ -109,17 +109,38 @@ class FakeAndroidSaveAs {
   };
   PlatformException? error;
   Completer<void>? pending;
+  void Function()? onCommitted;
+  int? _activeRequest;
+  final canceledRequests = <int>[];
 
   void install() {
     const channel = MethodChannel('com.cosyncing.client/file_export');
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           ..setMockMethodCallHandler(channel, (call) async {
+            final args = Map<String, dynamic>.from(call.arguments as Map);
+            if (call.method == 'cancelSaveAs') {
+              final id = args['requestId'] as int;
+              canceledRequests.add(id);
+              if (_activeRequest == id && !(pending?.isCompleted ?? true)) {
+                pending!.complete();
+              }
+              return null;
+            }
             expect(call.method, 'saveAs');
-            requests.add(Map<String, dynamic>.from(call.arguments as Map));
-            await pending?.future;
-            if (error != null) throw error!;
-            return response;
+            if (_activeRequest != null) throw PlatformException(code: 'busy');
+            final id = args['requestId'] as int;
+            _activeRequest = id;
+            requests.add(args);
+            try {
+              await pending?.future;
+              if (canceledRequests.contains(id)) return null;
+              if (error != null) throw error!;
+              if (response != null) onCommitted?.call();
+              return response;
+            } finally {
+              _activeRequest = null;
+            }
           });
     addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
   }

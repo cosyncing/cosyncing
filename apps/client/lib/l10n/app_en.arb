@@ -7140,5 +7140,6 @@
         "type": "String"
       }
     }
-  }
+  },
+  "transferSaveBusy": "Another save is in progress. Try Save again when it finishes."
 }

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -96,6 +97,10 @@ class SessionArtifactActionState {
 class SessionArtifactCancellationToken {
   var _isCanceled = false;
   String _reason = 'Canceled by user';
+  final _canceled = Completer<void>();
+
+  /// Completes once so native pickers/copies can be canceled cooperatively.
+  Future<void> get whenCanceled => _canceled.future;
 
   /// Whether cancellation has been requested.
   bool get isCanceled => _isCanceled;
@@ -107,6 +112,7 @@ class SessionArtifactCancellationToken {
   void cancel([String reason = 'Canceled by user']) {
     _isCanceled = true;
     _reason = reason;
+    if (!_canceled.isCompleted) _canceled.complete();
   }
 
   /// Throws when cancellation has been requested.
@@ -510,6 +516,7 @@ abstract interface class ArtifactExportTarget {
     required String sourcePath,
     required String suggestedName,
     String? mimeType,
+    SessionArtifactCancellationToken? cancellationToken,
   });
 }
 
@@ -529,12 +536,13 @@ final class FileSelectorArtifactExportTarget implements ArtifactExportTarget {
     required String sourcePath,
     required String suggestedName,
     String? mimeType,
+    SessionArtifactCancellationToken? cancellationToken,
   }) async {
     final destination = await picker.pickSavePath(
       suggestedName: suggestedName,
       mimeType: mimeType,
     );
-    cancellationToken?.throwIfCanceled();
+    (cancellationToken ?? this.cancellationToken)?.throwIfCanceled();
     if (destination == null) return null;
     await File(sourcePath).copy(destination);
     return destination;
@@ -560,18 +568,43 @@ final class AndroidArtifactExportTarget
   String? exportedNameFor(String destination) => _names[destination];
 
   static const _channel = MethodChannel('com.cosyncing.client/file_export');
+  static int _requestSequence = 0;
 
   @override
   Future<String?> export({
     required String sourcePath,
     required String suggestedName,
     String? mimeType,
+    SessionArtifactCancellationToken? cancellationToken,
   }) async {
-    final result = await _channel.invokeMapMethod<String, dynamic>('saveAs', {
-      'sourcePath': sourcePath,
-      'suggestedName': suggestedName,
-      'mimeType': mimeType,
-    });
+    cancellationToken?.throwIfCanceled();
+    final requestId = ++_requestSequence;
+    var active = true;
+    if (cancellationToken != null) {
+      unawaited(
+        cancellationToken.whenCanceled.then((_) async {
+          if (active) {
+            await _channel.invokeMethod<void>('cancelSaveAs', {
+              'requestId': requestId,
+            });
+          }
+        }),
+      );
+    }
+    Map<String, dynamic>? result;
+    try {
+      result = await _channel.invokeMapMethod<String, dynamic>('saveAs', {
+        'requestId': requestId,
+        'sourcePath': sourcePath,
+        'suggestedName': suggestedName,
+        'mimeType': mimeType,
+      });
+    } finally {
+      active = false;
+    }
+    // A successful native write is committed even if cancellation arrived at
+    // the same instant. Native cancellation returns null before committing.
+    if (result == null) cancellationToken?.throwIfCanceled();
     final uri = result?['uri'] as String?;
     final name = result?['displayName'] as String?;
     if (uri != null && name != null && name.isNotEmpty) _names[uri] = name;
@@ -1827,8 +1860,8 @@ final class DefaultSessionArtifactFileService
                 sourcePath: artifact.cachedFilePath,
                 suggestedName: artifact.fileName,
                 mimeType: artifact.contentType,
+                cancellationToken: cancellationToken,
               );
-      cancellationToken?.throwIfCanceled();
       return destination;
     } finally {
       release();

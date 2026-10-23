@@ -11,7 +11,6 @@ import 'package:cosyncing_client/src/features/sessions/sessions.dart';
 import 'package:cosyncing_client/src/features/transfers/data/local_transfer_file_opener.dart';
 import 'package:cosyncing_client/src/features/transfers/view/cached_transfer_actions.dart';
 import 'package:cosyncing_client/src/formatting/file_size.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -156,7 +155,8 @@ class _TransferManagerPageState extends ConsumerState<TransferManagerPage> {
         ? transfers
         : transfers
               .where(
-                (transfer) => _matchesSearchQuery(transfer, trimmedSearchQuery),
+                (transfer) =>
+                    _matchesSearchQuery(l10n, transfer, trimmedSearchQuery),
               )
               .toList();
     final hasTerminalTransfers = transfers.any(_isTerminalTransfer);
@@ -832,13 +832,13 @@ class _TransferRow extends ConsumerWidget {
     final canRetry = isOwningBrokerProfile && _isRetryableTransfer(transfer);
     final canCancel = _isCancelableTransfer(transfer);
     final isFailed = transfer.status == SessionArtifactTransferStatus.failed;
-    final localPath = _transferLocalPath(transfer);
-    final localPathLabel = _transferLocalPathLabel(l10n, transfer, localPath);
+    final localPath = transfer.localFilePath;
+    final localPathLabel = transfer.localizedLocalPath(l10n);
     final progressLabel = _transferProgressLabel(l10n, transfer);
     final primaryDetail = _transferDetailLabel(l10n, transfer);
     final detailLabel = progressLabel.isEmpty
-        ? '${_transferStatusLabel(l10n, transfer)} - $primaryDetail'
-        : '${_transferStatusLabel(l10n, transfer)} - $primaryDetail - '
+        ? '${transfer.localizedStatus(l10n)} - $primaryDetail'
+        : '${transfer.localizedStatus(l10n)} - $primaryDetail - '
               '$progressLabel';
 
     return ContextualDetails(
@@ -1107,7 +1107,7 @@ Future<void> _showTransferDetails(
   String? failureDetail,
 }) async {
   final l10n = AppLocalizations.of(context);
-  final localPath = _transferLocalPath(transfer);
+  final localPath = transfer.localFilePath;
   final progressLabel = _transferProgressLabel(l10n, transfer);
   final sourceUrl = _trimmedText(transfer.sourceUrl);
   final exportedPath = _trimmedText(transfer.exportedPath);
@@ -1149,7 +1149,7 @@ Future<void> _showTransferDetails(
                         ),
                         _TransferDetailsRow(
                           label: l10n.status,
-                          value: _transferStatusLabel(l10n, transfer),
+                          value: transfer.localizedStatus(l10n),
                         ),
                         if (progressLabel.isNotEmpty)
                           _TransferDetailsRow(
@@ -1319,7 +1319,7 @@ Future<void> _copySelectedTransferLocalPaths(
 ) async {
   final localPaths = <String>[];
   for (final transfer in visibleSelectedTransfers) {
-    final localPath = _transferLocalPath(transfer);
+    final localPath = transfer.localFilePath;
     if (localPath != null) {
       localPaths.add(localPath);
     }
@@ -1563,26 +1563,6 @@ class _TransferDetailsRow extends StatelessWidget {
   }
 }
 
-String? _transferLocalPath(SessionArtifactTransfer transfer) =>
-    transfer.localFilePath;
-
-String? _transferLocalPathLabel(
-  AppLocalizations l10n,
-  SessionArtifactTransfer transfer,
-  String? path,
-) {
-  final exportedPath = transfer.exportedPath?.trim();
-  if (path == null) {
-    return null;
-  }
-  if (exportedPath != null && exportedPath.isNotEmpty) {
-    return transfer.exportedToContentUri
-        ? l10n.transferSavedToDevice(transfer.fileName)
-        : l10n.transferSavedPath(path);
-  }
-  return l10n.transferCachedPath(path);
-}
-
 String _transferDirectionLabel(
   AppLocalizations l10n,
   SessionArtifactTransferDirection direction,
@@ -1590,26 +1570,6 @@ String _transferDirectionLabel(
   SessionArtifactTransferDirection.download => l10n.transferDirectionDownload,
   SessionArtifactTransferDirection.preview => l10n.transferDirectionPreview,
   SessionArtifactTransferDirection.upload => l10n.transferDirectionUpload,
-};
-
-String _transferStatusLabel(
-  AppLocalizations l10n,
-  SessionArtifactTransfer transfer,
-) => switch (transfer.status) {
-  SessionArtifactTransferStatus.queued => l10n.transferStatusQueued,
-  SessionArtifactTransferStatus.running => l10n.transferStatusRunning,
-  SessionArtifactTransferStatus.cached =>
-    !kIsWeb && defaultTargetPlatform == TargetPlatform.android
-        ? l10n.transferStatusDownloaded
-        : l10n.transferStatusCached,
-  SessionArtifactTransferStatus.completed =>
-    !kIsWeb &&
-            defaultTargetPlatform == TargetPlatform.android &&
-            transfer.exportedToContentUri
-        ? l10n.transferStatusSaved
-        : l10n.transferStatusComplete,
-  SessionArtifactTransferStatus.canceled => l10n.transferStatusCanceled,
-  SessionArtifactTransferStatus.failed => l10n.transferStatusFailed,
 };
 
 String _transferProgressLabel(
@@ -1650,7 +1610,7 @@ String _transferDetailLabel(
         ? l10n.transferUploadedSize(formatFileSize(l10n, bytes))
         : l10n.transferDownloadedSize(formatFileSize(l10n, bytes));
   }
-  return _transferStatusLabel(l10n, transfer);
+  return transfer.localizedStatus(l10n);
 }
 
 class _TransferStatusIcon extends StatelessWidget {
@@ -1742,6 +1702,7 @@ String _emptyMessageForFilter(
       };
 
 bool _matchesSearchQuery(
+  AppLocalizations l10n,
   SessionArtifactTransfer transfer,
   String trimmedQuery,
 ) {
@@ -1752,6 +1713,7 @@ bool _matchesSearchQuery(
     transfer.sessionKey.sessionId,
     transfer.directionLabel,
     transfer.statusLabel,
+    transfer.localizedStatus(l10n),
     transfer.detailLabel,
     transfer.message,
     if (transfer.error != null) transfer.error!,

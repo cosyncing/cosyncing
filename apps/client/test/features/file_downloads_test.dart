@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/design/components/contextual_details.dart';
+import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/background_downloader_engine.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_file_service.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_transfer.dart';
@@ -28,6 +30,10 @@ void main() {
     'server switch',
     'paused',
     'paused on other server',
+    'foreground on other server',
+    'save queue',
+    'simultaneous completion',
+    'queued save loses foreground',
     'restart',
     'cancel',
     'write failure',
@@ -42,6 +48,7 @@ void main() {
       final native = FakeDownloadTrackingDatabase();
       final save = FakeAndroidSaveAs()..install();
       final shares = <SessionArtifactCachedFile>[];
+      Exception? shareFailure;
       addTearDown(() {
         PathProviderPlatform.instance = previousPaths;
         if (directory.existsSync()) directory.deleteSync(recursive: true);
@@ -64,6 +71,8 @@ void main() {
             (ref) async => _DownloadWorkspace(),
           ),
           cachedFileShareProvider.overrideWithValue((file) async {
+            final failure = shareFailure;
+            if (failure != null) throw failure;
             shares.add(file);
           }),
         ],
@@ -83,6 +92,14 @@ void main() {
       final engine = native.launches.single;
       expect(engine.enqueued, hasLength(1));
       final id = engine.enqueued.single.taskId;
+      String? secondId;
+      if (scenario == 'simultaneous completion' ||
+          scenario == 'queued save loses foreground') {
+        await app.tapKey('session-detail-files-download-审阅意见.md');
+        secondId = engine.enqueued.last.taskId;
+        expect(secondId, isNot(id));
+        save.pending = Completer<void>();
+      }
       final controller = app.container.read(
         sessionArtifactTransferControllerProvider.notifier,
       );
@@ -115,12 +132,14 @@ void main() {
           message: 'Document provider refused the write',
         );
       }
-      if (scenario == 'paused on other server') {
+      if (scenario == 'paused on other server' ||
+          scenario == 'foreground on other server') {
         await app.tapKey('workspace-open-drawer');
         await app.switchServer(otherProfile.id);
       }
       if (scenario == 'paused' ||
           scenario == 'share' ||
+          scenario == 'save queue' ||
           scenario == 'paused on other server') {
         app.tester.binding.handleAppLifecycleStateChanged(
           AppLifecycleState.paused,
@@ -137,15 +156,66 @@ void main() {
       } else {
         native.complete(id, staged);
       }
-      if (scenario == 'paused on other server') {
+      if (secondId != null) {
+        native.complete(secondId, stageNativeDownload(directory, secondId));
+        await _nativeUntil(
+          app,
+          () =>
+              save.requests.length == 1 &&
+              _row(app, secondId!)?.status ==
+                  SessionArtifactTransferStatus.cached,
+        );
+        expect(save.requests, hasLength(1));
+        if (scenario == 'queued save loses foreground') {
+          app.tester.binding.handleAppLifecycleStateChanged(
+            AppLifecycleState.paused,
+          );
+          await app.settle();
+        }
+        save.pending!.complete();
+        save.pending = null;
+        if (scenario == 'simultaneous completion') {
+          await _nativeUntil(
+            app,
+            () =>
+                _row(app, secondId!)?.status ==
+                SessionArtifactTransferStatus.completed,
+          );
+          expect(save.requests, hasLength(2));
+        } else {
+          await _nativeUntil(
+            app,
+            () =>
+                _row(app, id)?.status ==
+                SessionArtifactTransferStatus.completed,
+          );
+          for (final state in [
+            AppLifecycleState.hidden,
+            AppLifecycleState.inactive,
+            AppLifecycleState.resumed,
+          ]) {
+            app.tester.binding.handleAppLifecycleStateChanged(state);
+          }
+          await app.settle();
+          expect(save.requests, hasLength(1));
+          expect(
+            _row(app, secondId)!.status,
+            SessionArtifactTransferStatus.cached,
+          );
+        }
+      }
+      if (scenario == 'paused on other server' ||
+          scenario == 'foreground on other server') {
         await app.settle();
         expect(save.requests, isEmpty);
-        for (final state in [
-          AppLifecycleState.hidden,
-          AppLifecycleState.inactive,
-          AppLifecycleState.resumed,
-        ]) {
-          app.tester.binding.handleAppLifecycleStateChanged(state);
+        if (scenario == 'paused on other server') {
+          for (final state in [
+            AppLifecycleState.hidden,
+            AppLifecycleState.inactive,
+            AppLifecycleState.resumed,
+          ]) {
+            app.tester.binding.handleAppLifecycleStateChanged(state);
+          }
         }
         await app.switchServer(firstProfile.id);
         await app.openFromRoster('s1', cwd: '/work/studio');
@@ -153,6 +223,8 @@ void main() {
       final expected = switch (scenario) {
         'paused' ||
         'paused on other server' ||
+        'foreground on other server' ||
+        'save queue' ||
         'share' ||
         'restart' => SessionArtifactTransferStatus.cached,
         'cancel' => SessionArtifactTransferStatus.canceled,
@@ -162,7 +234,9 @@ void main() {
       await _nativeUntil(app, () => _row(app, id)?.status == expected);
       final cached = _row(app, id)!.cachedFilePath!;
       expect(File(cached).existsSync(), isTrue);
-      if (scenario == 'paused' || scenario == 'share') {
+      if (scenario == 'paused' ||
+          scenario == 'share' ||
+          scenario == 'save queue') {
         expect(save.requests, isEmpty);
         for (final state in [
           AppLifecycleState.hidden,
@@ -181,13 +255,23 @@ void main() {
       await app.go(transfersRoute);
       if (scenario == 'paused' ||
           scenario == 'paused on other server' ||
+          scenario == 'foreground on other server' ||
+          scenario == 'save queue' ||
           scenario == 'restart' ||
           scenario == 'share') {
         expect(save.requests, isEmpty);
         expect(find.textContaining('Downloaded'), findsWidgets);
+        if (scenario == 'paused') {
+          await app.enterText(
+            find.byKey(const Key('transfer-manager-search-field')),
+            'Downloaded',
+          );
+          expect(find.text('Download: 审阅意见.md'), findsOneWidget);
+          await app.tapKey('transfer-manager-search-clear');
+        }
       } else {
-        expect(save.requests.single['suggestedName'], '审阅意见.md');
-        expect(save.requests.single['mimeType'], 'text/markdown');
+        expect(save.requests.first['suggestedName'], '审阅意见.md');
+        expect(save.requests.first['mimeType'], 'text/markdown');
       }
       expect(find.byKey(Key('transfer-manager-save-$id')), findsOneWidget);
       expect(find.byKey(Key('transfer-manager-share-$id')), findsOneWidget);
@@ -208,6 +292,14 @@ void main() {
               _row(app, id)?.status == SessionArtifactTransferStatus.completed,
         );
         expect(find.textContaining('Saved'), findsWidgets);
+        if (scenario == 'paused') {
+          await app.enterText(
+            find.byKey(const Key('transfer-manager-search-field')),
+            'Saved',
+          );
+          expect(find.text('Download: 审阅意见.md'), findsOneWidget);
+          await app.tapKey('transfer-manager-search-clear');
+        }
       }
       if (scenario == 'share') {
         await app.tapKey('transfer-manager-share-$id');
@@ -219,13 +311,69 @@ void main() {
         expect(shares.single.fileName, '审阅意见.md');
         expect(shares.single.contentType, 'text/markdown');
         expect(_row(app, id)!.status, expected);
+        shareFailure = Exception(
+          'https://share.test/file?token=fixture-secret '.padRight(10000, 'x'),
+        );
+        await app.tapKey('transfer-manager-share-$id');
+        await app.tap(find.widgetWithText(SnackBarAction, 'Technical details'));
+        final detail = app.tester
+            .widget<SelectableText>(
+              find.byKey(const Key('contextual-details-text')),
+            )
+            .data!;
+        expect(detail, isNot(contains('fixture-secret')));
+        // The copied snapshot prefixes timestamp and filename; the shared
+        // error bound applies to the diagnostic payload after those headers.
+        final payload = detail.split('\n').skip(2).join('\n');
+        expect(payload.length, lessThanOrEqualTo(maxTechnicalDetailLength));
+        expect(payload, endsWith('…'));
+        await app.tapKey('contextual-details-close');
         File(cached).deleteSync();
         await app.tapKey('transfer-manager-save-$id');
         expect(
           find.text('The cached copy was removed. Download the file again.'),
           findsOneWidget,
         );
-        expect(_row(app, id)!.status, SessionArtifactTransferStatus.failed);
+        expect(_row(app, id)!.status, SessionArtifactTransferStatus.cached);
+      }
+      if (scenario == 'save queue') {
+        // Two explicit saves cross a reconnect-bound worker replacement. The
+        // native fake rejects concurrent calls exactly like Android does.
+        save.pending = Completer<void>();
+        await app.tapKey('transfer-manager-save-$id');
+        await _nativeUntil(app, () => save.requests.length == 1);
+        app.container.invalidate(sessionArtifactTransferWorkerProvider);
+        final second = app.container
+            .read(sessionArtifactTransferWorkerProvider)
+            .saveCachedTransfer(id);
+        await app.settle();
+        expect(save.requests, hasLength(1));
+        save.pending!.complete();
+        save.pending = null;
+        await _nativeUntil(app, () => save.requests.length == 2);
+        await second;
+        expect(_row(app, id)!.status, SessionArtifactTransferStatus.completed);
+        for (final code in ['busy', 'no_activity', 'write_failed']) {
+          save.error = PlatformException(code: code, message: 'Provider $code');
+          await app.tapKey('transfer-manager-save-$id');
+          expect(
+            _row(app, id)!.status,
+            SessionArtifactTransferStatus.completed,
+          );
+          expect(_row(app, id)!.exportedPath, isNotNull);
+          // Opening the disclosure dismisses its snackbar too, so it cannot
+          // cover the next Save tap on the phone-sized viewport.
+          await app.tap(
+            find.widgetWithText(SnackBarAction, 'Technical details'),
+          );
+          expect(find.textContaining('Provider $code'), findsOneWidget);
+          await app.tapKey('contextual-details-close');
+        }
+        save
+          ..error = null
+          ..response = null;
+        await app.tapKey('transfer-manager-save-$id');
+        expect(_row(app, id)!.status, SessionArtifactTransferStatus.completed);
       }
       if (scenario == 'write failure') {
         expect(
@@ -245,6 +393,41 @@ void main() {
         expect(
           find.textContaining('Document provider refused the write'),
           findsOneWidget,
+        );
+        await app.tapKey('contextual-details-close');
+        save.error = null;
+        await app.tapKey('transfer-manager-retry-$id');
+        await app.pumpUntil(
+          () => _row(app, id)?.status == SessionArtifactTransferStatus.running,
+          reason: 'retry starts a fresh native download',
+        );
+        expect(find.byKey(Key('transfer-manager-save-$id')), findsNothing);
+        expect(find.byKey(Key('transfer-manager-share-$id')), findsNothing);
+        engine.emit(
+          BackgroundDownloadRecord(
+            taskId: id,
+            status: BackgroundDownloadTaskStatus.failed,
+            errorMessage: 'Second native failure',
+          ),
+        );
+        await _nativeUntil(
+          app,
+          () => _row(app, id)?.status == SessionArtifactTransferStatus.failed,
+        );
+        final nextDiagnosticRow = find
+            .ancestor(
+              of: find.text('Download: 审阅意见.md'),
+              matching: find.byType(ContextualDetails),
+            )
+            .first;
+        await app.tester.longPressAt(
+          app.tester.getTopLeft(nextDiagnosticRow) + const Offset(4, 4),
+        );
+        await app.settle();
+        expect(find.textContaining('Second native failure'), findsOneWidget);
+        expect(
+          find.textContaining('Document provider refused the write'),
+          findsNothing,
         );
       }
       if (scenario == 'server switch') {
@@ -326,8 +509,11 @@ void main() {
         controller.transferById(rows.single.id)!.exportedPath,
         startsWith('content:'),
       );
-      expect(rows.single.fileName, 'review-saved.md');
+      expect(rows.single.fileName, 'review.md');
+      expect(rows.single.savedFileName, 'review-saved.md');
       expect(rows.single.message, 'Saved review-saved.md');
+      await app.go(transfersRoute);
+      expect(find.text('Saved to device: review-saved.md'), findsWidgets);
       expect(find.textContaining('Saved'), findsWidgets);
       expect(app.tester.takeException(), isNull);
     },

@@ -125,17 +125,10 @@ class _ArtifactTransferRowState extends ConsumerState<_ArtifactTransferRow> {
             transfer.status == SessionArtifactTransferStatus.running ||
             transfer.status == SessionArtifactTransferStatus.cached);
     final localTransferFileOpener = ref.read(localTransferFileOpenerProvider);
-    final localPath = _sessionDetailTransferLocalPath(transfer);
-    final localPathLabel = _sessionDetailTransferLocalPathLabel(
-      l10n,
-      transfer,
-      localPath,
-    );
+    final localPath = transfer.localFilePath;
+    final localPathLabel = transfer.localizedLocalPath(l10n);
     final progressLabel = _sessionDetailTransferProgressLabel(l10n, transfer);
-    final statusLabel = _sessionDetailTransferStatusLabel(
-      l10n,
-      transfer,
-    );
+    final statusLabel = transfer.localizedStatus(l10n);
     final detailLabel = switch ((isFailed, progressLabel.isEmpty)) {
       (true, true) => '$statusLabel — ${l10n.transferFailed}',
       (true, false) => '$statusLabel — ${l10n.transferFailed} — $progressLabel',
@@ -501,26 +494,6 @@ Future<void> _showSessionTransferTextPreviewDialog(
   );
 }
 
-String? _sessionDetailTransferLocalPath(SessionArtifactTransfer transfer) =>
-    transfer.localFilePath;
-
-String? _sessionDetailTransferLocalPathLabel(
-  AppLocalizations l10n,
-  SessionArtifactTransfer transfer,
-  String? path,
-) {
-  final exportedPath = transfer.exportedPath?.trim();
-  if (path == null) {
-    return null;
-  }
-  if (exportedPath != null && exportedPath.isNotEmpty) {
-    return transfer.exportedToContentUri
-        ? l10n.transferSavedToDevice(transfer.fileName)
-        : l10n.transferSavedPath(path);
-  }
-  return l10n.transferCachedPath(path);
-}
-
 String _sessionDetailTransferDirectionLabel(
   AppLocalizations l10n,
   SessionArtifactTransferDirection direction,
@@ -528,26 +501,6 @@ String _sessionDetailTransferDirectionLabel(
   SessionArtifactTransferDirection.download => l10n.transferDirectionDownload,
   SessionArtifactTransferDirection.preview => l10n.transferDirectionPreview,
   SessionArtifactTransferDirection.upload => l10n.transferDirectionUpload,
-};
-
-String _sessionDetailTransferStatusLabel(
-  AppLocalizations l10n,
-  SessionArtifactTransfer transfer,
-) => switch (transfer.status) {
-  SessionArtifactTransferStatus.queued => l10n.transferStatusQueued,
-  SessionArtifactTransferStatus.running => l10n.transferStatusRunning,
-  SessionArtifactTransferStatus.cached =>
-    !kIsWeb && defaultTargetPlatform == TargetPlatform.android
-        ? l10n.transferStatusDownloaded
-        : l10n.transferStatusCached,
-  SessionArtifactTransferStatus.completed =>
-    !kIsWeb &&
-            defaultTargetPlatform == TargetPlatform.android &&
-            transfer.exportedToContentUri
-        ? l10n.transferStatusSaved
-        : l10n.transferStatusComplete,
-  SessionArtifactTransferStatus.canceled => l10n.transferStatusCanceled,
-  SessionArtifactTransferStatus.failed => l10n.transferStatusFailed,
 };
 
 String _sessionDetailTransferProgressLabel(
@@ -573,7 +526,7 @@ SessionArtifactTransfer? _sessionDetailTransferForArtifactSummary(
         transfer.direction != SessionArtifactTransferDirection.preview) {
       continue;
     }
-    if (_sessionDetailTransferLocalPath(transfer) == null) {
+    if (transfer.localFilePath == null) {
       continue;
     }
     if (newest == null ||
@@ -757,14 +710,10 @@ class _ArtifactSurfaceMessage extends ConsumerWidget {
     );
     // Governed by docs/architecture/client-ui.md:
     // artifact rows reuse the transfer-row local action policy.
-    final localPath = matchingTransfer == null
-        ? null
-        : _sessionDetailTransferLocalPath(matchingTransfer);
+    final localPath = matchingTransfer?.localFilePath;
     final localTransferFileOpener = ref.read(localTransferFileOpenerProvider);
     final localTransfer = matchingTransfer;
-    final localPathLabel = localTransfer == null
-        ? null
-        : _sessionDetailTransferLocalPathLabel(l10n, localTransfer, localPath);
+    final localPathLabel = localTransfer?.localizedLocalPath(l10n);
 
     return ContextualDetails(
       label: name,

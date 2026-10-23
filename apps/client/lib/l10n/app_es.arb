@@ -2112,5 +2112,6 @@
         "type": "String"
       }
     }
-  }
+  },
+  "transferSaveBusy": "Hay otro archivo guardándose. Vuelve a guardar cuando termine."
 }

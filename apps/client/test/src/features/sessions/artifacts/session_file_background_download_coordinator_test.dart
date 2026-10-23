@@ -155,6 +155,63 @@ void main() {
     );
 
     test(
+      'a transient ledger load failure still reconciles a native completion',
+      () async {
+        final repository = _TransientLoadRepository();
+        final now = DateTime.now();
+        const id = 'restart-task';
+        await repository.upsertTransfer(
+          SessionArtifactTransfer(
+            id: id,
+            sessionKey: sessionKey,
+            actionKey: 'report',
+            fileName: 'report.txt',
+            direction: SessionArtifactTransferDirection.download,
+            status: SessionArtifactTransferStatus.queued,
+            brokerProfileId: 'profile-a',
+            createdAt: now,
+            updatedAt: now,
+          ),
+        );
+        final restarted = ProviderContainer(
+          overrides: [
+            sessionArtifactTransferRepositoryProvider.overrideWithValue(
+              repository,
+            ),
+          ],
+        );
+        addTearDown(restarted.dispose);
+        final engine = FakeBackgroundDownloadEngine()
+          ..records = [
+            const BackgroundDownloadRecord(
+              taskId: id,
+              status: BackgroundDownloadTaskStatus.complete,
+              filePath: '/native/report.part',
+            ),
+          ];
+        final coordinator = SessionFileBackgroundDownloadCoordinator(
+          hub: hubFor(engine),
+          transferController: restarted.read(
+            sessionArtifactTransferControllerProvider.notifier,
+          ),
+          finalizer: _FakeFinalizer(cachedFile),
+          brokerProfileId: 'profile-a',
+          brokerClient: brokerClient(),
+        );
+        addTearDown(coordinator.dispose);
+        await coordinator.bootstrap();
+        expect(repository.loads, 2);
+        expect(
+          restarted
+              .read(sessionArtifactTransferControllerProvider)
+              .single
+              .status,
+          SessionArtifactTransferStatus.cached,
+        );
+      },
+    );
+
+    test(
       'downloadSessionFile enqueues a native task with auth headers and '
       'marks the ledger running',
       () async {
@@ -487,4 +544,14 @@ class _UnusedFileService implements SessionArtifactFileService {
   }) => throw UnimplementedError(
     'foreground path not used in background tests',
   );
+}
+
+class _TransientLoadRepository
+    extends InMemorySessionArtifactTransferRepository {
+  int loads = 0;
+  @override
+  Future<List<SessionArtifactTransfer>> loadTransfers() async {
+    if (++loads == 1) throw StateError('temporary ledger read failure');
+    return super.loadTransfers();
+  }
 }

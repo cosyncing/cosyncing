@@ -137,7 +137,7 @@ class _AppState extends ConsumerState<App> {
     if (!ref.watch(clientIsWebProvider) &&
         (defaultTargetPlatform == TargetPlatform.android ||
             defaultTargetPlatform == TargetPlatform.iOS)) {
-      ref.watch(sessionArtifactTransferWorkerProvider);
+      ref.listen(sessionArtifactTransferWorkerProvider, (_, _) {});
     }
     ref
       ..watch(activeBrokerProfileHydrationProvider)

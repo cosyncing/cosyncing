@@ -69,8 +69,14 @@ class MainActivity : FlutterActivity() {
         FileExport.attach(this)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.cosyncing.client/file_export")
             .setMethodCallHandler { call, result ->
-                if (call.method == "saveAs") FileExport.saveAs(application, call, result)
-                else result.notImplemented()
+                when (call.method) {
+                    "saveAs" -> FileExport.saveAs(application, call, result)
+                    "cancelSaveAs" -> {
+                        FileExport.cancel(call.argument<Int>("requestId"))
+                        result.success(null)
+                    }
+                    else -> result.notImplemented()
+                }
             }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, backgroundConnectionChannel)
             .setMethodCallHandler { call, result ->
@@ -183,6 +189,7 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
+        FileExport.detach(this)
         clearInstallReceiver()
         super.onDestroy()
     }

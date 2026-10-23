@@ -77,7 +77,7 @@ void main() {
       fileService
         ..mockCachedFile = const SessionArtifactCachedFile(
           cachedFilePath: '/tmp/report.html',
-          fileName: 'report.html',
+          fileName: 'report-1.html',
           contentType: 'text/html',
           byteLength: 42,
         )
@@ -90,7 +90,7 @@ void main() {
       );
 
       expect(result.outcome, SessionArtifactTransferWorkerOutcome.completed);
-      expect(result.cachedFile?.fileName, 'report.html');
+      expect(result.cachedFile?.fileName, 'report-1.html');
       expect(result.exportedPath, '/workspace/report.html');
       expect(fileService.cacheCallCount, 1);
       expect(fileService.exportCallCount, 1);
@@ -102,7 +102,8 @@ void main() {
       expect(transfer.status, SessionArtifactTransferStatus.completed);
       expect(transfer.cachedFilePath, '/tmp/report.html');
       expect(transfer.exportedPath, '/workspace/report.html');
-      expect(transfer.detailLabel, 'Saved report.html');
+      expect(transfer.fileName, 'report.html');
+      expect(transfer.detailLabel, 'Saved report-1.html');
     });
 
     test(

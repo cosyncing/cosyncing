@@ -1,5 +1,6 @@
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/components/contextual_details.dart';
+import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_file_service.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_transfer.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_transfer_worker.dart';
@@ -86,7 +87,7 @@ class _CachedTransferActionsState extends ConsumerState<CachedTransferActions> {
                 error.message == worker.cachedCopyRemovedMessage
             ? l10n.transferCachedCopyRemoved
             : l10n.transferShareFailed;
-        _showError(message, '$error');
+        _showError(message, describeFailure(error, lead: message).detail);
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -118,8 +119,7 @@ class _CachedTransferActionsState extends ConsumerState<CachedTransferActions> {
   Widget build(BuildContext context) {
     if (kIsWeb ||
         defaultTargetPlatform != TargetPlatform.android ||
-        !cachedFileSaveSupportedOn(defaultTargetPlatform) ||
-        widget.transfer.cachedFilePath == null) {
+        !widget.transfer.hasSettledCachedCopy) {
       return const SizedBox.shrink();
     }
     final l10n = AppLocalizations.of(context);
@@ -188,5 +188,38 @@ class TransferLocalFileActions extends StatelessWidget {
         ...actions,
       ],
     );
+  }
+}
+
+/// Shared labels used by session rows, the transfer manager and its search.
+extension TransferPresentation on SessionArtifactTransfer {
+  /// Localized status also used by transfer-list search.
+  String localizedStatus(AppLocalizations l10n) => switch (status) {
+    SessionArtifactTransferStatus.queued => l10n.transferStatusQueued,
+    SessionArtifactTransferStatus.running => l10n.transferStatusRunning,
+    SessionArtifactTransferStatus.cached =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.android
+          ? l10n.transferStatusDownloaded
+          : l10n.transferStatusCached,
+    SessionArtifactTransferStatus.completed =>
+      !kIsWeb &&
+              defaultTargetPlatform == TargetPlatform.android &&
+              exportedToContentUri
+          ? l10n.transferStatusSaved
+          : l10n.transferStatusComplete,
+    SessionArtifactTransferStatus.canceled => l10n.transferStatusCanceled,
+    SessionArtifactTransferStatus.failed => l10n.transferStatusFailed,
+  };
+
+  /// Destination label while filesystem actions keep using the cached copy.
+  String? localizedLocalPath(AppLocalizations l10n) {
+    final path = localFilePath;
+    if (path == null) return null;
+    if (exportedPath?.trim().isNotEmpty ?? false) {
+      return exportedToContentUri
+          ? l10n.transferSavedToDevice(savedFileName)
+          : l10n.transferSavedPath(path);
+    }
+    return l10n.transferCachedPath(path);
   }
 }

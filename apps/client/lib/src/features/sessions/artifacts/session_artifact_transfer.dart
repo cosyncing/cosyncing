@@ -138,6 +138,18 @@ class SessionArtifactTransfer {
     return cached == null || cached.isEmpty ? null : cached;
   }
 
+  /// Destination display name, recorded in the existing save message.
+  String get savedFileName =>
+      exportedToContentUri && message.startsWith('Saved ')
+      ? message.substring(6)
+      : fileName;
+
+  /// Only settled copies may be saved/shared; retry keeps its old cache path.
+  bool get hasSettledCachedCopy =>
+      cachedFilePath != null &&
+      status != SessionArtifactTransferStatus.queued &&
+      status != SessionArtifactTransferStatus.running;
+
   /// MIME type when known.
   final String? contentType;
 
@@ -479,16 +491,19 @@ final sessionArtifactTransferControllerProvider =
 class SessionArtifactTransferController
     extends Notifier<List<SessionArtifactTransfer>> {
   var _sequence = 0;
-  late Future<void> _hydration;
+  Future<void>? _hydration;
 
   /// Initial durable ledger load, before native restart reconciliation.
-  Future<void> get ready => _hydration;
+  Future<void> get ready =>
+      _hydration ??= hydrate().catchError((Object error, StackTrace stack) {
+        _hydration = null;
+        Error.throwWithStackTrace(error, stack);
+      });
   Future<void> _persistenceQueue = Future<void>.value();
 
   @override
   List<SessionArtifactTransfer> build() {
-    _hydration = hydrate();
-    unawaited(_hydration);
+    unawaited(ready.catchError((Object _) {}));
     return const [];
   }
 
@@ -776,7 +791,6 @@ class SessionArtifactTransferController
       id,
       (transfer, now) => transfer.copyWith(
         status: SessionArtifactTransferStatus.completed,
-        fileName: artifact.fileName,
         cachedFilePath: artifact.cachedFilePath,
         exportedPath: exportedPath,
         contentType: artifact.contentType,

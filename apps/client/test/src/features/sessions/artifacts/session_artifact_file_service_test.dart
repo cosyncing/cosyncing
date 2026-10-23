@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:ui';
@@ -8,7 +9,10 @@ import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifac
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import '../../../../support/feature/fake_file_downloads.dart';
+
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   group('SessionArtifactFileService save dialog localization', () {
     test('selected app locale wins when the platform locale differs', () async {
       final acceptedGroups = <XTypeGroup>[];
@@ -466,6 +470,60 @@ void main() {
         );
 
         expect(saved, isNull);
+      },
+    );
+
+    // Picker cancellation and native commit are independently scheduled; a
+    // platform-boundary barrier controls this race that app gestures cannot.
+    test(
+      'Android export cancels a pending picker and permits the next save',
+      () async {
+        final directory = Directory.systemTemp.createTempSync(
+          'android-export-cancel-',
+        );
+        addTearDown(() => directory.deleteSync(recursive: true));
+        final source = File('${directory.path}/source.md')
+          ..writeAsStringSync('cached');
+        final save = FakeAndroidSaveAs()
+          ..pending = Completer<void>()
+          ..install();
+        final service = DefaultSessionArtifactFileService(
+          downloadBackend: null,
+          cacheDirectoryProvider: _FakeArtifactCacheDirectoryProvider(
+            directory,
+          ),
+          saveTargetProvider: _FakeArtifactSaveTargetProvider(),
+          exportTarget: AndroidArtifactExportTarget(),
+        );
+        final cached = SessionArtifactCachedFile(
+          cachedFilePath: source.path,
+          fileName: 'source.md',
+          byteLength: 6,
+        );
+        final token = SessionArtifactCancellationToken();
+        final first = service.exportCachedArtifact(
+          cached,
+          cancellationToken: token,
+        );
+        final canceled = expectLater(
+          first,
+          throwsA(isA<SessionArtifactCanceledException>()),
+        );
+        await pumpEventQueue();
+        expect(save.requests, hasLength(1));
+        token.cancel();
+        await canceled;
+        expect(save.canceledRequests, [save.requests.single['requestId']]);
+        save.pending = null;
+        final committedToken = SessionArtifactCancellationToken();
+        save.onCommitted = committedToken.cancel;
+        final destination = await service.exportCachedArtifact(
+          cached,
+          cancellationToken: committedToken,
+        );
+        expect(committedToken.isCanceled, isTrue);
+        expect(destination, startsWith('content:'));
+        expect(save.requests, hasLength(2));
       },
     );
 

@@ -160,11 +160,8 @@ class SessionFileBackgroundUpdateHub {
   /// Explicit downloads in this launch that may offer Save as on completion.
   final saveWhenFinished = <String>{};
 
-  /// Reads the app-wide monitor even when the active coordinator belongs to
-  /// another broker. A background completion must never prompt on a later
-  /// server switch. Installed by the worker; no provider dependency or new
-  /// lifecycle subscription is added to this process-lifetime hub.
-  bool Function()? isForeground;
+  SessionFileBackgroundDownloadCoordinator? _activeCoordinator;
+  final _saveOffers = <String, SessionFileBackgroundDownloadCoordinator>{};
   final _finalizing = <String>{};
   final _stream = StreamController<BackgroundDownloadRecord>.broadcast();
   StreamSubscription<BackgroundDownloadRecord>? _subscription;
@@ -177,11 +174,16 @@ class SessionFileBackgroundUpdateHub {
   Stream<BackgroundDownloadRecord> get stream {
     if (!_disposed) {
       _subscription ??= engine.updates().listen((record) {
-        _records[record.taskId] = record;
         if (record.status == BackgroundDownloadTaskStatus.complete &&
-            !(isForeground?.call() ?? false)) {
-          saveWhenFinished.remove(record.taskId);
+            saveWhenFinished.remove(record.taskId)) {
+          // Decide once at live completion, before a different broker can
+          // ignore the record or a later reconciliation can replay it.
+          final owner = _activeCoordinator;
+          if (owner != null && owner.canOfferSave(record.taskId)) {
+            _saveOffers[record.taskId] = owner;
+          }
         }
+        _records[record.taskId] = record;
         _stream.add(record);
       }, onError: _stream.addError);
     }
@@ -192,6 +194,7 @@ class SessionFileBackgroundUpdateHub {
   Future<void> forget(String taskId) async {
     _records.remove(taskId);
     saveWhenFinished.remove(taskId);
+    _saveOffers.remove(taskId);
     await engine.forget(taskId);
   }
 
@@ -219,6 +222,7 @@ class SessionFileBackgroundDownloadCoordinator {
     required this.brokerClient,
     this.isForeground,
     this.onReadyToSave,
+    this.onFailureDetail,
   });
 
   /// Native download engine seam.
@@ -252,6 +256,9 @@ class SessionFileBackgroundDownloadCoordinator {
   /// Opens Save as after the finalization guard has been released.
   final Future<void> Function(String transferId)? onReadyToSave;
 
+  /// Sanitized in-memory diagnostics, separate from the persisted ledger.
+  final void Function(String, String?)? onFailureDetail;
+
   bool _disposed = false;
 
   /// Whether native background downloads are available here.
@@ -269,7 +276,12 @@ class SessionFileBackgroundDownloadCoordinator {
       listen();
       await engine.ensureStarted();
       if (_disposed) return;
-      await transferController.ready;
+      try {
+        await transferController.ready;
+      } on Object {
+        // A transient ledger read must not poison every later coordinator.
+        await transferController.ready;
+      }
       if (_disposed) return;
       await reconcile();
     } on Object {
@@ -280,6 +292,7 @@ class SessionFileBackgroundDownloadCoordinator {
   /// Subscribes to live task updates. Idempotent.
   void listen() {
     if (_disposed) return;
+    hub._activeCoordinator = this;
     _updatesSubscription ??= hub.stream.listen(
       (record) => unawaited(_reconcileRecordSafely(record)),
       onError: (Object _) {},
@@ -297,13 +310,12 @@ class SessionFileBackgroundDownloadCoordinator {
     } on Object catch (e) {
       final transfer = transferController.transferById(record.taskId);
       if (transfer != null && _owns(transfer)) {
-        transferController.markFailed(
-          record.taskId,
-          userFacingMessage(
-            e,
-            lead: "Couldn't update this background download.",
-          ),
+        final failure = describeFailure(
+          e,
+          lead: "Couldn't update this background download.",
         );
+        transferController.markFailed(record.taskId, failure.message);
+        onFailureDetail?.call(record.taskId, failure.detail);
       }
     }
   }
@@ -311,6 +323,10 @@ class SessionFileBackgroundDownloadCoordinator {
   /// Cancels the live subscription.
   Future<void> dispose() async {
     _disposed = true;
+    hub._saveOffers.removeWhere((_, owner) => identical(owner, this));
+    if (identical(hub._activeCoordinator, this)) {
+      hub._activeCoordinator = null;
+    }
     await _updatesSubscription?.cancel();
     _updatesSubscription = null;
   }
@@ -350,6 +366,7 @@ class SessionFileBackgroundDownloadCoordinator {
         transferId,
         message: 'Downloading in the background...',
       );
+      hub.saveWhenFinished.add(transferId);
       final accepted = await engine.enqueue(
         BackgroundSessionDownloadRequest(
           taskId: transferId,
@@ -360,29 +377,37 @@ class SessionFileBackgroundDownloadCoordinator {
         ),
       );
       if (!accepted) {
+        hub.saveWhenFinished.remove(transferId);
         const message = 'The background download engine rejected the task.';
         transferController.markFailed(transferId, message);
         return _failed(transferId, message);
       }
-      hub.saveWhenFinished.add(transferId);
       return SessionArtifactTransferWorkerResult(
         transferId: transferId,
         outcome: SessionArtifactTransferWorkerOutcome.enqueuedInBackground,
         message: 'Downloading $fileName in the background',
       );
     } on Object catch (e) {
-      final message = userFacingMessage(
+      hub.saveWhenFinished.remove(transferId);
+      final failure = describeFailure(
         e,
         lead: "Couldn't start the background download.",
       );
-      transferController.markFailed(transferId, message);
-      return _failed(transferId, message);
+      transferController.markFailed(transferId, failure.message);
+      onFailureDetail?.call(transferId, failure.detail);
+      return SessionArtifactTransferWorkerResult(
+        transferId: transferId,
+        outcome: SessionArtifactTransferWorkerOutcome.failed,
+        message: failure.message,
+        detail: failure.detail,
+      );
     }
   }
 
   /// Cancels the native task backing [transferId]. Best-effort; the ledger row
   /// is canceled by the worker regardless.
   Future<void> cancel(String transferId) async {
+    hub.saveWhenFinished.remove(transferId);
     try {
       await engine.cancel(transferId);
     } on Object {
@@ -441,10 +466,12 @@ class SessionFileBackgroundDownloadCoordinator {
       case BackgroundDownloadTaskStatus.failed:
       case BackgroundDownloadTaskStatus.notFound:
         if (!_isTerminal(transfer)) {
-          transferController.markFailed(
-            record.taskId,
+          final failure = describeFailure(
             record.errorMessage ?? 'Background download failed.',
+            lead: "Couldn't download this file.",
           );
+          transferController.markFailed(record.taskId, failure.message);
+          onFailureDetail?.call(record.taskId, failure.detail);
         }
         // Forget even when the row was already terminal, so stale records
         // cannot accumulate in the engine's tracking database.
@@ -499,20 +526,28 @@ class SessionFileBackgroundDownloadCoordinator {
         cached,
         message: 'Downloaded ${cached.fileName}',
       );
-      final requestedSave = hub.saveWhenFinished.remove(record.taskId);
-      readyToSave =
-          requestedSave &&
-          (isForeground?.call() ?? false) &&
-          cachedFileSaveSupportedOn(defaultTargetPlatform);
+      readyToSave = identical(hub._saveOffers.remove(record.taskId), this);
       await hub.forget(record.taskId);
     } finally {
       hub._finalizing.remove(record.taskId);
     }
-    if (readyToSave &&
-        (isForeground?.call() ?? false) &&
-        onReadyToSave != null) {
+    if (readyToSave && canOfferSave(record.taskId) && onReadyToSave != null) {
       unawaited(onReadyToSave!(record.taskId));
     }
+  }
+
+  /// Automatic saves are valid only while this live coordinator still owns
+  /// the active server and the application remains open. Also checked when a
+  /// queued save reaches the front, so it cannot become a deferred picker.
+  bool canOfferSave(String taskId) {
+    final transfer = transferController.transferById(taskId);
+    return !_disposed &&
+        identical(hub._activeCoordinator, this) &&
+        transfer != null &&
+        _owns(transfer) &&
+        !_isTerminal(transfer) &&
+        (isForeground?.call() ?? false) &&
+        cachedFileSaveSupportedOn(defaultTargetPlatform);
   }
 
   bool _owns(SessionArtifactTransfer transfer) {

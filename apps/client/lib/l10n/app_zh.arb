@@ -3090,5 +3090,6 @@
         "type": "String"
       }
     }
-  }
+  },
+  "transferSaveBusy": "另一个文件正在保存。完成后请再次点按保存。"
 }
