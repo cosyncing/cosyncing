@@ -157,13 +157,26 @@ void main() {
         native.complete(id, staged);
       }
       if (secondId != null) {
-        native.complete(secondId, stageNativeDownload(directory, secondId));
+        if (scenario == 'queued save loses foreground') {
+          // Gate the first picker explicitly: cache finalization is allowed
+          // to finish out of download order when the completions overlap.
+          await _nativeUntil(app, () => save.requests.length == 1);
+        }
+        native.complete(
+          secondId,
+          stageNativeDownload(
+            directory,
+            secondId,
+            contents: 'other file bytes',
+          ),
+        );
         await _nativeUntil(
           app,
           () =>
               save.requests.length == 1 &&
               _row(app, secondId!)?.status ==
-                  SessionArtifactTransferStatus.cached,
+                  SessionArtifactTransferStatus.cached &&
+              engine.forgotten.contains(secondId),
         );
         expect(save.requests, hasLength(1));
         if (scenario == 'queued save loses foreground') {
@@ -183,18 +196,23 @@ void main() {
           );
           expect(save.requests, hasLength(2));
         } else {
-          await _nativeUntil(
-            app,
-            () =>
-                _row(app, id)?.status ==
-                SessionArtifactTransferStatus.completed,
-          );
-          for (final state in [
-            AppLifecycleState.hidden,
-            AppLifecycleState.inactive,
-            AppLifecycleState.resumed,
-          ]) {
-            app.tester.binding.handleAppLifecycleStateChanged(state);
+          try {
+            await _nativeUntil(
+              app,
+              () =>
+                  _row(app, id)?.status ==
+                  SessionArtifactTransferStatus.completed,
+            );
+          } finally {
+            // Restore frame delivery even on assertion failure, so fixture
+            // teardown can unmount before disposing its ProviderContainer.
+            for (final state in [
+              AppLifecycleState.hidden,
+              AppLifecycleState.inactive,
+              AppLifecycleState.resumed,
+            ]) {
+              app.tester.binding.handleAppLifecycleStateChanged(state);
+            }
           }
           await app.settle();
           expect(save.requests, hasLength(1));
@@ -203,6 +221,11 @@ void main() {
             SessionArtifactTransferStatus.cached,
           );
         }
+        final firstPath = _row(app, id)!.cachedFilePath!;
+        final secondPath = _row(app, secondId)!.cachedFilePath!;
+        expect(secondPath, isNot(firstPath));
+        expect(File(firstPath).readAsStringSync(), 'download fixture');
+        expect(File(secondPath).readAsStringSync(), 'other file bytes');
       }
       if (scenario == 'paused on other server' ||
           scenario == 'foreground on other server') {

@@ -156,8 +156,12 @@ class DownloadTemporaryPaths extends PathProviderPlatform {
 }
 
 /// Small staged native file; the real finalizer moves and registers it.
-String stageNativeDownload(Directory directory, String id) {
+String stageNativeDownload(
+  Directory directory,
+  String id, {
+  String contents = 'download fixture',
+}) {
   final staging = File('${directory.path}/$id.part')
-    ..writeAsStringSync('download fixture');
+    ..writeAsStringSync(contents);
   return staging.path;
 }
