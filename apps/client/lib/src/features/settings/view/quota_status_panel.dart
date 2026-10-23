@@ -1,7 +1,11 @@
+import 'dart:math' as math;
+
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/components.dart';
+import 'package:cosyncing_client/src/design/window_size_class.dart';
+import 'package:cosyncing_client/src/features/settings/view/quota_liquid_gauge.dart';
 import 'package:cosyncing_client/src/features/settings/view/quota_provider_logo.dart';
 import 'package:cosyncing_client/src/features/settings/view/settings_common.dart';
 import 'package:flutter/material.dart';
@@ -19,19 +23,10 @@ const double quotaCriticalRemainingPercent = 10;
 /// own expiry notice inside the last 48 hours, the edge included.
 const Duration quotaResetCreditsUseOrLose = Duration(hours: 48);
 
-/// Tokdash-style quota status bars for Settings → Agents & Quota.
-///
-/// Renders the normalized [TokdashQuotaResponse] already held by
-/// `ManagedRuntimeController` as provider/window rows: one "5-hour" label for
-/// every five-hour window whatever the provider calls it, weekly and other
-/// windows by name, percentage remaining, a thin bar that stays neutral until
-/// the window runs low, the reset time, and estimated/stale/unavailable
-/// status. Under a provider's windows sit the reset credits it holds, when
-/// Tokdash reports any (Codex, Claude Code): how many, and when the soonest
-/// expires. Wide layouts set providers two to a row. Antigravity's per-model
-/// readings collapse into its two shared quota pools, matching Tokdash's own
-/// quota page. Viewing is independent of the quota-warnings opt-in, and the
-/// panel never shows raw payloads, endpoints, bucket ids, or API errors.
+/// Remaining quota in compact provider pairs, with one liquid circle per
+/// window. Provider selection, window normalization, stale/estimated readings
+/// and reset credits share the same presentation in Overview and Settings.
+/// Antigravity retains its two shared pools rather than repeating each model.
 class QuotaStatusPanel extends StatelessWidget {
   /// Creates a quota panel.
   ///
@@ -62,7 +57,7 @@ class QuotaStatusPanel extends StatelessWidget {
   final bool embedded;
 
   /// Content width from which providers sit two to a row.
-  static const double twoColumnWidth = 600;
+  static const double twoColumnWidth = 280;
 
   @override
   Widget build(BuildContext context) {
@@ -137,34 +132,59 @@ class QuotaStatusPanel extends StatelessWidget {
         text: l10n.settingsQuotaUnavailable,
       );
     }
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final columns =
-            constraints.maxWidth >= (embedded ? 720 : twoColumnWidth) ? 2 : 1;
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            for (var start = 0; start < groups.length; start += columns) ...[
-              if (start > 0) SizedBox(height: embedded ? 16 : 24),
-              if (columns == 1)
-                groups[start]
-              else
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(child: groups[start]),
-                    SizedBox(width: embedded ? 24 : 32),
-                    Expanded(
-                      child: start + 1 < groups.length
-                          ? groups[start + 1]
-                          : const SizedBox.shrink(),
-                    ),
-                  ],
+    return QuotaLiquidMotion(
+      enabled: providerIds.any(
+        (id) =>
+            data.providers[id]?.buckets.any(
+              (bucket) =>
+                  bucket.remainingPercent != null &&
+                  bucket.remainingPercent! > 0 &&
+                  bucket.remainingPercent! < 100,
+            ) ??
+            false,
+      ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final scale = MediaQuery.textScalerOf(context).scale(12) / 12;
+          final columns =
+              constraints.maxWidth >= twoColumnWidth * math.max(1, scale)
+              ? 2
+              : 1;
+          final gap = WindowSizeClass.of(context) == WindowSizeClass.compact
+              ? 12.0
+              : 16.0;
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                l10n.settingsQuotaRemainingLegend,
+                style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                  color: context.tokens.textSecondary,
                 ),
+              ),
+              const SizedBox(height: 8),
+              for (var start = 0; start < groups.length; start += columns) ...[
+                if (start > 0) SizedBox(height: gap),
+                if (columns == 1)
+                  groups[start]
+                else
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(child: groups[start]),
+                      SizedBox(width: gap),
+                      Expanded(
+                        child: start + 1 < groups.length
+                            ? groups[start + 1]
+                            : const SizedBox.shrink(),
+                      ),
+                    ],
+                  ),
+              ],
             ],
-          ],
-        );
-      },
+          );
+        },
+      ),
     );
   }
 }
@@ -205,85 +225,87 @@ class _QuotaProviderGroup extends StatelessWidget {
       l10n,
     );
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            QuotaProviderLogo(provider: provider.provider),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                providerName,
-                style: theme.textTheme.labelLarge?.copyWith(
-                  color: tokens.textPrimary,
-                  fontWeight: FontWeight.w700,
-                ),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            if (provider.estimated) ...[
-              StatusPill(
-                label: l10n.settingsQuotaEstimated,
-                color: tokens.statusIdle,
-              ),
+    return Container(
+      key: Key('settings-quota-provider-$providerId'),
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        border: Border.all(color: tokens.separator),
+        borderRadius: BorderRadius.circular(tokens.radiusMd),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              QuotaProviderLogo(provider: provider.provider),
               const SizedBox(width: 8),
-            ],
-            if (failed)
-              StatusPill(
-                label: l10n.settingsQuotaStale,
-                color: tokens.statusNeedsInput,
-              ),
-          ],
-        ),
-        const SizedBox(height: 12),
-        if (buckets.isEmpty)
-          Text(
-            l10n.settingsQuotaNoReadings,
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: tokens.textTertiary,
-            ),
-          )
-        else
-          for (var index = 0; index < buckets.length; index++) ...[
-            if (index > 0) const SizedBox(height: 16),
-            if (buckets[index].groupLabel case final groupLabel?) ...[
-              Text(
-                groupLabel,
-                style: theme.textTheme.labelMedium?.copyWith(
-                  color: tokens.textSecondary,
-                  fontWeight: FontWeight.w600,
+              Expanded(
+                child: Text(
+                  providerName,
+                  style: theme.textTheme.labelLarge?.copyWith(
+                    color: tokens.textPrimary,
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
               ),
-              const SizedBox(height: 8),
             ],
-            _QuotaBucketRow(
+          ),
+          if (provider.estimated || failed) ...[
+            const SizedBox(height: 4),
+            Wrap(
+              spacing: 4,
+              runSpacing: 4,
+              children: [
+                if (provider.estimated)
+                  StatusPill(
+                    label: l10n.settingsQuotaEstimated,
+                    color: tokens.statusIdle,
+                    dense: true,
+                  ),
+                if (failed)
+                  StatusPill(
+                    label: l10n.settingsQuotaStale,
+                    color: tokens.statusNeedsInput,
+                    dense: true,
+                  ),
+              ],
+            ),
+          ],
+          const SizedBox(height: 8),
+          if (buckets.isEmpty)
+            Text(
+              l10n.settingsQuotaNoReadings,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: tokens.textTertiary,
+              ),
+            )
+          else
+            for (var index = 0; index < buckets.length; index++) ...[
+              if (index > 0) const SizedBox(height: 8),
+              _QuotaBucketRow(
+                providerName: providerName,
+                providerId: providerId,
+                bucket: buckets[index].bucket,
+                bucketKey: buckets[index].key,
+                groupLabel: buckets[index].groupLabel,
+                windowLabelOverride: buckets[index].windowLabel,
+                estimated: provider.estimated,
+                stale: failed || buckets[index].bucket.status != 'ok',
+                showStalePill: !failed && buckets[index].bucket.status != 'ok',
+                now: now,
+              ),
+            ],
+          if (_spendableResetCredits(provider) case final credits?) ...[
+            const SizedBox(height: 12),
+            _QuotaResetCreditsRow(
               providerName: providerName,
               providerId: providerId,
-              bucket: buckets[index].bucket,
-              bucketKey: buckets[index].key,
-              groupLabel: buckets[index].groupLabel,
-              windowLabelOverride: buckets[index].windowLabel,
-              estimated: provider.estimated,
-              // A non-ok bucket status means the row shows a last-known
-              // reading even while the provider as a whole is healthy.
-              stale: failed || buckets[index].bucket.status != 'ok',
-              // The provider header already carries the Stale pill when the
-              // whole provider failed; only flag bucket-level failures inline.
-              showStalePill: !failed && buckets[index].bucket.status != 'ok',
+              credits: credits,
               now: now,
             ),
           ],
-        if (_spendableResetCredits(provider) case final credits?) ...[
-          const SizedBox(height: 16),
-          _QuotaResetCreditsRow(
-            providerName: providerName,
-            providerId: providerId,
-            credits: credits,
-            now: now,
-          ),
         ],
-      ],
+      ),
     );
   }
 }
@@ -337,20 +359,19 @@ class _QuotaResetCreditsRow extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
               children: [
-                Expanded(
-                  child: Text(
-                    l10n.settingsQuotaResetCredits,
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: tokens.textPrimary,
-                    ),
-                    overflow: TextOverflow.ellipsis,
+                Text(
+                  l10n.settingsQuotaResetCredits,
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: tokens.textPrimary,
                   ),
                 ),
                 Text(
                   available,
-                  style: theme.textTheme.labelMedium?.copyWith(
+                  style: theme.textTheme.labelSmall?.copyWith(
                     color: tokens.textSecondary,
                   ),
                 ),
@@ -480,7 +501,7 @@ List<_QuotaBucketPresentation> _quotaBucketsForPresentation(
   return result;
 }
 
-/// One window row: label, percentage remaining, compact bar, and reset time.
+/// One window: liquid reserve, complete window label and reset countdown.
 class _QuotaBucketRow extends StatelessWidget {
   const _QuotaBucketRow({
     required this.providerName,
@@ -534,62 +555,67 @@ class _QuotaBucketRow extends StatelessWidget {
       container: true,
       label: semanticsParts.join(', '),
       child: ExcludeSemantics(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        child: Row(
           children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
+            Tooltip(
+              message: remaining == null
+                  ? l10n.settingsQuotaNoReadings
+                  : l10n.settingsQuotaPercentRemaining('${remaining.round()}'),
+              child: QuotaLiquidGauge(
+                remaining: remaining?.toDouble(),
+                color: severityColor,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (groupLabel case final group?) ...[
+                    Text(
+                      group,
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: tokens.textPrimary,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                  ],
+                  Text(
                     windowLabel,
-                    style: theme.textTheme.bodySmall?.copyWith(
+                    style: theme.textTheme.labelSmall?.copyWith(
                       color: tokens.textPrimary,
                     ),
-                    overflow: TextOverflow.ellipsis,
                   ),
-                ),
-                if (showStalePill) ...[
-                  StatusPill(
-                    label: l10n.settingsQuotaStale,
-                    color: tokens.statusNeedsInput,
-                  ),
-                  const SizedBox(width: 8),
+                  if (remaining == null) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      l10n.settingsQuotaNoReadings,
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: tokens.textTertiary,
+                      ),
+                    ),
+                  ],
+                  if (resetCopy != null) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      resetCopy,
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: tokens.textSecondary,
+                      ),
+                    ),
+                  ],
+                  if (showStalePill) ...[
+                    const SizedBox(height: 4),
+                    StatusPill(
+                      label: l10n.settingsQuotaStale,
+                      color: tokens.statusNeedsInput,
+                      dense: true,
+                    ),
+                  ],
                 ],
-                if (remaining != null)
-                  Text(
-                    l10n.settingsQuotaPercentRemaining('${remaining.round()}'),
-                    style: theme.textTheme.labelMedium?.copyWith(
-                      color: severityColor,
-                    ),
-                  )
-                else
-                  Text(
-                    l10n.settingsQuotaNoReadings,
-                    style: theme.textTheme.labelMedium?.copyWith(
-                      color: tokens.textTertiary,
-                    ),
-                  ),
-              ],
+              ),
             ),
-            if (remaining != null) ...[
-              const SizedBox(height: 8),
-              LinearProgressIndicator(
-                value: (remaining.clamp(0, 100)) / 100,
-                minHeight: 4,
-                borderRadius: BorderRadius.circular(tokens.radiusXs),
-                color: severityColor,
-                backgroundColor: tokens.surface2,
-              ),
-            ],
-            if (resetCopy != null) ...[
-              const SizedBox(height: 8),
-              Text(
-                resetCopy,
-                style: theme.textTheme.labelSmall?.copyWith(
-                  color: tokens.textTertiary,
-                ),
-              ),
-            ],
           ],
         ),
       ),
@@ -741,8 +767,7 @@ String quotaProviderDisplayName(String providerId) {
 }
 
 /// Color for a remaining-percent reading: critical at or under 10%, warning
-/// at or under 25%, otherwise neutral. A healthy window is not news, so only a
-/// low one draws the eye.
+/// at or under 25%, otherwise the healthy reserve color.
 Color quotaSeverityColor(AppTokens tokens, num remainingPercent) {
   if (remainingPercent <= quotaCriticalRemainingPercent) {
     return tokens.statusError;
@@ -750,7 +775,7 @@ Color quotaSeverityColor(AppTokens tokens, num remainingPercent) {
   if (remainingPercent <= quotaWarningRemainingPercent) {
     return tokens.statusNeedsInput;
   }
-  return tokens.textSecondary;
+  return tokens.statusWorking;
 }
 
 /// When the soonest of [count] reset credits expires, by Tokdash's companion

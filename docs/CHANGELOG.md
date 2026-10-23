@@ -11,6 +11,12 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Changed
+
+- Quotas show each limit as a liquid circle, with two providers per row on
+  phones and larger screens. Window labels, remaining percentages and reset
+  times stay visible; waves pause for reduced motion and inactive views.
+
 ## 0.8.1 — 2026-10-22
 
 ### Fixed
