@@ -217,11 +217,22 @@ describe('delivered files in the web client', () => {
       });
       await child().locator('body[data-ready="yes"]').waitFor();
       await page.setViewportSize({ width: 390, height: 844 });
+      // The retained iframe is already ready before Flutter handles resize.
+      // Wait for the compact workspace control before acting on that layout.
+      const showSessions = page.getByRole('button', { name: 'Show sessions', exact: true });
+      await showSessions.waitFor();
       await child().locator('body[data-ready="yes"]').waitFor();
       expect(page.frames()).toHaveLength(3);
       await page.getByRole('button', { name: 'Close', exact: true }).last().click();
       await eventually(() => page.frames().length === 1, { what: 'close removes every frame' });
+      // Closing persists asynchronously, then publishes its Undo notice.
+      // Settle and dismiss it before changing layout and reopening the file.
+      const undo = page.getByRole('button', { name: 'Undo', exact: true });
+      await undo.waitFor();
+      await page.getByRole('button', { name: 'Close', exact: true }).last().click();
+      await undo.waitFor({ state: 'hidden' });
       await page.setViewportSize({ width: 1440, height: 1000 });
+      await showSessions.waitFor({ state: 'hidden' });
       await openView(page, 'Files');
       await page.getByRole('button', { name: 'Preview file', exact: true }).first().click();
       await child().locator('body[data-ready="yes"]').waitFor();

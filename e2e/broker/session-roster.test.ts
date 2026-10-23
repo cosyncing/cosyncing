@@ -596,7 +596,14 @@ describe('the session roster', () => {
       expect(rows.find((row) => row.id === pi.recent!.id)?.appHidden).toBe(false);
       expect((await client.delete(`/api/sessions/${parent.tool}/${encodeURIComponent(parent.id)}/cache`)).status).toBe(200);
       await broker.restart();
-      rows = (await rosterSnapshot(other, { refresh: true })).body.sessions;
+      // A cold sweep can reach its discovery budget and return an explicitly
+      // incomplete roster. Wait for the complete representation before
+      // deciding whether the persisted visibility preference survived.
+      rows = await eventually(async () => {
+        const snapshot = await rosterSnapshot(other, { refresh: true });
+        expect(snapshot.status).toBe(200);
+        return snapshot.body.complete === true ? snapshot.body.sessions : undefined;
+      }, { what: 'a complete roster after cache clearing and restart' });
       expect(rows.find((row) => row.id === parent.id)?.appHidden).toBe(true);
       expect(rows.find((row) => row.id === child.id)?.appHidden).toBe(true);
       expect((await change(parent, false)).status).toBe(200);
