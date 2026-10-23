@@ -11,6 +11,7 @@
  * another broker's file even for the same native session id.
  */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -230,17 +231,25 @@ describe('delivered files in the web client', () => {
   });
 
   test.concurrent('HTML policy precedes malformed bytes and isolates embedded and external documents', async () => {
+    const requestPrefix = `/${randomUUID()}/`;
     const requests: string[] = [];
     const recorder = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch(request) {
-      requests.push(new URL(request.url).pathname);
+      const path = new URL(request.url).pathname;
+      // Only this document's URLs belong to its CSP assertion. Other loopback
+      // probes must not contaminate a recorder on a newly allocated port.
+      if (path.startsWith(requestPrefix)) requests.push(path);
       return new Response('unexpected resource', { headers: { 'access-control-allow-origin': '*' } });
     } });
+    const target = new URL(requestPrefix, recorder.url).toString();
     try {
-      expect((await fetch(recorder.url)).status).toBe(200);
-      expect(requests).toHaveLength(1);
+      for (const probe of [recorder.url, target]) {
+        const response = await fetch(probe);
+        expect(response.status).toBe(200);
+        await response.text();
+      }
+      expect(requests).toEqual([requestPrefix]);
       requests.length = 0;
       await scenario(async (f, page) => {
-        const target = recorder.url.toString();
         // Executable bytes precede the apparent head; the existing policy and
         // malformed metadata must never precede or relax the containing policy.
         writeFileSync(join(f.workspace, 'attack.xhtml'), `<script>
