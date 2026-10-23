@@ -2113,6 +2113,7 @@
   "@settingsQuotaWindowGeneric": {
     "description": "Fallback label for a quota window with no known kind and no server label."
   },
+  "settingsQuotaRemainingLegend": "Remaining quota",
   "settingsQuotaPercentRemaining": "{percent}% remaining",
   "@settingsQuotaPercentRemaining": {
     "description": "Accessibility wording for the remaining percentage of a quota window.",
@@ -6770,6 +6771,7 @@
   },
   "workspaceCloseSelectedTabs": "Close {count} selected tabs",
   "overviewQuotaChoose": "Choose providers",
+  "overviewQuotaAllCompact": "All",
   "overviewQuotaAll": "All quotas",
   "overviewQuotaSaveFailed": "Could not save quota choices. Try again.",
   "sessionQuestionRecover": "Reply to earlier question",

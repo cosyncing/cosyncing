@@ -24,6 +24,7 @@ import 'package:cosyncing_client/src/design/ui_scale.dart';
 import 'package:cosyncing_client/src/features/sessions/sessions.dart';
 import 'package:cosyncing_client/src/features/settings/controller/locale_controller.dart';
 import 'package:cosyncing_client/src/features/settings/data/conversation_display_store.dart';
+import 'package:cosyncing_client/src/features/settings/view/quota_liquid_gauge.dart';
 import 'package:cosyncing_client/src/features/storage/data/device_file_registry.dart';
 import 'package:cosyncing_client/src/features/storage/data/device_storage_providers.dart';
 import 'package:cosyncing_client/src/features/storage/data/device_storage_service.dart';
@@ -107,11 +108,7 @@ void main() {
       }
       var app = await f.launch(
         initialLocation: storageSettingsRoute,
-        overrides: [
-          localStorageFileBackendProvider.overrideWithValue(
-            files,
-          ),
-        ],
+        overrides: [localStorageFileBackendProvider.overrideWithValue(files)],
       );
       await finishNativeWork(
         () => find.text(en.storageLoading).evaluate().isEmpty,
@@ -422,9 +419,7 @@ void main() {
 
   featureTest(
     'General opens Storage and offline cache cleanup requires confirmation',
-    (
-      f,
-    ) async {
+    (f) async {
       final transcripts = DriftSessionTranscriptRepository(f.storage.database);
       const cachedSession = SessionDetailKey(
         tool: 'codex',
@@ -527,9 +522,7 @@ void main() {
       expect(
         app.tester
             .getRect(density)
-            .overlaps(
-              app.tester.getRect(find.text(en.densityLabel)),
-            ),
+            .overlaps(app.tester.getRect(find.text(en.densityLabel))),
         isFalse,
       );
 
@@ -619,9 +612,7 @@ void main() {
     ]) {
       featureTest(
         'choice popups preserve settings labels at ${viewport.name}',
-        (
-          f,
-        ) async {
+        (f) async {
           await studioSeeded(f);
           await f.storage.preferences.setThemeId('soft-minimalist');
           final app = await f.launch(
@@ -667,10 +658,7 @@ void main() {
               findsNothing,
             );
             final popupBounds = app.tester.getRect(popup);
-            expect(
-              popupBounds.width,
-              closeTo(controlBounds.width, 1),
-            );
+            expect(popupBounds.width, closeTo(controlBounds.width, 1));
             expect(popupBounds.right, closeTo(controlBounds.right, 1));
             expect(popupBounds.left, greaterThanOrEqualTo(0));
             expect(popupBounds.right, lessThanOrEqualTo(viewport.size.width));
@@ -1002,7 +990,13 @@ void main() {
           'claude': quotaProvider(
             'claude',
             buckets: [
-              quotaBucket(id: 'session', label: 'Session', remaining: 60),
+              quotaBucket(id: 'session', label: 'Session', remaining: 96),
+              quotaBucket(id: 'weekly_all', label: 'Weekly', remaining: 21),
+              quotaBucket(
+                id: 'weekly_scoped_fable',
+                label: 'Fable',
+                remaining: 100,
+              ),
             ],
           ),
         });
@@ -1023,6 +1017,26 @@ void main() {
         find.byKey(const Key('settings-quota-row-claude-session')),
         findsOneWidget,
       );
+      for (final width in [320.0, 390.0]) {
+        app.tester.view.physicalSize = Size(width, 844);
+        await app.settle();
+        final codex = find.byKey(const Key('settings-quota-provider-codex'));
+        final claude = find.byKey(const Key('settings-quota-provider-claude'));
+        expect(
+          app.tester.getTopLeft(codex).dy,
+          app.tester.getTopLeft(claude).dy,
+        );
+        expect(
+          app.tester.getTopLeft(claude).dx,
+          greaterThan(app.tester.getTopLeft(codex).dx),
+        );
+        expect(
+          find.descendant(of: claude, matching: find.byType(QuotaLiquidGauge)),
+          findsNWidgets(3),
+        );
+        expect(app.tester.takeException(), isNull);
+      }
+      await app.captureReview('quota-liquid-phone');
       expect(desk.quotaPreferenceWrites, isEmpty);
       await app.tapKey('overview-quota-choose');
       await app.tapKey('overview-quota-provider-codex');
@@ -1069,11 +1083,11 @@ void main() {
         final panel = find.byKey(const Key('settings-quota-panel'));
         Finder inPanel(String text) =>
             find.descendant(of: panel, matching: find.text(text));
-        List<LinearProgressIndicator> bars() => app.tester
-            .widgetList<LinearProgressIndicator>(
+        List<QuotaLiquidGauge> reserves() => app.tester
+            .widgetList<QuotaLiquidGauge>(
               find.descendant(
                 of: panel,
-                matching: find.byType(LinearProgressIndicator),
+                matching: find.byType(QuotaLiquidGauge),
               ),
             )
             .toList();
@@ -1234,49 +1248,59 @@ void main() {
           inPanel(en.settingsQuotaAntigravityClaudeGptModels),
           findsOneWidget,
         );
-        expect(inPanel('41% remaining'), findsOneWidget);
-        expect(inPanel('24% remaining'), findsOneWidget);
-        expect(find.text('74% remaining'), findsNothing);
+        expect(inPanel('41%'), findsOneWidget);
+        expect(inPanel('24%'), findsOneWidget);
+        expect(find.text('74%'), findsNothing);
         expect(find.text('Experimental model'), findsNothing);
         expect(
           label('settings-quota-row-antigravity-pool-gemini'),
           contains('Antigravity Gemini models 5-hour'),
         );
-        // A reading the broker could not give is stated, not drawn as a bar.
+        // A reading the broker could not give remains explicitly unknown.
         expect(inPanel(en.settingsQuotaNoReadings), findsOneWidget);
         // Fresh rows: percent, reset time, one spoken summary per row.
-        expect(inPanel('42% remaining'), findsOneWidget);
-        expect(inPanel('80% remaining'), findsOneWidget);
+        expect(inPanel('42%'), findsOneWidget);
+        expect(inPanel('80%'), findsOneWidget);
         expect(inPanel('Resets in 3 h'), findsWidgets);
         expect(inPanel('Resets in 4 days'), findsOneWidget);
         final codex5h = label('settings-quota-row-codex-5h');
         expect(codex5h, contains('Codex 5-hour'));
         expect(codex5h, contains('42% remaining'));
         expect(codex5h, contains('Resets in 3 h'));
-        // A window that is running low colours its bar; healthy ones stay
-        // quiet.
-        final claudeBars = app.tester
-            .widgetList<LinearProgressIndicator>(
-              find.descendant(
-                of: find.byKey(const Key('settings-quota-row-claude-session')),
-                matching: find.byType(LinearProgressIndicator),
-              ),
-            )
-            .single;
-        expect(claudeBars.color, app.tokens.statusNeedsInput);
-        final critical = app.tester
-            .widgetList<LinearProgressIndicator>(
-              find.descendant(
-                of: find.byKey(
-                  const Key('settings-quota-row-claude-weekly_all'),
-                ),
-                matching: find.byType(LinearProgressIndicator),
-              ),
-            )
-            .single;
+        // Every displayed window gets a liquid reserve, including all three
+        // Claude limits. Colors preserve warning and critical severity.
+        expect(
+          find.descendant(
+            of: find.byKey(const Key('settings-quota-provider-claude')),
+            matching: find.byType(QuotaLiquidGauge),
+          ),
+          findsNWidgets(3),
+        );
+        expect(
+          find.descendant(
+            of: panel,
+            matching: find.byType(LinearProgressIndicator),
+          ),
+          findsNothing,
+        );
+        final warning = app.tester.widget<QuotaLiquidGauge>(
+          find.descendant(
+            of: find.byKey(const Key('settings-quota-row-claude-session')),
+            matching: find.byType(QuotaLiquidGauge),
+          ),
+        );
+        expect(warning.color, app.tokens.statusNeedsInput);
+        final critical = app.tester.widget<QuotaLiquidGauge>(
+          find.descendant(
+            of: find.byKey(const Key('settings-quota-row-claude-weekly_all')),
+            matching: find.byType(QuotaLiquidGauge),
+          ),
+        );
         expect(critical.color, app.tokens.statusError);
         expect(
-          bars().where((bar) => bar.color == app.tokens.textSecondary),
+          reserves().where(
+            (reserve) => reserve.color == app.tokens.statusWorking,
+          ),
           isNotEmpty,
         );
         expect(inPanel(en.settingsQuotaEstimated), findsOneWidget);
@@ -1345,7 +1369,7 @@ void main() {
             ),
           }),
         );
-        expect(inPanel('55% remaining'), findsOneWidget);
+        expect(inPanel('55%'), findsOneWidget);
         expect(inPanel(en.settingsQuotaStale), findsNWidgets(4));
         expect(inPanel(en.settingsQuotaNoReadings), findsNWidgets(2));
         expect(label('settings-quota-row-zai-7d'), contains('Stale'));
@@ -1489,7 +1513,7 @@ void main() {
           find.byKey(const Key('settings-runtime-policy')),
           findsOneWidget,
         );
-        expect(find.text('42% remaining'), findsOneWidget);
+        expect(find.text('42%'), findsOneWidget);
 
         // Owner on studio: the workspace-browsing gate asks before it moves.
         await app.openCategory('broker');
@@ -1530,15 +1554,15 @@ void main() {
         ]) {
           expect(find.byKey(Key(key)), findsNothing, reason: key);
         }
-        await app.waitFor(find.text('77% remaining'));
+        await app.waitFor(find.text('77%'));
 
         // The answers studio gives now land nowhere.
         quotaHold.release();
         restartHold.release();
         await app.settle();
         await app.elapse(const Duration(seconds: 1));
-        expect(find.text('42% remaining'), findsNothing);
-        expect(find.text('77% remaining'), findsOneWidget);
+        expect(find.text('42%'), findsNothing);
+        expect(find.text('77%'), findsOneWidget);
         expect(find.text('scheduled'), findsNothing);
 
         // A peer can see the workspace-browsing gate and not move it.

@@ -37,6 +37,7 @@ class _OverviewQuotaState extends ConsumerState<OverviewQuota> {
     });
     final t = context.tokens;
     final l10n = AppLocalizations.of(context);
+    final compact = MediaQuery.sizeOf(context).width < 420;
     final preferences = ref.watch(overviewQuotaPreferencesProvider);
     final selected = preferences.isLoading || preferences.hasError
         ? const <String>[]
@@ -87,15 +88,25 @@ class _OverviewQuotaState extends ConsumerState<OverviewQuota> {
                       ),
                     ),
                   ),
-                  builder: (context, controller, child) => TextButton(
-                    key: const Key('overview-quota-choose'),
-                    onPressed: source == null || preferences.isLoading
-                        ? null
-                        : () => controller.isOpen
-                              ? controller.close()
-                              : controller.open(),
-                    child: Text(l10n.overviewQuotaChoose),
-                  ),
+                  builder: (context, controller, child) {
+                    final enabled = source != null && !preferences.isLoading;
+                    void toggle() => controller.isOpen
+                        ? controller.close()
+                        : controller.open();
+                    if (compact) {
+                      return IconButton(
+                        key: const Key('overview-quota-choose'),
+                        tooltip: l10n.overviewQuotaChoose,
+                        onPressed: enabled ? toggle : null,
+                        icon: const StrokeIcon(StrokeGlyph.filter, size: 16),
+                      );
+                    }
+                    return TextButton(
+                      key: const Key('overview-quota-choose'),
+                      onPressed: enabled ? toggle : null,
+                      child: Text(l10n.overviewQuotaChoose),
+                    );
+                  },
                   menuChildren: [
                     Builder(
                       builder: (context) => SizedBox(
@@ -205,7 +216,7 @@ class _OverviewQuotaState extends ConsumerState<OverviewQuota> {
                 ),
                 IconButton(
                   key: const Key('overview-quota-refresh'),
-                  tooltip: l10n.retry,
+                  tooltip: l10n.refresh,
                   onPressed: reading.isLoading
                       ? null
                       : () => ref.invalidate(managedRuntimeQuotaProvider),
@@ -213,7 +224,14 @@ class _OverviewQuotaState extends ConsumerState<OverviewQuota> {
                 ),
                 TextButton(
                   onPressed: () => context.go(agentsSettingsRoute),
-                  child: Text(l10n.overviewQuotaAll),
+                  child: Tooltip(
+                    message: l10n.overviewQuotaAll,
+                    child: Text(
+                      compact
+                          ? l10n.overviewQuotaAllCompact
+                          : l10n.overviewQuotaAll,
+                    ),
+                  ),
                 ),
               ],
             ),
@@ -222,7 +240,7 @@ class _OverviewQuotaState extends ConsumerState<OverviewQuota> {
         if (preferences.hasError)
           InlineNotice(text: l10n.overviewQuotaSaveFailed),
         if (selected.isNotEmpty) ...[
-          const SizedBox(height: 16),
+          const SizedBox(height: 8),
           QuotaStatusPanel(
             quota: quota,
             loading: reading.isLoading,
