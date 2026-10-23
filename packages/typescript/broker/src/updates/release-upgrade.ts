@@ -70,11 +70,16 @@ import {
 } from './post-upgrade-check.ts';
 import { readSetupState } from '../installation/setup-state.ts';
 import { windowsServiceInstallPaths } from '../installation/windows-service-install.ts';
-import type {
-  DurableServiceVersionActivation,
-  DurableServiceVersionBuild,
-  DurableServiceVersionRecord,
-  DurableServiceVersions,
+import {
+  clearUpgradeFailureDiagnostic, readUpgradeFailureDiagnostic, recordUpgradeFailureDiagnostic,
+  upgradeFailureDetail, type UpgradeFailureDiagnostic, type UpgradeHealthCheck, type UpgradePhase,
+} from './upgrade-diagnostics.ts';
+import {
+  settleWithDeadline,
+  type DurableServiceVersionActivation,
+  type DurableServiceVersionBuild,
+  type DurableServiceVersionRecord,
+  type DurableServiceVersions,
 } from '../installation/service-manager.ts';
 import { PRODUCT_IDENTITY, type UpdateComponent } from '@cosyncing/protocol';
 import {
@@ -318,6 +323,9 @@ export interface UpgradeCommandResult {
   brokerCheck?: BrokerCheckOutcome;
   /** Anything setup installed that the installed build now finds out of date, from its own doctor. */
   setupCheck?: SetupCheckOutcome;
+  /** Original failure and recovery outcome, also saved outside the rollback journal. */
+  failure?: UpgradeFailureDiagnostic;
+  diagnosticPath?: string;
 }
 
 interface UpgradeJournal {
@@ -464,9 +472,13 @@ export interface UpgradeDependencies {
   service?: UpgradeServiceController;
   /** Told as each long step starts, so a terminal can say what the run is waiting on. */
   progress?: (event: UpgradeProgressEvent) => void;
-  verifyBrokerVersion?: (config: BrokerConfig, expectedVersion: string) => Promise<boolean>;
-  verifyWebVersion?: (config: BrokerConfig, expectedVersion: string) => Promise<boolean>;
+  verifyBrokerVersion?: (config: BrokerConfig, expectedVersion: string) => Promise<boolean | UpgradeHealthCheck>;
+  verifyWebVersion?: (config: BrokerConfig, expectedVersion: string) => Promise<boolean | UpgradeHealthCheck>;
   healthAttempts?: number;
+  /** One startup budget, including broker/web requests and backoff. */
+  healthTimeoutMs?: number;
+  /** Monotonic clock seam for bounded startup and recovery scenarios. */
+  healthClock?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
   acquireLock?: (options: { command: 'upgrade'; home: string }) => InstallationLockHandle;
   now?: () => Date;
@@ -1115,26 +1127,50 @@ export async function defaultRunBinary(
   } catch {
     return { status: 'unavailable', stdout: '', stderr: '' };
   }
-  const completed = await Promise.race([
-    child.exited.then((exitCode) => ({ timedOut: false as const, exitCode })),
-    Bun.sleep(timeoutMs).then(() => ({ timedOut: true as const, exitCode: undefined })),
-  ]);
-  if (completed.timedOut) child.kill('SIGKILL');
-  const streamText = (value: number | ReadableStream<Uint8Array> | undefined): Promise<string> =>
-    value instanceof ReadableStream ? new Response(value).text() : Promise.resolve('');
+  // Drain while the child runs: a full pipe otherwise prevents a large doctor
+  // report from ever reaching exit. Keep enough bounded output for that JSON,
+  // rather than retaining only its final 16 KiB and making it unparsable.
+  const readers: ReadableStreamDefaultReader<Uint8Array>[] = [];
+  const streamText = async (value: number | ReadableStream<Uint8Array> | undefined, limit: number): Promise<string> => {
+    if (!(value instanceof ReadableStream)) return '';
+    const reader = value.getReader();
+    readers.push(reader);
+    let bytes = Buffer.alloc(0);
+    try {
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) return bytes.toString('utf8');
+        bytes = Buffer.concat([bytes, next.value]).subarray(-limit);
+      }
+    } finally { reader.releaseLock(); }
+  };
+  const stdoutText = streamText(child.stdout, 1024 * 1024);
+  const stderrText = streamText(child.stderr, 16_384);
+  const completed = await settleWithDeadline(
+    Promise.all([child.exited, stdoutText, stderrText])
+      .then(([exitCode]) => ({ timedOut: false as const, exitCode })),
+    timeoutMs,
+    { timedOut: true as const, exitCode: undefined },
+  );
+  if (completed.timedOut) {
+    if (child.exitCode === null) child.kill('SIGKILL');
+    // A descendant retaining a pipe must not keep an already-exited command
+    // waiting forever. Closing our readers also bounds this part of the run.
+    await Promise.allSettled(readers.map(async (reader) => { await reader.cancel(); }));
+  }
   const [stdout, stderr] = await Promise.all([
-    streamText(child.stdout),
-    streamText(child.stderr),
+    stdoutText,
+    stderrText,
   ]);
   if (completed.timedOut) {
     await child.exited.catch(() => undefined);
-    return { status: 'timeout', stdout: stdout.slice(-16_384), stderr: stderr.slice(-16_384) };
+    return { status: 'timeout', stdout, stderr };
   }
   return {
     status: completed.exitCode === 0 ? 'ok' : 'error',
     exitCode: completed.exitCode,
-    stdout: stdout.slice(-16_384),
-    stderr: stderr.slice(-16_384),
+    stdout,
+    stderr,
   };
 }
 
@@ -1369,13 +1405,20 @@ function unlinkRegular(path: string): void {
   unlinkSync(path);
 }
 
+function failureForJournal(home: string, journal: UpgradeJournal): UpgradeFailureDiagnostic | undefined {
+  const failure = readUpgradeFailureDiagnostic(home);
+  return failure && failure.fromVersion === journal.fromVersion && failure.toVersion === journal.toVersion
+    && Date.parse(failure.recordedAt) >= Date.parse(journal.updatedAt) ? failure : undefined;
+}
+
 async function recoverUpgrade(options: {
   home: string;
   targetPath: string;
   service?: UpgradeServiceController;
-}): Promise<boolean> {
+  verifyRestored?: (version: string) => Promise<void>;
+}): Promise<UpgradeJournal | undefined> {
   const journal = parseJournal(options.home, options.targetPath);
-  if (!journal) return false;
+  if (!journal) return undefined;
   const bootstrapReceipt = inspectBootstrapReceipt(options.home, journal.targetPath);
   // A journal written before this field existed is necessarily from the revision-16 updater. If
   // broker-instance v2 now exists, the candidate crossed the one-way security fence: restoring or
@@ -1455,7 +1498,10 @@ async function recoverUpgrade(options: {
     journal.previousSha256,
     journal.runtime?.receiptRuntime ?? bootstrapReceipt?.runtime,
   );
-  if (journal.serviceWasActive && options.service) await options.service.start();
+  if (journal.serviceWasActive && options.service) {
+    await options.service.start();
+    await options.verifyRestored?.(journal.fromVersion);
+  }
   // Nothing names the abandoned runtime any more. Removing it can fail on Windows when the process running
   // this recovery is executing from it; an unreferenced runtime is inert and the next update reuses it.
   if (journal.runtime?.installed && launchersRestored) {
@@ -1470,36 +1516,141 @@ async function recoverUpgrade(options: {
   try {
     removeOwnedDirectory(abandonedCandidateWebRoot(journal.targetPath, journal.toVersion));
   } catch { /* an unreferenced web root is inert; never fail a completed recovery for one */ }
-  return true;
+  return journal;
 }
 
-async function defaultVerifyBrokerVersion(home: string, config: BrokerConfig, expectedVersion: string): Promise<boolean> {
-  const tokenInspection = inspectBrokerToken(brokerTokenPath(home));
-  if (tokenInspection.status !== 'ok') return false;
-  try {
-    const response = await fetch(new URL('/api/health', config.broker.internalUrl), {
-      headers: { [PRODUCT_IDENTITY.tokenHeader]: readBrokerToken(tokenInspection.path) },
-      redirect: 'error',
-      signal: AbortSignal.timeout(2_000),
-    });
-    if (!response.ok) return false;
-    const body = await response.json() as Record<string, unknown>;
-    return body.ok === true && body.product === PRODUCT_IDENTITY.productName
-      && body.version === expectedVersion && body.machine === config.broker.machineLabel;
-  } catch {
-    return false;
+class UpgradeHealthError extends Error {
+  constructor(readonly health: UpgradeHealthCheck) {
+    super(health.detail);
+    this.name = 'UpgradeHealthError';
   }
 }
 
-async function defaultVerifyWebVersion(config: BrokerConfig, expectedVersion: string): Promise<boolean> {
+async function defaultVerifyVersion(options: {
+  home: string; config: BrokerConfig; expectedVersion: string; web?: boolean; timeoutMs: number;
+}): Promise<UpgradeHealthCheck> {
+  const endpoint = options.web ? '/cosy/version.json' : '/api/health';
+  const base = { endpoint, expectedVersion: options.expectedVersion } as const;
+  const headers: Record<string, string> = {};
+  if (!options.web) {
+    const token = inspectBrokerToken(brokerTokenPath(options.home));
+    if (token.status !== 'ok') return { ...base, ok: false, detail: `Broker credential is ${token.status}; GET ${endpoint} could not be authenticated.` };
+    headers[PRODUCT_IDENTITY.tokenHeader] = readBrokerToken(token.path);
+  }
+  let statusCode: number | undefined;
   try {
-    const response = await fetch(new URL('/cosy/version.json', config.broker.internalUrl), {
-      redirect: 'error', cache: 'no-store', signal: AbortSignal.timeout(2_000),
+    const response = await fetch(new URL(endpoint, options.config.broker.internalUrl), {
+      headers, redirect: 'error', cache: 'no-store', signal: AbortSignal.timeout(options.timeoutMs),
     });
-    if (!response.ok) return false;
-    const body = await response.json() as Record<string, unknown>;
-    return body.version === expectedVersion;
-  } catch { return false; }
+    statusCode = response.status;
+    if (!response.ok) return { ...base, ok: false, statusCode, detail: `GET ${endpoint} returned HTTP ${statusCode}; expected version ${options.expectedVersion}.` };
+    // Finish the transport before classifying the document. A body timeout
+    // after HTTP 200 is retryable; a complete malformed document is not.
+    const text = await response.text();
+    let body: unknown;
+    try { body = JSON.parse(text); }
+    catch { return { ...base, ok: false, statusCode, detail: `GET ${endpoint} returned an invalid version document.` }; }
+    if (!plainObject(body)) return { ...base, ok: false, statusCode, detail: `GET ${endpoint} returned an invalid version document.` };
+    const observedVersion = typeof body.version === 'string' ? upgradeFailureDetail(body.version).slice(0, 128) : undefined;
+    const observed = { ...base, statusCode, ...(observedVersion ? { observedVersion } : {}) };
+    if (body.version !== options.expectedVersion) return { ...observed, ok: false,
+      detail: `GET ${endpoint} reported version ${observedVersion ?? '(missing)'}; expected ${options.expectedVersion}.` };
+    if (!options.web && (body.ok !== true || body.product !== PRODUCT_IDENTITY.productName
+        || body.machine !== options.config.broker.machineLabel)) return { ...observed, ok: false,
+      detail: `GET ${endpoint} answered, but the broker identity did not match this installation.` };
+    return { ...observed, ok: true, detail: `GET ${endpoint} confirmed version ${options.expectedVersion}.` };
+  } catch (error) {
+    return { ...base, ok: false, retryable: true, ...(statusCode ? { statusCode } : {}),
+      detail: `GET ${endpoint} failed: ${upgradeFailureDetail(error)}` };
+  }
+}
+
+/** Candidate acceptance and rollback both require the expected broker to answer. */
+async function verifyUpgradeHealth(options: {
+  home: string; config: BrokerConfig; version: string; web?: boolean;
+  dependencies: Pick<UpgradeDependencies, 'verifyBrokerVersion' | 'verifyWebVersion' | 'healthAttempts'
+    | 'healthTimeoutMs' | 'healthClock' | 'sleep'>;
+  phase?: (phase: UpgradePhase) => void;
+}): Promise<void> {
+  let last: UpgradeHealthCheck | undefined;
+  // An immediately refused connection used to consume thirty attempts in three
+  // seconds, while a slow HTTP response could consume over a minute. Windows
+  // Scheduled Tasks can legitimately need more than three seconds to start.
+  // Use the same 30s startup budget as durable-service transitions, and cap each
+  // request by the remaining time so a wedged endpoint cannot extend that budget.
+  const timeoutMs = Math.max(1, options.dependencies.healthTimeoutMs ?? 30_000);
+  const clock = options.dependencies.healthClock ?? (() => performance.now());
+  const deadline = clock() + timeoutMs;
+  const attempts = Math.max(1, options.dependencies.healthAttempts ?? Math.ceil(timeoutMs / 100) + 1);
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    for (const web of options.web ? [false, true] : [false]) {
+      const remaining = deadline - clock();
+      if (remaining <= 0 && last) {
+        if (last.ok) {
+          options.phase?.(web ? 'verifying-web' : 'verifying-broker');
+          throw new UpgradeHealthError({ ok: false, endpoint: web ? '/cosy/version.json' : '/api/health',
+            expectedVersion: options.version, detail: `Startup verification exceeded ${timeoutMs} ms before the ${web ? 'web client' : 'broker'} could be checked.` });
+        }
+        throw new UpgradeHealthError({ ...last, detail: `${last.detail} Startup verification exceeded ${timeoutMs} ms.` });
+      }
+      options.phase?.(web ? 'verifying-web' : 'verifying-broker');
+      const probe = web ? options.dependencies.verifyWebVersion : options.dependencies.verifyBrokerVersion;
+      const answer = probe ? await probe(options.config, options.version)
+        : await defaultVerifyVersion({ home: options.home, config: options.config, expectedVersion: options.version, web,
+          timeoutMs: Math.max(1, Math.min(2_000, Math.ceil(remaining))) });
+      last = typeof answer === 'boolean' ? {
+        ok: answer, endpoint: web ? '/cosy/version.json' : '/api/health', expectedVersion: options.version,
+        detail: `${web ? 'Web client' : 'Broker'} did ${answer ? '' : 'not '}confirm version ${options.version}.`,
+      } : answer;
+      if (clock() >= deadline) throw new UpgradeHealthError({ ...last, ok: false,
+        detail: `${last.detail} Startup verification exceeded ${timeoutMs} ms.` });
+      if (!last.ok) {
+        // Once this broker version answers, its paired web files are already
+        // fixed on disk. A wrong version/document or a 4xx cannot heal with
+        // startup time. Preserve that decisive cause instead of replacing it
+        // with a later broker probe's timeout while retrying the same files.
+        if (web && last.retryable !== true && last.statusCode !== undefined
+            && (last.statusCode >= 200 && last.statusCode < 300
+              || last.statusCode >= 400 && last.statusCode < 500)) throw new UpgradeHealthError(last);
+        break;
+      }
+    }
+    if (last?.ok) return;
+    const remaining = deadline - clock();
+    if (remaining <= 0) throw new UpgradeHealthError({ ...last!, detail: `${last!.detail} Startup verification exceeded ${timeoutMs} ms.` });
+    if (attempt + 1 < attempts) await (options.dependencies.sleep ?? Bun.sleep)(Math.min(100, remaining));
+  }
+  throw new UpgradeHealthError(last!);
+}
+
+function withUpgradeFailure(options: {
+  home: string; outcome: UpgradeCommandResult; error: unknown; phase: UpgradePhase;
+  rollback: UpgradeFailureDiagnostic['rollback']; rollbackError?: unknown; now?: () => Date;
+  priorFailure?: UpgradeFailureDiagnostic;
+}): UpgradeCommandResult {
+  const detail = upgradeFailureDetail(options.error);
+  const errorCode = options.error instanceof Error && 'code' in options.error ? String(options.error.code) : detail;
+  const failure: UpgradeFailureDiagnostic = {
+    schemaVersion: 1, recordedAt: (options.now?.() ?? new Date()).toISOString(),
+    fromVersion: options.outcome.fromVersion,
+    ...(options.outcome.toVersion ? { toVersion: options.outcome.toVersion } : {}),
+    phase: options.phase,
+    code: options.error instanceof UpgradeHealthError ? 'upgrade-health-check-failed'
+      : /^[a-z0-9_-]{1,128}$/i.test(errorCode) ? errorCode : 'upgrade-step-failed',
+    detail,
+    ...(options.error instanceof UpgradeHealthError ? { health: options.error.health } : {}),
+    ...(options.priorFailure ? { recordedAt: options.priorFailure.recordedAt, fromVersion: options.priorFailure.fromVersion,
+      ...(options.priorFailure.toVersion ? { toVersion: options.priorFailure.toVersion } : {}),
+      phase: options.priorFailure.phase, code: options.priorFailure.code, detail: options.priorFailure.detail,
+      ...(options.priorFailure.health ? { health: options.priorFailure.health } : {}) } : {}),
+    rollback: options.rollback,
+    ...(options.rollbackError !== undefined ? { rollbackDetail: upgradeFailureDetail(options.rollbackError) } : {}),
+  };
+  const diagnosticPath = recordUpgradeFailureDiagnostic(options.home, failure);
+  return { ...options.outcome, failure, ...(diagnosticPath ? { diagnosticPath } : {}),
+    summary: `Update failed during ${failure.phase.replaceAll('-', ' ')}: ${failure.detail} ${options.outcome.summary}`
+      + (failure.rollbackDetail ? ` Recovery failed: ${failure.rollbackDetail}` : '')
+      + (diagnosticPath ? ` Details: ${diagnosticPath}` : ' The failure details could not be saved.') };
 }
 
 function updateBinaryReceipt(
@@ -1788,6 +1939,11 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
     return result('blocked', 1, 'installation-lock-unavailable', 'Another installation mutation is active or the lock is unsafe.', fromVersion, false);
   }
   let recovered = false;
+  const verifyRestored = async (version: string): Promise<void> => {
+    const config = inspectBrokerConfig(dependencies.home);
+    if (config.status !== 'ok') throw new Error('upgrade-health-config-invalid');
+    await verifyUpgradeHealth({ home: dependencies.home, config: config.config, version, dependencies });
+  };
   try {
     try { if (reconcilesDesktop && !desktopProblem) assertDesktopClientUnchanged(desktop, desktopContext); }
     catch (error) {
@@ -1798,7 +1954,23 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
       desktop = undefined;
     }
     try {
-      recovered = await recoverUpgrade({ home: dependencies.home, targetPath, service: dependencies.service });
+      const recovery = await recoverUpgrade({ home: dependencies.home, targetPath, service: dependencies.service, verifyRestored });
+      recovered = !!recovery;
+      if (recovery) {
+        const prior = failureForJournal(dependencies.home, recovery);
+        const failure: UpgradeFailureDiagnostic = {
+          ...(prior ?? { schemaVersion: 1, phase: 'recovering', code: 'upgrade-interrupted', detail: 'The previous update was interrupted.' }),
+          recordedAt: prior?.recordedAt ?? (dependencies.now?.() ?? new Date()).toISOString(),
+          fromVersion: recovery.fromVersion, toVersion: recovery.toVersion, rollback: 'complete',
+        };
+        delete failure.rollbackDetail;
+        const diagnosticPath = recordUpgradeFailureDiagnostic(dependencies.home, failure);
+        return { ...result('rolled-back', 3, 'upgrade-interrupted-recovered',
+          `Recovered an interrupted upgrade and restored release ${recovery.fromVersion}; rerun cosy update to try again.`
+            + ` Original failure during ${failure.phase.replaceAll('-', ' ')}: ${failure.detail}`
+            + (diagnosticPath ? ` Details: ${diagnosticPath}` : ' The failure details could not be saved.'),
+          recovery.fromVersion, true, recovery.toVersion), failure, ...(diagnosticPath ? { diagnosticPath } : {}) };
+      }
     } catch (error) {
       if (error instanceof Error && error.message === 'upgrade-authorization-fence-crossed') {
         return result(
@@ -1810,7 +1982,16 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
           false,
         );
       }
-      return result('cleanup-required', 4, 'upgrade-recovery-failed', 'An interrupted upgrade needs manual recovery; the journal was preserved.', fromVersion, false);
+      let priorFailure: UpgradeFailureDiagnostic | undefined;
+      let recoveryJournal: UpgradeJournal | undefined;
+      try {
+        recoveryJournal = parseJournal(dependencies.home, targetPath);
+        if (recoveryJournal) priorFailure = failureForJournal(dependencies.home, recoveryJournal);
+      } catch { /* A malformed journal is itself the recovery failure. */ }
+      return withUpgradeFailure({ home: dependencies.home, now: dependencies.now, error, phase: 'recovering', rollback: 'incomplete',
+        ...(priorFailure ? { priorFailure, rollbackError: error } : {}),
+        outcome: result('cleanup-required', 4, 'upgrade-recovery-failed', 'An interrupted upgrade needs manual recovery; the journal was preserved.',
+          recoveryJournal?.fromVersion ?? fromVersion, false, recoveryJournal?.toVersion) });
     }
     const currentInstall = inspectInstallState(dependencies.home);
     if (!currentInstall.committed) {
@@ -1835,9 +2016,6 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
         fromVersion,
         recovered,
       );
-    }
-    if (recovered) {
-      return result('rolled-back', 3, 'upgrade-interrupted-recovered', 'Recovered an interrupted upgrade and restored the previous release; rerun upgrade to try again.', fromVersion, true);
     }
 
     const schemaProblems = inspectDurableSchemas(durableStateLayout({ stateRoot: dependencies.home, cacheRoot: dependencies.cacheRoot }))
@@ -2102,6 +2280,14 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
     });
     try {
       serviceWasActive = dependencies.service ? (await dependencies.service.inspect()).active : false;
+    } catch (error) {
+      try { unlinkRegular(stagingPath); } catch { /* preserve the inspection failure */ }
+      abandonRuntime();
+      return withUpgradeFailure({ home: dependencies.home, now: dependencies.now, error, phase: 'preparing', rollback: 'not-needed',
+        outcome: result('blocked', 1, 'upgrade-service-state-unavailable',
+          'The service state could not be inspected; the installed build was not changed.', fromVersion, recovered, toVersion) });
+    }
+    try {
       dependencies.authorizeCommit?.();
     } catch (error) {
       try { unlinkRegular(stagingPath); } catch { /* preserve the authorization failure */ }
@@ -2109,12 +2295,15 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
       return result('blocked', 3, error instanceof Error ? error.message : 'update-authorization-failed',
         'The reviewed update is no longer authorized. The installed build was not changed.', fromVersion, recovered, toVersion);
     }
+    let phase: UpgradePhase = 'preparing';
     try {
       journalAt('prepared');
       if (dependencies.faultAfter === 'journal-prepared') throw new Error('upgrade-fixture-interrupted');
       if (serviceWasActive) progress({ step: 'restarting', version: toVersion });
+      phase = 'stopping-service';
       if (serviceWasActive && dependencies.service) await dependencies.service.stop();
       if (dependencies.faultAfter === 'service-stopped') throw new Error('upgrade-fixture-interrupted');
+      phase = 'switching-binary';
       atomicWriteOwnerOnly(previousPath, previousBytes, { mode: 0o700 });
       previousWritten = true;
       journalAt('switching');
@@ -2133,31 +2322,24 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
       // The record is journaled BEFORE the pointer can move, exactly as `switching` precedes the binary
       // write, so a crash anywhere inside the activation leaves a state recovery can put back.
       if (activation) {
+        phase = 'activating-service';
         serviceVersion = activation.record;
         journalAt('activating');
         await activation.apply();
         if (dependencies.faultAfter === 'version-activated') throw new Error('upgrade-fixture-interrupted');
       }
+      phase = 'starting-service';
       if (serviceWasActive && dependencies.service) await dependencies.service.start();
       const config = inspectBrokerConfig(dependencies.home);
       if (serviceWasActive) {
+        phase = 'verifying-broker';
         if (config.status !== 'ok') throw new Error('upgrade-health-config-invalid');
         progress({ step: 'verifying', version: toVersion });
-        let healthy = false;
-        for (let attempt = 0; attempt < Math.max(1, dependencies.healthAttempts ?? 30); attempt += 1) {
-          healthy = dependencies.verifyBrokerVersion
-            ? await dependencies.verifyBrokerVersion(config.config, toVersion)
-            : await defaultVerifyBrokerVersion(dependencies.home, config.config, toVersion);
-          if (healthy && candidate.manifest.webApp && webPlan.checkServedVersion) {
-            healthy = dependencies.verifyWebVersion
-              ? await dependencies.verifyWebVersion(config.config, toVersion)
-              : await defaultVerifyWebVersion(config.config, toVersion);
-          }
-          if (healthy) break;
-          await (dependencies.sleep ?? Bun.sleep)(100);
-        }
-        if (!healthy) throw new Error('upgrade-health-check-failed');
+        await verifyUpgradeHealth({ home: dependencies.home, config: config.config, version: toVersion,
+          web: !!candidate.manifest.webApp && webPlan.checkServedVersion, dependencies,
+          phase: (next) => { phase = next; } });
       }
+      phase = 'committing';
       writeInstallState(updateBinaryReceipt(
         installState,
         targetPath,
@@ -2195,6 +2377,7 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
           await dependencies.service.versions.finalize(serviceVersion);
         } catch { /* leave it for repair */ }
       }
+      clearUpgradeFailureDiagnostic(dependencies.home);
       const clientOutcome = await desktopOutcomeFor(candidate.manifest);
       // The upgrade is committed and healthy: journal gone, receipts written, candidate answering on its
       // own port. Release the installation lock BEFORE delegating the mod refresh so the child can take
@@ -2236,18 +2419,20 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
           // The one-way fence still prevents the previous broker from starting. Preserve every
           // recovery artifact and report manual cleanup even when service control also failed.
         }
-        return result(
-          'cleanup-required',
-          4,
-          'upgrade-authorization-fence-crossed',
-          'The authorization migration crossed its one-way rollback fence; the previous broker was not restored. Repair or retry with a revision-17-or-later candidate.',
-          fromVersion,
-          recovered,
-          toVersion,
-        );
+        return withUpgradeFailure({ home: dependencies.home, now: dependencies.now, error, phase, rollback: 'incomplete',
+          outcome: result(
+            'cleanup-required',
+            4,
+            'upgrade-authorization-fence-crossed',
+            'The authorization migration crossed its one-way rollback fence; the previous broker was not restored. Repair or retry with a revision-17-or-later candidate.',
+            fromVersion,
+            recovered,
+            toVersion,
+          ) });
       }
       if (error instanceof Error && error.message === 'upgrade-fixture-interrupted') {
-        return result('cleanup-required', 4, 'upgrade-interrupted', 'Upgrade was interrupted; the durable journal will restore the previous release on the next run.', fromVersion, recovered, toVersion);
+        return withUpgradeFailure({ home: dependencies.home, now: dependencies.now, error, phase, rollback: 'pending',
+          outcome: result('cleanup-required', 4, 'upgrade-interrupted', 'Upgrade was interrupted; the durable journal will restore the previous release on the next run.', fromVersion, recovered, toVersion) });
       }
       // Before anything is restored, because the candidate may still be alive: a health check fails when
       // the candidate is slow as well as when it is broken, `start` on a running unit is a no-op on both
@@ -2258,6 +2443,7 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
         if (serviceWasActive && dependencies.service) await dependencies.service.stop();
       } catch { /* the restore below is still the best available outcome */ }
       let rollbackComplete = false;
+      let rollbackError: unknown;
       let launchersRestored = true;
       try {
         if (sha256(previousBytes) !== previousSha256) throw new Error('rollback-binary-mismatch');
@@ -2284,7 +2470,10 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
           dependencies.home,
         );
         writeBootstrapReceipt(bootstrapReceipt, targetPath, fromVersion, previousSha256, runtimeSwitch?.receiptRuntime ?? bootstrapReceipt?.runtime);
-        if (serviceWasActive && dependencies.service) await dependencies.service.start();
+        if (serviceWasActive && dependencies.service) {
+          await dependencies.service.start();
+          await verifyRestored(fromVersion);
+        }
         unlinkRegular(stagingPath);
         // The journal goes before the rollback copy it names, for the same reason it does in recovery.
         unlinkRegular(upgradeJournalPath(dependencies.home));
@@ -2298,12 +2487,14 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
         // The service and launchers run the previous runtime again; the one this run installed is unowned.
         if (launchersRestored) abandonRuntime();
         rollbackComplete = true;
-      } catch {
-        rollbackComplete = false;
+      } catch (failure) {
+        rollbackError = failure;
       }
-      return rollbackComplete
-        ? result('rolled-back', 3, 'upgrade-rolled-back', 'The candidate failed after switching; the previous binary was restored.', fromVersion, recovered, toVersion)
-        : result('cleanup-required', 4, 'upgrade-rollback-incomplete', 'Upgrade rollback is incomplete; preserve the journal and previous binary for manual recovery.', fromVersion, recovered, toVersion);
+      return withUpgradeFailure({ home: dependencies.home, now: dependencies.now, error, phase, rollbackError,
+        rollback: rollbackComplete ? 'complete' : 'incomplete',
+        outcome: rollbackComplete
+          ? result('rolled-back', 3, 'upgrade-rolled-back', `Previous release ${fromVersion} was restored${serviceWasActive ? ' and is answering' : ''}.`, fromVersion, recovered, toVersion)
+          : result('cleanup-required', 4, 'upgrade-rollback-incomplete', 'Upgrade rollback is incomplete; preserve the journal and previous binary for recovery.', fromVersion, recovered, toVersion) });
     }
   } finally {
     lock.release();

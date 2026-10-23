@@ -245,7 +245,7 @@ if ($operation -eq 'inspect') {
 } elseif ($operation -eq 'reconcile') {
   $shared = Get-FolderOrNull ([string] $payload.sharedPath)
   if ($null -eq $shared) {
-    $shared = $root.CreateFolder('Cosyncing', [string] $payload.expectedSddl)
+    $shared = $root.CreateFolder(([string] $payload.sharedPath).TrimStart([char] 92), [string] $payload.expectedSddl)
   } elseif (-not (Test-ExpectedSddl ([string] $shared.GetSecurityDescriptor(7)))) {
     throw 'scheduler shared folder identity conflict'
   }
@@ -294,7 +294,7 @@ if ($operation -eq 'inspect') {
   }
   if ($null -ne $shared -and [bool] $payload.sharedFolderCreated) {
     Assert-EmptyFolder $shared
-    $root.DeleteFolder('Cosyncing', 0)
+    $root.DeleteFolder(([string] $payload.sharedPath).TrimStart([char] 92), 0)
   }
 } elseif ($operation -eq 'restore') {
   $prior = $payload.snapshot
@@ -304,7 +304,7 @@ if ($operation -eq 'inspect') {
     $task = Get-TaskOrNull $sidFolder ([string] $payload.taskName)
     if ($null -ne $task) { Assert-OwnedTask $task; $sidFolder.DeleteTask([string] $payload.taskName, 0) }
     if ($null -ne $sidFolder) { Assert-EmptyFolder $sidFolder; $shared.DeleteFolder([string] $payload.sid, 0) }
-    if ($null -ne $shared) { Assert-EmptyFolder $shared; $root.DeleteFolder('Cosyncing', 0) }
+    if ($null -ne $shared) { Assert-EmptyFolder $shared; $root.DeleteFolder(([string] $payload.sharedPath).TrimStart([char] 92), 0) }
   } else {
     if ($null -eq $shared) { throw 'scheduler shared folder disappeared during transaction' }
     $shared.SetSecurityDescriptor([string] $prior.shared.sddl, 0)
@@ -353,7 +353,12 @@ export class NativeWindowsTaskSchedulerExecutor implements WindowsTaskSchedulerE
     const encodedInput = Buffer.from(JSON.stringify(input), 'utf8').toString('base64');
     const result = this.spawn(
       powershellExecutable(this.env),
-      ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '-'],
+      // `-Command -` executes stdin a statement at a time: a terminating
+      // registration error can be followed by Get-Snapshot and exit zero.
+      // Evaluate the entire bounded stdin script as one unit and preserve its
+      // failure exit code, without putting the large script or payload in argv.
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+        "$ErrorActionPreference = 'Stop'; try { & ([ScriptBlock]::Create([Console]::In.ReadToEnd())); exit 0 } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"],
       {
         encoding: 'utf8',
         input: WINDOWS_TASK_SCHEDULER_POWERSHELL_SOURCE,

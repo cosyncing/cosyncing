@@ -15,6 +15,21 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 - File-close notices dismiss automatically and include a close button. With
   accessible navigation enabled, Undo remains available until dismissed.
+- Windows serves the web client and its version document correctly, allowing
+  signed updates to pass web verification instead of repeatedly rolling back.
+- Failed broker updates report the failing step and underlying health or service
+  error, retain details after rollback, and expose them in `cosy doctor`. When
+  the broker was running, rollback and interrupted-update recovery confirm it
+  answers before reporting success.
+- Update startup checks use a bounded 30-second readiness window, so Windows
+  service startup is not mistaken for failure after three seconds of connection
+  refusals. Transient web response-body failures also retry within that window,
+  including timeouts after HTTP 200 headers arrive.
+- Update child commands drain their output while running and cancel completed
+  deadlines, preventing large diagnostic reports from blocking an update or
+  keeping a finished command alive until its timeout.
+- Windows desktop-running checks use native process and executable-path queries,
+  preventing slow shell probes from skipping a safe desktop update.
 
 ### Changed
 
