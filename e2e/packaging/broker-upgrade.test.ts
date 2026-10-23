@@ -52,10 +52,26 @@ describe.skipIf(process.platform !== 'win32')('native Windows signed broker upda
       cwd: ROOT, env, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe',
     });
     const capture = captureProcessOutput(child, { maxChars: 512_000 });
-    const timer = setTimeout(() => child.kill(), scaled(options.timeoutMs ?? 90_000));
+    let timedOut = false;
+    const startedAt = Date.now();
+    const timer = setTimeout(() => { timedOut = true; child.kill(); }, scaled(options.timeoutMs ?? 90_000));
     try {
       const code = await child.exited;
       await capture.done;
+      if (code !== 0 && args[0] === 'setup') {
+        // Cleanup removes the interrupted transaction. Retain its last action,
+        // not credential contents or rollback snapshots, in the failure log.
+        let transaction: Record<string, unknown> | undefined;
+        try {
+          const journal = JSON.parse(readFileSync(join(home, 'transactions/setup.json'), 'utf8'));
+          transaction = { stage: journal.stage, inFlight: journal.inFlight?.id,
+            applied: journal.applied?.map((action: { id: string }) => action.id),
+            updatedAt: journal.updatedAt, failureCode: journal.failureCode };
+        } catch { /* setup may have stopped before creating its journal */ }
+        console.error(JSON.stringify({ fixtureSetupFailure: { timedOut, elapsedMs: Date.now() - startedAt,
+          lockPresent: existsSync(join(home, 'installation.lock')),
+          applicationPresent: existsSync(application), transaction } }));
+      }
       if (code !== 0 && (args[0] === 'update' || args[0] === 'upgrade')) {
         let outcome: { status?: string; failure?: { health?: { endpoint?: string } } } | undefined;
         try { outcome = JSON.parse(capture.read()); } catch { /* the assertion retains the CLI output */ }
