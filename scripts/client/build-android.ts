@@ -90,14 +90,7 @@ export async function buildAndroid(
   mode: AndroidBuildMode = 'release',
 ): Promise<number> {
   const status = await runClientCommand(androidBuildCommand(mode));
-  if (status !== 0) return status;
-  // The native document-provider boundary needs JVM coverage in addition to
-  // Flutter's platform-channel scenarios. Reuse the existing Android lane.
-  const tests = await runClientCommand([
-    process.platform === 'win32' ? 'android/gradlew.bat' : 'android/gradlew',
-    '-p', 'android', ':app:testDebugUnitTest', '--console=plain',
-  ]);
-  if (tests !== 0 || mode !== 'release') return tests;
+  if (status !== 0 || mode !== 'release') return status;
   return verifyAndroidReleaseResources();
 }
 

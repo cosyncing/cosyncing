@@ -44,6 +44,8 @@ class FakeBackgroundDownloadEngine implements SessionFileBackgroundDownloader {
   bool enqueueAccepted = true;
   Completer<void>? startup;
   int listens = 0;
+  int starts = 0;
+  int recordLoads = 0;
   final enqueued = <BackgroundSessionDownloadRequest>[];
   final canceled = <String>[];
   final forgotten = <String>[];
@@ -65,6 +67,7 @@ class FakeBackgroundDownloadEngine implements SessionFileBackgroundDownloader {
   bool get isSupported => true;
   @override
   Future<void> ensureStarted() async {
+    starts++;
     started = true;
     await startup?.future;
   }
@@ -82,7 +85,11 @@ class FakeBackgroundDownloadEngine implements SessionFileBackgroundDownloader {
   }
 
   @override
-  Future<List<BackgroundDownloadRecord>> loadRecords() async => records;
+  Future<List<BackgroundDownloadRecord>> loadRecords() async {
+    recordLoads++;
+    return records;
+  }
+
   @override
   Future<BackgroundDownloadRecord?> recordFor(String taskId) async =>
       database.records[taskId];
@@ -110,6 +117,8 @@ class FakeAndroidSaveAs {
   PlatformException? error;
   Completer<void>? pending;
   void Function()? onCommitted;
+  void Function()? onOpened;
+  void Function()? beforeReply;
   bool ignoreCancellation = false;
   bool deferCancellation = false;
   int? _activeRequest;
@@ -137,14 +146,18 @@ class FakeAndroidSaveAs {
             final id = args['requestId'] as int;
             _activeRequest = id;
             requests.add(args);
+            onOpened?.call();
             try {
               await pending?.future;
               if (canceledRequests.contains(id) && !ignoreCancellation) {
                 return null;
               }
-              if (error != null) throw error!;
-              if (response != null) onCommitted?.call();
-              return response;
+              final reply = response;
+              final failure = error;
+              beforeReply?.call();
+              if (failure != null) throw failure;
+              if (reply != null) onCommitted?.call();
+              return reply;
             } finally {
               returnedRequests.add(id);
               _activeRequest = null;

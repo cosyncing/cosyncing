@@ -147,6 +147,17 @@ class $ArtifactTransferRowsTable extends ArtifactTransferRows
     type: DriftSqlType.string,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _exportedFileNameMeta = const VerificationMeta(
+    'exportedFileName',
+  );
+  @override
+  late final GeneratedColumn<String> exportedFileName = GeneratedColumn<String>(
+    'exported_file_name',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
   static const VerificationMeta _contentTypeMeta = const VerificationMeta(
     'contentType',
   );
@@ -304,6 +315,7 @@ class $ArtifactTransferRowsTable extends ArtifactTransferRows
     sourceUrl,
     cachedFilePath,
     exportedPath,
+    exportedFileName,
     contentType,
     contentHash,
     uploadId,
@@ -431,6 +443,15 @@ class $ArtifactTransferRowsTable extends ArtifactTransferRows
         exportedPath.isAcceptableOrUnknown(
           data['exported_path']!,
           _exportedPathMeta,
+        ),
+      );
+    }
+    if (data.containsKey('exported_file_name')) {
+      context.handle(
+        _exportedFileNameMeta,
+        exportedFileName.isAcceptableOrUnknown(
+          data['exported_file_name']!,
+          _exportedFileNameMeta,
         ),
       );
     }
@@ -595,6 +616,10 @@ class $ArtifactTransferRowsTable extends ArtifactTransferRows
         DriftSqlType.string,
         data['${effectivePrefix}exported_path'],
       ),
+      exportedFileName: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}exported_file_name'],
+      ),
       contentType: attachedDatabase.typeMapping.read(
         DriftSqlType.string,
         data['${effectivePrefix}content_type'],
@@ -697,6 +722,9 @@ class ArtifactTransferRow extends DataClass
   /// User-selected export path once saved.
   final String? exportedPath;
 
+  /// Display name returned by the save destination, separate from UI copy.
+  final String? exportedFileName;
+
   /// MIME type, when known.
   final String? contentType;
 
@@ -749,6 +777,7 @@ class ArtifactTransferRow extends DataClass
     this.sourceUrl,
     this.cachedFilePath,
     this.exportedPath,
+    this.exportedFileName,
     this.contentType,
     this.contentHash,
     this.uploadId,
@@ -788,6 +817,9 @@ class ArtifactTransferRow extends DataClass
     }
     if (!nullToAbsent || exportedPath != null) {
       map['exported_path'] = Variable<String>(exportedPath);
+    }
+    if (!nullToAbsent || exportedFileName != null) {
+      map['exported_file_name'] = Variable<String>(exportedFileName);
     }
     if (!nullToAbsent || contentType != null) {
       map['content_type'] = Variable<String>(contentType);
@@ -850,6 +882,9 @@ class ArtifactTransferRow extends DataClass
       exportedPath: exportedPath == null && nullToAbsent
           ? const Value.absent()
           : Value(exportedPath),
+      exportedFileName: exportedFileName == null && nullToAbsent
+          ? const Value.absent()
+          : Value(exportedFileName),
       contentType: contentType == null && nullToAbsent
           ? const Value.absent()
           : Value(contentType),
@@ -905,6 +940,7 @@ class ArtifactTransferRow extends DataClass
       sourceUrl: serializer.fromJson<String?>(json['sourceUrl']),
       cachedFilePath: serializer.fromJson<String?>(json['cachedFilePath']),
       exportedPath: serializer.fromJson<String?>(json['exportedPath']),
+      exportedFileName: serializer.fromJson<String?>(json['exportedFileName']),
       contentType: serializer.fromJson<String?>(json['contentType']),
       contentHash: serializer.fromJson<String?>(json['contentHash']),
       uploadId: serializer.fromJson<String?>(json['uploadId']),
@@ -939,6 +975,7 @@ class ArtifactTransferRow extends DataClass
       'sourceUrl': serializer.toJson<String?>(sourceUrl),
       'cachedFilePath': serializer.toJson<String?>(cachedFilePath),
       'exportedPath': serializer.toJson<String?>(exportedPath),
+      'exportedFileName': serializer.toJson<String?>(exportedFileName),
       'contentType': serializer.toJson<String?>(contentType),
       'contentHash': serializer.toJson<String?>(contentHash),
       'uploadId': serializer.toJson<String?>(uploadId),
@@ -969,6 +1006,7 @@ class ArtifactTransferRow extends DataClass
     Value<String?> sourceUrl = const Value.absent(),
     Value<String?> cachedFilePath = const Value.absent(),
     Value<String?> exportedPath = const Value.absent(),
+    Value<String?> exportedFileName = const Value.absent(),
     Value<String?> contentType = const Value.absent(),
     Value<String?> contentHash = const Value.absent(),
     Value<String?> uploadId = const Value.absent(),
@@ -1000,6 +1038,9 @@ class ArtifactTransferRow extends DataClass
         ? cachedFilePath.value
         : this.cachedFilePath,
     exportedPath: exportedPath.present ? exportedPath.value : this.exportedPath,
+    exportedFileName: exportedFileName.present
+        ? exportedFileName.value
+        : this.exportedFileName,
     contentType: contentType.present ? contentType.value : this.contentType,
     contentHash: contentHash.present ? contentHash.value : this.contentHash,
     uploadId: uploadId.present ? uploadId.value : this.uploadId,
@@ -1045,6 +1086,9 @@ class ArtifactTransferRow extends DataClass
       exportedPath: data.exportedPath.present
           ? data.exportedPath.value
           : this.exportedPath,
+      exportedFileName: data.exportedFileName.present
+          ? data.exportedFileName.value
+          : this.exportedFileName,
       contentType: data.contentType.present
           ? data.contentType.value
           : this.contentType,
@@ -1093,6 +1137,7 @@ class ArtifactTransferRow extends DataClass
           ..write('sourceUrl: $sourceUrl, ')
           ..write('cachedFilePath: $cachedFilePath, ')
           ..write('exportedPath: $exportedPath, ')
+          ..write('exportedFileName: $exportedFileName, ')
           ..write('contentType: $contentType, ')
           ..write('contentHash: $contentHash, ')
           ..write('uploadId: $uploadId, ')
@@ -1125,6 +1170,7 @@ class ArtifactTransferRow extends DataClass
     sourceUrl,
     cachedFilePath,
     exportedPath,
+    exportedFileName,
     contentType,
     contentHash,
     uploadId,
@@ -1156,6 +1202,7 @@ class ArtifactTransferRow extends DataClass
           other.sourceUrl == this.sourceUrl &&
           other.cachedFilePath == this.cachedFilePath &&
           other.exportedPath == this.exportedPath &&
+          other.exportedFileName == this.exportedFileName &&
           other.contentType == this.contentType &&
           other.contentHash == this.contentHash &&
           other.uploadId == this.uploadId &&
@@ -1186,6 +1233,7 @@ class ArtifactTransferRowsCompanion
   final Value<String?> sourceUrl;
   final Value<String?> cachedFilePath;
   final Value<String?> exportedPath;
+  final Value<String?> exportedFileName;
   final Value<String?> contentType;
   final Value<String?> contentHash;
   final Value<String?> uploadId;
@@ -1214,6 +1262,7 @@ class ArtifactTransferRowsCompanion
     this.sourceUrl = const Value.absent(),
     this.cachedFilePath = const Value.absent(),
     this.exportedPath = const Value.absent(),
+    this.exportedFileName = const Value.absent(),
     this.contentType = const Value.absent(),
     this.contentHash = const Value.absent(),
     this.uploadId = const Value.absent(),
@@ -1243,6 +1292,7 @@ class ArtifactTransferRowsCompanion
     this.sourceUrl = const Value.absent(),
     this.cachedFilePath = const Value.absent(),
     this.exportedPath = const Value.absent(),
+    this.exportedFileName = const Value.absent(),
     this.contentType = const Value.absent(),
     this.contentHash = const Value.absent(),
     this.uploadId = const Value.absent(),
@@ -1280,6 +1330,7 @@ class ArtifactTransferRowsCompanion
     Expression<String>? sourceUrl,
     Expression<String>? cachedFilePath,
     Expression<String>? exportedPath,
+    Expression<String>? exportedFileName,
     Expression<String>? contentType,
     Expression<String>? contentHash,
     Expression<String>? uploadId,
@@ -1309,6 +1360,7 @@ class ArtifactTransferRowsCompanion
       if (sourceUrl != null) 'source_url': sourceUrl,
       if (cachedFilePath != null) 'cached_file_path': cachedFilePath,
       if (exportedPath != null) 'exported_path': exportedPath,
+      if (exportedFileName != null) 'exported_file_name': exportedFileName,
       if (contentType != null) 'content_type': contentType,
       if (contentHash != null) 'content_hash': contentHash,
       if (uploadId != null) 'upload_id': uploadId,
@@ -1341,6 +1393,7 @@ class ArtifactTransferRowsCompanion
     Value<String?>? sourceUrl,
     Value<String?>? cachedFilePath,
     Value<String?>? exportedPath,
+    Value<String?>? exportedFileName,
     Value<String?>? contentType,
     Value<String?>? contentHash,
     Value<String?>? uploadId,
@@ -1370,6 +1423,7 @@ class ArtifactTransferRowsCompanion
       sourceUrl: sourceUrl ?? this.sourceUrl,
       cachedFilePath: cachedFilePath ?? this.cachedFilePath,
       exportedPath: exportedPath ?? this.exportedPath,
+      exportedFileName: exportedFileName ?? this.exportedFileName,
       contentType: contentType ?? this.contentType,
       contentHash: contentHash ?? this.contentHash,
       uploadId: uploadId ?? this.uploadId,
@@ -1428,6 +1482,9 @@ class ArtifactTransferRowsCompanion
     }
     if (exportedPath.present) {
       map['exported_path'] = Variable<String>(exportedPath.value);
+    }
+    if (exportedFileName.present) {
+      map['exported_file_name'] = Variable<String>(exportedFileName.value);
     }
     if (contentType.present) {
       map['content_type'] = Variable<String>(contentType.value);
@@ -1492,6 +1549,7 @@ class ArtifactTransferRowsCompanion
           ..write('sourceUrl: $sourceUrl, ')
           ..write('cachedFilePath: $cachedFilePath, ')
           ..write('exportedPath: $exportedPath, ')
+          ..write('exportedFileName: $exportedFileName, ')
           ..write('contentType: $contentType, ')
           ..write('contentHash: $contentHash, ')
           ..write('uploadId: $uploadId, ')
@@ -2919,7 +2977,7 @@ class $AttentionEventRowsTable extends AttentionEventRows
 
 class AttentionEventRow extends DataClass
     implements Insertable<AttentionEventRow> {
-  /// Owning broker profile id.
+  /// Exact encoded broker source key (historical column name).
   final String brokerProfileId;
 
   /// Stable event id from the broker.
@@ -4181,7 +4239,7 @@ class $AttentionCursorRowsTable extends AttentionCursorRows
 
 class AttentionCursorRow extends DataClass
     implements Insertable<AttentionCursorRow> {
-  /// Owning broker profile id.
+  /// Exact encoded broker source key (historical column name).
   final String brokerProfileId;
 
   /// Last durable cursor returned by the broker.
@@ -6439,7 +6497,8 @@ class SessionDraftRow extends DataClass implements Insertable<SessionDraftRow> {
   ///
   /// A conditional update on this value is what makes concurrent writers safe:
   /// the in-process mutation chain covers one controller and a transaction
-  /// covers one connection, but a second browser tab is neither. `localRevision`
+  /// covers one connection, but a second browser tab is neither.
+  /// `localRevision`
   /// cannot serve — it tracks coalesced user edits, so state-only writes
   /// (binding a send, adopting a revision, clearing a conflict) leave it
   /// unchanged and would look like no mutation at all.
@@ -7488,6 +7547,7 @@ typedef $$ArtifactTransferRowsTableCreateCompanionBuilder =
       Value<String?> sourceUrl,
       Value<String?> cachedFilePath,
       Value<String?> exportedPath,
+      Value<String?> exportedFileName,
       Value<String?> contentType,
       Value<String?> contentHash,
       Value<String?> uploadId,
@@ -7518,6 +7578,7 @@ typedef $$ArtifactTransferRowsTableUpdateCompanionBuilder =
       Value<String?> sourceUrl,
       Value<String?> cachedFilePath,
       Value<String?> exportedPath,
+      Value<String?> exportedFileName,
       Value<String?> contentType,
       Value<String?> contentHash,
       Value<String?> uploadId,
@@ -7605,6 +7666,11 @@ class $$ArtifactTransferRowsTableFilterComposer
 
   ColumnFilters<String> get exportedPath => $composableBuilder(
     column: $table.exportedPath,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get exportedFileName => $composableBuilder(
+    column: $table.exportedFileName,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -7748,6 +7814,11 @@ class $$ArtifactTransferRowsTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<String> get exportedFileName => $composableBuilder(
+    column: $table.exportedFileName,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<String> get contentType => $composableBuilder(
     column: $table.contentType,
     builder: (column) => ColumnOrderings(column),
@@ -7872,6 +7943,11 @@ class $$ArtifactTransferRowsTableAnnotationComposer
     builder: (column) => column,
   );
 
+  GeneratedColumn<String> get exportedFileName => $composableBuilder(
+    column: $table.exportedFileName,
+    builder: (column) => column,
+  );
+
   GeneratedColumn<String> get contentType => $composableBuilder(
     column: $table.contentType,
     builder: (column) => column,
@@ -7984,6 +8060,7 @@ class $$ArtifactTransferRowsTableTableManager
                 Value<String?> sourceUrl = const Value.absent(),
                 Value<String?> cachedFilePath = const Value.absent(),
                 Value<String?> exportedPath = const Value.absent(),
+                Value<String?> exportedFileName = const Value.absent(),
                 Value<String?> contentType = const Value.absent(),
                 Value<String?> contentHash = const Value.absent(),
                 Value<String?> uploadId = const Value.absent(),
@@ -8012,6 +8089,7 @@ class $$ArtifactTransferRowsTableTableManager
                 sourceUrl: sourceUrl,
                 cachedFilePath: cachedFilePath,
                 exportedPath: exportedPath,
+                exportedFileName: exportedFileName,
                 contentType: contentType,
                 contentHash: contentHash,
                 uploadId: uploadId,
@@ -8042,6 +8120,7 @@ class $$ArtifactTransferRowsTableTableManager
                 Value<String?> sourceUrl = const Value.absent(),
                 Value<String?> cachedFilePath = const Value.absent(),
                 Value<String?> exportedPath = const Value.absent(),
+                Value<String?> exportedFileName = const Value.absent(),
                 Value<String?> contentType = const Value.absent(),
                 Value<String?> contentHash = const Value.absent(),
                 Value<String?> uploadId = const Value.absent(),
@@ -8070,6 +8149,7 @@ class $$ArtifactTransferRowsTableTableManager
                 sourceUrl: sourceUrl,
                 cachedFilePath: cachedFilePath,
                 exportedPath: exportedPath,
+                exportedFileName: exportedFileName,
                 contentType: contentType,
                 contentHash: contentHash,
                 uploadId: uploadId,

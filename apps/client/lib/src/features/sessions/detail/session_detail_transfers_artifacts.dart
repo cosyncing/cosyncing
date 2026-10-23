@@ -699,10 +699,8 @@ class _ArtifactSurfaceMessage extends ConsumerWidget {
         hasDownloadOrFetch &&
         !isBusy &&
         (descriptor.isInlineDataUrl || hasActiveBrokerClient);
-    final actionHint = _artifactActionLabel(l10n, actionState.phase);
-    final shouldShowActionHint =
-        actionState.phase != SessionArtifactActionPhase.idle &&
-        actionHint.isNotEmpty;
+    final actionHint = _artifactActionLabel(l10n, actionState);
+    final shouldShowActionHint = actionHint.isNotEmpty;
 
     final matchingTransfer = _sessionDetailTransferForArtifactSummary(
       descriptor,
@@ -922,9 +920,9 @@ bool _artifactActionIsBusy(SessionArtifactActionPhase phase) {
 
 String _artifactActionLabel(
   AppLocalizations l10n,
-  SessionArtifactActionPhase phase,
-) => switch (phase) {
-  SessionArtifactActionPhase.idle => '',
+  SessionArtifactActionState action,
+) => switch (action.phase) {
+  SessionArtifactActionPhase.idle => action.message,
   SessionArtifactActionPhase.loading => l10n.sessionArtifactDownloading,
   SessionArtifactActionPhase.previewing => l10n.sessionArtifactOpeningPreview,
   SessionArtifactActionPhase.saved => l10n.sessionArtifactSaved,

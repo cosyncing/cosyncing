@@ -1409,6 +1409,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
       return;
     }
     if (!result.succeeded ||
+        result.outcome == SessionArtifactTransferWorkerOutcome.cached ||
         result.outcome ==
             SessionArtifactTransferWorkerOutcome.enqueuedInBackground) {
       // Surface both foreground failures and the background-started notice so
@@ -1420,6 +1421,8 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
             result.outcome ==
                     SessionArtifactTransferWorkerOutcome.enqueuedInBackground
                 ? l10n.sessionFileDownloadStartedInBackground
+                : result.outcome == SessionArtifactTransferWorkerOutcome.cached
+                ? result.message
                 : l10n.sessionFileDownloadFailed,
           ),
         ),

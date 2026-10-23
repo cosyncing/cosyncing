@@ -12,6 +12,8 @@ import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifac
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_file_background_download.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_file_browser.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_detail_state.dart';
+import 'package:cosyncing_client/src/features/storage/data/local_storage_file_backend.dart';
+import 'package:cosyncing_client/src/features/storage/data/managed_file_access.dart';
 import 'package:cosyncing_client/src/features/transfers/view/cached_transfer_actions.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -35,6 +37,7 @@ void main() {
     'save queue',
     'simultaneous completion',
     'queued save loses foreground',
+    'queued picker dismissed',
     'restart',
     'cancel',
     'write failure',
@@ -43,6 +46,9 @@ void main() {
     'late answer',
     'row change',
     'share',
+    'share stale dialog',
+    'retry loses cached copy',
+    'write fails after cancel',
   ]) {
     featureTest('Android workspace download: $scenario', (f) async {
       final directory = Directory.systemTemp.createTempSync(
@@ -78,6 +84,17 @@ void main() {
           cachedFileShareProvider.overrideWithValue((file) async {
             final failure = shareFailure;
             if (failure != null) throw failure;
+            if (scenario == 'share stale dialog') {
+              // Real cleanup admission must protect the actual file while the
+              // share sheet owns it, even when its dialog has an older row.
+              await expectLater(
+                ManagedFileAccess.shared.remove(
+                  file.cachedFilePath,
+                  () => File(file.cachedFilePath).delete(),
+                ),
+                throwsA(isA<LocalStorageException>()),
+              );
+            }
             shares.add(file);
           }),
         ],
@@ -98,8 +115,10 @@ void main() {
       expect(engine.enqueued, hasLength(1));
       final id = engine.enqueued.single.taskId;
       String? secondId;
+      String? dismissedId;
       if (scenario == 'simultaneous completion' ||
-          scenario == 'queued save loses foreground') {
+          scenario == 'queued save loses foreground' ||
+          scenario == 'queued picker dismissed') {
         await app.tapKey('session-detail-files-download-审阅意见.md');
         secondId = engine.enqueued.last.taskId;
         expect(secondId, isNot(id));
@@ -130,7 +149,30 @@ void main() {
         await app.openFromRoster('s1', cwd: '/work/studio');
         expect(engine.listens, 1);
       }
-      if (scenario == 'cancel') save.response = null;
+      if (scenario == 'cancel' || scenario == 'retry loses cached copy') {
+        save.response = null;
+      }
+      if (scenario == 'queued picker dismissed') {
+        save.onOpened = () {
+          for (final state in [
+            AppLifecycleState.inactive,
+            AppLifecycleState.hidden,
+            AppLifecycleState.paused,
+          ]) {
+            app.tester.binding.handleAppLifecycleStateChanged(state);
+          }
+        };
+      }
+      if (scenario == 'write fails after cancel') {
+        save
+          ..error = PlatformException(
+            code: 'write_failed',
+            message: 'Provider failed after opening',
+          )
+          ..beforeReply = () => app.container
+              .read(sessionArtifactTransferWorkerProvider)
+              .cancelTransfer(id);
+      }
       if (scenario == 'cancel row' ||
           scenario == 'cancel row after reconnect' ||
           scenario == 'late answer') {
@@ -155,6 +197,7 @@ void main() {
       }
       if (scenario == 'paused' ||
           scenario == 'share' ||
+          scenario == 'share stale dialog' ||
           scenario == 'save queue' ||
           scenario == 'paused on other server') {
         app.tester.binding.handleAppLifecycleStateChanged(
@@ -201,6 +244,31 @@ void main() {
               engine.forgotten.contains(secondId),
         );
         expect(save.requests, hasLength(1));
+        if (scenario == 'queued picker dismissed') {
+          dismissedId = [id, secondId].firstWhere(
+            (candidate) =>
+                _row(app, candidate)?.cachedFilePath ==
+                save.requests.single['sourcePath'],
+          );
+          save
+            ..response = null
+            ..beforeReply = () {
+              save
+                ..onOpened = null
+                ..beforeReply = null
+                ..response = {
+                  'uri': 'content://documents/second.md',
+                  'displayName': 'second.md',
+                };
+              for (final state in [
+                AppLifecycleState.hidden,
+                AppLifecycleState.inactive,
+                AppLifecycleState.resumed,
+              ]) {
+                app.tester.binding.handleAppLifecycleStateChanged(state);
+              }
+            };
+        }
         if (scenario == 'queued save loses foreground') {
           app.tester.binding.handleAppLifecycleStateChanged(
             AppLifecycleState.paused,
@@ -209,7 +277,17 @@ void main() {
         }
         save.pending!.complete();
         save.pending = null;
-        if (scenario == 'simultaneous completion') {
+        if (scenario == 'queued picker dismissed') {
+          await _nativeUntil(
+            app,
+            () =>
+                _row(app, dismissedId!)?.status ==
+                    SessionArtifactTransferStatus.canceled &&
+                _row(app, dismissedId == id ? secondId! : id)?.status ==
+                    SessionArtifactTransferStatus.completed &&
+                save.requests.length == 2,
+          );
+        } else if (scenario == 'simultaneous completion') {
           await _nativeUntil(
             app,
             () =>
@@ -278,20 +356,29 @@ void main() {
           await app.switchServer(firstProfile.id);
         }
       }
-      final expected = switch (scenario) {
-        'paused' ||
-        'paused on other server' ||
-        'foreground on other server' ||
-        'save queue' ||
-        'cancel row' ||
-        'cancel row after reconnect' ||
-        'late answer' ||
-        'share' ||
-        'restart' => SessionArtifactTransferStatus.cached,
-        'cancel' => SessionArtifactTransferStatus.canceled,
-        'write failure' || 'row change' => SessionArtifactTransferStatus.failed,
-        _ => SessionArtifactTransferStatus.completed,
-      };
+      final expected = scenario == 'queued picker dismissed'
+          ? (dismissedId == id
+                ? SessionArtifactTransferStatus.canceled
+                : SessionArtifactTransferStatus.completed)
+          : switch (scenario) {
+              'paused' ||
+              'paused on other server' ||
+              'foreground on other server' ||
+              'save queue' ||
+              'cancel row' ||
+              'cancel row after reconnect' ||
+              'late answer' ||
+              'share' ||
+              'share stale dialog' ||
+              'restart' => SessionArtifactTransferStatus.cached,
+              'cancel' ||
+              'queued picker dismissed' ||
+              'retry loses cached copy' =>
+                SessionArtifactTransferStatus.canceled,
+              'write failure' || 'row change' || 'write fails after cancel' =>
+                SessionArtifactTransferStatus.failed,
+              _ => SessionArtifactTransferStatus.completed,
+            };
       await _nativeUntil(app, () => _row(app, id)?.status == expected);
       final cached = _row(app, id)!.cachedFilePath!;
       expect(File(cached).existsSync(), isTrue);
@@ -304,6 +391,7 @@ void main() {
       }
       if (scenario == 'paused' ||
           scenario == 'share' ||
+          scenario == 'share stale dialog' ||
           scenario == 'save queue') {
         expect(save.requests, isEmpty);
         for (final state in [
@@ -326,7 +414,8 @@ void main() {
           scenario == 'foreground on other server' ||
           scenario == 'save queue' ||
           scenario == 'restart' ||
-          scenario == 'share') {
+          scenario == 'share' ||
+          scenario == 'share stale dialog') {
         expect(save.requests, isEmpty);
         expect(find.textContaining('Downloaded'), findsWidgets);
         if (scenario == 'paused') {
@@ -421,6 +510,58 @@ void main() {
           findsOneWidget,
         );
         expect(_row(app, id)!.status, SessionArtifactTransferStatus.cached);
+      }
+      if (scenario == 'share stale dialog') {
+        if (find.byType(SnackBar).evaluate().isNotEmpty) {
+          await app.tester.drag(
+            find.byType(SnackBar).first,
+            const Offset(0, 200),
+          );
+          await app.settle();
+        }
+        await app.tapKey('transfer-manager-details-$id');
+        final replacement = File('${directory.path}/new-cache.md')
+          ..writeAsStringSync('new cache bytes');
+        controller.markCached(
+          id,
+          SessionArtifactCachedFile(
+            cachedFilePath: replacement.path,
+            fileName: '审阅意见.md',
+            byteLength: 15,
+          ),
+        );
+        await app.tapKey('transfer-manager-details-share-$id');
+        await app.pumpUntil(
+          () => shares.isNotEmpty,
+          reason:
+              'share uses the current cache while the dialog '
+              'retains its snapshot',
+        );
+        expect(shares.single.cachedFilePath, replacement.path);
+        expect(replacement.readAsStringSync(), 'new cache bytes');
+        await app.tap(find.widgetWithText(TextButton, 'Close').last);
+      }
+      if (scenario == 'retry loses cached copy') {
+        await app.tapKey('transfer-manager-retry-$id');
+        await app.pumpUntil(
+          () => _row(app, id)?.status == SessionArtifactTransferStatus.running,
+          reason: 'retry begins without claiming old cached bytes',
+        );
+        engine.emit(
+          BackgroundDownloadRecord(
+            taskId: id,
+            status: BackgroundDownloadTaskStatus.failed,
+            errorMessage: 'Network unavailable',
+          ),
+        );
+        await _nativeUntil(
+          app,
+          () => _row(app, id)?.status == SessionArtifactTransferStatus.failed,
+        );
+        expect(_row(app, id)!.cachedFilePath, isNull);
+        expect(File(cached).existsSync(), isTrue);
+        expect(find.byKey(Key('transfer-manager-save-$id')), findsNothing);
+        expect(find.byKey(Key('transfer-manager-share-$id')), findsNothing);
       }
       if (scenario == 'save queue') {
         // Two explicit saves cross a reconnect-bound worker replacement. The
@@ -572,10 +713,18 @@ void main() {
     }, platform: TargetPlatform.android);
   }
 
-  for (final saveOutcome in ['saved', 'busy', 'no_activity', 'cancel retry']) {
+  for (final saveOutcome in [
+    'saved',
+    'busy',
+    'no_activity',
+    'cancel retry',
+    'manual wins cache commit',
+    'manual wins failed cache commit',
+  ]) {
     featureTest(
       'Android agent artifact uses the system Save as channel: $saveOutcome',
       (f) async {
+        final manualWins = saveOutcome.startsWith('manual wins');
         final directory = Directory.systemTemp.createTempSync(
           'artifact-download-feature-',
         );
@@ -595,7 +744,7 @@ void main() {
           save
             ..pending = Completer<void>()
             ..deferCancellation = true;
-        } else if (saveOutcome != 'saved') {
+        } else if (saveOutcome != 'saved' && !manualWins) {
           save.error = PlatformException(code: saveOutcome);
         }
         final broker = f.network.add('http://studio.test:7734')
@@ -621,15 +770,69 @@ void main() {
           }),
         ];
         await f.storage.seedServer(broker);
+        final repository = _DelayedCacheRepository(
+          DriftSessionArtifactTransferRepository(f.storage.database),
+          failCacheCommit: saveOutcome == 'manual wins failed cache commit',
+        );
+        if (saveOutcome == 'saved') {
+          final cache = Directory(
+            '${directory.path}/$sessionArtifactCacheSubdirectory',
+          )..createSync(recursive: true);
+          File(
+            '${cache.path}/review.md',
+          ).writeAsStringSync('pre-existing cache');
+        }
         final app = await f.launch(
           viewport: FeatureViewport.phone,
           overrides: [
             sessionFileBackgroundDownloaderProvider.overrideWithValue(null),
+            if (manualWins)
+              sessionArtifactTransferRepositoryProvider.overrideWithValue(
+                repository,
+              ),
           ],
         );
         await app.tapKey('workspace-open-drawer');
         await app.openFromRoster('s1', cwd: '/work/studio');
+        final baselineClients = f.network.openHttpClients;
+        save.onOpened = () => expect(
+          f.network.openHttpClients,
+          baselineClients,
+          reason: 'HTTP pools close before any local save interaction',
+        );
         await app.tap(find.text('Download').last);
+        if (manualWins) {
+          try {
+            await _nativeUntil(app, () => repository.held);
+            final id = app.container
+                .read(sessionArtifactTransferControllerProvider)
+                .single
+                .id;
+            await app.go(transfersRoute);
+            await app.tapKey('transfer-manager-save-$id');
+            await _nativeUntil(
+              app,
+              () =>
+                  _row(app, id)?.status ==
+                  SessionArtifactTransferStatus.completed,
+            );
+            repository.release.complete();
+            await app.container
+                .read(sessionArtifactTransferControllerProvider.notifier)
+                .persistTransfer(id);
+            await app.settle();
+            expect(
+              save.requests,
+              hasLength(1),
+              reason:
+                  'automatic save never opens a duplicate picker '
+                  'after the manual save',
+            );
+          } finally {
+            if (!repository.release.isCompleted) repository.release.complete();
+            await app.settle();
+          }
+        }
         await _nativeUntil(app, () => save.requests.isNotEmpty);
         if (saveOutcome == 'cancel retry') {
           final id = app.container
@@ -673,12 +876,18 @@ void main() {
               .any(
                 (row) =>
                     row.status ==
-                    (saveOutcome == 'saved' || saveOutcome == 'cancel retry'
+                    (saveOutcome == 'saved' ||
+                            saveOutcome == 'cancel retry' ||
+                            manualWins
                         ? SessionArtifactTransferStatus.completed
                         : SessionArtifactTransferStatus.cached),
               ),
         );
-        if (saveOutcome != 'saved' && saveOutcome != 'cancel retry') {
+        if (saveOutcome == 'busy' || saveOutcome == 'no_activity') {
+          expect(
+            app.visibleText,
+            contains('Downloaded. Use Save to choose a destination.'),
+          );
           expect(app.visibleText, isNot(contains("Couldn't")));
           expect(find.text('Downloading…'), findsNothing);
           await app.go(transfersRoute);
@@ -704,6 +913,13 @@ void main() {
           startsWith('content:'),
         );
         expect(rows.single.fileName, 'review.md');
+        if (saveOutcome == 'saved') {
+          final existing = File(
+            '${directory.path}/$sessionArtifactCacheSubdirectory/review.md',
+          );
+          expect(rows.single.cachedFilePath, isNot(existing.path));
+          expect(existing.readAsStringSync(), 'pre-existing cache');
+        }
         expect(rows.single.savedFileName, 'review-saved.md');
         expect(rows.single.message, 'Saved review-saved.md');
         await app.go(transfersRoute);
@@ -714,6 +930,80 @@ void main() {
       platform: TargetPlatform.android,
     );
   }
+
+  featureTest(
+    'Android foreground workspace download explains deferred saving',
+    (f) async {
+      final directory = Directory.systemTemp.createTempSync(
+        'foreground-workspace-',
+      );
+      final previousPaths = PathProviderPlatform.instance;
+      PathProviderPlatform.instance = DownloadTemporaryPaths(directory.path);
+      addTearDown(() {
+        PathProviderPlatform.instance = previousPaths;
+        directory.deleteSync(recursive: true);
+      });
+      final save = FakeAndroidSaveAs()
+        ..error = PlatformException(code: 'no_activity')
+        ..install();
+      final broker = f.network.add('http://studio.test:7734')
+        ..addSession('s1', 'File download');
+      broker.files['/api/sessions/codex/s1/fs/download'] =
+          const FakeBrokerResponse.text(
+            200,
+            'workspace bytes',
+            {'content-type': 'text/markdown', 'content-length': '15'},
+          );
+      await f.storage.seedServer(broker);
+      final app = await f.launch(
+        viewport: FeatureViewport.phone,
+        overrides: [
+          sessionFileBackgroundDownloaderProvider.overrideWithValue(null),
+          sessionFileBrowserRepositoryProvider.overrideWith(
+            (ref) async => _DownloadWorkspace(),
+          ),
+        ],
+      );
+      await app.tapKey('workspace-open-drawer');
+      await app.openFromRoster('s1', cwd: '/work/studio');
+      await app.tapKey('session-detail-view-menu');
+      await app.tapKey('session-detail-view-item-files');
+      await app.tapKey('session-detail-files-download-审阅意见.md');
+      await _nativeUntil(
+        app,
+        () => app.container
+            .read(sessionArtifactTransferControllerProvider)
+            .any(
+              (row) =>
+                  row.status == SessionArtifactTransferStatus.cached &&
+                  row.message ==
+                      'Downloaded. Use Save to choose a destination.',
+            ),
+      );
+      expect(
+        app.visibleText,
+        contains('Downloaded. Use Save to choose a destination.'),
+      );
+      expect(app.visibleText, isNot(contains('Download failed')));
+      final transfer = app.container
+          .read(sessionArtifactTransferControllerProvider)
+          .single;
+      expect(
+        File(transfer.cachedFilePath!).readAsStringSync(),
+        'workspace bytes',
+      );
+      await app.go(transfersRoute);
+      save.error = null;
+      await app.tapKey('transfer-manager-save-${transfer.id}');
+      await _nativeUntil(
+        app,
+        () =>
+            _row(app, transfer.id)?.status ==
+            SessionArtifactTransferStatus.completed,
+      );
+    },
+    platform: TargetPlatform.android,
+  );
 }
 
 SessionArtifactTransfer? _row(AppDriver app, String id) => app.container
@@ -722,11 +1012,20 @@ SessionArtifactTransfer? _row(AppDriver app, String id) => app.container
 
 // Filesystem event barriers, bounded without sleeps, as in file_previews_test.
 Future<void> _nativeUntil(AppDriver app, bool Function() condition) async {
-  for (var turn = 0; turn < 100 && !condition(); turn++) {
-    // An async filesystem probe yields to native I/O callbacks.
+  final elapsed = Stopwatch()..start();
+  final budget = AppDriver.step * 100;
+  var advanced = Duration.zero;
+  var turns = 0;
+  while (!condition() && elapsed.elapsed < budget) {
+    // Yield to real I/O without consuming five seconds of fake application
+    // time before the OS has completed a small file operation. Advancing by
+    // measured elapsed time also services genuine app timers at their rate.
     // ignore: avoid_slow_async_io
     await app.tester.runAsync(() => Directory.systemTemp.exists());
-    await app.tester.pump(AppDriver.step);
+    final now = elapsed.elapsed;
+    await app.tester.pump(now - advanced);
+    advanced = now;
+    turns++;
   }
   final messages = app.container
       .read(sessionArtifactTransferControllerProvider)
@@ -736,7 +1035,8 @@ Future<void> _nativeUntil(AppDriver app, bool Function() condition) async {
     condition(),
     isTrue,
     reason:
-        'native download/cache/export reached its expected state. '
+        'native download/cache/export reached its expected state '
+        'after $turns I/O turns (${elapsed.elapsedMilliseconds}ms real). '
         '\n${app.visibleText}\n'
         '$messages',
   );
@@ -775,4 +1075,27 @@ class _DownloadWorkspace implements SessionFileBrowserRepository {
     required String path,
     int maxBytes = sessionFilePreviewDefaultMaxBytes,
   }) async => throw UnimplementedError();
+}
+
+class _DelayedCacheRepository implements SessionArtifactTransferRepository {
+  _DelayedCacheRepository(this.delegate, {this.failCacheCommit = false});
+  final SessionArtifactTransferRepository delegate;
+  final bool failCacheCommit;
+  final release = Completer<void>();
+  bool held = false;
+  @override
+  Future<List<SessionArtifactTransfer>> loadTransfers() =>
+      delegate.loadTransfers();
+  @override
+  Future<void> upsertTransfer(SessionArtifactTransfer transfer) async {
+    if (!held && transfer.status == SessionArtifactTransferStatus.cached) {
+      held = true;
+      await release.future;
+      if (failCacheCommit) throw StateError('Held cache commit failed');
+    }
+    await delegate.upsertTransfer(transfer);
+  }
+
+  @override
+  Future<void> deleteTerminalTransfers() => delegate.deleteTerminalTransfers();
 }

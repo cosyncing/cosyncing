@@ -213,7 +213,7 @@ class _TranscriptArtifactDownloadAction extends ConsumerWidget {
     final isBusy = _artifactActionIsBusy(actionState.phase);
     final canDownload =
         !isBusy && (descriptor.isInlineDataUrl || hasActiveBrokerClient);
-    final stateLabel = _artifactActionLabel(l10n, actionState.phase);
+    final stateLabel = _artifactActionLabel(l10n, actionState);
     final sourceId = descriptor.actionStateKey;
 
     return Align(

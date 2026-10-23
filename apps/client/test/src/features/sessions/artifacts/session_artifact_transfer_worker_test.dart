@@ -10,6 +10,8 @@ import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profi
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/sessions.dart';
 import 'package:cosyncing_client/src/features/settings/data/ui_preferences_store.dart';
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, debugDefaultTargetPlatformOverride;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -73,7 +75,9 @@ void main() {
       container.dispose();
     });
 
-    test('downloadArtifact caches, exports, and completes transfer', () async {
+    test('desktop download caches, exports, and completes transfer', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
       fileService
         ..mockCachedFile = const SessionArtifactCachedFile(
           cachedFilePath: '/tmp/report.html',
@@ -2571,11 +2575,18 @@ class _FakeSessionArtifactFileService implements SessionArtifactFileService {
   }
 
   @override
-  Future<String?> exportCachedArtifact(
+  Future<ArtifactExportResult?> exportCachedArtifact(
     SessionArtifactCachedFile artifact, {
+    String? suggestedName,
     SessionArtifactCancellationToken? cancellationToken,
   }) async {
     exportCallCount++;
-    return exportedPath;
+    final destination = exportedPath;
+    return destination == null
+        ? null
+        : ArtifactExportResult(
+            destination: destination,
+            displayName: suggestedName ?? artifact.fileName,
+          );
   }
 }

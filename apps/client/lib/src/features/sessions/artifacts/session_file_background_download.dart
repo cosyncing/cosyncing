@@ -166,6 +166,34 @@ class SessionFileBackgroundUpdateHub {
   final _stream = StreamController<BackgroundDownloadRecord>.broadcast();
   StreamSubscription<BackgroundDownloadRecord>? _subscription;
   bool _disposed = false;
+  Future<void>? _initialization;
+  bool _loadedInitialRecords = false;
+  final _forgottenDuringInitialization = <String>{};
+
+  /// Starts and snapshots the native database once for this app process.
+  /// Worker/profile replacement replays retained live records, without doing
+  /// another allRecords/filePath scan. A failed startup remains retryable.
+  Future<void> initialize() => _initialization ??= _initialize().catchError((
+    Object error,
+    StackTrace stack,
+  ) {
+    _initialization = null;
+    Error.throwWithStackTrace(error, stack);
+  });
+
+  Future<void> _initialize() async {
+    start();
+    await engine.ensureStarted();
+    final initial = await engine.loadRecords();
+    if (_disposed) return;
+    for (final record in initial) {
+      if (!_forgottenDuringInitialization.contains(record.taskId)) {
+        _records.putIfAbsent(record.taskId, () => record);
+      }
+    }
+    _loadedInitialRecords = true;
+    _forgottenDuringInitialization.clear();
+  }
 
   /// Latest unforgotten update for each task.
   Iterable<BackgroundDownloadRecord> get latest => _records.values.toList();
@@ -194,6 +222,7 @@ class SessionFileBackgroundUpdateHub {
 
   /// Drops both the retained update and the native tracking record.
   Future<void> forget(String taskId) async {
+    if (!_loadedInitialRecords) _forgottenDuringInitialization.add(taskId);
     _records.remove(taskId);
     saveWhenFinished.remove(taskId);
     _saveOffers.remove(taskId);
@@ -223,6 +252,7 @@ class SessionFileBackgroundDownloadCoordinator {
     required this.brokerProfileId,
     required this.brokerClient,
     this.isForeground,
+    this.isSaveInProgress,
     this.onReadyToSave,
     this.onFailureDetail,
   });
@@ -255,6 +285,9 @@ class SessionFileBackgroundDownloadCoordinator {
   /// Reads the existing app-wide lifecycle monitor at completion time.
   final bool Function()? isForeground;
 
+  /// An earlier granted picker can cover the app while another cache settles.
+  final bool Function()? isSaveInProgress;
+
   /// Opens Save as after the finalization guard has been released.
   final Future<void> Function(String transferId)? onReadyToSave;
 
@@ -276,7 +309,7 @@ class SessionFileBackgroundDownloadCoordinator {
     }
     try {
       listen();
-      await engine.ensureStarted();
+      await hub.initialize();
       if (_disposed) return;
       try {
         await transferController.ready;
@@ -285,7 +318,7 @@ class SessionFileBackgroundDownloadCoordinator {
         await transferController.ready;
       }
       if (_disposed) return;
-      await reconcile();
+      await _reconcileRetained();
     } on Object {
       // Engine/platform storage unavailable (e.g. under unit tests).
     }
@@ -352,7 +385,7 @@ class SessionFileBackgroundDownloadCoordinator {
     try {
       if (_disposed) throw StateError('Download coordinator was disposed.');
       listen();
-      await engine.ensureStarted();
+      await hub.initialize();
       if (_disposed) throw StateError('Download coordinator was disposed.');
       final url = _downloadUrl(
         client,
@@ -434,6 +467,13 @@ class SessionFileBackgroundDownloadCoordinator {
       return;
     }
     for (final record in [...records, ...hub.latest]) {
+      if (_disposed) return;
+      await _reconcileRecordSafely(record);
+    }
+  }
+
+  Future<void> _reconcileRetained() async {
+    for (final record in hub.latest) {
       if (_disposed) return;
       await _reconcileRecordSafely(record);
     }
@@ -535,7 +575,9 @@ class SessionFileBackgroundDownloadCoordinator {
       hub._saveOffers.remove(record.taskId);
       hub._finalizing.remove(record.taskId);
     }
-    if (readyToSave && canOfferSave(record.taskId) && onReadyToSave != null) {
+    if (readyToSave &&
+        canOfferSave(record.taskId, allowQueueBehindPicker: true) &&
+        onReadyToSave != null) {
       unawaited(onReadyToSave!(record.taskId));
     }
   }
@@ -543,14 +585,15 @@ class SessionFileBackgroundDownloadCoordinator {
   /// Automatic saves are valid only while this live coordinator still owns
   /// the active server and the application remains open. Also checked when a
   /// queued save reaches the front, so it cannot become a deferred picker.
-  bool canOfferSave(String taskId) {
+  bool canOfferSave(String taskId, {bool allowQueueBehindPicker = false}) {
     final transfer = transferController.transferById(taskId);
     return !_disposed &&
         identical(hub._activeCoordinator, this) &&
         transfer != null &&
         _owns(transfer) &&
         !_isTerminal(transfer) &&
-        (isForeground?.call() ?? false) &&
+        ((isForeground?.call() ?? false) ||
+            (allowQueueBehindPicker && (isSaveInProgress?.call() ?? false))) &&
         defaultTargetPlatform == TargetPlatform.android;
   }
 

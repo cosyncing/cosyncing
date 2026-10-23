@@ -435,7 +435,7 @@ void main() {
         ),
       );
 
-      expect(saved, destination);
+      expect(saved?.destination, destination);
       expect(await File(destination).readAsString(), 'exported');
       expect(saveProvider.lastSuggestion, 'source.bin');
     });
@@ -522,7 +522,7 @@ void main() {
           cancellationToken: committedToken,
         );
         expect(committedToken.isCanceled, isTrue);
-        expect(destination, startsWith('content:'));
+        expect(destination?.destination, startsWith('content:'));
         expect(save.requests, hasLength(2));
       },
     );

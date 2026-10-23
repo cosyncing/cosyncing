@@ -52,6 +52,31 @@ class SessionArtifactCachedFile {
   final String? contentHash;
 }
 
+/// A successful save, including the document provider's actual display name.
+@immutable
+class ArtifactExportResult {
+  /// Creates an export receipt.
+  const ArtifactExportResult({
+    required this.destination,
+    required this.displayName,
+  });
+
+  /// Filesystem destination or Android content URI.
+  final String destination;
+
+  /// Name returned by the destination, independent of the source/cache name.
+  final String displayName;
+}
+
+/// The app's cached bytes no longer exist. UI copy is resolved by the caller.
+class CachedCopyMissingException implements Exception {
+  /// Creates a missing-copy failure without localized message matching.
+  const CachedCopyMissingException();
+
+  @override
+  String toString() => 'The cached copy no longer exists.';
+}
+
 /// Cache/export lifecycle phases for artifact actions.
 enum SessionArtifactActionPhase {
   /// No action is running.
@@ -503,7 +528,7 @@ bool cachedArtifactFileExists(String path) =>
 // ignore: one_member_abstracts
 abstract interface class ArtifactExportTarget {
   /// Returns a destination path/URI, or null when the user cancels.
-  Future<String?> export({
+  Future<ArtifactExportResult?> export({
     required String sourcePath,
     required String suggestedName,
     String? mimeType,
@@ -520,7 +545,7 @@ final class FileSelectorArtifactExportTarget implements ArtifactExportTarget {
   final ArtifactSaveTargetProvider picker;
 
   @override
-  Future<String?> export({
+  Future<ArtifactExportResult?> export({
     required String sourcePath,
     required String suggestedName,
     String? mimeType,
@@ -533,35 +558,23 @@ final class FileSelectorArtifactExportTarget implements ArtifactExportTarget {
     cancellationToken?.throwIfCanceled();
     if (destination == null) return null;
     await File(sourcePath).copy(destination);
-    return destination;
+    return ArtifactExportResult(
+      destination: destination,
+      displayName: path_util.basename(destination),
+    );
   }
 }
 
-/// Optional display names returned by document providers that rename a file.
-// ignore: one_member_abstracts
-abstract interface class ArtifactExportNames {
-  /// Actual destination name, when the platform reported it.
-  String? exportedNameFor(String destination);
-}
-
 /// Android Storage Access Framework save picker and streamed native copy.
-final class AndroidArtifactExportTarget
-    implements ArtifactExportTarget, ArtifactExportNames {
+final class AndroidArtifactExportTarget implements ArtifactExportTarget {
   /// Creates the app-owned platform boundary.
   AndroidArtifactExportTarget();
-
-  String? _lastDestination;
-  String? _lastName;
-
-  @override
-  String? exportedNameFor(String destination) =>
-      destination == _lastDestination ? _lastName : null;
 
   static const _channel = MethodChannel('com.cosyncing.client/file_export');
   static int _requestSequence = 0;
 
   @override
-  Future<String?> export({
+  Future<ArtifactExportResult?> export({
     required String sourcePath,
     required String suggestedName,
     String? mimeType,
@@ -597,9 +610,12 @@ final class AndroidArtifactExportTarget
     if (result == null) cancellationToken?.throwIfCanceled();
     final uri = result?['uri'] as String?;
     final name = result?['displayName'] as String?;
-    _lastDestination = uri;
-    _lastName = (name?.isNotEmpty ?? false) ? name : null;
-    return uri;
+    return uri == null
+        ? null
+        : ArtifactExportResult(
+            destination: uri,
+            displayName: (name?.isNotEmpty ?? false) ? name! : suggestedName,
+          );
   }
 }
 
@@ -641,8 +657,9 @@ abstract interface class SessionArtifactFileService {
   });
 
   /// Exports cached artifact through destination picker/interaction.
-  Future<String?> exportCachedArtifact(
+  Future<ArtifactExportResult?> exportCachedArtifact(
     SessionArtifactCachedFile artifact, {
+    String? suggestedName,
     SessionArtifactCancellationToken? cancellationToken,
   });
 }
@@ -840,8 +857,9 @@ final class BrowserSessionArtifactFileService
   }
 
   @override
-  Future<String?> exportCachedArtifact(
+  Future<ArtifactExportResult?> exportCachedArtifact(
     SessionArtifactCachedFile artifact, {
+    String? suggestedName,
     SessionArtifactCancellationToken? cancellationToken,
   }) async {
     cancellationToken?.throwIfCanceled();
@@ -855,11 +873,14 @@ final class BrowserSessionArtifactFileService
     try {
       await XFile.fromData(
         entry,
-        name: artifact.fileName,
+        name: suggestedName ?? artifact.fileName,
         mimeType: artifact.contentType,
       ).saveTo('');
       cancellationToken?.throwIfCanceled();
-      return artifact.fileName;
+      return ArtifactExportResult(
+        destination: suggestedName ?? artifact.fileName,
+        displayName: suggestedName ?? artifact.fileName,
+      );
     } finally {
       release();
     }
@@ -1110,8 +1131,7 @@ final class DefaultSessionArtifactFileService
     implements
         SessionArtifactFileService,
         ResumableSessionArtifactFileService,
-        BackgroundSessionDownloadFinalizer,
-        ArtifactExportNames {
+        BackgroundSessionDownloadFinalizer {
   /// Creates a [DefaultSessionArtifactFileService].
   const DefaultSessionArtifactFileService({
     required ArtifactDownloadBackend? downloadBackend,
@@ -1134,14 +1154,6 @@ final class DefaultSessionArtifactFileService
     this._exportTarget,
     this._onCompleted,
   });
-
-  @override
-  String? exportedNameFor(String destination) {
-    return switch (_exportTarget) {
-      final ArtifactExportNames target => target.exportedNameFor(destination),
-      _ => null,
-    };
-  }
 
   final ArtifactExportTarget? _exportTarget;
   final ArtifactDownloadBackend? _downloadBackend;
@@ -1853,8 +1865,9 @@ final class DefaultSessionArtifactFileService
   }
 
   @override
-  Future<String?> exportCachedArtifact(
+  Future<ArtifactExportResult?> exportCachedArtifact(
     SessionArtifactCachedFile artifact, {
+    String? suggestedName,
     SessionArtifactCancellationToken? cancellationToken,
   }) async {
     cancellationToken?.throwIfCanceled();
@@ -1865,7 +1878,7 @@ final class DefaultSessionArtifactFileService
                   FileSelectorArtifactExportTarget(_saveTargetProvider))
               .export(
                 sourcePath: artifact.cachedFilePath,
-                suggestedName: artifact.fileName,
+                suggestedName: suggestedName ?? artifact.fileName,
                 mimeType: artifact.contentType,
                 cancellationToken: cancellationToken,
               );

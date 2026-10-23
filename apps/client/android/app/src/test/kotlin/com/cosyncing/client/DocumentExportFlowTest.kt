@@ -8,7 +8,6 @@ import java.util.ArrayDeque
 import java.io.FilterOutputStream
 import java.io.IOException
 import java.io.OutputStream
-import java.util.concurrent.CancellationException
 
 /** Executes the production native copy path with filesystem-backed documents. */
 class DocumentExportFlowTest {
@@ -36,39 +35,25 @@ class DocumentExportFlowTest {
         }
     }
 
-    @Test fun interruptedWritesCloseStreamsAndKeepTheSelectedDocument() {
+    @Test fun writeFailureClosesTheStreamWithoutDeletingTheSelectedDocument() {
         val source = files.newFile("large.md").apply { writeBytes(ByteArray(32000) { 42 }) }
-        for (reason in listOf("cancel", "write-failed")) {
-            val target = files.newFile("$reason.md").apply { writeText("existing content") }
-            var canceled = false
-            var closed = false
-            try {
-                copyExportDocument(
-                    source,
-                    openDestination = {
-                        object : FilterOutputStream(target.outputStream()) {
-                            override fun write(bytes: ByteArray, offset: Int, count: Int) {
-                                out.write(bytes, offset, count)
-                                if (reason == "write-failed") throw IOException("Provider write failed")
-                                canceled = true
-                            }
-                            override fun close() {
-                                closed = true
-                                super.close()
-                            }
-                        }
-                    },
-                    isCanceled = { canceled },
-                )
-                fail("The interrupted export must not succeed")
-            } catch (error: Exception) {
-                if (reason == "cancel") assertTrue(error is CancellationException)
-                else assertTrue(error is IOException)
-            }
-            assertTrue(closed)
-            assertTrue(target.exists())
-            assertTrue(target.length() in 1 until source.length())
-        }
+        val target = files.newFile("write-failed.md").apply { writeText("existing content") }
+        var closed = false
+        try {
+            copyExportDocument(source, openDestination = {
+                object : FilterOutputStream(target.outputStream()) {
+                    override fun write(bytes: ByteArray, offset: Int, count: Int) {
+                        out.write(bytes, offset, count)
+                        throw IOException("Provider write failed")
+                    }
+                    override fun close() { closed = true; super.close() }
+                }
+            }, isCanceled = { false })
+            fail("The failed write must not succeed")
+        } catch (_: IOException) { }
+        assertTrue(closed)
+        assertTrue(target.exists())
+        assertTrue(target.length() in 1 until source.length())
     }
 
     @Test fun successfulExportStreamsTheWholeFileAndClosesTheDestination() {
@@ -157,24 +142,66 @@ class DocumentExportFlowTest {
         flow.session.cancel(4)
     }
 
-    @Test fun cancelDuringCopyRetainsPendingUntilStreamsCloseAndReplyIsSent() {
-        val source = files.newFile("cancel-source.md").apply { writeBytes(ByteArray(32000) { 42 }) }
+    @Test fun cancelAndHostFinishAfterOpeningAllowTheWholeCopyToFinish() {
+        val source = files.newFile("commit-source.md").apply { writeBytes(ByteArray(32000) { 42 }) }
+        for (reason in listOf("cancel", "finish", "write-failed")) {
+            val flow = Flow()
+            val target = Target(files.newFile("$reason-target.md"))
+            target.afterWrite = {
+                assertNull(if (reason == "finish") flow.session.detach(finishing = true) else flow.session.cancel(1))
+                if (reason == "write-failed") throw IOException("Provider write failed")
+            }
+            val reply = Reply()
+            val code = flow.session.begin(1, source, source.name, reply)!!
+            flow.session.result(code, target)
+            flow.io.removeFirst().invoke()
+            assertTrue(target.closed)
+            assertTrue(flow.session.isPending)
+            assertTrue(reply.values.isEmpty())
+            assertEquals(0, flow.idle)
+            flow.main.removeFirst().invoke()
+            assertFalse(flow.session.isPending)
+            assertEquals(1, flow.idle)
+            if (reason == "write-failed") {
+                assertEquals(listOf("write_failed"), reply.errors)
+                assertTrue(reply.values.isEmpty())
+            } else {
+                assertEquals(target.uri, reply.values.single()!!["uri"])
+                assertArrayEquals(source.readBytes(), target.file.readBytes())
+            }
+        }
+    }
+
+    @Test fun cancellationBeforeTheWriteCommitPreservesOriginalContents() {
+        val source = files.newFile("uncommitted-source.md").apply { writeText("new bytes") }
+        val target = Target(files.newFile("uncommitted-target.md").apply { writeText("original bytes") })
         val flow = Flow()
-        val target = Target(files.newFile("cancel-target.md"))
-        target.afterWrite = { flow.session.cancel(1) }
         val reply = Reply()
         val code = flow.session.begin(1, source, source.name, reply)!!
         flow.session.result(code, target)
+        flow.session.cancel(1)
+        assertTrue(flow.session.isPending)
         flow.io.removeFirst().invoke()
-        assertTrue(target.closed)
+        flow.main.removeFirst().invoke()
+        assertEquals(0, target.opens)
+        assertEquals("original bytes", target.file.readText())
+        assertEquals(listOf<Map<String, String>?>(null), reply.values)
+    }
+
+    @Test fun dismissedPickerRepliesAfterTheHostsResumeTurn() {
+        val source = files.newFile("dismissed-source.md").apply { writeText("bytes") }
+        val flow = Flow()
+        val reply = Reply()
+        val code = flow.session.begin(1, source, source.name, reply)!!
+        flow.session.result(code, null)
         assertTrue(flow.session.isPending)
         assertTrue(reply.values.isEmpty())
-        assertEquals(0, flow.idle)
+        // Android performs onResume before the posted main-loop callback.
         flow.main.removeFirst().invoke()
         assertFalse(flow.session.isPending)
-        assertEquals(1, flow.idle)
         assertEquals(listOf<Map<String, String>?>(null), reply.values)
-        assertTrue(target.file.exists())
+        assertNotNull(flow.session.begin(2, source, source.name, Reply()))
+        flow.session.cancel(2)
     }
 
     private class Reply : DocumentExportReply {

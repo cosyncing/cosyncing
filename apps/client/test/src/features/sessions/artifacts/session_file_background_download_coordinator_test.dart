@@ -538,8 +538,9 @@ class _UnusedFileService implements SessionArtifactFileService {
   );
 
   @override
-  Future<String?> exportCachedArtifact(
+  Future<ArtifactExportResult?> exportCachedArtifact(
     SessionArtifactCachedFile artifact, {
+    String? suggestedName,
     SessionArtifactCancellationToken? cancellationToken,
   }) => throw UnimplementedError(
     'foreground path not used in background tests',

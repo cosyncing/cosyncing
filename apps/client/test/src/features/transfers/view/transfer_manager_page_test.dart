@@ -4036,8 +4036,9 @@ final class _NoopFileService implements SessionArtifactFileService {
   }
 
   @override
-  Future<String?> exportCachedArtifact(
+  Future<ArtifactExportResult?> exportCachedArtifact(
     SessionArtifactCachedFile artifact, {
+    String? suggestedName,
     SessionArtifactCancellationToken? cancellationToken,
   }) {
     throw UnimplementedError();

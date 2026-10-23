@@ -40,7 +40,7 @@ void main() {
       final version = await database
           .customSelect('PRAGMA user_version')
           .getSingle();
-      expect(version.read<int>('user_version'), 20);
+      expect(version.read<int>('user_version'), 21);
 
       // The pre-existing outbox row survives untouched.
       final outboxRows = await database
@@ -112,7 +112,7 @@ void main() {
     final version = await database
         .customSelect('PRAGMA user_version')
         .getSingle();
-    expect(version.read<int>('user_version'), 20);
+    expect(version.read<int>('user_version'), 21);
 
     // The pre-existing draft survives, and its clear target reads as absent —
     // a v13 row was never a pending clear.
@@ -152,7 +152,7 @@ void main() {
     final version = await database
         .customSelect('PRAGMA user_version')
         .getSingle();
-    expect(version.read<int>('user_version'), 20);
+    expect(version.read<int>('user_version'), 21);
 
     final row = await database.select(database.attentionEventRows).getSingle();
     expect(row.eventId, 'event-v15');
@@ -194,7 +194,7 @@ void main() {
       final version = await database
           .customSelect('PRAGMA user_version')
           .getSingle();
-      expect(version.read<int>('user_version'), 20);
+      expect(version.read<int>('user_version'), 21);
 
       // Profiles.
       final profile = await database
@@ -306,6 +306,65 @@ void main() {
       expect(indexNames, contains('idx_session_draft_profile_updated'));
       expect(indexNames, contains('idx_session_outbox_status_updated'));
       expect(indexNames, contains('idx_session_transcript_profile_updated'));
+    },
+  );
+
+  test(
+    'v20 preserves transfers and recovers their destination names once',
+    () async {
+      final file = File('${tempDir.path}/saved-names.sqlite');
+      final legacy = AppDatabase(NativeDatabase(file));
+      await legacy
+          .into(legacy.artifactTransferRows)
+          .insert(
+            ArtifactTransferRowsCompanion.insert(
+              id: 'saved-v20',
+              tool: 'codex',
+              sessionId: 's1',
+              actionKey: 'report',
+              fileName: 'report.md',
+              direction: 'download',
+              status: 'completed',
+              cachedFilePath: const Value('/cache/report-1.md'),
+              exportedPath: const Value('content://documents/renamed.md'),
+              message: const Value('Saved 改名した.md'),
+              createdAt: DateTime.utc(2026),
+              updatedAt: DateTime.utc(2026),
+            ),
+          );
+      // Reproduce the actual v20 transfer table without the nullable v21 field.
+      await legacy.customStatement(
+        'ALTER TABLE artifact_transfer_rows DROP COLUMN exported_file_name',
+      );
+      await legacy.customStatement('PRAGMA user_version = 20');
+      await legacy.close();
+
+      var database = AppDatabase(NativeDatabase(file));
+      final migrated = await database
+          .select(database.artifactTransferRows)
+          .getSingle();
+      expect(migrated.fileName, 'report.md');
+      expect(migrated.cachedFilePath, '/cache/report-1.md');
+      expect(migrated.exportedPath, 'content://documents/renamed.md');
+      expect(migrated.exportedFileName, '改名した.md');
+      await (database.update(
+        database.artifactTransferRows,
+      )..where((row) => row.id.equals('saved-v20'))).write(
+        const ArtifactTransferRowsCompanion(message: Value('別の状態メッセージ')),
+      );
+      await database.close();
+      database = AppDatabase(NativeDatabase(file));
+      addTearDown(database.close);
+      final reopened = await database
+          .select(database.artifactTransferRows)
+          .getSingle();
+      expect(reopened.exportedFileName, '改名した.md');
+      expect(reopened.message, '別の状態メッセージ');
+      expect(
+        (await database.customSelect('PRAGMA user_version').getSingle())
+            .read<int>('user_version'),
+        21,
+      );
     },
   );
 }

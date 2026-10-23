@@ -23,6 +23,9 @@ void main() {
         status: SessionArtifactTransferStatus.cached,
         updatedAt: DateTime(2026, 6, 30, 10),
         cachedFilePath: '/tmp/report.html',
+        exportedPath: 'content://documents/actual-name.md',
+        exportedFileName: '実際の名前.md',
+        message: 'Status text no longer contains the filename',
         bytesTransferred: 21,
         totalBytes: 42,
         byteLength: 42,
@@ -53,6 +56,8 @@ void main() {
       expect(transfers.first.error, 'Network failed');
       expect(transfers.first.attemptCount, 2);
       expect(transfers.last.cachedFilePath, '/tmp/report.html');
+      expect(transfers.last.savedFileName, '実際の名前.md');
+      expect(transfers.last.fileName, 'report.html');
       expect(transfers.last.bytesTransferred, 21);
       expect(transfers.last.totalBytes, 42);
       expect(transfers.last.byteLength, 42);
@@ -225,6 +230,7 @@ SessionArtifactTransfer _transfer({
   int attemptCount = 0,
   String? cachedFilePath,
   String? exportedPath,
+  String? exportedFileName,
   int? byteLength,
   int? bytesTransferred,
   int? totalBytes,
@@ -245,6 +251,7 @@ SessionArtifactTransfer _transfer({
     sourceUrl: '/artifact/artifact-1',
     cachedFilePath: cachedFilePath,
     exportedPath: exportedPath,
+    exportedFileName: exportedFileName,
     contentType: 'text/html',
     contentHash: contentHash ?? 'sha256:abc',
     uploadId: uploadId,

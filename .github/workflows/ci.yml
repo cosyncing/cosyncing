@@ -143,6 +143,10 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        if: matrix.target == 'android'
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
       - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
         if: matrix.target == 'android'
         with:
@@ -160,9 +164,11 @@ jobs:
       - if: matrix.target == 'linux'
         run: flutter build linux --debug
       - if: matrix.target == 'android'
-        run: |
-          flutter build apk --debug
-          ./android/gradlew -p android :app:testDebugUnitTest --console=plain
+        run: flutter build apk --debug
+      - run: bun run check android
+        name: Native Android tests through the shared runner
+        if: matrix.target == 'android'
+        working-directory: .
 
   apple:
     name: ${{ matrix.target }} build

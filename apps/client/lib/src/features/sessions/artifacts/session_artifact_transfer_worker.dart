@@ -153,6 +153,7 @@ final sessionArtifactTransferWorkerProvider =
           .watch(brokerClientProvider)
           .maybeWhen(data: (value) => value, orElse: () => null);
       final fileService = ref.watch(sessionArtifactFileServiceProvider);
+      final saveQueue = ref.read(_sessionArtifactSaveQueueProvider);
       final l10n = resolveAppLocalizations(
         ref.watch(localeControllerProvider).valueOrNull,
       );
@@ -209,6 +210,7 @@ final sessionArtifactTransferWorkerProvider =
           brokerProfileId: brokerProfileId,
           brokerClient: brokerClient,
           isForeground: isForeground,
+          isSaveInProgress: () => saveQueue.isActive,
           onFailureDetail: recordDetail,
           onReadyToSave: (id) async {
             await worker.saveCachedTransfer(
@@ -232,7 +234,7 @@ final sessionArtifactTransferWorkerProvider =
         transferController: transferController,
         sessionAttachmentPicker: ref.read(sessionAttachmentPickerProvider),
         backgroundCoordinator: backgroundCoordinator,
-        saveQueue: ref.read(_sessionArtifactSaveQueueProvider),
+        saveQueue: saveQueue,
         cachedCopyRemovedMessage: l10n.transferCachedCopyRemoved,
         saveBusyMessage: l10n.transferSaveBusy,
         saveDeferredMessage: l10n.transferSaveDeferred,
@@ -243,6 +245,10 @@ final sessionArtifactTransferWorkerProvider =
 /// App-lifetime serialization of Android document pickers and streamed copies.
 class SessionArtifactSaveQueue {
   Future<void> _tail = Future<void>.value();
+  int _active = 0;
+
+  /// A granted offer may queue behind our picker while it covers the app.
+  bool get isActive => _active > 0;
   final _tokens = <String, Set<SessionArtifactCancellationToken>>{};
 
   /// Cancels active and queued saves, including work begun by an older worker.
@@ -262,6 +268,7 @@ class SessionArtifactSaveQueue {
   }) async {
     (_tokens[transferId] ??= {}).add(cancellationToken);
     Completer<void>? done;
+    var started = false;
     try {
       if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
         final previous = _tail;
@@ -270,8 +277,11 @@ class SessionArtifactSaveQueue {
         await previous;
       }
       cancellationToken.throwIfCanceled();
+      started = true;
+      _active++;
       return await action();
     } finally {
+      if (started) _active--;
       _tokens[transferId]?.remove(cancellationToken);
       if (_tokens[transferId]?.isEmpty ?? false) _tokens.remove(transferId);
       done?.complete();
@@ -406,16 +416,33 @@ class SessionArtifactTransferWorker {
     );
   }
 
-  /// Saves an existing cached copy. A row-tap cancellation keeps its state;
-  /// cancellation of the automatic post-download picker marks it canceled.
+  /// Saves an existing settled copy. Automatic offers may never replay a save
+  /// after another action changes that row; explicit taps may save it again.
   Future<SessionArtifactTransferWorkerResult> saveCachedTransfer(
     String transferId, {
     bool cancelOnDismiss = false,
     bool Function()? shouldStart,
+  }) => _withCancellation(
+    transferId,
+    (token) => _saveCachedTransfer(
+      transferId,
+      token: token,
+      requested: transferController.transferById(transferId),
+      automatic: cancelOnDismiss,
+      shouldStart: shouldStart,
+    ),
+  );
+
+  Future<SessionArtifactTransferWorkerResult> _saveCachedTransfer(
+    String transferId, {
+    required SessionArtifactCancellationToken token,
+    required SessionArtifactTransfer? requested,
+    required bool automatic,
+    SessionArtifactCachedFile? downloaded,
+    bool Function()? shouldStart,
   }) async {
-    final token = _registerCancellationToken(transferId);
-    final requested = transferController.transferById(transferId);
     SessionArtifactTransfer? original;
+    SessionArtifactCachedFile? attemptedCache;
     bool canUpdateRow() =>
         !token.isCanceled &&
         original != null &&
@@ -424,30 +451,49 @@ class SessionArtifactTransferWorker {
       return await _saveQueue.run(
         () async {
           original = transferController.transferById(transferId);
-          // Earlier queued Saves can legitimately complete the same row.
-          // Capture a fresh baseline when this picker reaches the front.
           final current = original;
-          final validQueuedRow =
-              current != null &&
-              requested != null &&
-              current.attemptCount == requested.attemptCount &&
-              (identical(current, requested) ||
-                  current.status == SessionArtifactTransferStatus.completed);
-          if (!validQueuedRow ||
-              !canUpdateRow() ||
-              !(shouldStart?.call() ?? true)) {
+          if (token.isCanceled ||
+              requested == null ||
+              current == null ||
+              current.attemptCount != requested.attemptCount) {
+            return _canceledSaveResult(transferId);
+          }
+          if (automatic &&
+              current.status == SessionArtifactTransferStatus.completed &&
+              current.cachedFilePath == requested.cachedFilePath) {
+            // An explicit Save won the race during cache persistence/queueing.
+            // Return its result without another picker or write.
             return SessionArtifactTransferWorkerResult(
               transferId: transferId,
-              outcome: SessionArtifactTransferWorkerOutcome.canceled,
+              outcome: SessionArtifactTransferWorkerOutcome.completed,
+              cachedFile: downloaded,
+              exportedPath: current.exportedPath,
+              message: current.message,
             );
           }
-          var cached = cachedFileForTransfer(transferId);
-          final destination = await fileService.exportCachedArtifact(
+          final valid = automatic
+              ? identical(current, requested) &&
+                    current.status == SessionArtifactTransferStatus.cached
+              : identical(current, requested) ||
+                    (current.status ==
+                            SessionArtifactTransferStatus.completed &&
+                        current.cachedFilePath == requested.cachedFilePath);
+          if (!valid || !(shouldStart?.call() ?? true)) {
+            return _canceledSaveResult(transferId);
+          }
+          final cached = downloaded ?? cachedFileForTransfer(transferId);
+          attemptedCache = cached;
+          final receipt = await fileService.exportCachedArtifact(
             cached,
+            suggestedName:
+                !kIsWeb && defaultTargetPlatform == TargetPlatform.android
+                ? _originalExportName(current)
+                : null,
             cancellationToken: token,
           );
-          if (destination == null || !canUpdateRow()) {
-            if (destination == null && cancelOnDismiss && canUpdateRow()) {
+          if (!canUpdateRow()) return _canceledSaveResult(transferId);
+          if (receipt == null) {
+            if (automatic) {
               transferController.markCanceled(
                 transferId,
                 message: 'Save destination canceled',
@@ -459,12 +505,16 @@ class SessionArtifactTransferWorker {
               cachedFile: cached,
             );
           }
-          cached = _withExportedName(cached, destination);
-          final message = 'Saved ${cached.fileName}';
+          final savedName =
+              !kIsWeb && defaultTargetPlatform == TargetPlatform.android
+              ? receipt.displayName
+              : cached.fileName;
+          final message = 'Saved $savedName';
           transferController.markExported(
             transferId,
             cached,
-            exportedPath: destination,
+            exportedPath: receipt.destination,
+            exportedFileName: receipt.displayName,
             message: message,
           );
           onFailureDetail?.call(transferId, null);
@@ -472,7 +522,7 @@ class SessionArtifactTransferWorker {
             transferId: transferId,
             outcome: SessionArtifactTransferWorkerOutcome.completed,
             cachedFile: cached,
-            exportedPath: destination,
+            exportedPath: receipt.destination,
             message: message,
           );
         },
@@ -480,24 +530,44 @@ class SessionArtifactTransferWorker {
         cancellationToken: token,
       );
     } on SessionArtifactCanceledException {
-      return SessionArtifactTransferWorkerResult(
-        transferId: transferId,
-        outcome: SessionArtifactTransferWorkerOutcome.canceled,
-      );
+      return _canceledSaveResult(transferId);
     } on Object catch (error) {
-      if (!canUpdateRow()) return _canceledSaveResult(transferId);
+      final current = transferController.transferById(transferId);
+      final failedAfterCancellation =
+          automatic &&
+          error is PlatformException &&
+          error.code == 'write_failed' &&
+          current?.status == SessionArtifactTransferStatus.canceled &&
+          current?.attemptCount == requested?.attemptCount &&
+          current?.cachedFilePath == requested?.cachedFilePath;
+      if (!canUpdateRow() && !failedAfterCancellation) {
+        return _canceledSaveResult(transferId);
+      }
+      if (automatic && _saveUnavailable(error)) {
+        final cached = attemptedCache;
+        if (cached != null) {
+          transferController.markCached(
+            transferId,
+            cached,
+            message: saveDeferredMessage,
+          );
+        }
+        return SessionArtifactTransferWorkerResult(
+          transferId: transferId,
+          outcome: SessionArtifactTransferWorkerOutcome.cached,
+          message: saveDeferredMessage,
+        );
+      }
       final failure = describeFailure(
         error,
         lead: "Couldn't save this artifact.",
       );
-      final message =
-          error is StateError && error.message == cachedCopyRemovedMessage
+      final message = error is CachedCopyMissingException
           ? cachedCopyRemovedMessage
           : error is PlatformException && error.code == 'busy'
           ? saveBusyMessage
           : failure.message;
-      // A separate Save attempt preserves the prior state and diagnostic.
-      if (cancelOnDismiss && canUpdateRow() && !_saveUnavailable(error)) {
+      if (automatic) {
         transferController.markFailed(transferId, message);
         onFailureDetail?.call(transferId, failure.detail ?? message);
       }
@@ -507,8 +577,21 @@ class SessionArtifactTransferWorker {
         message: message,
         detail: failure.detail,
       );
+    }
+  }
+
+  Future<SessionArtifactTransferWorkerResult> _withCancellation(
+    String id,
+    Future<SessionArtifactTransferWorkerResult> Function(
+      SessionArtifactCancellationToken token,
+    )
+    action,
+  ) async {
+    final token = _registerCancellationToken(id);
+    try {
+      return await action(token);
     } finally {
-      _unregisterCancellationToken(transferId, token);
+      _unregisterCancellationToken(id, token);
     }
   }
 
@@ -518,45 +601,27 @@ class SessionArtifactTransferWorker {
         outcome: SessionArtifactTransferWorkerOutcome.canceled,
       );
 
-  SessionArtifactTransferWorkerResult _deferredSaveResult(String id) =>
-      SessionArtifactTransferWorkerResult(
-        transferId: id,
-        outcome: SessionArtifactTransferWorkerOutcome.cached,
-        message: saveDeferredMessage,
+  String _originalExportName(SessionArtifactTransfer transfer) =>
+      DefaultSessionArtifactFileService.resolveSafeFileName(
+        SessionArtifactDescriptor(name: transfer.fileName),
+        contentType: transfer.contentType,
       );
-
-  SessionArtifactCachedFile _withExportedName(
-    SessionArtifactCachedFile cached,
-    String destination,
-  ) {
-    final service = fileService;
-    final name = service is ArtifactExportNames
-        ? (service as ArtifactExportNames).exportedNameFor(destination)
-        : null;
-    if (name == null || name == cached.fileName) return cached;
-    return SessionArtifactCachedFile(
-      cachedFilePath: cached.cachedFilePath,
-      fileName: name,
-      byteLength: cached.byteLength,
-      contentType: cached.contentType,
-      artifactKey: cached.artifactKey,
-      contentHash: cached.contentHash,
-    );
-  }
 
   /// Validates the local copy for Save and Share without requiring a server.
   SessionArtifactCachedFile cachedFileForTransfer(String transferId) {
     final transfer = transferController.transferById(transferId);
     final path = transfer?.cachedFilePath;
-    if (transfer == null ||
-        !transfer.hasSettledCachedCopy ||
-        path == null ||
-        !cachedArtifactFileExists(path)) {
-      throw StateError(cachedCopyRemovedMessage);
+    if (transfer == null || path == null || !cachedArtifactFileExists(path)) {
+      throw const CachedCopyMissingException();
+    }
+    if (!transfer.hasSettledCachedCopy) {
+      throw StateError(
+        'Wait for this download to finish before saving or sharing.',
+      );
     }
     return SessionArtifactCachedFile(
       cachedFilePath: path,
-      fileName: transfer.fileName,
+      fileName: _originalExportName(transfer),
       contentType: transfer.contentType,
       byteLength: transfer.byteLength ?? 0,
       artifactKey: transfer.artifactKey,
@@ -1414,46 +1479,26 @@ class SessionArtifactTransferWorker {
     required String fileName,
     required bool hasActiveBrokerClient,
     String? mimeType,
-  }) => _withPinnedTransport(
-    transferId,
-    () async {
-      // Platform capability gate: on iOS/Android, hand the workspace-file
-      // download to the native engine so it survives backgrounding. Other
-      // platforms use the foreground resumable path below.
-      final coordinator = backgroundCoordinator;
-      if (coordinator != null && coordinator.isSupported) {
-        return coordinator.startDownload(
+  }) {
+    final coordinator = backgroundCoordinator;
+    if (coordinator != null && coordinator.isSupported) {
+      return _withPinnedTransport(
+        transferId,
+        () => coordinator.startDownload(
           transferId: transferId,
           sessionKey: sessionKey,
           path: path,
           fileName: fileName,
           mimeType: mimeType,
           hasActiveBrokerClient: hasActiveBrokerClient,
-        );
-      }
-
-      final cancellationToken = _registerCancellationToken(transferId);
-      final runAttempt = transferController
-          .transferById(transferId)
-          ?.attemptCount;
-      SessionArtifactTransfer? exportingTransfer;
-      transferController.markRunning(transferId, message: 'Downloading...');
-
-      if (!hasActiveBrokerClient) {
-        const message = 'Connect to the server before downloading this file.';
-        transferController.markFailed(transferId, message);
-        _unregisterCancellationToken(transferId, cancellationToken);
-        return SessionArtifactTransferWorkerResult(
-          transferId: transferId,
-          outcome: SessionArtifactTransferWorkerOutcome.failed,
-          message: message,
-        );
-      }
-
-      try {
-        cancellationToken.throwIfCanceled();
-        var cached = fileService is ResumableSessionArtifactFileService
-            ? await (fileService as ResumableSessionArtifactFileService)
+        ),
+      );
+    }
+    return _downloadAndSave(
+      transferId,
+      (token, progress) {
+        return fileService is ResumableSessionArtifactFileService
+            ? (fileService as ResumableSessionArtifactFileService)
                   .cacheSessionFileResumable(
                     tool: sessionKey.tool,
                     sessionId: sessionKey.sessionId,
@@ -1463,128 +1508,24 @@ class SessionArtifactTransferWorker {
                     checkpoint: _downloadCheckpoint(transferId),
                     onCheckpoint: (checkpoint) =>
                         _commitDownloadCheckpoint(transferId, checkpoint),
-                    cancellationToken: cancellationToken,
-                    onProgress: ({required bytesTransferred, totalBytes}) {
-                      cancellationToken.throwIfCanceled();
-                      transferController.markProgress(
-                        transferId,
-                        bytesTransferred: bytesTransferred,
-                        totalBytes: totalBytes,
-                      );
-                    },
+                    cancellationToken: token,
+                    onProgress: progress,
                   )
-            : await fileService.cacheSessionFile(
+            : fileService.cacheSessionFile(
                 tool: sessionKey.tool,
                 sessionId: sessionKey.sessionId,
                 path: path,
                 fileName: fileName,
                 mimeType: mimeType,
-                cancellationToken: cancellationToken,
-                onProgress: ({required bytesTransferred, totalBytes}) {
-                  cancellationToken.throwIfCanceled();
-                  transferController.markProgress(
-                    transferId,
-                    bytesTransferred: bytesTransferred,
-                    totalBytes: totalBytes,
-                  );
-                },
+                cancellationToken: token,
+                onProgress: progress,
               );
-        cancellationToken.throwIfCanceled();
-        await transferController.markCachedWithPersistence(
-          transferId,
-          cached,
-          message: 'Cached ${cached.fileName}',
-        );
-        exportingTransfer = transferController.transferById(transferId);
-        final destination = await _saveQueue.run(
-          () => fileService.exportCachedArtifact(
-            cached,
-            cancellationToken: cancellationToken,
-          ),
-          transferId: transferId,
-          cancellationToken: cancellationToken,
-        );
-        if (cancellationToken.isCanceled ||
-            !identical(
-              transferController.transferById(transferId),
-              exportingTransfer,
-            )) {
-          return SessionArtifactTransferWorkerResult(
-            transferId: transferId,
-            outcome: SessionArtifactTransferWorkerOutcome.canceled,
-            cachedFile: cached,
-          );
-        }
-        if (destination == null) {
-          const message = 'Save destination canceled';
-          transferController.markCanceled(transferId, message: message);
-          return SessionArtifactTransferWorkerResult(
-            transferId: transferId,
-            outcome: SessionArtifactTransferWorkerOutcome.canceled,
-            cachedFile: cached,
-            message: message,
-          );
-        }
-
-        cached = _withExportedName(cached, destination);
-        final message = 'Saved ${cached.fileName}';
-        transferController.markExported(
-          transferId,
-          cached,
-          exportedPath: destination,
-          message: message,
-        );
-        return SessionArtifactTransferWorkerResult(
-          transferId: transferId,
-          outcome: SessionArtifactTransferWorkerOutcome.completed,
-          cachedFile: cached,
-          exportedPath: destination,
-          message: message,
-        );
-      } on SessionArtifactCanceledException catch (e) {
-        final current = transferController.transferById(transferId);
-        if (current?.attemptCount == runAttempt &&
-            (current?.status == SessionArtifactTransferStatus.running ||
-                current?.status == SessionArtifactTransferStatus.cached) &&
-            (exportingTransfer == null ||
-                identical(current, exportingTransfer))) {
-          transferController.markCanceled(transferId, message: e.message);
-        }
-        return SessionArtifactTransferWorkerResult(
-          transferId: transferId,
-          outcome: SessionArtifactTransferWorkerOutcome.canceled,
-          message: e.message,
-        );
-      } on Object catch (e) {
-        if (cancellationToken.isCanceled ||
-            transferController.transferById(transferId)?.attemptCount !=
-                runAttempt ||
-            (exportingTransfer != null &&
-                !identical(
-                  transferController.transferById(transferId),
-                  exportingTransfer,
-                ))) {
-          return _canceledSaveResult(transferId);
-        }
-        final failure = describeFailure(
-          e,
-          lead: "Couldn't download this file.",
-        );
-        final message = failure.message;
-        if (_saveUnavailable(e)) return _deferredSaveResult(transferId);
-        transferController.markFailed(transferId, message);
-        return SessionArtifactTransferWorkerResult(
-          transferId: transferId,
-          outcome: SessionArtifactTransferWorkerOutcome.failed,
-          message: message,
-          detail: failure.detail,
-        );
-      } finally {
-        _unregisterCancellationToken(transferId, cancellationToken);
-      }
-    },
-    expectedAttempt: transferController.transferById(transferId)?.attemptCount,
-  );
+      },
+      validationError: hasActiveBrokerClient
+          ? null
+          : 'Connect to the server before downloading this file.',
+    );
+  }
 
   /// Requests active cancellation for a queued or running transfer.
   ///
@@ -1602,152 +1543,151 @@ class SessionArtifactTransferWorker {
     required SessionDetailKey sessionKey,
     required SessionArtifactDescriptor descriptor,
     required bool hasActiveBrokerClient,
-  }) => _withPinnedTransport(
+  }) => _downloadAndSave(
     transferId,
-    () async {
-      final cancellationToken = _registerCancellationToken(transferId);
-      final runAttempt = transferController
-          .transferById(transferId)
-          ?.attemptCount;
-      SessionArtifactTransfer? exportingTransfer;
+    (token, progress) {
+      return fileService.cacheArtifact(
+        descriptor,
+        checkpoint: _downloadCheckpoint(transferId),
+        onCheckpoint: (checkpoint) =>
+            _commitDownloadCheckpoint(transferId, checkpoint),
+        cancellationToken: token,
+        onProgress: progress,
+      );
+    },
+    validationError: !descriptor.isInlineDataUrl && !hasActiveBrokerClient
+        ? 'Connect to the server before downloading this artifact.'
+        : _artifactReferenceError(sessionKey, descriptor),
+  );
+
+  Future<SessionArtifactTransferWorkerResult> _downloadAndSave(
+    String transferId,
+    Future<SessionArtifactCachedFile> Function(
+      SessionArtifactCancellationToken token,
+      SessionArtifactProgressCallback progress,
+    )
+    cache, {
+    String? validationError,
+  }) => _withCancellation(transferId, (token) async {
+    final attempt = transferController.transferById(transferId)?.attemptCount;
+    final downloaded = await _withPinnedTransport(transferId, () async {
       transferController.markRunning(transferId, message: 'Downloading...');
-
-      if (!descriptor.isInlineDataUrl && !hasActiveBrokerClient) {
-        const message =
-            'Connect to the server before downloading this artifact.';
-        transferController.markFailed(transferId, message);
-        _unregisterCancellationToken(transferId, cancellationToken);
-        return SessionArtifactTransferWorkerResult(
-          transferId: transferId,
-          outcome: SessionArtifactTransferWorkerOutcome.failed,
-          message: message,
-        );
-      }
-
-      final referenceError = _artifactReferenceError(sessionKey, descriptor);
-      if (referenceError != null) {
-        transferController.markFailed(transferId, referenceError);
-        _unregisterCancellationToken(transferId, cancellationToken);
-        return SessionArtifactTransferWorkerResult(
-          transferId: transferId,
-          outcome: SessionArtifactTransferWorkerOutcome.failed,
-          message: referenceError,
-        );
-      }
-
       try {
-        cancellationToken.throwIfCanceled();
-        var cached = await fileService.cacheArtifact(
-          descriptor,
-          checkpoint: _downloadCheckpoint(transferId),
-          onCheckpoint: (checkpoint) =>
-              _commitDownloadCheckpoint(transferId, checkpoint),
-          cancellationToken: cancellationToken,
-          onProgress: ({required bytesTransferred, totalBytes}) {
-            cancellationToken.throwIfCanceled();
-            transferController.markProgress(
-              transferId,
-              bytesTransferred: bytesTransferred,
-              totalBytes: totalBytes,
-            );
-          },
-        );
-        cancellationToken.throwIfCanceled();
-        transferController.markCached(
-          transferId,
-          cached,
-          message: 'Cached ${cached.fileName}',
-        );
-        exportingTransfer = transferController.transferById(transferId);
-        final destination = await _saveQueue.run(
-          () => fileService.exportCachedArtifact(
-            cached,
-            cancellationToken: cancellationToken,
-          ),
-          transferId: transferId,
-          cancellationToken: cancellationToken,
-        );
-        if (cancellationToken.isCanceled ||
-            !identical(
-              transferController.transferById(transferId),
-              exportingTransfer,
-            )) {
+        token.throwIfCanceled();
+        if (validationError != null) {
+          transferController.markFailed(transferId, validationError);
           return SessionArtifactTransferWorkerResult(
             transferId: transferId,
-            outcome: SessionArtifactTransferWorkerOutcome.canceled,
-            cachedFile: cached,
+            outcome: SessionArtifactTransferWorkerOutcome.failed,
+            message: validationError,
           );
         }
-        if (destination == null) {
-          const message = 'Save destination canceled';
-          transferController.markCanceled(transferId, message: message);
-          return SessionArtifactTransferWorkerResult(
-            transferId: transferId,
-            outcome: SessionArtifactTransferWorkerOutcome.canceled,
-            cachedFile: cached,
-            message: message,
-          );
+        void ensureCurrentDownload() {
+          token.throwIfCanceled();
+          final current = transferController.transferById(transferId);
+          if (current?.attemptCount != attempt ||
+              current?.status != SessionArtifactTransferStatus.running) {
+            throw const SessionArtifactCanceledException('Download canceled');
+          }
         }
 
-        cached = _withExportedName(cached, destination);
-        final message = 'Saved ${cached.fileName}';
-        transferController.markExported(
-          transferId,
-          cached,
-          exportedPath: destination,
-          message: message,
-        );
+        final cached = await cache(token, ({
+          required bytesTransferred,
+          totalBytes,
+        }) {
+          ensureCurrentDownload();
+          transferController.markProgress(
+            transferId,
+            bytesTransferred: bytesTransferred,
+            totalBytes: totalBytes,
+          );
+        });
+        ensureCurrentDownload();
         return SessionArtifactTransferWorkerResult(
           transferId: transferId,
-          outcome: SessionArtifactTransferWorkerOutcome.completed,
+          outcome: SessionArtifactTransferWorkerOutcome.cached,
           cachedFile: cached,
-          exportedPath: destination,
-          message: message,
         );
-      } on SessionArtifactCanceledException catch (e) {
+      } on SessionArtifactCanceledException {
         final current = transferController.transferById(transferId);
-        if (current?.attemptCount == runAttempt &&
-            (current?.status == SessionArtifactTransferStatus.running ||
-                current?.status == SessionArtifactTransferStatus.cached) &&
-            (exportingTransfer == null ||
-                identical(current, exportingTransfer))) {
-          transferController.markCanceled(transferId, message: e.message);
+        if (current?.attemptCount == attempt &&
+            current?.status == SessionArtifactTransferStatus.running) {
+          transferController.markCanceled(transferId);
         }
-        return SessionArtifactTransferWorkerResult(
-          transferId: transferId,
-          outcome: SessionArtifactTransferWorkerOutcome.canceled,
-          message: e.message,
-        );
-      } on Object catch (e) {
-        if (cancellationToken.isCanceled ||
+        return _canceledSaveResult(transferId);
+      } on Object {
+        if (token.isCanceled ||
             transferController.transferById(transferId)?.attemptCount !=
-                runAttempt ||
-            (exportingTransfer != null &&
-                !identical(
-                  transferController.transferById(transferId),
-                  exportingTransfer,
-                ))) {
+                attempt) {
           return _canceledSaveResult(transferId);
         }
-        final failure = describeFailure(
-          e,
-          lead: "Couldn't save this artifact.",
-        );
-        final message = failure.message;
-        if (_saveUnavailable(e)) return _deferredSaveResult(transferId);
-        transferController.markFailed(transferId, message);
-        return SessionArtifactTransferWorkerResult(
-          transferId: transferId,
-          outcome: SessionArtifactTransferWorkerOutcome.failed,
-          message: message,
-          detail: failure.detail,
-        );
-      } finally {
-        _unregisterCancellationToken(transferId, cancellationToken);
+        rethrow;
       }
-    },
-    expectedAttempt: transferController.transferById(transferId)?.attemptCount,
-  );
+    }, expectedAttempt: attempt);
+    if (downloaded.outcome != SessionArtifactTransferWorkerOutcome.cached ||
+        token.isCanceled) {
+      return token.isCanceled ? _canceledSaveResult(transferId) : downloaded;
+    }
+    // Close network resources before cache persistence or any save interaction.
+    // A slow database commit can expose the manual Save button before this
+    // automatic offer reaches the queue.
+    final current = transferController.transferById(transferId);
+    if (current?.attemptCount != attempt ||
+        current?.status != SessionArtifactTransferStatus.running) {
+      return _canceledSaveResult(transferId);
+    }
+    SessionArtifactTransfer? snapshot;
+    try {
+      final cached = downloaded.cachedFile!;
+      final persisted = transferController.markCachedWithPersistence(
+        transferId,
+        cached,
+        message: 'Cached ${cached.fileName}',
+      );
+      snapshot = transferController.transferById(transferId);
+      await persisted;
+      if (token.isCanceled) return _canceledSaveResult(transferId);
+      return _saveCachedTransfer(
+        transferId,
+        token: token,
+        requested: snapshot,
+        automatic: true,
+        downloaded: cached,
+      );
+    } on Object catch (error) {
+      if (token.isCanceled ||
+          transferController.transferById(transferId)?.attemptCount !=
+              attempt) {
+        return _canceledSaveResult(transferId);
+      }
+      final latest = transferController.transferById(transferId);
+      if (!identical(latest, snapshot)) {
+        if (latest?.status == SessionArtifactTransferStatus.completed &&
+            latest?.cachedFilePath == snapshot?.cachedFilePath) {
+          return SessionArtifactTransferWorkerResult(
+            transferId: transferId,
+            outcome: SessionArtifactTransferWorkerOutcome.completed,
+            cachedFile: downloaded.cachedFile,
+            exportedPath: latest?.exportedPath,
+            message: latest?.message ?? '',
+          );
+        }
+        return _canceledSaveResult(transferId);
+      }
+      final failure = describeFailure(
+        error,
+        lead: "Couldn't record this download.",
+      );
+      transferController.markFailed(transferId, failure.message);
+      onFailureDetail?.call(transferId, failure.detail);
+      return SessionArtifactTransferWorkerResult(
+        transferId: transferId,
+        outcome: SessionArtifactTransferWorkerOutcome.failed,
+        message: failure.message,
+        detail: failure.detail,
+      );
+    }
+  });
 
   /// Caches an HTML artifact for preview.
   Future<SessionArtifactTransferWorkerResult> preparePreview({

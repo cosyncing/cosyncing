@@ -14,6 +14,7 @@ internal fun copyExportDocument(
     source: File,
     openDestination: () -> OutputStream,
     isCanceled: () -> Boolean,
+    beforeDestinationOpen: () -> Unit = {},
 ) {
     fun checkCanceled() {
         if (isCanceled()) throw CancellationException()
@@ -21,10 +22,12 @@ internal fun copyExportDocument(
     checkCanceled()
     FileInputStream(source).use { input ->
         checkCanceled()
+        // Commit cancellation before a provider can truncate the destination.
+        // Once committed, finish the copy even if the caller goes away.
+        beforeDestinationOpen()
         openDestination().use { output ->
             val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
             while (true) {
-                checkCanceled()
                 val count = input.read(buffer)
                 if (count < 0) break
                 output.write(buffer, 0, count)
@@ -59,6 +62,7 @@ internal class DocumentExportSession(
         val reply: DocumentExportReply,
         @Volatile var canceled: Boolean = false,
         var copying: Boolean = false,
+        var writing: Boolean = false,
     )
     private var pending: Request? = null
     private var nextCode = 48127
@@ -79,7 +83,10 @@ internal class DocumentExportSession(
     fun cancel(id: Int? = null): Int? {
         val request = pending ?: return null
         if (id != null && request.id != id) return null
-        request.canceled = true
+        synchronized(request) {
+            if (request.writing) return null
+            request.canceled = true
+        }
         if (request.copying) return null
         pending = null
         try { request.reply.success(null) } finally { onIdle() }
@@ -99,8 +106,16 @@ internal class DocumentExportSession(
         // A canceled/older picker has no authority over a later request or URI.
         if (request.code != code || request.copying) return
         if (document == null) {
-            pending = null
-            try { request.reply.success(null) } finally { onIdle() }
+            request.copying = true
+            // Android resumes the host after onActivityResult returns. Reply
+            // on the next main-loop turn so a queued save sees that lifecycle
+            // update, rather than silently dropping its offer while paused.
+            postMain {
+                if (pending === request) {
+                    pending = null
+                    try { request.reply.success(null) } finally { onIdle() }
+                }
+            }
             return
         }
         request.copying = true
@@ -108,7 +123,17 @@ internal class DocumentExportSession(
             var failure: Exception? = null
             var name: String? = null
             try {
-                copyExportDocument(request.source, document::open) { request.canceled }
+                copyExportDocument(
+                    request.source,
+                    document::open,
+                    isCanceled = { request.canceled },
+                    beforeDestinationOpen = {
+                        synchronized(request) {
+                            if (request.canceled) throw CancellationException()
+                            request.writing = true
+                        }
+                    },
+                )
                 if (!request.canceled) name = try { document.displayName() } catch (_: Exception) { null }
             } catch (error: Exception) {
                 failure = error

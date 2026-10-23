@@ -67,11 +67,10 @@ class _CachedTransferActionsState extends ConsumerState<CachedTransferActions> {
     final shareFile = ref.read(cachedFileShareProvider);
     try {
       if (share) {
-        final release = ManagedFileAccess.shared.acquire(
-          widget.transfer.cachedFilePath!,
-        );
+        final cached = worker.cachedFileForTransfer(widget.transfer.id);
+        final release = ManagedFileAccess.shared.acquire(cached.cachedFilePath);
         try {
-          await shareFile(worker.cachedFileForTransfer(widget.transfer.id));
+          await shareFile(cached);
         } finally {
           release();
         }
@@ -84,9 +83,7 @@ class _CachedTransferActionsState extends ConsumerState<CachedTransferActions> {
       }
     } on Object catch (error) {
       if (mounted) {
-        final message =
-            error is StateError &&
-                error.message == worker.cachedCopyRemovedMessage
+        final message = error is CachedCopyMissingException
             ? l10n.transferCachedCopyRemoved
             : l10n.transferShareFailed;
         _showError(message, describeFailure(error, lead: message).detail);

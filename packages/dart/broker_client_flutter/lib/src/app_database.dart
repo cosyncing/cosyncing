@@ -48,7 +48,7 @@ final class AppDatabase extends _$AppDatabase {
   static final Uri defaultWebDriftWorkerUri = Uri.parse('drift_worker.js');
 
   @override
-  int get schemaVersion => 20;
+  int get schemaVersion => 21;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -360,6 +360,29 @@ final class AppDatabase extends _$AppDatabase {
           }
         });
       }
+      if (from < 21) {
+        // Historical repair fixtures may omit this unrelated table, and very
+        // old upgrades can create it using today's column definitions.
+        final columns = await customSelect(
+          'PRAGMA table_info(artifact_transfer_rows)',
+        ).get();
+        if (columns.isNotEmpty &&
+            !columns.any(
+              (row) => row.read<String>('name') == 'exported_file_name',
+            )) {
+          await migrator.addColumn(
+            artifactTransferRows,
+            artifactTransferRows.exportedFileName,
+          );
+        }
+        if (columns.isNotEmpty) {
+          await customStatement(
+            "UPDATE artifact_transfer_rows SET exported_file_name = substr(message, 7) "
+            "WHERE exported_file_name IS NULL AND exported_path LIKE 'content:%' "
+            "AND substr(message, 1, 6) = 'Saved '",
+          );
+        }
+      }
     },
   );
 }
@@ -432,6 +455,9 @@ class ArtifactTransferRows extends Table {
 
   /// User-selected export path once saved.
   TextColumn get exportedPath => text().nullable()();
+
+  /// Display name returned by the save destination, separate from UI copy.
+  TextColumn get exportedFileName => text().nullable()();
 
   /// MIME type, when known.
   TextColumn get contentType => text().nullable()();

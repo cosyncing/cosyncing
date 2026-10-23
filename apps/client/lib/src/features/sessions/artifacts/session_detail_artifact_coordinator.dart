@@ -218,14 +218,11 @@ extension _SessionDetailArtifactActions on SessionDetailController {
 
     switch (result.outcome) {
       case SessionArtifactTransferWorkerOutcome.completed:
-        final cached = result.cachedFile;
         _setArtifactActionState(
           actionKey,
           SessionArtifactActionState(
             phase: SessionArtifactActionPhase.saved,
-            message: cached == null
-                ? result.message
-                : 'Saved ${cached.fileName} (${cached.byteLength} bytes)',
+            message: result.message,
           ),
         );
         state = state.copyWith(clearError: true);
@@ -241,8 +238,9 @@ extension _SessionDetailArtifactActions on SessionDetailController {
       case SessionArtifactTransferWorkerOutcome.cached:
         _setArtifactActionState(
           actionKey,
-          const SessionArtifactActionState(
+          SessionArtifactActionState(
             phase: SessionArtifactActionPhase.idle,
+            message: result.message,
           ),
         );
         state = state.copyWith(clearError: true);
