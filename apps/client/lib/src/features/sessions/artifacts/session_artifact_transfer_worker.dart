@@ -533,14 +533,16 @@ class SessionArtifactTransferWorker {
       return _canceledSaveResult(transferId);
     } on Object catch (error) {
       final current = transferController.transferById(transferId);
+      final nativeWriteFailed =
+          error is PlatformException && error.code == 'write_failed';
       final failedAfterCancellation =
           automatic &&
-          error is PlatformException &&
-          error.code == 'write_failed' &&
+          nativeWriteFailed &&
           current?.status == SessionArtifactTransferStatus.canceled &&
           current?.attemptCount == requested?.attemptCount &&
           current?.cachedFilePath == requested?.cachedFilePath;
-      if (!canUpdateRow() && !failedAfterCancellation) {
+      final unchanged = canUpdateRow();
+      if (!unchanged && !failedAfterCancellation && !nativeWriteFailed) {
         return _canceledSaveResult(transferId);
       }
       if (automatic && _saveUnavailable(error)) {
@@ -567,7 +569,10 @@ class SessionArtifactTransferWorker {
           : error is PlatformException && error.code == 'busy'
           ? saveBusyMessage
           : failure.message;
-      if (automatic) {
+      // A provider can fail after opening/truncating the chosen document.
+      // Surface that failure even if Cancel raced with its reply, while
+      // preserving a newer row or an explicit Save's existing status.
+      if (automatic && (unchanged || failedAfterCancellation)) {
         transferController.markFailed(transferId, message);
         onFailureDetail?.call(transferId, failure.detail ?? message);
       }

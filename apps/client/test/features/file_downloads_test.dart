@@ -49,6 +49,7 @@ void main() {
     'share stale dialog',
     'retry loses cached copy',
     'write fails after cancel',
+    'manual write fails after cancel',
   ]) {
     featureTest('Android workspace download: $scenario', (f) async {
       final directory = Directory.systemTemp.createTempSync(
@@ -198,6 +199,7 @@ void main() {
       if (scenario == 'paused' ||
           scenario == 'share' ||
           scenario == 'share stale dialog' ||
+          scenario == 'manual write fails after cancel' ||
           scenario == 'save queue' ||
           scenario == 'paused on other server') {
         app.tester.binding.handleAppLifecycleStateChanged(
@@ -370,6 +372,7 @@ void main() {
               'late answer' ||
               'share' ||
               'share stale dialog' ||
+              'manual write fails after cancel' ||
               'restart' => SessionArtifactTransferStatus.cached,
               'cancel' ||
               'queued picker dismissed' ||
@@ -392,6 +395,7 @@ void main() {
       if (scenario == 'paused' ||
           scenario == 'share' ||
           scenario == 'share stale dialog' ||
+          scenario == 'manual write fails after cancel' ||
           scenario == 'save queue') {
         expect(save.requests, isEmpty);
         for (final state in [
@@ -415,7 +419,8 @@ void main() {
           scenario == 'save queue' ||
           scenario == 'restart' ||
           scenario == 'share' ||
-          scenario == 'share stale dialog') {
+          scenario == 'share stale dialog' ||
+          scenario == 'manual write fails after cancel') {
         expect(save.requests, isEmpty);
         expect(find.textContaining('Downloaded'), findsWidgets);
         if (scenario == 'paused') {
@@ -432,6 +437,25 @@ void main() {
       }
       expect(find.byKey(Key('transfer-manager-save-$id')), findsOneWidget);
       expect(find.byKey(Key('transfer-manager-share-$id')), findsOneWidget);
+      if (scenario == 'manual write fails after cancel') {
+        save
+          ..error = PlatformException(
+            code: 'write_failed',
+            message: 'Manual write failed after opening',
+          )
+          ..beforeReply = () => app.container
+              .read(sessionArtifactTransferWorkerProvider)
+              .cancelTransfer(id);
+        await app.tapKey('transfer-manager-save-$id');
+        expect(_row(app, id)!.status, SessionArtifactTransferStatus.canceled);
+        expect(_row(app, id)!.exportedPath, isNull);
+        await app.tap(find.widgetWithText(SnackBarAction, 'Technical details'));
+        expect(
+          find.textContaining('Manual write failed after opening'),
+          findsOneWidget,
+        );
+        await app.tapKey('contextual-details-close');
+      }
       if (scenario == 'cancel row' ||
           scenario == 'cancel row after reconnect' ||
           scenario == 'late answer') {
