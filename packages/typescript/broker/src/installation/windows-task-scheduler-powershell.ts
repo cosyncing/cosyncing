@@ -51,6 +51,10 @@ export const WINDOWS_TASK_SCHEDULER_POWERSHELL_SOURCE = String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
+# A fresh profile has no module-analysis cache. Discovering an unqualified
+# ConvertFrom-Json can scan every installed module on each short-lived child.
+# Load the one module this script needs directly from this PowerShell install.
+Import-Module "$PSHOME\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1" -ErrorAction Stop
 
 $operation = [Environment]::GetEnvironmentVariable('COSYNCING_SCHEDULER_OPERATION', 'Process')
 $encodedInput = [Environment]::GetEnvironmentVariable('COSYNCING_SCHEDULER_INPUT', 'Process')

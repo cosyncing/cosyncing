@@ -30,6 +30,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   keeping a finished command alive until its timeout.
 - Windows desktop-running checks use native process and executable-path queries,
   preventing slow shell probes from skipping a safe desktop update.
+- Windows service commands load their PowerShell module directly, avoiding
+  repeated module-discovery delays during setup and updates on fresh profiles.
 
 ### Changed
 

@@ -96,45 +96,10 @@ describe.skipIf(process.platform !== 'win32')('native Windows signed broker upda
     writeFileSync(entry, `import { runCli } from ${JSON.stringify(join(ROOT, 'packages/typescript/broker/src/cli/cli.ts'))};
 import { runUpgrade } from ${JSON.stringify(join(ROOT, 'packages/typescript/broker/src/updates/release-upgrade.ts'))};
 import { createDurableServiceProvider } from ${JSON.stringify(join(ROOT, 'packages/typescript/broker/src/installation/service-manager.ts'))};
-import { inspectSetupEnvironment } from ${JSON.stringify(join(ROOT, 'packages/typescript/broker/src/installation/setup.ts'))};
-import { acquireInstallationLock } from ${JSON.stringify(join(ROOT, 'packages/typescript/broker/src/installation/installation-lock.ts'))};
-import { NativeWindowsTaskSchedulerExecutor } from ${JSON.stringify(join(ROOT, 'packages/typescript/broker/src/installation/windows-task-scheduler-powershell.ts'))};
 import { readFileSync, existsSync } from 'node:fs';
 const control = process.env.FIXTURE_UPDATE_CONTROL;
-const trace = (phase) => {
-  if (process.argv[2] === 'setup') console.error(JSON.stringify({ fixtureSetupPhase: phase, at: new Date().toISOString() }));
-};
-const execute = NativeWindowsTaskSchedulerExecutor.prototype.execute;
-NativeWindowsTaskSchedulerExecutor.prototype.execute = function(operation, input) {
-  trace('scheduler:' + operation);
-  try { return execute.call(this, operation, input); }
-  finally { trace('scheduler:' + operation + ':done'); }
-};
 process.exitCode = await runCli(process.argv.slice(2), {
-  setupOverrides: {
-    acquireLock: (options) => {
-      trace('lock');
-      const lock = acquireInstallationLock(options);
-      trace('lock:done');
-      return lock;
-    },
-    inspectEnvironment: async (options) => {
-      trace('inspect');
-      const context = { ...options.context };
-      for (const method of ['fetchJson', 'probeTcp', 'runReadOnly', 'listenerProcess']) {
-        if (typeof context[method] !== 'function') continue;
-        const original = context[method].bind(context);
-        context[method] = async (...args) => {
-          trace(method + ':' + args[0]);
-          try { return await original(...args); }
-          finally { trace(method + ':done'); }
-        };
-      }
-      const result = await inspectSetupEnvironment({ ...options, context });
-      trace('inspect:done');
-      return result;
-    },
-    durableServiceProviderFactory: (options) => {
+  setupOverrides: { durableServiceProviderFactory: (options) => {
     const provider = createDurableServiceProvider(options);
     const inspect = provider.inspect.bind(provider);
     provider.inspect = async () => {
@@ -208,7 +173,12 @@ process.exitCode = await runCli(process.argv.slice(2), {
     const runId = process.env.COSYNCING_WINDOWS_BROKER_RUN_ID ?? 'manual';
     if (!/^[A-Za-z0-9._-]{1,64}$/.test(runId)) throw new Error('invalid native update fixture run id');
     namespace = `\\Cosyncing-Test-${runId}-${randomUUID()}`;
-    env = isolatedBrokerFixtureEnvironment(root, { overrides: { FIXTURE_UPDATE_CONTROL: join(root, 'control.json') } });
+    env = isolatedBrokerFixtureEnvironment(root, { overrides: {
+      FIXTURE_UPDATE_CONTROL: join(root, 'control.json'),
+      // Every scheduler command must work with a cold module-discovery cache,
+      // as on a fresh installation or an isolated hosted runner profile.
+      PSModuleAnalysisCachePath: 'NUL',
+    } });
     home = env.COSYNCING_HOME!;
     runtime = process.env.COSYNCING_TEST_BASELINE_RUNTIME ?? process.execPath;
     env.PATH = [dirname(process.execPath), dirname(runtime), join(process.env.SystemRoot!, 'System32'),
