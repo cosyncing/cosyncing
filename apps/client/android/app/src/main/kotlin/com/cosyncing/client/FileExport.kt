@@ -27,7 +27,9 @@ internal object FileExport {
 
     val isPending: Boolean get() = session.isPending
 
-    fun attach(host: Activity) {
+    fun attach(host: Activity, restored: Boolean) {
+        // The new host did not launch the old picker, so there is none to close.
+        session.hostStarted(restored, launcherGone = activity.get() == null)
         activity = WeakReference(host)
         resumed = false
         finishRequested = false

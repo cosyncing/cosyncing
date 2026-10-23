@@ -26,9 +26,12 @@ class MainActivity : FlutterActivity() {
     private val backgroundConnectionChannel = "com.cosyncing.client/background_connection"
     private val updateDownloadChannel = "com.cosyncing.client/update_download"
     private var installReceiver: BroadcastReceiver? = null
+    private var restoredFromState = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         val reattaching = RetainedEngine.engine != null
+        // Read by configureFlutterEngine, which runs inside super.onCreate.
+        restoredFromState = savedInstanceState != null
         super.onCreate(savedInstanceState)
         if (reattaching && savedInstanceState == null) forwardNotificationTap()
     }
@@ -76,7 +79,7 @@ class MainActivity : FlutterActivity() {
         // Bound to the application, not this activity: the app can switch the
         // connection off while no activity is open.
         val application = applicationContext
-        FileExport.attach(this)
+        FileExport.attach(this, restored = restoredFromState)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.cosyncing.client/file_export")
             .setMethodCallHandler { call, result ->
                 when (call.method) {

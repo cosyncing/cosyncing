@@ -95,6 +95,16 @@ internal class DocumentExportSession(
 
     fun detach(finishing: Boolean): Int? = if (finishing) cancel() else null
 
+    /**
+     * Android returns a picker result only to a recreation of the activity that
+     * launched it. A fresh host started after that activity was destroyed (its
+     * task removed while the process lived on) can never receive it, so end
+     * the waiting request as dismissed instead of refusing every later save as
+     * busy. A committed write still finishes and replies with its receipt.
+     */
+    fun hostStarted(restored: Boolean, launcherGone: Boolean): Int? =
+        if (!restored && launcherGone) cancel() else null
+
     fun launchFailed(code: Int, message: String?) {
         val request = pending?.takeIf { it.code == code } ?: return
         pending = null

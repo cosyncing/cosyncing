@@ -586,10 +586,14 @@ final class AndroidArtifactExportTarget implements ArtifactExportTarget {
     if (cancellationToken != null) {
       unawaited(
         cancellationToken.whenCanceled.then((_) async {
-          if (active) {
+          if (!active) return;
+          try {
             await _channel.invokeMethod<void>('cancelSaveAs', {
               'requestId': requestId,
             });
+          } on Object {
+            // Best effort: without a native handler there is no picker left to
+            // close, and the pending save still settles through its own reply.
           }
         }),
       );

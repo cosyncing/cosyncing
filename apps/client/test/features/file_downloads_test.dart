@@ -179,7 +179,11 @@ void main() {
           scenario == 'late answer') {
         save
           ..pending = Completer<void>()
-          ..ignoreCancellation = scenario == 'late answer';
+          ..ignoreCancellation = scenario == 'late answer'
+          // An engine without the native handler must not fail the cancel.
+          ..cancelError = scenario == 'cancel row'
+              ? MissingPluginException()
+              : null;
       }
       if (scenario == 'row change') {
         save.onCommitted = () =>
@@ -460,13 +464,23 @@ void main() {
           scenario == 'cancel row after reconnect' ||
           scenario == 'late answer') {
         await app.tapKey('transfer-manager-cancel-$id');
+        // A write the provider committed before Cancel reached it is recorded;
+        // an uncommitted one stays canceled.
+        final committed = scenario == 'late answer';
         await _nativeUntil(
           app,
           () =>
               save.canceledRequests.length == 1 &&
-              _row(app, id)?.status == SessionArtifactTransferStatus.canceled,
+              save.returnedRequests.length == 1 &&
+              _row(app, id)?.status ==
+                  (committed
+                      ? SessionArtifactTransferStatus.completed
+                      : SessionArtifactTransferStatus.canceled),
         );
-        expect(_row(app, id)!.exportedPath, isNull);
+        expect(
+          _row(app, id)!.exportedPath,
+          committed ? 'content://documents/saved/report.md' : isNull,
+        );
         expect(File(cached).readAsStringSync(), 'download fixture');
         expect(save.requests, hasLength(1));
       }

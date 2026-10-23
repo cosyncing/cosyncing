@@ -142,6 +142,39 @@ class DocumentExportFlowTest {
         flow.session.cancel(4)
     }
 
+    @Test fun aFreshHostReleasesAPickerWhoseLauncherCannotAnswer() {
+        val source = files.newFile("orphaned-source.md").apply { writeText("saved bytes") }
+        val flow = Flow()
+        val waiting = Reply()
+        flow.session.begin(1, source, source.name, waiting)!!
+        // The launcher is destroyed without finishing; the picker stays open.
+        assertNull(flow.session.detach(finishing = false))
+        // A recreated launcher still receives the result, and a live launcher
+        // may still answer: neither releases the request.
+        assertNull(flow.session.hostStarted(restored = true, launcherGone = true))
+        assertNull(flow.session.hostStarted(restored = false, launcherGone = false))
+        assertTrue(flow.session.isPending)
+        assertTrue(waiting.values.isEmpty())
+        // A fresh host after the task was removed: no result can ever arrive.
+        assertNotNull(flow.session.hostStarted(restored = false, launcherGone = true))
+        assertFalse(flow.session.isPending)
+        assertEquals(listOf<Map<String, String>?>(null), waiting.values)
+        val next = Reply()
+        val nextCode = flow.session.begin(2, source, source.name, next)!!
+        assertTrue(next.errors.isEmpty())
+
+        // A committed write is never abandoned: it finishes and replies.
+        val target = Target(files.newFile("orphaned-target.md"))
+        target.afterWrite = {
+            assertNull(flow.session.hostStarted(restored = false, launcherGone = true))
+        }
+        flow.session.result(nextCode, target)
+        flow.io.removeFirst().invoke()
+        flow.main.removeFirst().invoke()
+        assertEquals(target.uri, next.values.single()!!["uri"])
+        assertEquals("saved bytes", target.file.readText())
+    }
+
     @Test fun cancelAndHostFinishAfterOpeningAllowTheWholeCopyToFinish() {
         val source = files.newFile("commit-source.md").apply { writeBytes(ByteArray(32000) { 42 }) }
         for (reason in listOf("cancel", "finish", "write-failed")) {

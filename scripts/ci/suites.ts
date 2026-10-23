@@ -268,6 +268,9 @@ export const suites: Suite[] = [
     platforms: ['linux', 'darwin', 'win32'],
     prepare: [
       { id: 'pub-get', run: ['flutter', 'pub', 'get'], cwd: 'apps/client' },
+      // gradlew and its wrapper jar are gitignored; Flutter writes them when it
+      // configures the Android project, so a fresh checkout has neither.
+      { id: 'gradle-wrapper', run: ['flutter', 'build', 'apk', '--config-only'], cwd: 'apps/client' },
     ],
     tasks: [{
       id: 'native-jvm',

@@ -491,7 +491,21 @@ class SessionArtifactTransferWorker {
                 : null,
             cancellationToken: token,
           );
-          if (!canUpdateRow()) return _canceledSaveResult(transferId);
+          if (receipt != null) {
+            // The document is written: record it even when a cancellation
+            // raced the reply. Any other row change keeps the newer state.
+            final row = transferController.transferById(transferId);
+            final canceledDuringWrite =
+                row != null &&
+                row.status == SessionArtifactTransferStatus.canceled &&
+                row.attemptCount == current.attemptCount &&
+                row.cachedFilePath == cached.cachedFilePath;
+            if (!identical(row, current) && !canceledDuringWrite) {
+              return _canceledSaveResult(transferId);
+            }
+          } else if (!canUpdateRow()) {
+            return _canceledSaveResult(transferId);
+          }
           if (receipt == null) {
             if (automatic) {
               transferController.markCanceled(

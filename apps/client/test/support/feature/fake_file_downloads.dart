@@ -121,6 +121,7 @@ class FakeAndroidSaveAs {
   void Function()? beforeReply;
   bool ignoreCancellation = false;
   bool deferCancellation = false;
+  Object? cancelError;
   int? _activeRequest;
   final canceledRequests = <int>[];
   final returnedRequests = <int>[];
@@ -139,6 +140,8 @@ class FakeAndroidSaveAs {
                   !(pending?.isCompleted ?? true)) {
                 pending!.complete();
               }
+              final failure = cancelError;
+              if (failure != null) throw failure;
               return null;
             }
             expect(call.method, 'saveAs');
