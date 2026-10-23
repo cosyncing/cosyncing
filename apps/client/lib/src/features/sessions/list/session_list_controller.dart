@@ -1020,11 +1020,11 @@ final sessionRosterResumeRefreshProvider = Provider<SessionRosterResumeRefresh>(
 
 /// The roster rows every roster surface renders (R0b).
 ///
-/// [SessionListController] owns roster *membership and metadata*; the
-/// [SessionStatusRegistry] owns Working/Idle. Both roster layouts read this one
-/// projection, so an open Session Detail's live transition reaches the roster
-/// in the same frame instead of waiting for a delta round trip — and both
-/// layouts necessarily agree with each other and with the open detail.
+/// [SessionListController] owns roster membership and metadata; the
+/// [SessionStatusRegistry] overlays live status and activity time. Both layouts
+/// read this projection, so an open Session Detail's live transition reaches
+/// the roster in the same frame instead of waiting for a delta round trip.
+/// Both layouts agree with each other and with the open detail.
 final rosterSessionsProvider = Provider<List<SessionInfo>>((ref) {
   final rows = ref.watch(sessionListControllerProvider).sessions;
   // Ordered AFTER the registry overlay, never before. The overlay changes a

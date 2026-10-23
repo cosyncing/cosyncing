@@ -226,9 +226,20 @@ describe('a live session when its serve misbehaves', () => {
   let cwd: string;
   let id: string;
   const requests: Array<{ method: string; path: string }> = [];
+  let reconnectGate: Promise<void> | undefined;
+  let releaseReconnect = () => {};
+  let waitingReconnects = 0;
 
   beforeAll(async () => {
     serve = new FakeOpenCodeServe({
+      intercept: async (request, next) => {
+        const gate = reconnectGate;
+        if (gate && new URL(request.url).pathname === '/global/event') {
+          waitingReconnects += 1;
+          await gate;
+        }
+        return next(request);
+      },
       record: (entry) => {
         if (entry.kind === 'request') requests.push({ method: entry.method, path: entry.path });
       },
@@ -257,6 +268,7 @@ describe('a live session when its serve misbehaves', () => {
     client = broker.client();
   });
   afterAll(async () => {
+    releaseReconnect();
     client?.closeAll();
     serve?.releaseAll();
     serve?.stop();
@@ -265,15 +277,24 @@ describe('a live session when its serve misbehaves', () => {
 
   const connects = () => requests.filter((request) => request.method === 'GET' && request.path === '/global/event').length;
 
-  test('a silent event stream is dropped and re-opened, and the session keeps working over the new one', async () => {
+  test('a silent event stream reconnects, replays a turn completed in the gap, and keeps working', async () => {
     const stream = await client.attach('opencode', id);
     await stream.waitForKind('session');
+    await stream.waitForKind('history');
     const first = connects();
-    // The serve says nothing: the adapter gives up on the stream after the idle limit and reconnects, more than once.
-    await eventually(() => connects() >= first + 2, { what: 'the adapter to re-open the silent event stream twice' });
-    // A live serve keeps its streams warm; once both of the broker's streams have heard it, a turn runs over them.
+    reconnectGate = new Promise<void>((resolve) => { releaseReconnect = resolve; });
+    try {
+      // Hold the replacement streams at the native HTTP boundary. The old
+      // streams have gone silent and the broker has tried to replace them.
+      await eventually(() => waitingReconnects >= 2, { what: 'replacement event streams waiting at the serve' });
+      serve.appendTurn(id, 'during the reconnect', 'answer completed while disconnected');
+    } finally {
+      reconnectGate = undefined;
+      releaseReconnect();
+    }
     serve.setHeartbeat(100);
-    await eventually(() => serve.openStreams().filter((open) => open.heartbeats >= 2).length >= 2, { what: 'the broker streams to hear heartbeats' });
+    await stream.waitForMessage((message) => message.type === 'model-output' && message.text === 'answer completed while disconnected');
+    expect(connects()).toBeGreaterThanOrEqual(first + 2);
     expect((await stream.sendAndAwait({ kind: 'prompt', text: 'after the reconnect' })).kind).toBe('ack');
     await stream.waitForMessage((message) => message.type === 'model-output' && message.text === 'answer: after the reconnect');
     expect(stream.frames.filter((frame) => frame.kind === 'session' && frame.info?.control?.drive?.state === 'unavailable')).toEqual([]);

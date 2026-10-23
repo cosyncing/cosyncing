@@ -17,6 +17,15 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   phones and larger screens. Window labels, remaining percentages and reset
   times stay visible; waves pause for reduced motion and inactive views.
 
+### Fixed
+
+- Finished sessions move into the correct recent order within their project
+  as soon as their completion reaches the app, without a roster refresh.
+- Claude Code skills launched in the background appear as subagents in the
+  session roster and activity bar, including their completion state.
+- OpenCode sessions recover answers completed while their event stream was
+  reconnecting, without requiring the session to be reopened.
+
 ## 0.8.1 — 2026-10-22
 
 ### Fixed

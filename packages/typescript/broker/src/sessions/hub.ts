@@ -1348,6 +1348,7 @@ export class ManagedConn {
   private accumulateLive(message: AgentMessage): void {
     const retainedBefore = this.requiresAttentionRetention;
     const statusBefore = this.conn.info.status;
+    const updatedAtBefore = this.conn.info.updatedAt;
     if (message.type === 'user-message' && message.key) {
       const before = this.pendingQueuedUserKeys.size;
       if (message.queued === true) this.pendingQueuedUserKeys.add(message.key);
@@ -1400,7 +1401,17 @@ export class ManagedConn {
       this.applyManagedStatus(this.status);
     } else if (message.type === 'run-summary') {
       if (message.status === 'running') this.activeRunKeys.add(message.key);
-      else this.activeRunKeys.delete(message.key);
+      else {
+        this.activeRunKeys.delete(message.key);
+        // A connection's SessionInfo starts at attach time. Advance recency from
+        // the native completion evidence so Idle enters the settled roster band
+        // at the time the run finished, without waiting for another disk sweep.
+        const completedAt = message.completedAt;
+        if (typeof completedAt === 'number' && Number.isFinite(completedAt) &&
+            completedAt >= 0 && (this.conn.info.updatedAt === undefined || completedAt > this.conn.info.updatedAt)) {
+          this.conn.info.updatedAt = completedAt;
+        }
+      }
     } else if (message.type === 'goal-state') {
       const key = message.key ?? 'current';
       if (message.status === 'active') this.activeGoalKeys.add(key);
@@ -1414,10 +1425,9 @@ export class ManagedConn {
         console.warn('[hub] attention retention observer failed:', error instanceof Error ? error.message : String(error));
       }
     }
-    // A run-state transition is control state, not transcript: push the updated SessionInfo so an
-    // attached client stops showing a stale `working` the moment the turn ends, instead of waiting
-    // for the roster poll. Existing `{ kind: 'session' }` frame — no contract change.
-    if (this.conn.info.status !== statusBefore) this.broadcastSession(this.conn.info);
+    // Publish both state transitions and completion recency. Idle may precede
+    // its final run-summary, so a timestamp-only change still needs a frame.
+    if (this.conn.info.status !== statusBefore || this.conn.info.updatedAt !== updatedAtBefore) this.broadcastSession(this.conn.info);
   }
 
   /** Whether a turn is running now. The newest durable text row can then still be growing in the

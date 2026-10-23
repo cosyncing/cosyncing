@@ -1780,7 +1780,7 @@ export class ClaudeAdapter implements AgentBackend {
     const modNow = (): ClaudeModStatus | undefined => (modReading ??= { status: this.modStatus(uuid) }).status;
     // The child's own meta sidecar, read once so the attached row carries the SAME title the roster shows.
     const subagentMeta = subagent
-      ? parseLineOrNull(readTextSafe(join(dirname(path), subagent.agent + '.meta.json')))
+      ? readStandaloneSubagentMeta(dirname(path), subagent.agent)
       : undefined;
     const info: SessionInfo = {
       id: sessionId,
@@ -1912,7 +1912,7 @@ export class ClaudeAdapter implements AgentBackend {
       const parentStatus = existsSync(subagent.parentTranscript)
         ? await claudeSessionStatus(subagent.parentTranscript, parentRaw, now)
         : parentRaw;
-      const meta = parseLineOrNull(readTextSafe(join(dirname(path), `${subagent.agent}.meta.json`))) ?? undefined;
+      const meta = subagentMeta;
       info.status = claudeSubagentStatus(
         parentStatus,
         claudeSubagentStatusEvidence(subagent.parentTranscript, { path, meta, mtimeMs: statSafe(path)?.mtimeMs }),
@@ -2287,7 +2287,7 @@ export class ClaudeObserveConnection implements SessionConnection {
     if (firstStoredAttach && this.activity) {
       this.activity.close();
       this.activity = new ClaudeActivityWatcher(claudeActivityDir(this.path), (message) => this.emit(message),
-        () => this.handlers.size > 0, store.setOf('activityResolved'), storedParentActivity(store));
+        () => this.handlers.size > 0, store.setOf('activityResolved'), storedParentActivity(store), () => this.refreshSubagentStatus());
       this.activity.start();
     }
     const activity = buildActivitySnapshot(claudeActivityDir(this.path), store.setOf('activityResolved'), Date.now(), storedParentActivity(store)).map((frame) => frame.msg);
@@ -2376,9 +2376,25 @@ export class ClaudeObserveConnection implements SessionConnection {
         () => this.handlers.size > 0,
         this.storedActivityState?.resolved ?? this.resolvedToolUseIds,
         this.storedActivityState?.parent ?? this.parentActivity(),
+        () => this.refreshSubagentStatus(),
       );
       this.activity.start();
     }
+  }
+
+  /** A background child's lifetime is also recorded outside its transcript. Keep an attached
+   * child current when its metadata finishes or its parent receives a notification/TaskStop. */
+  private refreshSubagentStatus(): void {
+    const child = claudeSubagentPathInfo(this.path);
+    if (!child) return;
+    const meta = readStandaloneSubagentMeta(dirname(this.path), child.agent);
+    const now = Date.now();
+    const evidence = claudeSubagentStatusEvidence(child.parentTranscript, { path: this.path, meta, mtimeMs: statSafe(this.path)?.mtimeMs });
+    if (evidence.background === undefined) return;
+    const status = claudeSubagentStatus(undefined, evidence, now);
+    if (status === this.info.status) return;
+    this.info.status = status;
+    this.emit({ type: 'status', status: status === 'working' ? 'running' : 'idle' });
   }
 
   /** Read bytes appended past `offset`, map each newly-completed line, emit. Inert until getHistory()
@@ -6594,9 +6610,23 @@ export interface ClaudeSubagentTranscript {
   path: string;
   /** Claude's own `agent-<id>` filename stem. */
   agent: string;
-  /** Parsed `agent-<id>.meta.json` sidecar (a parent-spawned Task subagent always writes one). */
+  /** Parsed metadata for an Agent/Task child or a forked Skill. */
   meta: Record<string, any>;
   mtimeMs: number;
+}
+
+/** Forked skills have their own attribution sidecar instead of a spawning `toolUseId` (2.1.307).
+ * Require that positive identity: workflow-owned and unrelated meta-less agents stay excluded. */
+function readStandaloneSubagentMeta(subDir: string, agent: string): Record<string, any> | undefined {
+  const meta = parseLineOrNull(readTextSafe(join(subDir, `${agent}.meta.json`)));
+  if (!meta) return undefined;
+  if (meta.toolUseId != null) return meta;
+  if (meta.agentType === 'workflow-subagent') return undefined;
+  const skill = parseLineOrNull(readTextSafe(join(subDir, `${agent}.forked-skill.json`)));
+  const marker = parseLineOrNull(readTextSafe(join(subDir, `${agent}.forked-skill.marker.json`)));
+  const skillName = skill?.skillName ?? (marker?.forkedSkill === true ? marker.skillName : undefined);
+  if (typeof skillName !== 'string' || !skillName.trim()) return undefined;
+  return { ...meta, description: meta.description ?? `/${skillName.trim()}` };
 }
 
 /**
@@ -6605,18 +6635,18 @@ export interface ClaudeSubagentTranscript {
  * Reuses the bounded walk that already serves the activity cards ({@link buildActivitySnapshot} step 1),
  * shape for shape: one `readdir` of `<uuid>/subagents` plus a small meta read + one stat per
  * `agent-*.meta.json`. It does NOT recurse: the nested `subagents/workflows/<run>/` agents are not roster
- * rows — they are summarized inside their workflow's activity card, and the very same `toolUseId == null`
- * rule that keeps workflow-owned metas out of the standalone subagent cards keeps them out of the roster.
+ * rows — they are summarized inside their workflow's activity card. Standalone Agent/Task children and
+ * explicitly attributed forked skills use the same metadata selection as the activity cards.
  * A missing `subagents/` dir costs one failed readdir, the same as the heartbeat walk.
  */
 export function claudeSubagentTranscripts(transcriptPath: string): ClaudeSubagentTranscript[] {
   const subDir = join(claudeActivityDir(transcriptPath), 'subagents');
   const out: ClaudeSubagentTranscript[] = [];
   for (const name of safeReaddir(subDir)) {
-    if (!name.endsWith('.meta.json')) continue;
-    const meta = parseLineOrNull(readTextSafe(join(subDir, name)));
-    if (!meta || meta.toolUseId == null) continue;
+    if (!name.startsWith('agent-') || !name.endsWith('.meta.json')) continue;
     const agent = name.replace(/\.meta\.json$/, '');
+    const meta = readStandaloneSubagentMeta(subDir, agent);
+    if (!meta) continue;
     const path = join(subDir, agent + '.jsonl');
     const st = statSafe(path);
     if (!st?.isFile()) continue;
@@ -7151,8 +7181,13 @@ export function collectParentActivity(
   // snake_case; the on-disk transcript uses camelCase. It is a property of the LINE, while the entry
   // is keyed by BLOCK, so reading it here (once) and binding it below is the only thing that keeps a
   // second, unrelated tool_result on the same line from inheriting another command's task id.
-  const lineBackgroundTaskId = (ln.tool_use_result ?? ln.toolUseResult)?.backgroundTaskId;
+  const structuredResult = ln.tool_use_result ?? ln.toolUseResult;
+  const lineBackgroundTaskId = structuredResult?.backgroundTaskId;
   const toolResultBlocks = Array.isArray(c) ? c.filter((b: any) => b?.type === 'tool_result').length : 0;
+  const forkedSkillAgentId = toolResultBlocks === 1 && structuredResult?.success === true &&
+    structuredResult?.status === 'forked' && structuredResult?.background === true &&
+    typeof structuredResult?.agentId === 'string' && /^[A-Za-z0-9_-]+$/.test(structuredResult.agentId)
+      ? structuredResult.agentId : undefined;
   if (Array.isArray(c)) {
     for (const b of c) {
       if (b?.type !== 'tool_result' || b.tool_use_id == null) continue;
@@ -7190,7 +7225,7 @@ export function collectParentActivity(
       // spawns omit `run_in_background` (backgrounding became the harness default), so
       // the input-flag check above never fires for them. The ack lands within the same
       // second as the spawn, so its own timestamp serves as the spawn time.
-      if (/^Async agent launched/.test(blockText)) {
+      if (/^Async agent launched/.test(blockText) || forkedSkillAgentId !== undefined) {
         background.add(tuid);
         if (backgroundSpawnMs && !backgroundSpawnMs.has(tuid)) {
           const ts = timestampToMs(ln.timestamp);
@@ -7199,11 +7234,11 @@ export function collectParentActivity(
       }
       // The spawn ack ("Async agent launched… agentId: X") maps agent id → spawning tool_use_id, so a
       // later TaskStop of X can resolve the pending-background entry keyed by that tool_use_id.
-      const ack = /agentId:\s*([A-Za-z0-9_-]+)/.exec(blockText);
+      const ackAgentId = forkedSkillAgentId ?? /agentId:\s*([A-Za-z0-9_-]+)/.exec(blockText)?.[1];
       // The FIRST block to name an agent id is that agent's own launch result: ids are minted at launch.
       // A later block that merely mentions it — a grep over transcripts, a SendMessage reply — must not
       // remap it, or the agent's real notification and TaskStop would no longer find their launch.
-      if (ack?.[1] && !extra?.agentIdToToolUseId?.has(ack[1])) extra?.agentIdToToolUseId?.set(ack[1], tuid);
+      if (ackAgentId && !extra?.agentIdToToolUseId?.has(ackAgentId)) extra?.agentIdToToolUseId?.set(ackAgentId, tuid);
       const stopped = extra?.stopRequests?.get(tuid);
       if (stopped && b.is_error !== true) {
         extra?.killedAgentIds?.add(stopped);
@@ -7342,30 +7377,33 @@ export function buildActivitySnapshot(activityDir: string, resolved: Set<string>
   const subDir = join(activityDir, 'subagents');
   const wfDir = join(activityDir, 'workflows');
 
-  // 1. Parent-spawned subagents. Skip the minimal {agentType:'workflow-subagent'} metas (no toolUseId) —
-  //    those belong to a workflow and are summarized inside its card.
+  // 1. Standalone Agent/Task children and forked skills; workflow-owned agents have their own card.
   for (const name of safeReaddir(subDir)) {
-    if (!name.endsWith('.meta.json')) continue;
-    const meta = parseLineOrNull(readTextSafe(join(subDir, name)));
-    if (!meta || meta.toolUseId == null) continue;
+    if (!name.startsWith('agent-') || !name.endsWith('.meta.json')) continue;
     const base = name.replace(/\.meta\.json$/, '');
+    const meta = readStandaloneSubagentMeta(subDir, base);
+    if (!meta) continue;
     const jsonlPath = join(subDir, base + '.jsonl');
     const stat = statSafe(jsonlPath);
+    if (!stat?.isFile()) continue;
     const s = subagentStats(jsonlPath);
-    const tuid = String(meta.toolUseId);
+    const agentId = base.replace(/^agent-/, '');
+    const tuid = meta.toolUseId != null ? String(meta.toolUseId) : parent.agentIdToToolUseId?.get(agentId);
     const staleWindow = s.tailState === 'in-tool-call' ? CLAUDE_SUBAGENT_OPEN_TURN_STALE_MS : WORKING_FRESH_MS;
     const stale = s.mtimeMs != null && now - s.mtimeMs > staleWindow;
-    const background = parent.backgroundToolUseIds.has(tuid);
+    const background = meta.requestShape === 'background' || (tuid !== undefined && parent.backgroundToolUseIds.has(tuid));
     // A TaskStop'd agent is done the moment the parent's stop tool_result lands — its own file just
     // stops mid-flight (no final text, no task-notification), which otherwise reads as "running" for
     // the whole stale window (issues-part1: "I stopped the agent and it still tick-tocks").
-    const killed = parent.killedAgentIds?.has(base.replace(/^agent-/, '')) === true;
-    const done = killed || s.tailState === 'final-text' || (background ? parent.notifiedToolUseIds.has(tuid) || stale : resolved.has(tuid) || stale);
+    const killed = parent.killedAgentIds?.has(agentId) === true;
+    const done = meta.finished === true || killed || s.tailState === 'final-text' || stale ||
+      (tuid !== undefined && (background ? parent.notifiedToolUseIds.has(tuid) : resolved.has(tuid)));
     const status: ActivityMsg['status'] = done ? 'done' : 'running';
     out.push({
       msg: {
         type: 'agent-activity',
-        key: 'agent:' + tuid,
+        // The filename keeps a skill's key stable even if its launch is outside the parent's tail.
+        key: 'agent:' + (meta.toolUseId ?? base),
         kind: 'subagent',
         title: typeof meta.description === 'string' && meta.description ? meta.description : String(meta.agentType ?? base),
         subtitle: typeof meta.agentType === 'string' ? meta.agentType : undefined,
@@ -7732,6 +7770,7 @@ export class ClaudeActivityWatcher {
     private readonly hasClients: () => boolean,
     private readonly resolved: Set<string>,
     private readonly parent: ParentActivityState = { backgroundToolUseIds: new Set(), notifiedToolUseIds: new Set() },
+    private readonly onSweep?: () => void,
   ) {}
 
   start(): void {
@@ -7781,6 +7820,7 @@ export class ClaudeActivityWatcher {
     const now = Date.now();
     let frames: ActivityFrame[];
     try {
+      this.onSweep?.();
       frames = buildActivitySnapshot(this.dir, this.resolved, now, this.parent);
     } catch {
       return; // transient FS / mid-write error → next sweep recovers
@@ -9170,6 +9210,7 @@ interface ClaudeBackgroundAgentLedger {
   readonly background: ReadonlySet<string>;
   /** The launches the parent has since heard back from: a task notification, or its own TaskStop. */
   readonly ended: ReadonlySet<string>;
+  readonly agentIdToToolUseId: ReadonlyMap<string, string>;
   /** Launch time of the newest background launch the parent has not heard back from. */
   readonly newestPendingSpawnMs?: number;
 }
@@ -9194,7 +9235,7 @@ function computeBackgroundAgentLedger(path: string): ClaudeBackgroundAgentLedger
     const ts = spawnMs.get(id);
     if (ts !== undefined && (newest === undefined || ts > newest)) newest = ts;
   }
-  return { background, ended: notified, ...(newest !== undefined ? { newestPendingSpawnMs: newest } : {}) };
+  return { background, ended: notified, agentIdToToolUseId: extra.agentIdToToolUseId, ...(newest !== undefined ? { newestPendingSpawnMs: newest } : {}) };
 }
 
 function pendingBackgroundSpawnMs(path: string, now: number): number | undefined {
@@ -9210,28 +9251,31 @@ function pendingBackgroundSpawnMs(path: string, now: number): number | undefined
  * Two sources say "background", and either is enough: the parent's own launch record (the flag, or the
  * async-launch ack), and the child meta's `requestShape`, which newer CLIs write. The meta matters when
  * the launch has scrolled out of the parent's 512 KiB tail under a long continuation; older CLIs omit it,
- * which is why the launch record is still read. Only the parent can say "ended", and it outranks both.
+ * which is why the launch record is still read. A parent notification/Stop or the child's explicit
+ * `finished` metadata ends that lifetime and outranks both background signals.
  */
 export function claudeSubagentBackground(
   parentTranscript: string,
-  meta: { toolUseId?: unknown; requestShape?: unknown } | undefined,
+  meta: { toolUseId?: unknown; requestShape?: unknown; finished?: unknown } | undefined,
+  agent?: string,
 ): 'pending' | 'ended' | undefined {
-  if (meta?.toolUseId == null) return undefined;
-  const id = String(meta.toolUseId);
+  if (meta?.finished === true) return 'ended';
+  if (!meta) return undefined;
   const ledger = claudeBackgroundAgentLedger(parentTranscript);
-  if (ledger.ended.has(id)) return 'ended';
-  return ledger.background.has(id) || meta.requestShape === 'background' ? 'pending' : undefined;
+  const id = meta.toolUseId != null ? String(meta.toolUseId) : ledger.agentIdToToolUseId.get(agent?.replace(/^agent-/, '') ?? '');
+  if (id !== undefined && ledger.ended.has(id)) return 'ended';
+  return (id !== undefined && ledger.background.has(id)) || meta.requestShape === 'background' ? 'pending' : undefined;
 }
 
 /** The evidence for one child row, gathered the same way by discovery and by a child attach. */
 export function claudeSubagentStatusEvidence(
   parentTranscript: string,
-  child: { path: string; meta?: { toolUseId?: unknown; requestShape?: unknown }; mtimeMs?: number },
+  child: { path: string; meta?: { toolUseId?: unknown; requestShape?: unknown; finished?: unknown }; mtimeMs?: number },
 ): ClaudeSubagentStatusEvidence {
   return {
     mtimeMs: child.mtimeMs,
     openTurn: () => claudeSubagentTailState(child.path),
-    background: claudeSubagentBackground(parentTranscript, child.meta),
+    background: claudeSubagentBackground(parentTranscript, child.meta, basename(child.path, '.jsonl')),
   };
 }
 

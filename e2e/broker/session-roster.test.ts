@@ -325,26 +325,27 @@ describe('the session roster', () => {
     expect([stale.body.complete, corrected.complete]).toEqual([true, true]);
   });
 
-  test('the delta feed wakes on the next change, carries metadata and never transcript, and skips identical rows', async () => {
+  test('bridge registration, live completion and project order reach the roster as transcript-free deltas', async () => {
+    const feed = new RosterFeed(client);
+    await feed.start();
     const open = async (name: string): Promise<string> => {
       const hello = await client.post('/pi/bridge/hello', {
         sessionFile: join(broker.paths.root, `live-${name}.jsonl`), cwd: broker.paths.home, title: `live ${name}`,
       });
       expect(hello.status).toBe(200);
-      // A bridged session enters the feed with its first frame.
+      // Admission must happen before any native frame: a quiet, newly bridged
+      // session is already discoverable by a client following this feed.
+      await feed.waitFor((delta) => delta.sessionId === hello.body.id);
       await client.post('/pi/bridge/events', {
         id: hello.body.id, events: [{ t: 'status', running: true }, { t: 'status', running: false }],
       });
       return String(hello.body.id);
     };
-    const feed = new RosterFeed(client);
-    await feed.start();
     const first = await open('first');
     const second = await open('second');
     // Settle the hellos' own deltas, so the next poll can only be answered by what follows.
     await feed.waitFor((delta) => delta.sessionId === second && delta.session?.status === 'idle');
-    await feed.start();
-
+    const completedAt = Math.max(...feed.seen.map((delta) => delta.session?.updatedAt ?? 0)) + 1_000;
     const woken = feed.request(feed.cursor, 20_000);
     const marker = `transcript-text-${crypto.randomUUID()}`;
     await client.post('/pi/bridge/events', {
@@ -355,6 +356,7 @@ describe('the session roster', () => {
         { t: 'delta', key: 'pi:answer:1', delta: marker },
         { t: 'final', key: 'pi:answer:1', text: `${marker} final` },
         { t: 'token', input: 120, output: 40, cost: 0.01 },
+        { t: 'run-summary', key: 'pi:run:1', turnId: 'turn-1', status: 'done', startedAt: completedAt - 3_000, completedAt },
         { t: 'status', running: false },
       ],
     });
@@ -364,7 +366,9 @@ describe('the session roster', () => {
     feed.cursor = batch.revision;
     feed.seen.push(...batch.deltas);
     await feed.waitFor((delta) => delta.sessionId === first && delta.session?.status === 'working');
-    await feed.waitFor((delta) => delta.sessionId === first && delta.session?.status === 'idle');
+    await feed.waitFor((delta) => delta.sessionId === first && delta.session?.status === 'idle' && delta.session?.updatedAt === completedAt);
+    const snapshot = await rosterSnapshot(client);
+    expect(snapshot.body.sessions.filter((row) => row.id === first || row.id === second).map((row) => row.id)).toEqual([first, second]);
 
     const wire = JSON.stringify(feed.seen);
     expect(wire).not.toContain(marker);
@@ -379,24 +383,6 @@ describe('the session roster', () => {
     expect(feed.of(first, from)).toEqual([]);
   });
 
-  // The Pi extension sends no frame until the user acts, so the hello itself
-  // must journal the row: otherwise the delta feed (and a client polling with
-  // its ETag, answered 304) learns of the session only at its first frame.
-  test('a freshly bridged session reaches the delta feed before its first frame', async () => {
-    const feed = new RosterFeed(client);
-    await feed.start();
-    const hello = await client.post('/pi/bridge/hello', {
-      sessionFile: join(broker.paths.root, 'live-hello-only.jsonl'), cwd: broker.paths.home, title: 'hello only',
-    });
-    const fresh = String(hello.body.id);
-    // A later change on another session: the feed has moved past the hello.
-    const sentinel = await client.post('/pi/bridge/hello', {
-      sessionFile: join(broker.paths.root, 'live-sentinel.jsonl'), cwd: broker.paths.home, title: 'sentinel',
-    });
-    await client.post('/pi/bridge/events', { id: sentinel.body.id, events: [{ t: 'status', running: true }] });
-    await feed.waitFor((delta) => delta.sessionId === sentinel.body.id);
-    expect(feed.of(fresh)).not.toEqual([]);
-  });
 
   test('a 7-day client sees an idle row age out and a deleted file leave, as transcript-free removals', async () => {
     const window = '7d';
