@@ -32,6 +32,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   preventing slow shell probes from skipping a safe desktop update.
 - Windows service commands load their PowerShell module directly, avoiding
   repeated module-discovery delays during setup and updates on fresh profiles.
+- Windows process and listener probes load their system modules directly so
+  cold module discovery does not consume the probe budget and delay session discovery.
 - Windows scheduled tasks explicitly retain user ownership when setup runs
   elevated, and security checks recognize Windows' equivalent account SID aliases.
 
