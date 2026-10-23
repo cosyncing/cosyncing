@@ -112,6 +112,13 @@ final class _ServerRoutes {
   final probes = <String, BrokerRouteProbe>{};
   final fasterRounds = <String, int>{};
   Completer<BrokerRouteTransport>? firstReady;
+
+  /// A generation callers already hold was retired, and
+  /// [BrokerRouteCoordinator.onSwitch] has not told them yet. A
+  /// [BrokerRouteCoordinator.resolve] caller waiting on [firstReady] must not
+  /// suppress that announcement, or the open sessions and long-lived clients
+  /// built on the retired generation are never rebuilt.
+  bool retiredUnannounced = false;
   Future<void>? switching;
   Future<void>? round;
   bool roundIncludesAlternates = false;
@@ -645,11 +652,17 @@ final class BrokerRouteCoordinator extends ChangeNotifier {
     // trusted address after a network generation change, while leaving ordinary
     // socket retries to the existing session reconnect policy.
     if (!explicit && state.server.principalId == null) {
-      if (state.active != null && !state.active!.retired) return;
+      // A caller may already have rebound the address while this server was
+      // in the background; the clients on the retired one still need telling.
+      if (state.active != null &&
+          !state.active!.retired &&
+          !state.retiredUnannounced) {
+        return;
+      }
       try {
         await resolve(state.profile);
         if (_disposed || epoch != state.epoch) return;
-        await onSwitch(state.profile);
+        await _announce(state);
       } on Object catch (error) {
         if (_disposed || epoch != state.epoch) return;
         state.failures['legacy'] = error;
@@ -822,8 +835,11 @@ final class BrokerRouteCoordinator extends ChangeNotifier {
         state.server = updated.copyWith(generation: server.generation + 1);
         // The initial caller is already waiting for this context. Invalidating
         // its provider here would dispose that construction before completion.
-        if (old != null || state.firstReady == null) {
-          await onSwitch(state.profile);
+        // A replacement for a retired generation is announced regardless.
+        if (old != null ||
+            state.firstReady == null ||
+            state.retiredUnannounced) {
+          await _announce(state);
           requireCurrent();
         }
       } on Object {
@@ -880,7 +896,9 @@ final class BrokerRouteCoordinator extends ChangeNotifier {
     final old = state.active;
     if (old != null) {
       old.retire();
-      state.active = null;
+      state
+        ..active = null
+        ..retiredUnannounced = true;
       state.observations.remove(old.context.routeId);
     }
     // A recently authenticated alternate already passed its WS check. It can
@@ -965,6 +983,9 @@ final class BrokerRouteCoordinator extends ChangeNotifier {
     _proxyFailures.clear();
     for (final state in _servers.values) {
       final relevant = _relevant(state);
+      // Configuration and credential edits rebuild their own clients; nothing
+      // else tells the clients on a generation a network change retired.
+      if (state.active != null) state.retiredUnannounced = true;
       _retire(state);
       if (_foreground && relevant) {
         unawaited(_round(state));
@@ -1042,7 +1063,7 @@ final class BrokerRouteCoordinator extends ChangeNotifier {
       ..server = server
       ..profile = profile
       ..revoked = false;
-    await onSwitch(profile);
+    await _announce(state);
     _changed();
   }
 
@@ -1069,6 +1090,12 @@ final class BrokerRouteCoordinator extends ChangeNotifier {
       }
     }
     _changed();
+  }
+
+  /// Tells the clients built on this server's earlier generations to rebuild.
+  Future<void> _announce(_ServerRoutes state) {
+    state.retiredUnannounced = false;
+    return onSwitch(state.profile);
   }
 
   void _retire(_ServerRoutes state) {

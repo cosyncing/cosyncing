@@ -32,6 +32,14 @@ const Duration defaultAttentionFeedUnauthorizedRetryDelay = Duration(
   minutes: 30,
 );
 
+/// Longest wait for a replacement client before asking for one again. A
+/// verified server reconnects only through a readiness round, which does not
+/// run in the background; asking again after the app returns starts one.
+const Duration defaultAttentionFeedReconnectWait = Duration(seconds: 15);
+
+/// Builds a client on the profile's current connection generation.
+typedef AttentionFeedClientFactory = Future<BrokerClient> Function();
+
 /// Returns whether the current UI state is the foreground target for a run
 /// failure.
 typedef AttentionFeedRunFailureFocusMatcher =
@@ -78,7 +86,7 @@ typedef AttentionFeedDelay = Future<void> Function(Duration duration);
 class AttentionFeedWorker implements AttentionFeedRunner {
   /// Creates a one-profile attention feed worker.
   AttentionFeedWorker({
-    required this.brokerClient,
+    required this._brokerClient,
     required this.repository,
     required this.brokerProfileId,
     required this.clientId,
@@ -91,6 +99,8 @@ class AttentionFeedWorker implements AttentionFeedRunner {
     this.initialRetryDelay = defaultAttentionFeedInitialRetryDelay,
     this.maxRetryDelay = defaultAttentionFeedMaxRetryDelay,
     this.unauthorizedRetryDelay = defaultAttentionFeedUnauthorizedRetryDelay,
+    this.reconnectWait = defaultAttentionFeedReconnectWait,
+    this.reconnectClient,
     this.onUnauthorized,
     this.now,
     AttentionFeedDelay? sleep,
@@ -138,8 +148,18 @@ class AttentionFeedWorker implements AttentionFeedRunner {
   /// Observes OS presentation attempts.
   final AttentionNotificationDeliveryObserver? onDelivery;
 
-  /// Primary broker API client for attention polling and ack/dismiss.
-  final BrokerClient brokerClient;
+  /// Broker API client for attention polling and ack/dismiss. Replaced
+  /// through [reconnectClient] when its connection generation is retired.
+  BrokerClient get brokerClient => _brokerClient;
+  BrokerClient _brokerClient;
+
+  /// Builds a client on the current connection generation after the one
+  /// [brokerClient] was bound to is retired (a network change, route switch
+  /// or transport failure). Without it, a retired client ends the loop.
+  final AttentionFeedClientFactory? reconnectClient;
+
+  /// Longest wait for [reconnectClient] before asking again.
+  final Duration reconnectWait;
 
   /// Durable repository for feed persistence and presentation state.
   final AttentionRepository repository;
@@ -271,6 +291,7 @@ class AttentionFeedWorker implements AttentionFeedRunner {
       _stopSignal.complete();
     }
     _cancelSleeps();
+    _abandonReconnect?.call();
     await _loopFuture;
   }
 
@@ -399,8 +420,16 @@ class AttentionFeedWorker implements AttentionFeedRunner {
           retryDelay = _nextRetryDelay(retryDelay);
         }
       } on DioException catch (error) {
-        if (cancelToken.isCancelled || error.type == DioExceptionType.cancel) {
-          return;
+        if (_isStopped(cancelToken)) return;
+        if (error.type == DioExceptionType.cancel) {
+          // Not this worker's stop: the connection generation its client was
+          // bound to has been retired, and that client now refuses every
+          // request. Polling resumes on a replacement; without one the feed
+          // would stop for good while Settings still reports it connected.
+          // The backoff below still applies, so a replacement that is refused
+          // the same way cannot spin.
+          if (reconnectClient == null) return;
+          await _reconnect(cancelToken);
         }
         await _sleepWithBoundedBackoff(retryDelay);
         retryDelay = _nextRetryDelay(retryDelay);
@@ -409,6 +438,51 @@ class AttentionFeedWorker implements AttentionFeedRunner {
         retryDelay = _nextRetryDelay(retryDelay);
       }
     }
+  }
+
+  /// Adopts a client on the current connection generation, unless none is
+  /// built within [reconnectWait] or the worker stops first.
+  Future<void> _reconnect(CancelToken cancelToken) async {
+    final built = Completer<BrokerClient?>();
+    void giveUp() {
+      if (!built.isCompleted) built.complete(null);
+    }
+
+    unawaited(
+      Future.sync(reconnectClient!).then(
+        (client) {
+          // A replacement that arrives after the wait or a stop is not adopted.
+          if (built.isCompleted) {
+            client.close();
+          } else {
+            built.complete(client);
+          }
+        },
+        onError: (Object error, StackTrace stackTrace) {
+          if (!built.isCompleted) built.completeError(error, stackTrace);
+        },
+      ),
+    );
+    final wait = Timer(reconnectWait, giveUp);
+    _abandonReconnect = giveUp;
+    final BrokerClient? client;
+    try {
+      client = await built.future;
+    } on Object {
+      // No ready address yet, or the credential is gone; ask again later.
+      return;
+    } finally {
+      wait.cancel();
+      _abandonReconnect = null;
+    }
+    if (client == null) return;
+    if (_isStopped(cancelToken)) {
+      client.close();
+      return;
+    }
+    final retired = _brokerClient;
+    _brokerClient = client;
+    retired.close();
   }
 
   Future<void> _sleepWithBoundedBackoff(
@@ -463,6 +537,7 @@ class AttentionFeedWorker implements AttentionFeedRunner {
   }
 
   AttentionFeedSupportState _supportState = AttentionFeedSupportState.unknown;
+  void Function()? _abandonReconnect;
   Future<void>? _loopFuture;
   CancelToken? _cancelToken;
   Completer<void> _stopSignal = Completer<void>();
