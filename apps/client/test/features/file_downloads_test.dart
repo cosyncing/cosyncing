@@ -192,7 +192,10 @@ void main() {
             app,
             () =>
                 _row(app, secondId!)?.status ==
-                SessionArtifactTransferStatus.completed,
+                    SessionArtifactTransferStatus.completed &&
+                _row(app, id)?.status ==
+                    SessionArtifactTransferStatus.completed &&
+                save.requests.length == 2,
           );
           expect(save.requests, hasLength(2));
         } else {
