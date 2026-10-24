@@ -63,6 +63,10 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   session roster and activity bar, including their completion state.
 - OpenCode sessions recover answers completed while their event stream was
   reconnecting, without requiring the session to be reopened.
+- Upgrading the installed OpenCode command to OpenCode 2 no longer restarts
+  a broker-owned V1 server with the new binary or triggers its data import.
+  Running turns finish before the V1 server retires; pre-migration V1 history
+  remains readable, with private Resume and export disabled for OpenCode 2.
 
 ## 0.8.1 — 2026-10-22
 

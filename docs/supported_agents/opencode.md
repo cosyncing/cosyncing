@@ -13,9 +13,8 @@ The stable npm package is also supported:
 npm install --global opencode-ai
 ```
 
-cosyncing currently integrates with the stable OpenCode 1 `opencode serve`
-surface. The OpenCode 2 beta installs as `opencode2` and is not a replacement
-for the required `opencode` command.
+cosyncing supports OpenCode 1. OpenCode 2 replaces the `opencode` command
+and is detected but not yet supported.
 
 Setup may route terminal `opencode` through cosyncing's managed shared server.
 An independently started server remains unowned and is not stopped or replaced.
