@@ -264,6 +264,10 @@ export function createOpencodeRuntimeUpdateProvider(deps: OpencodeRuntimeDepende
         detail: busy ? 'A managed OpenCode session is working or needs input.' : 'Managed OpenCode serve is idle.',
       });
     },
-    restart: deps.restart,
+    async restart() {
+      const versions = await deps.readVersions();
+      if (!versions.managed) throw new Error(versions.detail || 'OpenCode serve is not managed by this broker.');
+      await deps.restart();
+    },
   };
 }

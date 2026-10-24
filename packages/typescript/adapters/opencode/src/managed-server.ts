@@ -34,14 +34,15 @@ import {
   PRODUCT_IDENTITY,
   HostProcessProvider,
   bunSpawnResolvedInvocation,
-  bunSpawnSyncResolvedInvocation,
   resolveInvocation,
   terminateHostProcessTree,
 } from '@cosyncing/adapter-api';
 import { readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { opencodeChildEnv, resolveLocalOpencodeBaseUrl } from './implementation.ts';
+import { resolveLocalOpencodeBaseUrl } from './implementation.ts';
+import { normalizeOpencodeVersion, opencodeAllowsV1, opencodeChildEnv, opencodeGeneration } from './generation.ts';
+export { normalizeOpencodeVersion } from './generation.ts';
 
 const LOG_PREFIX = `[${PRODUCT_IDENTITY.productName}]`;
 
@@ -111,10 +112,6 @@ function clearStartFailure(): void {
   try { managedState.clearStartFailure(); } catch {
     /* diagnostics are best-effort and must never break the managed runtime */
   }
-}
-
-export function normalizeOpencodeVersion(raw: string): string {
-  return raw.match(/\b\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\b/)?.[0] ?? raw.trim().split(/\s+/)[0] ?? '';
 }
 
 function isLocalHost(host: string): boolean {
@@ -421,6 +418,7 @@ async function ensureManagedOpencodeServeInternal(shouldContinue: () => boolean)
         console.log(`${LOG_PREFIX} could not reclaim the opencode serve at ${base}; leaving it in place — config-driven model reloads won't apply until the broker owns a serve here (D20)`);
         return;
       }
+      clearOwnershipRecord();
       if (!shouldContinue()) return;
       // fall through to the broker-owned spawn below (which rewrites the ownership record)
     } else {
@@ -438,6 +436,11 @@ async function ensureManagedOpencodeServeInternal(shouldContinue: () => boolean)
     platform: process.platform,
   });
   if (!invocation) return; // not installed → OpenCode stays observe/resume only
+  const generation = opencodeGeneration(process.env, process.platform, invocation.originalPath);
+  if (generation.kind === 'v2' || generation.kind === 'future') {
+    console.log(`${LOG_PREFIX} OpenCode ${generation.version} is detected but not supported; leaving managed serve stopped.`);
+    return;
+  }
   if (!shouldContinue()) return;
 
   let child: Bun.Subprocess;
@@ -560,23 +563,7 @@ async function managedOpencodeRunningVersion(): Promise<string | undefined> {
 }
 
 function installedOpencodeVersion(): string | undefined {
-  const invocation = resolveInvocation('opencode', { env: process.env, platform: process.platform });
-  if (!invocation) return undefined;
-  try {
-    // timeout: this runs synchronously ON the broker event loop (every poll + every status GET) — a
-    // hung binary must not freeze the whole broker.
-    const result = bunSpawnSyncResolvedInvocation(invocation, ['--version'], {
-      // Also the most FREQUENT OpenCode child, per the comment above, which is
-      // why leaving it unguarded gave the updater the most chances to fire.
-      stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', env: opencodeChildEnv(process.env),
-      timeout: 3000, windowsHide: process.platform === 'win32',
-    });
-    if (result.exitCode !== 0) return undefined;
-    const version = normalizeOpencodeVersion(new TextDecoder().decode(result.stdout));
-    return version || undefined;
-  } catch {
-    return undefined;
-  }
+  return opencodeGeneration(process.env, process.platform).version;
 }
 
 export async function readManagedOpencodeVersions(): Promise<{ managed: boolean; installedVersion?: string; runningVersion?: string; detail?: string }> {
@@ -585,6 +572,11 @@ export async function readManagedOpencodeVersions(): Promise<{ managed: boolean;
     managedOpencodeRunningVersion(),
     Promise.resolve(installedOpencodeVersion()),
   ]);
+  const installedMajor = installedVersion?.match(/^(\d+)\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/)?.[1];
+  const runningMajor = runningVersion?.match(/^(\d+)\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/)?.[1];
+  if (installedMajor && runningMajor && installedMajor !== runningMajor) {
+    return { managed: false, detail: `Installed OpenCode ${installedVersion} differs in generation from the running ${runningVersion} serve. The broker will retire its serve at idle and will not launch the new generation.` };
+  }
   return {
     managed: true,
     ...(installedVersion ? { installedVersion } : {}),
@@ -598,6 +590,9 @@ export async function restartManagedOpencodeRuntime(shouldContinue: () => boolea
   if (!managed) throw new Error('OpenCode serve is not managed by this broker.');
   managedLifecycleRestart = (async () => {
     if (!shouldContinue()) return;
+    if (!opencodeAllowsV1(opencodeGeneration(process.env, process.platform))) {
+      throw new Error('The installed OpenCode generation is not supported; refusing to restart the managed V1 serve.');
+    }
     await stopManagedOpencodeServe();
     if (!shouldContinue()) return;
     await ensureManagedOpencodeServe(shouldContinue);
@@ -741,11 +736,24 @@ export function startOpencodeConfigWatch(opts: OpencodeConfigWatchOptions = {}):
   configWatchTimer = setInterval(() => {
     void (async () => {
       if (opts.shouldContinue?.() === false || restartInFlight || !managed || managedStartedAt === 0) return;
-      let busy = false;
+      const generation = opencodeGeneration(process.env, process.platform);
+      let busy = !opencodeAllowsV1(generation);
       try {
         busy = opts.isBusy?.() ?? false;
       } catch {
-        busy = false; // best-effort: an unavailable liveness signal must not block the reload
+        busy = !opencodeAllowsV1(generation); // V1 reload stays best-effort; retirement waits for proven idle.
+      }
+      if (generation.kind === 'absent' || !opencodeAllowsV1(generation)) {
+        pendingRestartSince = 0;
+        if (busy || opts.shouldContinue?.() === false) return;
+        restartInFlight = true;
+        try {
+          console.log(`${LOG_PREFIX} installed OpenCode is no longer V1 — retiring the idle managed serve.`);
+          await stopManagedOpencodeServe();
+        } finally {
+          restartInFlight = false;
+        }
+        return;
       }
       const decision = evaluateConfigRestart({
         cfgMtime: newestConfigMtime(),

@@ -10,7 +10,7 @@
  * the fixture started; teardown stops those by executable path.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { reserveLoopbackFixturePort } from '../../packages/typescript/broker/test/helpers/isolated-broker-fixture.ts';
 import { type Broker, type BrokerClient, eventually, startBroker } from '../harness/index.ts';
@@ -381,6 +381,8 @@ describe('the broker-owned OpenCode serve', () => {
         COSYNCING_RESTART_DRY_RUN: '1',
         COSYNCING_RUNTIME_UPDATE_STATUS_TTL_MS: '600000',
         COSYNCING_TEST_RUNTIME_UPDATE_POLL_MS: '400',
+        COSYNCING_TEST_OPENCODE_CONFIG_WATCH_MS: '100',
+        COSYNCING_OPENCODE_SERVE_RESTART_MAX_DEFER_MS: '1',
       }),
     });
     client = broker.client();
@@ -470,5 +472,50 @@ describe('the broker-owned OpenCode serve', () => {
     expect(restarted.body.update).toMatchObject({ state: 'current', runningVersion: '1.3.0', installedVersion: '1.3.0' });
     expect(opencode.serves().map((entry) => entry.version)).toEqual(['1.1.0', '1.2.0', '1.3.0']);
     expect(opencode.isAlive(previous.pid)).toBe(false);
+  });
+
+  test('a cross-major upgrade stays unavailable while busy, refuses a confirmed restart, then retires at idle', async () => {
+    const serve = opencode.serves().at(-1)!;
+    const count = opencode.serves().length;
+    const ownership = join(broker.paths.cosyncingHome, 'opencode-serve-owner.json');
+    expect(existsSync(ownership)).toBe(true);
+    await sessionActivity('working');
+    opencode.configure({ installed: '2.1.4' });
+    const waiting = await nextCheck(Date.now());
+    expect(waiting).toMatchObject({ managed: false, state: 'unavailable', updateAvailable: false, autoRestartReady: false });
+    expect(waiting.detail).toMatch(/generation/);
+    // A config edit must not enter the old restart path during this transition either.
+    const config = join(broker.paths.root, 'xdg-config', 'opencode', 'opencode.json');
+    mkdirSync(join(config, '..'), { recursive: true });
+    writeFileSync(config, '{}');
+    const newer = new Date(Date.now() + 2_000);
+    utimesSync(config, newer, newer);
+    expect((await nextCheck(waiting.checkedAt)).state).toBe('unavailable');
+    const refused = await client.post('/api/agent-runtime-updates/opencode/restart', RESTART_CONFIRMED);
+    expect(refused.status).toBe(502);
+    expect(refused.body.error).toMatch(/generation/);
+    expect(opencode.isAlive(serve.pid)).toBe(true);
+    expect(opencode.serves()).toHaveLength(count);
+    expect(opencode.ledger().some((entry) => entry.kind === 'serve-exit' && entry.pid === serve.pid)).toBe(false);
+
+    opencode.configure({ sessions: [{ id: SESSION, title: 'Finished refactor', directory: broker.paths.home, busy: false }] });
+    await sessionActivity('idle');
+    await eventually(() => !opencode.isAlive(serve.pid), { what: 'the V1 serve to retire after the turn finishes' });
+    await eventually(async () => (await updates(client, { fresh: true })).opencode.state === 'unavailable', { what: 'unavailable after retirement' });
+    expect(opencode.serves()).toHaveLength(count);
+    expect(opencode.serves().every((entry) => entry.version.startsWith('1.'))).toBe(true);
+    expect(existsSync(ownership)).toBe(false);
+  });
+
+  test('an idle cross-major upgrade retires without offering or launching a restart', async () => {
+    opencode.configure({ installed: '1.17.19', sessions: [] });
+    await broker.restart();
+    const serve = await eventually(() => opencode.serves().find((entry) => entry.version === '1.17.19'), { what: 'a fresh V1 serve' });
+    await eventually(() => broker.output().includes('managed opencode serve ready'), { what: 'ownership to be recorded' });
+    const count = opencode.serves().length;
+    opencode.configure({ installed: '2.1.4' });
+    await eventually(() => !opencode.isAlive(serve.pid), { what: 'idle V1 retirement' });
+    expect((await updates(client, { fresh: true })).opencode).toMatchObject({ managed: false, state: 'unavailable', updateAvailable: false, autoRestartReady: false });
+    expect(opencode.serves()).toHaveLength(count);
   });
 });

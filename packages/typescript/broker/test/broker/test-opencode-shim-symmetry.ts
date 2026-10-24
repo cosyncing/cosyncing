@@ -360,6 +360,27 @@ try {
         && readFileSync(bashrc, 'utf8').includes('# pre-existing user config'));
   }
 
+  // The installed asset, as sourced by either supported shell, preserves V2's own service.
+  {
+    const m = machine();
+    const action = createOpencodeShimSetupAction(actionInputsFor(m));
+    await action.apply(fakeTxContext(m));
+    const bin = join(m.userHome, 'bin');
+    const state = join(m.userHome, 'state');
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(join(state, 'opencode'), { recursive: true });
+    writeFileSync(join(bin, 'opencode'), '#!/bin/sh\nprintf "forwarded:%s" "$*"\n', { mode: 0o755 });
+    writeFileSync(join(state, 'opencode', 'service.json'), JSON.stringify({ pid: process.pid }));
+    for (const shell of ['bash', 'zsh'].filter((shell) => Bun.which(shell))) {
+      const proc = Bun.spawn([shell, '-c', 'source "$COSYNCING_SHIM"; opencode "$HOME"'], {
+        env: { ...process.env, HOME: m.userHome, XDG_STATE_HOME: state, PATH: `${bin}:${process.env.PATH}`, COSYNCING_SHIM: opencodeShimShellPath(m.home) },
+        stdout: 'pipe', stderr: 'pipe',
+      });
+      const [out, err, exit] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+      check(`installed shim passes through V2 silently in ${shell}`, exit === 0 && out === `forwarded:${m.userHome}` && err === '');
+    }
+  }
+
   // 2. install -> uninstall round-trip: after a confirmed uninstall the shim script is gone, BOTH rc blocks are
   //    excised, and the pre-existing unrelated content is byte-preserved. Clean removal exits 0.
   {

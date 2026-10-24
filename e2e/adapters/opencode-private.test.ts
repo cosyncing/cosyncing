@@ -9,12 +9,14 @@
  * can never fall through to 4096.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, statSync, utimesSync } from 'node:fs';
+import { Database } from 'bun:sqlite';
+import { defaultBrokerConfig, writeBrokerConfig } from '../../packages/typescript/broker/src/runtime/configuration.ts';
 import { join } from 'node:path';
 import { reserveLoopbackFixturePort } from '../../packages/typescript/broker/test/helpers/isolated-broker-fixture.ts';
 import { type Broker, type BrokerClient, eventually, type SessionStream, startBroker } from '../harness/index.ts';
 import { type FakeOpencodeCliConfig, OpencodeStore, type StoreLayout } from './kits/fakes/opencode-cli.ts';
-import { installFakeExecutable, Ledger, treeSnapshot } from './kits/kit.ts';
+import { installFakeExecutable, type InstalledFake, Ledger, treeSnapshot } from './kits/kit.ts';
 
 type Json = Record<string, any>;
 
@@ -29,6 +31,7 @@ describe.each(['sqlite', 'json'] as StoreLayout[])('OpenCode without a serve, %s
   let store: OpencodeStore;
   let ledger: Ledger;
   let controlDir: string;
+  let cli: InstalledFake;
   let workspace: string;
   const ids = {
     main: 'ses_private_main',
@@ -86,7 +89,8 @@ describe.each(['sqlite', 'json'] as StoreLayout[])('OpenCode without a serve, %s
         mkdirSync(controlDir, { recursive: true });
         ledger = new Ledger(join(installRoot, 'ledger.jsonl'));
         const config: FakeOpencodeCliConfig = { ledger: ledger.path, controlDir, version: '1.17.19', store: { dataDir, layout } };
-        installFakeExecutable(paths.bin, 'opencode', 'opencode-cli.ts', config);
+        cli = installFakeExecutable(paths.bin, 'opencode', 'opencode-cli.ts', config);
+        writeBrokerConfig({ ...defaultBrokerConfig(), features: { httpTranscriptExport: true } }, paths.cosyncingHome);
         seed(ids.main, 'Private main', { turns: 2 });
         seed(ids.child, 'Private child', { parentID: ids.main });
         seed(ids.working, 'Private working');
@@ -326,5 +330,51 @@ describe.each(['sqlite', 'json'] as StoreLayout[])('OpenCode without a serve, %s
       stream.close();
       tab.close();
     });
+  });
+
+  test('a binary upgrade refuses private Resume and export, keeps history read-only, and hides migrated V1 rows', async () => {
+    const id = 'ses_generation_guard';
+    seed(id, 'Generation guard');
+    seed('ses_generation_read_only', 'Read-only history');
+    await row(id);
+    // Keep a Resume connection open across the install to exercise dispatch-time revalidation.
+    const resumed = await client.attach('opencode', id, { mode: 'resume' });
+    await resumed.waitForKind('session');
+    const config = cli.readConfig<FakeOpencodeCliConfig>();
+    cli.writeConfig({ ...config, version: '2.1.4' });
+    const stamp = new Date(Math.max(Date.now(), statSync(cli.path).mtimeMs + 1));
+    utimesSync(cli.path, stamp, stamp);
+    const mark = ledger.mark();
+    const before = treeSnapshot(store.dataDir);
+    const main = await client.waitForSession((candidate) => candidate.id === 'ses_generation_read_only' && candidate.control?.drive?.supported === false);
+    expect(main.control.drive).toMatchObject({ supported: false, state: 'observing', reason: expect.stringContaining('read-only') });
+    const refusedPrompt = await resumed.sendAndAwait({ kind: 'prompt', text: 'must never run V2' });
+    expect(refusedPrompt.kind).toBe('nack');
+    expect(refusedPrompt.message).toContain('read-only');
+    const refusedResume = await client.attach('opencode', ids.main, { mode: 'resume', reason: 'takeover' });
+    expect(await refusedResume.waitForKind('attach-conflict')).toMatchObject({ code: 'DRIVE_NATIVE_SESSION_UNRESUMABLE' });
+    const history = await refusedResume.waitForKind('history');
+    expect((history.messages as any[]).some((message) => textOf(message) === 'seeded answer 1')).toBe(true);
+    const route = `/api/sessions/opencode/${ids.main}/export`;
+    const preflight = await client.post(`${route}/preflight`);
+    expect(preflight.status).toBe(200);
+    const exported = await client.post(route, { nonce: preflight.body.nonce });
+    expect(exported.status).toBe(502);
+    expect(exported.body.code).toBe('EXPORT_FAILED');
+    expect(treeSnapshot(store.dataDir)).toEqual(before);
+    expect(ledger.entries().slice(mark).filter((entry) => entry.kind !== 'version-probe')).toEqual([]);
+    resumed.close();
+    refusedResume.close();
+
+    // This also proves that a migrated DB suppresses the legacy JSON fallback.
+    const db = new Database(join(store.dataDir, 'opencode.db'));
+    try { db.exec('create table session_v2 (id text primary key)'); } finally { db.close(); }
+    await eventually(async () => !(await client.sessions({ refresh: true })).some((candidate) => candidate.id === 'ses_generation_read_only'), { what: 'a migrated V1 store row to leave discovery' });
+    // Earlier scenarios leave attention-retained Observe owners in memory. A fresh broker proves
+    // the migrated store supplies no rows, independently of those pre-existing open owners.
+    client.closeAll();
+    await broker.restart();
+    client = broker.client();
+    expect((await client.sessions({ refresh: true })).filter((candidate) => candidate.tool === 'opencode')).toEqual([]);
   });
 });

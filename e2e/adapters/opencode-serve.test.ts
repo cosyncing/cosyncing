@@ -146,7 +146,7 @@ posix('a serve that is already listening when the broker starts', () => {
    * `stranger`, the user's own `opencode serve` (the same fake binary, a real process the broker never
    * started) already listens on that port before the broker starts.
    */
-  async function brokerAt(port: number, options: { env?: Record<string, string>; stranger?: boolean } = {}): Promise<{ broker: Broker; opencode: FakeOpencode; stranger?: Bun.Subprocess }> {
+  async function brokerAt(port: number, options: { env?: Record<string, string>; stranger?: boolean; installed?: string } = {}): Promise<{ broker: Broker; opencode: FakeOpencode; stranger?: Bun.Subprocess }> {
     let opencode!: FakeOpencode;
     let stranger: Bun.Subprocess | undefined;
     const broker = await startBroker({
@@ -156,7 +156,7 @@ posix('a serve that is already listening when the broker starts', () => {
         const workspace = join(paths.home, 'project');
         mkdirSync(workspace, { recursive: true });
         opencode = installFakeOpencode(paths, {
-          installed: '1.17.19',
+          installed: options.stranger ? '1.17.19' : options.installed ?? '1.17.19',
           sessions: [{ id: 'ses_listening', title: 'Listening session', directory: workspace }],
         });
         if (options.stranger) {
@@ -164,6 +164,7 @@ posix('a serve that is already listening when the broker starts', () => {
             stdin: 'ignore', stdout: 'pipe', stderr: 'pipe',
           });
           await eventually(() => opencode.serves().length === 1, { what: 'the stranger serve to listen' });
+          if (options.installed) opencode.configure({ installed: options.installed });
         }
       },
       env: { ...opencodeServeEnvironment(port), COSYNCING_OPENCODE_STARTUP_TIMEOUT_MS: '60000', ...options.env },
@@ -206,6 +207,39 @@ posix('a serve that is already listening when the broker starts', () => {
     await eventually(() => opencode.serves().length === 2, { what: 'the replacement serve' });
     await deadline(opencode, stranger!.pid);
     expect(opencode.serves().at(-1)!.pid).not.toBe(stranger!.pid);
+  });
+
+  test.each(['2.1.4', '3.0.0'])('with OpenCode %s installed, startup launches nothing', async (installed) => {
+    const { broker, opencode } = await brokerAt(await leasePort(), { installed });
+    await eventually(() => broker.output().includes('detected but not supported'), { what: 'the generation guard' });
+    expect((await broker.client().agents()).find((agent) => agent.id === 'opencode')?.canCreateSession).toBe(false);
+    expect(opencode.ledger().filter((entry) => entry.kind === 'cli' && entry.argv?.[0] !== '--version')).toEqual([]);
+  });
+
+  test('a proven V1 orphan is reclaimed after a V2 upgrade, without a replacement', async () => {
+    const { broker, opencode } = await brokerAt(await leasePort());
+    await eventually(() => broker.output().includes('managed opencode serve ready'), { what: 'the broker to record ownership' });
+    const orphan = opencode.serves()[0]!;
+    await broker.crash();
+    opencode.configure({ installed: '2.1.4' });
+    await broker.start();
+    await deadline(opencode, orphan.pid);
+    await eventually(() => broker.output().includes('detected but not supported'), { what: 'the post-reclaim guard' });
+    expect(opencode.serves()).toHaveLength(1);
+  });
+
+  test('a V2 binary leaves an unowned V1 listener untouched', async () => {
+    const { broker, opencode, stranger } = await brokerAt(await leasePort(), { stranger: true, installed: '2.1.4' });
+    await eventually(() => broker.output().includes('did not start'), { what: 'the unowned-listener decision' });
+    expect(opencode.isAlive(stranger!.pid)).toBe(true);
+    expect(opencode.serves()).toHaveLength(1);
+  });
+
+  test('an unparsable version retains V1 autoserve behavior', async () => {
+    const { broker, opencode } = await brokerAt(await leasePort(), { installed: 'development-build' });
+    await eventually(() => broker.output().includes('managed opencode serve ready'), { what: 'the legacy unknown-version startup' });
+    expect(opencode.serves()).toHaveLength(1);
+    expect((await broker.client().waitForSession((row) => row.id === 'ses_listening')).attachMode).toBe('live');
   });
 
   test('with autoserve off, the broker launches nothing', async () => {

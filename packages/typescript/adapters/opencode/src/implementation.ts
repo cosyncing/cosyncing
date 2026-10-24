@@ -37,6 +37,7 @@ import type {
 import {
   PRODUCT_IDENTITY,
   ControlRefusedError,
+  NativeSessionUnresumableError,
   SessionCreateTemporarilyUnavailableError,
   SessionNotFoundError,
   TranscriptExportTooLargeError,
@@ -53,7 +54,10 @@ import { homedir } from 'node:os';
 import { Database } from 'bun:sqlite';
 import { attachedTuiSessions, tuiPresenceSupported } from './tui-presence.ts';
 import { diagnoseOpenCodeSetup } from './diagnostics.ts';
+import { opencodeAllowsV1, opencodeChildEnv, opencodeGeneration, OPENCODE_V1_READ_ONLY_REASON } from './generation.ts';
 import { mapOpenCodePart as mapSharedOpenCodePart } from '@cosyncing/opencode-wire';
+
+export { opencodeChildEnv } from './generation.ts';
 
 const OPENCODE_RETRY_DETAIL_MAX_SCALARS = 240;
 
@@ -598,8 +602,9 @@ export class OpenCodeAdapter implements AgentBackend {
   }
 
   private readPrivateSessions(options?: SessionDiscoveryOptions): { parents: OcSession[]; dirs: string[] } {
-    const legacy = this.readDiskSessions(options);
     const db = this.readDbSessions(options);
+    if (db.migrated) return { parents: [], dirs: [] };
+    const legacy = this.readDiskSessions(options);
     const byId = new Map<string, OcSession>();
     for (const s of legacy.parents) byId.set(s.id, s);
     // Current OpenCode (1.16.x) stores new sessions in opencode.db; prefer it over legacy JSON.
@@ -610,10 +615,16 @@ export class OpenCodeAdapter implements AgentBackend {
     };
   }
 
-  private readDbSessions(options?: SessionDiscoveryOptions): { parents: OcSession[]; dirs: string[] } {
+  private readDbSessions(options?: SessionDiscoveryOptions): { parents: OcSession[]; dirs: string[]; migrated?: boolean } {
     const db = this.openDb();
     if (!db) return { parents: [], dirs: [] };
     try {
+      // V2's presence makes its roster authoritative. Inspect only the DB the V1 reader opened,
+      // read-only, and suppress legacy JSON too so already-imported sessions cannot leak back in.
+      if (!opencodeAllowsV1(opencodeGeneration(process.env, process.platform))
+          && db.query("select 1 from sqlite_master where type = 'table' and name = 'session_v2' limit 1").get()) {
+        return { parents: [], dirs: [], migrated: true };
+      }
       const cutoff = options?.updatedAfter;
       options?.onWork?.({
         kind: 'sqlite-query',
@@ -777,6 +788,9 @@ export class OpenCodeAdapter implements AgentBackend {
       this.privateSessionInfo(sessionId, serverOk);
     if (!info) throw new SessionNotFoundError('OpenCode does not list this session.');
     if (mode === 'resume') {
+      if (!opencodeAllowsV1(opencodeGeneration(process.env, process.platform))) {
+        throw new NativeSessionUnresumableError(OPENCODE_V1_READ_ONLY_REASON);
+      }
       if (!this.opencodeBin) throw new Error(`OpenCode CLI is not available on PATH, so ${PRODUCT_IDENTITY.productName} cannot Drive this session.`);
       return new OpenCodeRunConnection(this.storageRoot, this.opencodeBin, {
         ...info,
@@ -816,7 +830,9 @@ export class OpenCodeAdapter implements AgentBackend {
   }
 
   private privateSessionInfo(id: string, serverOk: boolean): SessionInfo | undefined {
-    const s = this.readDbSession(id) ?? this.readDiskSession(id);
+    const s = opencodeAllowsV1(opencodeGeneration(process.env, process.platform))
+      ? this.readDbSession(id) ?? this.readDiskSession(id)
+      : this.readPrivateSessions().parents.find((session) => session.id === id);
     if (!s) return undefined;
     const syncHint = serverOk ? this.syncHint(s.id, s.directory) : undefined;
     return {
@@ -1094,6 +1110,9 @@ export class OpenCodeAdapter implements AgentBackend {
     if (!this.opencodeBin) throw new Error('OpenCode CLI is not available on PATH; cannot export transcript.');
     // The id becomes an argv word: one that is not a session id must never reach the CLI.
     if (!isOpaqueSessionId(sessionId)) throw new SessionNotFoundError('This OpenCode session id is not a session id.');
+    if (!opencodeAllowsV1(opencodeGeneration(process.env, process.platform, this.opencodeBin))) {
+      throw new ControlRefusedError(OPENCODE_V1_READ_ONLY_REASON, 'command-unsupported');
+    }
     const outPath = join(opts.tempDir, 'export.json');
     const proc = spawnOpenCode(this.opencodeBin, ['export', sessionId, '--sanitize'], {
       stdout: 'pipe',
@@ -1194,7 +1213,9 @@ function opencodePrivateControlState(opts: {
     // Private bare OpenCode TUI sessions have no reachable runtime. Observe tails disk; Drive starts
     // a broker-owned continuation. Only terminalSync.active proves same-live-owner control.
     // Contract: docs/architecture/client-ui.md
-    drive: opts.canDrive
+    drive: !opencodeAllowsV1(opencodeGeneration(process.env, process.platform))
+      ? { supported: false, state: 'observing', reason: OPENCODE_V1_READ_ONLY_REASON }
+      : opts.canDrive
       ? { supported: true, state: 'observing' }
       : { supported: false, state: 'unavailable', reason: `OpenCode CLI is not available on PATH, so ${PRODUCT_IDENTITY.productName} cannot Drive this session.` },
     terminalSync: opts.terminalSyncHint
@@ -1388,6 +1409,9 @@ class OpenCodeRunConnection extends OpenCodeObserveConnection {
 
   override async sendPrompt(input: PromptInput): Promise<void> {
     if (this.running) throw new Error('OpenCode Drive is already running a turn for this session.');
+    if (!opencodeAllowsV1(opencodeGeneration(process.env, process.platform, this.bin))) {
+      throw new NativeSessionUnresumableError(OPENCODE_V1_READ_ONLY_REASON);
+    }
     const filePaths = (input.files ?? []).map((file) => {
       const path = writeInboxFile(this.info.cwd, file);
       if (!path) throw new Error(`OpenCode could not materialize attachment ${file.name}.`);
@@ -3967,21 +3991,6 @@ function resolveBin(bin: string): string | null {
   return resolveInvocation(bin, { env: process.env, platform: process.platform })?.originalPath ?? null;
 }
 
-/**
- * The environment every OpenCode child starts with, in-place updater off.
- *
- * Only children Cosyncing spawns are affected; the user's own `opencode
- * upgrade` is untouched. Grok drifted eleven releases under an unattended
- * broker because its children were left unguarded, and OpenCode has the same
- * shape: a long-lived managed serve plus short-lived per-prompt children, any
- * of which can replace the binary underneath a running broker.
- */
-export function opencodeChildEnv(
-  env: Readonly<Record<string, string | undefined>>,
-): Record<string, string | undefined> {
-  return { ...env, OPENCODE_DISABLE_AUTOUPDATE: '1' };
-}
-
 function spawnOpenCode<
   const In extends Bun.SpawnOptions.Writable,
   const Out extends Bun.SpawnOptions.Readable,
@@ -3992,6 +4001,13 @@ function spawnOpenCode<
   options: Bun.SpawnOptions.SpawnOptions<In, Out, Err>,
 ): Bun.Subprocess<In, Out, Err> {
   const env = (options.env ?? process.env) as Readonly<Record<string, string | undefined>>;
+  // Revalidate both PATH and the resolved child immediately before dispatch. A package-manager
+  // symlink can move to V2 while an existing Resume connection still holds the old V1 target.
+  if (!opencodeAllowsV1(opencodeGeneration(env, process.platform))
+      || !opencodeAllowsV1(opencodeGeneration(env, process.platform, executable))) {
+    if (args[0] === 'run') throw new NativeSessionUnresumableError(OPENCODE_V1_READ_ONLY_REASON);
+    throw new ControlRefusedError(OPENCODE_V1_READ_ONLY_REASON, 'command-unsupported');
+  }
   const invocation = resolveInvocation(executable, { env, platform: process.platform });
   if (!invocation) throw new Error(`OpenCode executable is unavailable: ${executable}`);
   // Suppressed at the choke point rather than per call site: `opencode export`

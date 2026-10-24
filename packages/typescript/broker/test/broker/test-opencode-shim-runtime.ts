@@ -168,7 +168,11 @@ const wrapper = join(tmp, 'run-opencode.sh');
 writeFileSync(wrapper, 'source "$COSYNCING_SHIM"\nopencode "$@"\n');
 
 // Reachable serve: the shim probes GET /session with `curl -f` (fails on >=400), so return 200.
-const serve = Bun.serve({ port: 0, hostname: '127.0.0.1', fetch: () => new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } }) });
+let probes = 0;
+const serve = Bun.serve({ port: 0, hostname: '127.0.0.1', fetch: () => {
+  probes += 1;
+  return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
+} });
 if (typeof serve.port !== 'number') throw new Error('in-process serve did not bind a port');
 const PORT: number = serve.port;
 const URL_ = `http://127.0.0.1:${PORT}`;
@@ -180,7 +184,7 @@ async function runShim(shell: string, argv: string[], port: number, extraEnv: Re
   const proc = Bun.spawn([shell, wrapper, ...argv], {
     cwd: tmp, // a clean cwd so single args like `serve`/`run` are never mistaken for an existing directory
     // Pin PWD to the spawn cwd so the bare-invocation `--dir "$PWD"` assertion is deterministic.
-    env: { ...process.env, PWD: tmp, COSYNCING_SHIM: SHIM, PATH: `${binDir}:${process.env.PATH ?? ''}`, COSYNCING_OPENCODE_PORT: String(port), ...extraEnv },
+    env: { ...process.env, HOME: tmp, XDG_STATE_HOME: join(tmp, 'state'), PWD: tmp, COSYNCING_SHIM: SHIM, PATH: `${binDir}:${process.env.PATH ?? ''}`, COSYNCING_OPENCODE_PORT: String(port), ...extraEnv },
     stdout: 'pipe',
     stderr: 'pipe',
   });
@@ -225,6 +229,26 @@ async function runMatrix(shell: string): Promise<void> {
 
   const deadDir = await runShim(shell, [existingDir], DEAD);
   check(P + 'unreachable + 1 dir arg -> passthrough, not attach --dir', eq(deadDir.argv, [existingDir]), deadDir.argv.join(' | '));
+
+  // A live V2 registration wins even while the old V1 endpoint still answers.
+  for (const stateHome of [join(tmp, 'state'), '']) {
+    const registration = join(stateHome || join(tmp, '.local', 'state'), 'opencode', 'service.json');
+    mkdirSync(join(registration, '..'), { recursive: true });
+    writeFileSync(registration, JSON.stringify({ pid: process.pid }));
+    const before = probes;
+    for (const args of [[], [existingDir]]) {
+      const result = await runShim(shell, args, PORT, { XDG_STATE_HOME: stateHome });
+      check(P + `live V2 registration (${stateHome ? 'XDG' : 'HOME'}) passes through silently`, eq(result.argv, args) && result.stderr === '');
+    }
+    check(P + 'live V2 registration bypasses the V1 probe', probes === before);
+    writeFileSync(registration, '{"pid":2147483647}');
+    const dead = await runShim(shell, [], PORT, { XDG_STATE_HOME: stateHome });
+    check(P + 'dead registration retains V1 routing', eq(dead.argv, ['attach', URL_, '--dir', tmp]));
+    writeFileSync(registration, '{"pid":0}');
+    const stale = await runShim(shell, [], PORT, { XDG_STATE_HOME: stateHome });
+    check(P + 'invalid registration retains V1 routing', eq(stale.argv, ['attach', URL_, '--dir', tmp]));
+    rmSync(registration);
+  }
 
   // --- port override is honored (attach targets the COSYNCING_OPENCODE_PORT the managed rc block pins) ---
   check(P + 'attach target reflects the COSYNCING_OPENCODE_PORT override', bare.argv.includes(URL_), bare.argv.join(' | '));
