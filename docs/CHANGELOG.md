@@ -13,6 +13,12 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Completion notifications, inbox entries, Overview counts and session dots keep
+  arriving after the device changes network or a session connection drops.
+  Previously the notification feed stopped until the app restarted while
+  Settings still showed it as connected.
+- Open sessions reconnect after a network change even when a notification or
+  other background request asks for the new connection at the same moment.
 - File-close notices dismiss automatically and include a close button. With
   accessible navigation enabled, Undo remains available until dismissed.
 - Windows serves the web client and its version document correctly, allowing
