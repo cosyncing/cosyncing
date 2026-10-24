@@ -400,11 +400,12 @@ describe('the broker-owned OpenCode serve', () => {
       .some((row) => row.id === SESSION && row.status === status), { what: `the OpenCode session to be ${status}` });
   }
 
-  /** The stored status after the next automatic check that starts later than `after`. */
-  async function nextCheck(after: number): Promise<any> {
+  /** A later completed automatic check. A probe already in flight can publish pre-change values
+   * with a new checkedAt, so callers changing native state also wait for that state to be observed. */
+  async function nextCheck(after: number, observed: (status: any) => boolean = () => true): Promise<any> {
     return eventually(async () => {
       const status = (await updates(client)).opencode;
-      return status.checkedAt > after ? status : undefined;
+      return status.checkedAt > after && observed(status) ? status : undefined;
     }, { what: 'the next automatic runtime check' });
   }
 
@@ -437,7 +438,7 @@ describe('the broker-owned OpenCode serve', () => {
     await sessionActivity('working');
     opencode.configure({ installed: '1.2.0' });
 
-    const waiting = await nextCheck(Date.now());
+    const waiting = await nextCheck(Date.now(), (status) => status.installedVersion === '1.2.0');
     expect(waiting).toMatchObject({
       state: 'pending',
       updateAvailable: true,
@@ -472,7 +473,7 @@ describe('the broker-owned OpenCode serve', () => {
     try {
       // Three automatic 400ms checks span roughly one second without a fixed sleep,
       // and exercise multiple 100ms config-watch ticks while the executable is absent.
-      let absent = await nextCheck(Date.now());
+      let absent = await nextCheck(Date.now(), (status) => status.state === 'unavailable');
       expect(absent).toMatchObject({ state: 'unavailable', updateAvailable: false });
       for (let tick = 0; tick < 2; tick += 1) {
         absent = await nextCheck(absent.checkedAt);
@@ -482,7 +483,7 @@ describe('the broker-owned OpenCode serve', () => {
     } finally {
       renameSync(hidden, opencode.executable);
     }
-    const restored = await nextCheck(Date.now());
+    const restored = await nextCheck(Date.now(), (status) => status.state === 'current');
     expect(restored).toMatchObject({ managed: true, state: 'current', installedVersion: serve.version, runningVersion: serve.version });
     expect(opencode.isAlive(serve.pid)).toBe(true);
     expect(opencode.serves()).toHaveLength(count);
@@ -508,7 +509,7 @@ describe('the broker-owned OpenCode serve', () => {
     expect(existsSync(ownership)).toBe(true);
     await sessionActivity('working');
     opencode.configure({ installed: '2.1.4' });
-    const waiting = await nextCheck(Date.now());
+    const waiting = await nextCheck(Date.now(), (status) => status.state === 'unavailable');
     expect(waiting).toMatchObject({ managed: false, state: 'unavailable', updateAvailable: false, autoRestartReady: false });
     expect(waiting.detail).toMatch(/generation/);
     // A config edit must not enter the old restart path during this transition either.

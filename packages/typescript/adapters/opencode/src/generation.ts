@@ -18,11 +18,11 @@ export function opencodeChildEnv(
   return { ...env, OPENCODE_DISABLE_AUTOUPDATE: '1' };
 }
 
-const cache = new Map<string, OpencodeGeneration>();
+const cache = new Map<string, { result: OpencodeGeneration; retryAt?: number }>();
 
 /** Stat on every use so a replacement binary is noticed before any lifecycle or CLI action.
- * Cache every probe outcome by executable identity without expiry: periodic roster sweeps must
- * not repeat the synchronous version probe for an unchanged binary, even with unknown output.
+ * Successful probes, including unknown output, have no expiry. Failed probes retry after one
+ * minute so a transient first-exec failure cannot hide the installed generation indefinitely.
  * Unknown output retains the historical V1 path; it must not become a new version floor. */
 export function opencodeGeneration(
   env: NodeJS.ProcessEnv = process.env,
@@ -38,20 +38,24 @@ export function opencodeGeneration(
     identity = `${executable}\0${stat.ino}\0${stat.size}\0${stat.mtimeMs}\0${stat.ctimeMs}`;
   } catch { /* An unstatable executable is probed without caching. */ }
   const remembered = identity ? cache.get(identity) : undefined;
-  if (remembered) return remembered;
+  if (remembered && (remembered.retryAt === undefined || Date.now() < remembered.retryAt)) return remembered.result;
   let version: string | undefined;
+  let succeeded = false;
   try {
     const result = bunSpawnSyncResolvedInvocation(invocation, ['--version'], {
       stdin: 'ignore', stdout: 'pipe', stderr: 'pipe',
       env: opencodeChildEnv(env), timeout: 3000, windowsHide: platform === 'win32',
     });
-    if (result.exitCode === 0) version = normalizeOpencodeVersion(new TextDecoder().decode(result.stdout)) || undefined;
+    if (result.exitCode === 0) {
+      version = normalizeOpencodeVersion(new TextDecoder().decode(result.stdout)) || undefined;
+      succeeded = true;
+    }
   } catch { /* A failed or hung probe preserves the historical unknown-version behavior. */ }
   const major = version?.match(/^(\d+)\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/)?.[1];
   const kind = major === '1' ? 'v1' : major === '2' ? 'v2' : major && Number(major) >= 3 ? 'future' : 'unparsable';
   const result: OpencodeGeneration = { kind, executable, ...(version ? { version } : {}) };
   if (identity) {
-    cache.set(identity, result);
+    cache.set(identity, { result, ...(!succeeded ? { retryAt: Date.now() + 60_000 } : {}) });
     while (cache.size > 64) cache.delete(cache.keys().next().value!);
   }
   return result;

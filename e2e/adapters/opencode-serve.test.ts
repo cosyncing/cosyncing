@@ -9,13 +9,20 @@
  * fixture's fake `opencode` binary (`harness/fakes/opencode.ts`), a real process, so the broker's
  * ownership proof (pid, start time, boot, command) runs against real process identity.
  */
-import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
-import { mkdirSync, utimesSync, writeFileSync } from 'node:fs';
+import { afterAll, afterEach, beforeAll, describe, expect, setSystemTime, test } from 'bun:test';
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { reserveLoopbackFixturePort } from '../../packages/typescript/broker/test/helpers/isolated-broker-fixture.ts';
-import { type Broker, type BrokerClient, eventually, never, startBroker } from '../harness/index.ts';
+import { type Broker, type BrokerClient, eventually, fixturePaths, never, startBroker } from '../harness/index.ts';
 import { type FakeOpencode, installFakeOpencode, opencodeServeEnvironment } from '../harness/fakes/opencode.ts';
 import { FakeOpenCodeServe } from './kits/fakes/opencode-serve.ts';
+import { opencodeAllowsV1, opencodeGeneration } from '../../packages/typescript/adapters/opencode/src/generation.ts';
+import {
+  __setOpencodeBinOverrideForTest,
+  ensureManagedOpencodeServe,
+  stopManagedOpencodeServe,
+} from '../../packages/typescript/adapters/opencode/src/managed-server.ts';
 
 async function leasePort(): Promise<number> {
   const lease = await reserveLoopbackFixturePort();
@@ -209,8 +216,8 @@ posix('a serve that is already listening when the broker starts', () => {
     expect(opencode.serves().at(-1)!.pid).not.toBe(stranger!.pid);
   });
 
-  test.each(['2.1.4'])('with OpenCode %s installed, startup launches nothing', async (installed) => {
-    const { broker, opencode } = await brokerAt(await leasePort(), { installed });
+  test('with OpenCode 2.1.4 installed, startup launches nothing', async () => {
+    const { broker, opencode } = await brokerAt(await leasePort(), { installed: '2.1.4' });
     await eventually(() => broker.output().includes('detected but not supported'), { what: 'the generation guard' });
     expect((await broker.client().agents()).find((agent) => agent.id === 'opencode')?.canCreateSession).toBe(false);
     expect(opencode.ledger().filter((entry) => entry.kind === 'cli' && entry.argv?.[0] !== '--version')).toEqual([]);
@@ -366,4 +373,61 @@ describe('a live session when its serve misbehaves', () => {
     await again.waitForMessage((message) => message.type === 'model-output' && message.text === 'answer: after the serve returned');
     again.close();
   });
+});
+
+// Narrow clock-driven policy exception (docs/development/testing.md): the broker subprocess
+// has no public cache clock. An HTTP-only expiry test would need a real minute or a new test API.
+// Keep this in the existing OpenCode suite, use a real fake CLI, and exercise the spawn boundary too.
+test('a failed version probe expires, recovers V2, and prevents a managed spawn', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'cosyncing-opencode-probe-recovery-'));
+  const paths = fixturePaths(root);
+  const opencode = installFakeOpencode(paths, { installed: '2.1.4', failFirstVersionProbe: true });
+  const overrides = opencodeServeEnvironment(await leasePort());
+  const previousEnv = Object.fromEntries(Object.keys(overrides).map((key) => [key, process.env[key]]));
+  const readGeneration = () => opencodeGeneration(process.env, process.platform, opencode.executable);
+  const probes = () => opencode.ledger().filter((entry) => entry.kind === 'cli').map((entry) => entry.argv);
+  const start = Date.UTC(2030, 0, 1);
+  try {
+    Object.assign(process.env, overrides);
+    __setOpencodeBinOverrideForTest(opencode.executable);
+    setSystemTime(start);
+    const failed = readGeneration();
+    expect(failed.kind).toBe('unparsable');
+    expect(opencodeAllowsV1(failed)).toBe(true);
+    setSystemTime(start + 59_999);
+    expect(readGeneration().kind).toBe('unparsable');
+    expect(probes()).toEqual([['--version']]);
+
+    setSystemTime(start + 60_000);
+    const recovered = readGeneration();
+    expect(recovered).toMatchObject({ kind: 'v2', version: '2.1.4' });
+    expect(opencodeAllowsV1(recovered)).toBe(false);
+    setSystemTime(); // Keep the asynchronous launch boundary on the real clock.
+    await ensureManagedOpencodeServe();
+    expect(opencode.serves()).toEqual([]);
+    expect(probes()).toEqual([['--version'], ['--version']]);
+
+    // Successful probes have no expiry, whether recognized or unrecognized.
+    setSystemTime(start + 86_400_000);
+    expect(readGeneration()).toMatchObject({ kind: 'v2', version: '2.1.4' });
+    expect(probes()).toHaveLength(2);
+    opencode.configure({ installed: 'development-build' });
+    expect(readGeneration()).toMatchObject({ kind: 'unparsable', version: 'development-build' });
+    setSystemTime(start + 2 * 86_400_000);
+    expect(readGeneration()).toMatchObject({ kind: 'unparsable', version: 'development-build' });
+    expect(probes()).toHaveLength(3);
+  } finally {
+    setSystemTime();
+    try {
+      await stopManagedOpencodeServe();
+      opencode.cleanup();
+    } finally {
+      __setOpencodeBinOverrideForTest(null);
+      for (const [key, value] of Object.entries(previousEnv)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
 });
