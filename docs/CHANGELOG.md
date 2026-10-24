@@ -65,8 +65,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   reconnecting, without requiring the session to be reopened.
 - Upgrading the installed OpenCode command to OpenCode 2 no longer restarts
   a broker-owned V1 server with the new binary or triggers its data import.
-  Running turns finish before the V1 server retires; pre-migration V1 history
-  remains readable, with private Resume and export disabled for OpenCode 2.
+  Running turns finish before the V1 server retires. V1 sessions stay readable
+  until OpenCode 2 imports them. Private Resume and export are disabled for
+  OpenCode 2.
 
 ## 0.8.1 — 2026-10-22
 

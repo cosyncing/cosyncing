@@ -200,6 +200,12 @@ export async function diagnoseOpenCodeSetup(
     }
   }
 
+  if (unsupported) {
+    // Setup cannot reconcile a managed serve for an unsupported generation.
+    const serverCheck = checks.find((check) => check.id === 'opencode.server');
+    if (serverCheck) delete serverCheck.remediation;
+  }
+
   return {
     agent: 'opencode',
     displayName: 'OpenCode',

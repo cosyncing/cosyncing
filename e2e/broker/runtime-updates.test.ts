@@ -462,6 +462,33 @@ describe('the broker-owned OpenCode serve', () => {
     await eventually(() => !opencode.isAlive(serve!.pid), { what: 'the old serve to exit' });
   });
 
+  test('a brief V1 reinstall gap leaves the idle managed serve running', async () => {
+    await sessionActivity('idle');
+    const serve = opencode.serves().at(-1)!;
+    const count = opencode.serves().length;
+    const outputMark = broker.output().length;
+    const hidden = `${opencode.executable}.reinstalling`;
+    renameSync(opencode.executable, hidden);
+    try {
+      // Three automatic 400ms checks span roughly one second without a fixed sleep,
+      // and exercise multiple 100ms config-watch ticks while the executable is absent.
+      let absent = await nextCheck(Date.now());
+      expect(absent).toMatchObject({ state: 'unavailable', updateAvailable: false });
+      for (let tick = 0; tick < 2; tick += 1) {
+        absent = await nextCheck(absent.checkedAt);
+        expect(absent).toMatchObject({ state: 'unavailable', updateAvailable: false });
+      }
+      expect(opencode.isAlive(serve.pid)).toBe(true);
+    } finally {
+      renameSync(hidden, opencode.executable);
+    }
+    const restored = await nextCheck(Date.now());
+    expect(restored).toMatchObject({ managed: true, state: 'current', installedVersion: serve.version, runningVersion: serve.version });
+    expect(opencode.isAlive(serve.pid)).toBe(true);
+    expect(opencode.serves()).toHaveLength(count);
+    expect(broker.output().slice(outputMark)).not.toContain('retiring the idle managed serve');
+  });
+
   test('a confirmed restart replaces the serve at once, even while a session works', async () => {
     const previous = opencode.serves().at(-1)!;
     opencode.configure({ sessions: [{ id: SESSION, title: 'Busy refactor', directory: broker.paths.home, busy: true }] });
@@ -487,24 +514,28 @@ describe('the broker-owned OpenCode serve', () => {
     // A config edit must not enter the old restart path during this transition either.
     const config = join(broker.paths.root, 'xdg-config', 'opencode', 'opencode.json');
     mkdirSync(join(config, '..'), { recursive: true });
-    writeFileSync(config, '{}');
-    const newer = new Date(Date.now() + 2_000);
-    utimesSync(config, newer, newer);
-    expect((await nextCheck(waiting.checkedAt)).state).toBe('unavailable');
-    const refused = await client.post('/api/agent-runtime-updates/opencode/restart', RESTART_CONFIRMED);
-    expect(refused.status).toBe(502);
-    expect(refused.body.error).toMatch(/generation/);
-    expect(opencode.isAlive(serve.pid)).toBe(true);
-    expect(opencode.serves()).toHaveLength(count);
-    expect(opencode.ledger().some((entry) => entry.kind === 'serve-exit' && entry.pid === serve.pid)).toBe(false);
+    try {
+      writeFileSync(config, '{}');
+      const newer = new Date(Date.now() + 2_000);
+      utimesSync(config, newer, newer);
+      expect((await nextCheck(waiting.checkedAt)).state).toBe('unavailable');
+      const refused = await client.post('/api/agent-runtime-updates/opencode/restart', RESTART_CONFIRMED);
+      expect(refused.status).toBe(502);
+      expect(refused.body.error).toMatch(/generation/);
+      expect(opencode.isAlive(serve.pid)).toBe(true);
+      expect(opencode.serves()).toHaveLength(count);
+      expect(opencode.ledger().some((entry) => entry.kind === 'serve-exit' && entry.pid === serve.pid)).toBe(false);
 
-    opencode.configure({ sessions: [{ id: SESSION, title: 'Finished refactor', directory: broker.paths.home, busy: false }] });
-    await sessionActivity('idle');
-    await eventually(() => !opencode.isAlive(serve.pid), { what: 'the V1 serve to retire after the turn finishes' });
-    await eventually(async () => (await updates(client, { fresh: true })).opencode.state === 'unavailable', { what: 'unavailable after retirement' });
-    expect(opencode.serves()).toHaveLength(count);
-    expect(opencode.serves().every((entry) => entry.version.startsWith('1.'))).toBe(true);
-    expect(existsSync(ownership)).toBe(false);
+      opencode.configure({ sessions: [{ id: SESSION, title: 'Finished refactor', directory: broker.paths.home, busy: false }] });
+      await sessionActivity('idle');
+      await eventually(() => !opencode.isAlive(serve.pid), { what: 'the V1 serve to retire after the turn finishes' });
+      await eventually(async () => (await updates(client, { fresh: true })).opencode.state === 'unavailable', { what: 'unavailable after retirement' });
+      expect(opencode.serves()).toHaveLength(count);
+      expect(opencode.serves().every((entry) => entry.version.startsWith('1.'))).toBe(true);
+      expect(existsSync(ownership)).toBe(false);
+    } finally {
+      rmSync(config, { force: true });
+    }
   });
 
   test('an idle cross-major upgrade retires without offering or launching a restart', async () => {

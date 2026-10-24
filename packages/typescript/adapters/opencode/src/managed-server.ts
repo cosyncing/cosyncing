@@ -743,7 +743,7 @@ export function startOpencodeConfigWatch(opts: OpencodeConfigWatchOptions = {}):
       } catch {
         busy = !opencodeAllowsV1(generation); // V1 reload stays best-effort; retirement waits for proven idle.
       }
-      if (generation.kind === 'absent' || !opencodeAllowsV1(generation)) {
+      if (!opencodeAllowsV1(generation)) {
         pendingRestartSince = 0;
         if (busy || opts.shouldContinue?.() === false) return;
         restartInFlight = true;
