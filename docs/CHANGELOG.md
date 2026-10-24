@@ -11,8 +11,12 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+## 0.8.2 — 2026-10-24
+
 ### Fixed
 
+- New Codex sessions keep the selected custom-profile model on attach and the
+  first prompt, including when no reasoning effort was explicitly selected.
 - Android downloads open the system Save as screen, and cached files offer
   Save and Share. Downloads that finish while the app is in the background
   remain available to save later. The chosen saved filename survives restarts.
@@ -49,14 +53,6 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - Windows scheduled tasks explicitly retain user ownership when setup runs
   elevated, and security checks recognize Windows' equivalent account SID aliases.
 
-### Changed
-
-- Quotas show each limit as a liquid circle, with two providers per row on
-  phones and larger screens. Window labels, remaining percentages and reset
-  times stay visible; waves pause for reduced motion and inactive views.
-
-### Fixed
-
 - Finished sessions move into the correct recent order within their project
   as soon as their completion reaches the app, without a roster refresh.
 - Claude Code skills launched in the background appear as subagents in the
@@ -68,6 +64,12 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   Running turns finish before the V1 server retires. V1 sessions stay readable
   until OpenCode 2 imports them. Private Resume and export are disabled for
   OpenCode 2.
+
+### Changed
+
+- Quotas show each limit as a liquid circle, with two providers per row on
+  phones and larger screens. Window labels, remaining percentages and reset
+  times stay visible; waves pause for reduced motion and inactive views.
 
 ## 0.8.1 — 2026-10-22
 

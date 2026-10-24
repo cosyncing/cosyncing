@@ -5,35 +5,51 @@ then use `cosy pair` to authorize the client.
 
 ## Update your client with this release
 
-0.8.1 repairs two regressions in 0.8.0 that left sessions hanging when a
-server is reached through an HTTPS reverse proxy such as Tailscale serve. The
-web client served through such a proxy opens sessions again, and native clients
-open sessions again on an HTTPS address that has no explicit port, such as
-`https://host.example`. Nothing else changes: there are no new features, the
-broker contract revision stays at 35, and the minimum accepted client revision
-stays at 17.
+0.8.2 keeps the app working when the device changes network: completion
+notifications, inbox entries and open sessions recover on their own instead of
+waiting for an app restart. Android downloads now use the system **Save as**
+screen, keep reporting progress, and stay saveable or shareable from the cache.
+Quotas move to liquid circles. There is no new Server feature: the broker
+contract revision stays at 35, the minimum accepted client revision stays at 17,
+and Bun stays at 1.4.3.
 
-Both fixes are needed. The web client fix lives in the Server, so update the
-Server first with `cosy update`; the web client ships with the broker and always
-matches it. The native fix lives in this client, so a 0.8.0 native client keeps
-reconnecting to a proxied HTTPS address until you install this download. Bun
-stays at 1.4.3 and nothing else about the Server moves.
+Most of what's fixed here lives in this client, so install this download to get
+it. Update the Server first anyway with `cosy update`: it ships the web client,
+and 0.8.2 is where a Windows Server starts serving that web client and its
+version document correctly, which is what lets a signed update pass its web
+verification instead of rolling back. The same Server release adds OpenCode 2
+compatibility and clearer reporting for failed updates.
 
 A desktop update in this release still ends in a **Download**, or in
 `cosy update` for a desktop the all-in-one installer placed. Update the Server
-first with `cosy update`; the app then offers the 0.8.1 download.
+first with `cosy update`; the app then offers the 0.8.2 download.
 
-## What's fixed in 0.8.1
+## What's fixed for clients in 0.8.2
 
-- The web client served through an HTTPS reverse proxy opens sessions again.
-  0.8.0 refused its requests because the page's HTTPS origin differed from the
-  plain HTTP address the Server saw. Trusted browser origins now only grant
-  cross-origin access; they no longer block other requests.
-- Native clients open sessions again on an HTTPS address without an explicit
-  port. 0.8.0 rejected the session socket's implied port 443 as a different
-  destination and kept reconnecting.
+- Android downloads open the system **Save as** screen, and a download that
+  finishes while the app is in the background stays available to save later.
+  Cached files offer **Save** and **Share**, and the filename you chose survives
+  restarts.
+- Android workspace downloads keep reporting progress after you switch servers or
+  reconnect, instead of staying at 0 bytes.
+- Artifact **Technical details** show the underlying save or preview error.
+- Completion notifications, inbox entries, Overview counts and session dots keep
+  arriving after the device changes network or a session connection drops.
+  Previously the feed stopped until the app restarted, while Settings still
+  showed the Server as connected.
+- Open sessions reconnect after a network change even when a notification or
+  another background request needs the new connection at the same moment.
+- File-close notices dismiss automatically and have a close button. With
+  accessible navigation enabled, **Undo** stays available until you dismiss one.
+- Finished sessions move into the correct recent order within their project as
+  soon as their completion arrives, without a roster refresh.
+- Claude Code skills launched in the background appear as subagents in the
+  session roster and activity bar, including their completion state.
+- Quotas show each limit as a liquid circle, with two providers per row on phones
+  and larger screens. Waves pause for reduced motion and inactive views.
 
-For everything else that changed since 0.7.2, see the 0.8.0 section of the
+For the Server side of 0.8.2 — Windows update readiness, recovery and
+diagnostics, and OpenCode 2 compatibility — see the 0.8.2 section of the
 changelog.
 
 ## Downloads
