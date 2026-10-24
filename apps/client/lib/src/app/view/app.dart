@@ -26,6 +26,7 @@ import 'package:cosyncing_client/src/features/connection/provider/connection_pro
 import 'package:cosyncing_client/src/features/connection/view/broker_auth_barrier.dart';
 import 'package:cosyncing_client/src/features/pairing/controller/installer_pairing_handoff_controller.dart';
 import 'package:cosyncing_client/src/features/pairing/view/installer_pairing_startup_barrier.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_transfer_worker.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_notification_hooks.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
@@ -43,6 +44,7 @@ import 'package:cosyncing_client/src/platform/update/local_desktop_updater_provi
 import 'package:cosyncing_client/src/platform/update/web_client_update_provider.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_bridge.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_freeze.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -130,6 +132,13 @@ class _AppState extends ConsumerState<App> {
 
   @override
   Widget build(BuildContext context) {
+    // The native engine may have completed downloads while this process was
+    // gone. Reconcile on mobile startup, before the user starts another task.
+    if (!ref.watch(clientIsWebProvider) &&
+        (defaultTargetPlatform == TargetPlatform.android ||
+            defaultTargetPlatform == TargetPlatform.iOS)) {
+      ref.listen(sessionArtifactTransferWorkerProvider, (_, _) {});
+    }
     ref
       ..watch(activeBrokerProfileHydrationProvider)
       // Redeems the all-in-one installer's one-shot pairing offer, if this is

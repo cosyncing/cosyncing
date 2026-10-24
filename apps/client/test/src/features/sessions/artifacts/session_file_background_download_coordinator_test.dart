@@ -6,6 +6,8 @@ import 'package:cosyncing_client/src/features/sessions/sessions.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import '../../../../support/feature/fake_file_downloads.dart';
+
 void main() {
   group('SessionFileBackgroundDownloadCoordinator', () {
     const sessionKey = SessionDetailKey(tool: 'claude', sessionId: 'session-1');
@@ -39,14 +41,24 @@ void main() {
       peerToken: 'peer-secret',
     );
 
+    final hubs =
+        <FakeBackgroundDownloadEngine, SessionFileBackgroundUpdateHub>{};
+    SessionFileBackgroundUpdateHub hubFor(
+      FakeBackgroundDownloadEngine engine,
+    ) => hubs.putIfAbsent(engine, () {
+      final hub = SessionFileBackgroundUpdateHub(engine);
+      addTearDown(hub.dispose);
+      return hub;
+    });
+
     SessionFileBackgroundDownloadCoordinator coordinatorWith(
-      _FakeBackgroundEngine engine, {
+      FakeBackgroundDownloadEngine engine, {
       String? brokerProfileId = 'profile-a',
       _FakeFinalizer? finalizer,
       bool withoutClient = false,
     }) {
       return SessionFileBackgroundDownloadCoordinator(
-        engine: engine,
+        hub: hubFor(engine),
         transferController: controller,
         finalizer: finalizer ?? _FakeFinalizer(cachedFile),
         brokerProfileId: brokerProfileId,
@@ -68,11 +80,142 @@ void main() {
       );
     }
 
+    // These controlled startup/database races cannot be driven through a UI
+    // tap: the native tracking write and startup completion are independent.
+    test(
+      'replacement uses live completion over a stale running record',
+      () async {
+        final engine = FakeBackgroundDownloadEngine();
+        final first = coordinatorWith(engine);
+        final result = await workerWith(first).downloadSessionFile(
+          sessionKey: sessionKey,
+          path: 'notes/report.txt',
+          fileName: 'report.txt',
+          hasActiveBrokerClient: true,
+        );
+        await first.dispose();
+        engine
+          ..records = [
+            BackgroundDownloadRecord(
+              taskId: result.transferId,
+              status: BackgroundDownloadTaskStatus.running,
+            ),
+          ]
+          ..emit(
+            BackgroundDownloadRecord(
+              taskId: result.transferId,
+              status: BackgroundDownloadTaskStatus.complete,
+              filePath: '/native/tmp/report.part',
+            ),
+          );
+        await pumpEventQueue();
+        final replacement = coordinatorWith(engine);
+        addTearDown(replacement.dispose);
+        await replacement.bootstrap();
+        expect(
+          controller.transferById(result.transferId)!.status,
+          SessionArtifactTransferStatus.cached,
+        );
+      },
+    );
+
+    test(
+      'disposal during startup leaves native listener with the hub',
+      () async {
+        final engine = FakeBackgroundDownloadEngine()
+          ..startup = Completer<void>();
+        final first = coordinatorWith(engine);
+        final starting = first.bootstrap();
+        await first.dispose();
+        final replacement = coordinatorWith(engine);
+        addTearDown(replacement.dispose);
+        final restarting = replacement.bootstrap();
+        engine.startup!.complete();
+        await Future.wait([starting, restarting]);
+        final result = await workerWith(replacement).downloadSessionFile(
+          sessionKey: sessionKey,
+          path: 'notes/report.txt',
+          fileName: 'report.txt',
+          hasActiveBrokerClient: true,
+        );
+        engine.emit(
+          BackgroundDownloadRecord(
+            taskId: result.transferId,
+            status: BackgroundDownloadTaskStatus.running,
+            bytesTransferred: 64,
+            totalBytes: 128,
+          ),
+        );
+        await pumpEventQueue();
+        expect(
+          controller.transferById(result.transferId)!.bytesTransferred,
+          64,
+        );
+      },
+    );
+
+    test(
+      'a transient ledger load failure still reconciles a native completion',
+      () async {
+        final repository = _TransientLoadRepository();
+        final now = DateTime.now();
+        const id = 'restart-task';
+        await repository.upsertTransfer(
+          SessionArtifactTransfer(
+            id: id,
+            sessionKey: sessionKey,
+            actionKey: 'report',
+            fileName: 'report.txt',
+            direction: SessionArtifactTransferDirection.download,
+            status: SessionArtifactTransferStatus.queued,
+            brokerProfileId: 'profile-a',
+            createdAt: now,
+            updatedAt: now,
+          ),
+        );
+        final restarted = ProviderContainer(
+          overrides: [
+            sessionArtifactTransferRepositoryProvider.overrideWithValue(
+              repository,
+            ),
+          ],
+        );
+        addTearDown(restarted.dispose);
+        final engine = FakeBackgroundDownloadEngine()
+          ..records = [
+            const BackgroundDownloadRecord(
+              taskId: id,
+              status: BackgroundDownloadTaskStatus.complete,
+              filePath: '/native/report.part',
+            ),
+          ];
+        final coordinator = SessionFileBackgroundDownloadCoordinator(
+          hub: hubFor(engine),
+          transferController: restarted.read(
+            sessionArtifactTransferControllerProvider.notifier,
+          ),
+          finalizer: _FakeFinalizer(cachedFile),
+          brokerProfileId: 'profile-a',
+          brokerClient: brokerClient(),
+        );
+        addTearDown(coordinator.dispose);
+        await coordinator.bootstrap();
+        expect(repository.loads, 2);
+        expect(
+          restarted
+              .read(sessionArtifactTransferControllerProvider)
+              .single
+              .status,
+          SessionArtifactTransferStatus.cached,
+        );
+      },
+    );
+
     test(
       'downloadSessionFile enqueues a native task with auth headers and '
       'marks the ledger running',
       () async {
-        final engine = _FakeBackgroundEngine();
+        final engine = FakeBackgroundDownloadEngine();
         final worker = workerWith(coordinatorWith(engine));
 
         final result = await worker.downloadSessionFile(
@@ -110,7 +253,7 @@ void main() {
       'live updates drive queued -> running -> complete with ledger '
       'reconciliation and finalization',
       () async {
-        final engine = _FakeBackgroundEngine();
+        final engine = FakeBackgroundDownloadEngine();
         final finalizer = _FakeFinalizer(cachedFile);
         final worker = workerWith(
           coordinatorWith(engine, finalizer: finalizer),
@@ -182,7 +325,7 @@ void main() {
           direction: SessionArtifactTransferDirection.download,
         );
         final finalizer = _FakeFinalizer(cachedFile);
-        final engine = _FakeBackgroundEngine()
+        final engine = FakeBackgroundDownloadEngine()
           ..records = [
             BackgroundDownloadRecord(
               taskId: id,
@@ -214,7 +357,7 @@ void main() {
         direction: SessionArtifactTransferDirection.download,
       );
       final finalizer = _FakeFinalizer(cachedFile);
-      final engine = _FakeBackgroundEngine()
+      final engine = FakeBackgroundDownloadEngine()
         ..records = [
           BackgroundDownloadRecord(
             taskId: id,
@@ -235,7 +378,7 @@ void main() {
     });
 
     test('cancel propagates to the native task and cancels the row', () async {
-      final engine = _FakeBackgroundEngine();
+      final engine = FakeBackgroundDownloadEngine();
       final finalizer = _FakeFinalizer(cachedFile);
       final worker = workerWith(coordinatorWith(engine, finalizer: finalizer));
       final result = await worker.downloadSessionFile(
@@ -272,7 +415,7 @@ void main() {
     });
 
     test('a live-update finalize error fails the row, not the zone', () async {
-      final engine = _FakeBackgroundEngine();
+      final engine = FakeBackgroundDownloadEngine();
       final finalizer = _FakeFinalizer(cachedFile)..throwOnFinalize = true;
       final worker = workerWith(coordinatorWith(engine, finalizer: finalizer));
       final result = await worker.downloadSessionFile(
@@ -302,7 +445,7 @@ void main() {
     });
 
     test('a rejected enqueue fails the ledger row', () async {
-      final engine = _FakeBackgroundEngine()..enqueueAccepted = false;
+      final engine = FakeBackgroundDownloadEngine()..enqueueAccepted = false;
       final worker = workerWith(coordinatorWith(engine));
 
       final result = await worker.downloadSessionFile(
@@ -320,7 +463,7 @@ void main() {
     });
 
     test('no active broker client fails before touching the engine', () async {
-      final engine = _FakeBackgroundEngine();
+      final engine = FakeBackgroundDownloadEngine();
       final worker = workerWith(coordinatorWith(engine, withoutClient: true));
 
       final result = await worker.downloadSessionFile(
@@ -339,52 +482,6 @@ void main() {
       );
     });
   });
-}
-
-class _FakeBackgroundEngine implements SessionFileBackgroundDownloader {
-  bool started = false;
-  bool enqueueAccepted = true;
-  final enqueued = <BackgroundSessionDownloadRequest>[];
-  final canceled = <String>[];
-  final forgotten = <String>[];
-  List<BackgroundDownloadRecord> records = const [];
-  final _updates = StreamController<BackgroundDownloadRecord>.broadcast();
-
-  void emit(BackgroundDownloadRecord record) => _updates.add(record);
-
-  @override
-  bool get isSupported => true;
-
-  @override
-  Future<void> ensureStarted() async {
-    started = true;
-  }
-
-  @override
-  Future<bool> enqueue(BackgroundSessionDownloadRequest request) async {
-    enqueued.add(request);
-    return enqueueAccepted;
-  }
-
-  @override
-  Future<List<BackgroundDownloadRecord>> loadRecords() async => records;
-
-  @override
-  Future<BackgroundDownloadRecord?> recordFor(String taskId) async {
-    for (final record in records) {
-      if (record.taskId == taskId) return record;
-    }
-    return null;
-  }
-
-  @override
-  Future<void> cancel(String taskId) async => canceled.add(taskId);
-
-  @override
-  Future<void> forget(String taskId) async => forgotten.add(taskId);
-
-  @override
-  Stream<BackgroundDownloadRecord> updates() => _updates.stream;
 }
 
 class _FakeFinalizer implements BackgroundSessionDownloadFinalizer {
@@ -441,10 +538,21 @@ class _UnusedFileService implements SessionArtifactFileService {
   );
 
   @override
-  Future<String?> exportCachedArtifact(
+  Future<ArtifactExportResult?> exportCachedArtifact(
     SessionArtifactCachedFile artifact, {
+    String? suggestedName,
     SessionArtifactCancellationToken? cancellationToken,
   }) => throw UnimplementedError(
     'foreground path not used in background tests',
   );
+}
+
+class _TransientLoadRepository
+    extends InMemorySessionArtifactTransferRepository {
+  int loads = 0;
+  @override
+  Future<List<SessionArtifactTransfer>> loadTransfers() async {
+    if (++loads == 1) throw StateError('temporary ledger read failure');
+    return super.loadTransfers();
+  }
 }

@@ -9,8 +9,13 @@ import 'package:broker_crypto/broker_crypto.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/sessions.dart';
+import 'package:cosyncing_client/src/features/settings/data/ui_preferences_store.dart';
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, debugDefaultTargetPlatformOverride;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import '../../../../support/in_memory_ui_preferences_store.dart';
 
 SessionAttachment _testAttachment(
   String name,
@@ -70,11 +75,13 @@ void main() {
       container.dispose();
     });
 
-    test('downloadArtifact caches, exports, and completes transfer', () async {
+    test('desktop download caches, exports, and completes transfer', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
       fileService
         ..mockCachedFile = const SessionArtifactCachedFile(
           cachedFilePath: '/tmp/report.html',
-          fileName: 'report.html',
+          fileName: 'report-1.html',
           contentType: 'text/html',
           byteLength: 42,
         )
@@ -87,7 +94,7 @@ void main() {
       );
 
       expect(result.outcome, SessionArtifactTransferWorkerOutcome.completed);
-      expect(result.cachedFile?.fileName, 'report.html');
+      expect(result.cachedFile?.fileName, 'report-1.html');
       expect(result.exportedPath, '/workspace/report.html');
       expect(fileService.cacheCallCount, 1);
       expect(fileService.exportCallCount, 1);
@@ -99,7 +106,8 @@ void main() {
       expect(transfer.status, SessionArtifactTransferStatus.completed);
       expect(transfer.cachedFilePath, '/tmp/report.html');
       expect(transfer.exportedPath, '/workspace/report.html');
-      expect(transfer.detailLabel, 'Saved report.html');
+      expect(transfer.fileName, 'report.html');
+      expect(transfer.detailLabel, 'Saved report-1.html');
     });
 
     test(
@@ -470,6 +478,9 @@ void main() {
               (ref) => profileAt('alpha.invalid'),
             ),
             sessionArtifactFileServiceProvider.overrideWithValue(fileService),
+            uiPreferencesStoreProvider.overrideWithValue(
+              InMemoryUiPreferencesStore(),
+            ),
           ],
         );
         addTearDown(alphaContainer.dispose);
@@ -493,6 +504,9 @@ void main() {
             ),
             brokerClientProvider.overrideWith((ref) async => brokerClient),
             sessionArtifactFileServiceProvider.overrideWithValue(fileService),
+            uiPreferencesStoreProvider.overrideWithValue(
+              InMemoryUiPreferencesStore(),
+            ),
           ],
         );
         addTearDown(betaContainer.dispose);
@@ -2561,11 +2575,18 @@ class _FakeSessionArtifactFileService implements SessionArtifactFileService {
   }
 
   @override
-  Future<String?> exportCachedArtifact(
+  Future<ArtifactExportResult?> exportCachedArtifact(
     SessionArtifactCachedFile artifact, {
+    String? suggestedName,
     SessionArtifactCancellationToken? cancellationToken,
   }) async {
     exportCallCount++;
-    return exportedPath;
+    final destination = exportedPath;
+    return destination == null
+        ? null
+        : ArtifactExportResult(
+            destination: destination,
+            displayName: suggestedName ?? artifact.fileName,
+          );
   }
 }

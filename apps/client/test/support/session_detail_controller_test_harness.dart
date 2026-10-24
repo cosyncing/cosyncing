@@ -602,15 +602,22 @@ class FakeControllerArtifactFileService implements SessionArtifactFileService {
   }
 
   @override
-  Future<String?> exportCachedArtifact(
+  Future<ArtifactExportResult?> exportCachedArtifact(
     SessionArtifactCachedFile artifact, {
+    String? suggestedName,
     SessionArtifactCancellationToken? cancellationToken,
   }) async {
     exportCallCount++;
     if (shouldThrowOnExport) {
       throw Exception('export failed');
     }
-    return exportedPath;
+    final destination = exportedPath;
+    return destination == null
+        ? null
+        : ArtifactExportResult(
+            destination: destination,
+            displayName: suggestedName ?? artifact.fileName,
+          );
   }
 }
 

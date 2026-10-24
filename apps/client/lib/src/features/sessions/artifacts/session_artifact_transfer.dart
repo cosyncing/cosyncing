@@ -72,6 +72,7 @@ class SessionArtifactTransfer {
     this.sourceUrl,
     this.cachedFilePath,
     this.exportedPath,
+    this.exportedFileName,
     this.contentType,
     this.contentHash,
     this.uploadId,
@@ -123,6 +124,32 @@ class SessionArtifactTransfer {
 
   /// User-selected/exported path when a download completes.
   final String? exportedPath;
+
+  /// Actual destination name, independent of status messages and source name.
+  final String? exportedFileName;
+
+  /// Android document destinations cannot be passed to filesystem actions.
+  bool get exportedToContentUri =>
+      Uri.tryParse(exportedPath ?? '')?.scheme == 'content';
+
+  /// Filesystem copy for Copy path, Open with, Reveal and Preview.
+  String? get localFilePath {
+    final exported = exportedPath?.trim();
+    if (exported != null && exported.isNotEmpty && !exportedToContentUri) {
+      return exported;
+    }
+    final cached = cachedFilePath?.trim();
+    return cached == null || cached.isEmpty ? null : cached;
+  }
+
+  /// Destination display name, falling back for older records without one.
+  String get savedFileName => exportedFileName ?? fileName;
+
+  /// Only settled copies may be saved/shared; retry keeps its old cache path.
+  bool get hasSettledCachedCopy =>
+      cachedFilePath != null &&
+      status != SessionArtifactTransferStatus.queued &&
+      status != SessionArtifactTransferStatus.running;
 
   /// MIME type when known.
   final String? contentType;
@@ -252,6 +279,7 @@ class SessionArtifactTransfer {
     SessionArtifactTransferStatus? status,
     String? cachedFilePath,
     String? exportedPath,
+    String? exportedFileName,
     String? contentType,
     String? contentHash,
     String? uploadId,
@@ -265,6 +293,7 @@ class SessionArtifactTransfer {
     String? message,
     DateTime? updatedAt,
     int? attemptCount,
+    bool clearCachedCopy = false,
     bool clearUploadId = false,
     bool clearDownloadCheckpoint = false,
     bool clearError = false,
@@ -281,8 +310,13 @@ class SessionArtifactTransfer {
       attemptCount: attemptCount ?? this.attemptCount,
       artifactKey: artifactKey,
       sourceUrl: sourceUrl,
-      cachedFilePath: cachedFilePath ?? this.cachedFilePath,
-      exportedPath: exportedPath ?? this.exportedPath,
+      cachedFilePath: clearCachedCopy
+          ? null
+          : cachedFilePath ?? this.cachedFilePath,
+      exportedPath: clearCachedCopy ? null : exportedPath ?? this.exportedPath,
+      exportedFileName: clearCachedCopy
+          ? null
+          : exportedFileName ?? this.exportedFileName,
       contentType: contentType ?? this.contentType,
       contentHash: contentHash ?? this.contentHash,
       uploadId: clearUploadId ? null : uploadId ?? this.uploadId,
@@ -395,6 +429,7 @@ class DriftSessionArtifactTransferRepository
       sourceUrl: row.sourceUrl,
       cachedFilePath: row.cachedFilePath,
       exportedPath: row.exportedPath,
+      exportedFileName: row.exportedFileName,
       contentType: row.contentType,
       contentHash: row.contentHash,
       byteLength: row.byteLength,
@@ -426,6 +461,7 @@ class DriftSessionArtifactTransferRepository
       sourceUrl: Value(transfer.sourceUrl),
       cachedFilePath: Value(transfer.cachedFilePath),
       exportedPath: Value(transfer.exportedPath),
+      exportedFileName: Value(transfer.exportedFileName),
       contentType: Value(transfer.contentType),
       contentHash: Value(transfer.contentHash),
       uploadId: Value(transfer.uploadId),
@@ -465,11 +501,19 @@ final sessionArtifactTransferControllerProvider =
 class SessionArtifactTransferController
     extends Notifier<List<SessionArtifactTransfer>> {
   var _sequence = 0;
+  Future<void>? _hydration;
+
+  /// Initial durable ledger load, before native restart reconciliation.
+  Future<void> get ready =>
+      _hydration ??= hydrate().catchError((Object error, StackTrace stack) {
+        _hydration = null;
+        Error.throwWithStackTrace(error, stack);
+      });
   Future<void> _persistenceQueue = Future<void>.value();
 
   @override
   List<SessionArtifactTransfer> build() {
-    unawaited(hydrate());
+    unawaited(ready.catchError((Object _) {}));
     return const [];
   }
 
@@ -751,6 +795,7 @@ class SessionArtifactTransferController
     String id,
     SessionArtifactCachedFile artifact, {
     required String exportedPath,
+    String? exportedFileName,
     String message = '',
   }) {
     _update(
@@ -759,6 +804,7 @@ class SessionArtifactTransferController
         status: SessionArtifactTransferStatus.completed,
         cachedFilePath: artifact.cachedFilePath,
         exportedPath: exportedPath,
+        exportedFileName: exportedFileName,
         contentType: artifact.contentType,
         contentHash: artifact.contentHash,
         byteLength: artifact.byteLength,
@@ -867,6 +913,7 @@ class SessionArtifactTransferController
         updatedAt: now,
         clearError: true,
         clearProgress: clearUploadProgress,
+        clearCachedCopy: clearUploadProgress,
       );
     });
   }

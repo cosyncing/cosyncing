@@ -2101,5 +2101,20 @@
         "type": "int"
       }
     }
-  }
+  },
+  "share": "Compartir",
+  "transferStatusSaved": "Guardado",
+  "transferStatusDownloaded": "Descargado",
+  "transferSavedToDevice": "Guardado en el dispositivo: {fileName}",
+  "transferCachedCopyRemoved": "Se eliminó la copia en caché. Vuelve a descargar el archivo.",
+  "transferShareFailed": "No se pudo compartir este archivo. Inténtalo de nuevo.",
+  "@transferSavedToDevice": {
+    "placeholders": {
+      "fileName": {
+        "type": "String"
+      }
+    }
+  },
+  "transferSaveBusy": "Hay otro archivo guardándose. Vuelve a guardar cuando termine.",
+  "transferSaveDeferred": "Descargado. Pulsa Guardar para elegir un destino."
 }

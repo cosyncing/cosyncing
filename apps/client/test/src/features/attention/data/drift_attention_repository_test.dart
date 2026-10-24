@@ -24,7 +24,7 @@ void main() {
           final userVersion = await database
               .customSelect('PRAGMA user_version')
               .getSingle();
-          expect(userVersion.data['user_version'], 20);
+          expect(userVersion.data['user_version'], 21);
 
           await database.close();
         },
@@ -49,9 +49,9 @@ void main() {
             .getSingle();
         final userVersionValue = userVersion.data['user_version'];
         expect(userVersionValue, isA<int>());
-        expect(userVersionValue as int, 20);
+        expect(userVersionValue as int, 21);
 
-        expect(database.schemaVersion, 20);
+        expect(database.schemaVersion, 21);
 
         final eventColumnNames = await _columnNames(
           database,

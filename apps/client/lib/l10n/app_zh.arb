@@ -3079,5 +3079,20 @@
         "type": "int"
       }
     }
-  }
+  },
+  "share": "分享",
+  "transferStatusSaved": "已保存",
+  "transferStatusDownloaded": "已下载",
+  "transferSavedToDevice": "已保存到设备：{fileName}",
+  "transferCachedCopyRemoved": "缓存副本已被移除。请重新下载文件。",
+  "transferShareFailed": "无法分享此文件，请重试。",
+  "@transferSavedToDevice": {
+    "placeholders": {
+      "fileName": {
+        "type": "String"
+      }
+    }
+  },
+  "transferSaveBusy": "另一个文件正在保存。完成后请再次点按保存。",
+  "transferSaveDeferred": "已下载。请点按保存以选择保存位置。"
 }

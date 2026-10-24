@@ -13,6 +13,12 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Android downloads open the system Save as screen, and cached files offer
+  Save and Share. Downloads that finish while the app is in the background
+  remain available to save later. The chosen saved filename survives restarts.
+- Android workspace downloads keep reporting progress after switching servers
+  or reconnecting, instead of staying at 0 bytes.
+- Artifact Technical details show the underlying save or preview error.
 - Completion notifications, inbox entries, Overview counts and session dots keep
   arriving after the device changes network or a session connection drops.
   Previously the notification feed stopped until the app restarted while

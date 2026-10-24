@@ -22,6 +22,7 @@ import 'package:video_player_platform_interface/video_player_platform_interface.
 import 'package:webview_flutter_platform_interface/webview_flutter_platform_interface.dart'
     as html;
 
+import '../support/feature/app_driver.dart';
 import '../support/feature/composer_driver.dart';
 import '../support/feature/cosyncing_app.dart';
 import '../support/feature/fake_os_notifications.dart';
@@ -630,7 +631,7 @@ void main() {
         await app.tapKey('session-detail-view-menu');
         await app.tapKey('session-detail-view-item-files');
         await app.tapKey('session-detail-files-preview-legacy.mp4');
-        await _pumpNativeIoUntil(app.tester, () => player.sources.isNotEmpty);
+        await _pumpNativeIoUntil(app, () => player.sources.isNotEmpty);
         if (closeDuringCreation) {
           await app.pumpUntil(
             () => player.sources.isNotEmpty,
@@ -640,12 +641,12 @@ void main() {
           await app.tapKey('file-viewer-close');
           expect(file.existsSync(), isTrue);
           player.allowCreation.complete();
-          await _pumpNativeIoUntil(app.tester, () => !file.parent.existsSync());
+          await _pumpNativeIoUntil(app, () => !file.parent.existsSync());
           return;
         }
         if (failsCreation) {
           await _pumpNativeIoUntil(
-            app.tester,
+            app,
             () => find
                 .text(
                   'This file could not be previewed. '
@@ -655,7 +656,7 @@ void main() {
                 .isNotEmpty,
           );
           final file = File.fromUri(Uri.parse(player.sources.single.uri!));
-          await _pumpNativeIoUntil(app.tester, () => !file.parent.existsSync());
+          await _pumpNativeIoUntil(app, () => !file.parent.existsSync());
           await app.tapKey('file-viewer-close');
           expect(app.activeTabKey, 'codex/s1');
           return;
@@ -704,7 +705,7 @@ void main() {
           await app.flushRealAsync();
           await app.tester.idle();
           await _pumpNativeIoUntil(
-            app.tester,
+            app,
             () => player.sources.length == 2,
           );
           await app.waitFor(find.byTooltip('Play'));
@@ -715,7 +716,7 @@ void main() {
           AppLifecycleState.resumed,
         );
         expect(find.byKey(const Key('file-viewer-pane')), findsNothing);
-        await _pumpNativeIoUntil(app.tester, () => player.disposeStarted);
+        await _pumpNativeIoUntil(app, () => player.disposeStarted);
         expect(player.disposeStarted, isTrue);
         expect(
           file.existsSync(),
@@ -724,7 +725,7 @@ void main() {
         );
         player.allowDispose.complete();
         await _pumpNativeIoUntil(
-          app.tester,
+          app,
           () => directory.listSync().isEmpty,
         );
       },
@@ -908,32 +909,11 @@ void main() {
   );
 }
 
-// Native file operations need actual I/O event turns, not only fake-clock
-// frames. An awaited filesystem probe is an event barrier, with no sleep or
-// product timeout expansion. The normal app driver still owns UI assertions.
+// Native file operations use the shared real-I/O condition wait.
 Future<void> _pumpNativeIoUntil(
-  WidgetTester tester,
+  AppDriver app,
   bool Function() condition,
-) async {
-  // A count of filesystem probes is not an I/O deadline: fast probes can
-  // exhaust the count before a pending create/write finishes under load.
-  const timeout = Duration(seconds: 20);
-  final elapsed = Stopwatch()..start();
-  var turns = 0;
-  while (!condition() && elapsed.elapsed < timeout) {
-    // Intentional async I/O: a synchronous probe cannot yield to file
-    // callbacks.
-    // ignore: avoid_slow_async_io
-    await tester.runAsync(() => Directory.systemTemp.exists());
-    await tester.pump();
-    turns++;
-  }
-  expect(
-    condition(),
-    isTrue,
-    reason: 'native media I/O completed in ${elapsed.elapsed} ($turns turns)',
-  );
-}
+) => app.pumpNativeIoUntil(condition, reason: 'native media I/O completed');
 
 class _TemporaryPaths extends PathProviderPlatform {
   _TemporaryPaths(this.path);

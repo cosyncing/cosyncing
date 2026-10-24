@@ -362,6 +362,13 @@ void main() {
             contains("Couldn't save this artifact."),
           );
           expect(
+            container
+                .read(sessionDetailControllerProvider(key))
+                .actionStateFor('inline-artifact.bin')
+                .detail,
+            contains('cache failed'),
+          );
+          expect(
             container.read(sessionDetailControllerProvider(key)).error,
             isNull,
           );

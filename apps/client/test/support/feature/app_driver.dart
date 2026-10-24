@@ -87,6 +87,39 @@ class AppDriver {
     await tester.runAsync(() async {});
   }
 
+  /// Waits for real native/file I/O while also servicing application frames.
+  ///
+  /// An event-turn count is not a time bound: fast probes can exhaust it
+  /// before a pending filesystem operation runs under parallel suite load.
+  /// Use the driver's normal wait budget unless a caller has a narrower one.
+  Future<void> pumpNativeIoUntil(
+    bool Function() condition, {
+    required String reason,
+    Duration? budget,
+    String Function()? diagnostics,
+  }) async {
+    final limit = budget ?? step * maxSteps;
+    final elapsed = Stopwatch()..start();
+    var advanced = Duration.zero;
+    var turns = 0;
+    while (!condition() && elapsed.elapsed < limit) {
+      // An awaited filesystem probe yields to real callbacks without a sleep.
+      // ignore: avoid_slow_async_io
+      await tester.runAsync(() => Directory.systemTemp.exists());
+      final now = elapsed.elapsed;
+      await tester.pump(now - advanced);
+      advanced = now;
+      turns++;
+    }
+    if (!condition()) {
+      fail(
+        '$reason after $turns I/O turns '
+        '(${elapsed.elapsedMilliseconds}ms real; budget $limit). '
+        '${diagnostics?.call() ?? ''}',
+      );
+    }
+  }
+
   /// Lets pending work land: flushes microtasks, then pumps until no frame is
   /// scheduled, advancing at most [budget] of fake time.
   ///

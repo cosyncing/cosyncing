@@ -10,8 +10,9 @@
  * Feature e2e suites are discovered from `e2e/<suite>/**\/*.test.ts` and run
  * with `bun test`; listing them here is unnecessary.
  */
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
+import { homedir } from 'node:os';
 import { legacyTasks } from './legacy-tasks.ts';
 import { windowsLane } from './lib/windows-lane.ts';
 
@@ -21,6 +22,7 @@ export type SuiteId =
   | 'adapters'
   | 'packaging'
   | 'client'
+  | 'android'
   | 'web'
   | 'windows';
 
@@ -258,6 +260,30 @@ export const suites: Suite[] = [
     ],
   },
   {
+    // Native Android needs an SDK/JDK, supplied by the existing Android build
+    // job rather than the Flutter test shards. Local full checks include it
+    // whenever an Android SDK is configured; release builds stay build-only.
+    id: 'android',
+    title: 'Android client native JVM scenarios',
+    platforms: ['linux', 'darwin', 'win32'],
+    prepare: [
+      { id: 'pub-get', run: ['flutter', 'pub', 'get'], cwd: 'apps/client' },
+      // gradlew and its wrapper jar are gitignored; Flutter writes them when it
+      // configures the Android project, so a fresh checkout has neither.
+      { id: 'gradle-wrapper', run: ['flutter', 'build', 'apk', '--config-only'], cwd: 'apps/client' },
+    ],
+    tasks: [{
+      id: 'native-jvm',
+      retry: false,
+      run: [process.platform === 'win32' ? 'android/gradlew.bat' : 'android/gradlew',
+        '-p', 'android', ':app:testDebugUnitTest', '--console=plain'],
+      cwd: 'apps/client',
+      serial: true,
+      timeoutMs: 600_000,
+      estimateMs: 60_000,
+    }],
+  },
+  {
     id: 'web',
     title: 'Web client in a real browser against fixture brokers',
     prepare: [
@@ -331,5 +357,15 @@ for (const suite of suites) {
 }
 
 export function suiteRunsOn(suite: Suite, host: NodeJS.Platform): boolean {
-  return (suite.platforms ?? ['linux', 'darwin']).includes(host);
+  const supportedHost = (suite.platforms ?? ['linux', 'darwin']).includes(host);
+  if (!supportedHost || suite.id !== 'android') return supportedHost;
+  const properties = join(ROOT, 'apps', 'client', 'android', 'local.properties');
+  const configured = existsSync(properties)
+    ? readFileSync(properties, 'utf8').match(/^sdk\.dir=(.+)$/m)?.[1]?.trim()
+      ?.replace(/\\:/g, ':').replace(/\\\\/g, '\\').replace(/\\ /g, ' ')
+    : undefined;
+  const roots = [configured, process.env.ANDROID_HOME, process.env.ANDROID_SDK_ROOT,
+    join(homedir(), 'Android', 'Sdk'), join(homedir(), 'Library', 'Android', 'sdk'),
+    ...(process.env.LOCALAPPDATA ? [join(process.env.LOCALAPPDATA, 'Android', 'Sdk')] : [])];
+  return roots.some((root) => root != null && existsSync(join(root, 'platforms')));
 }

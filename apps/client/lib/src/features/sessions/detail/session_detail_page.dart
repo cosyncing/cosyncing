@@ -93,6 +93,7 @@ import 'package:cosyncing_client/src/features/settings/controller/tool_display_c
 import 'package:cosyncing_client/src/features/settings/controller/tool_visibility_controller.dart';
 import 'package:cosyncing_client/src/features/settings/view/settings_common.dart';
 import 'package:cosyncing_client/src/features/transfers/data/local_transfer_file_opener.dart';
+import 'package:cosyncing_client/src/features/transfers/view/cached_transfer_actions.dart';
 import 'package:cosyncing_client/src/features/voice/controller/read_aloud_controller.dart';
 import 'package:cosyncing_client/src/features/voice/controller/read_aloud_rate_controller.dart';
 import 'package:cosyncing_client/src/features/voice/controller/voice_input_controller.dart';
@@ -107,7 +108,7 @@ import 'package:cosyncing_client/src/platform/update/web_handoff_hold.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_participants.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:flutter/foundation.dart'
-    show ValueListenable, kIsWeb, listEquals, setEquals;
+    show TargetPlatform, ValueListenable, kIsWeb, listEquals, setEquals;
 import 'package:flutter/gestures.dart'
     show HitTestResult, PointerDownEvent, PointerScrollEvent, kPrimaryButton;
 import 'package:flutter/material.dart';
@@ -1408,6 +1409,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
       return;
     }
     if (!result.succeeded ||
+        result.outcome == SessionArtifactTransferWorkerOutcome.cached ||
         result.outcome ==
             SessionArtifactTransferWorkerOutcome.enqueuedInBackground) {
       // Surface both foreground failures and the background-started notice so
@@ -1419,6 +1421,8 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
             result.outcome ==
                     SessionArtifactTransferWorkerOutcome.enqueuedInBackground
                 ? l10n.sessionFileDownloadStartedInBackground
+                : result.outcome == SessionArtifactTransferWorkerOutcome.cached
+                ? result.message
                 : l10n.sessionFileDownloadFailed,
           ),
         ),

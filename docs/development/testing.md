@@ -25,6 +25,7 @@ runner is `scripts/ci/run.ts`.
 | `adapters` | Every agent adapter and the Claude Code mod |
 | `packaging` | JavaScript installation, compiled assets, installers, release supply chain |
 | `client` | Flutter client (format, analyze, tests, sharded three ways) and the Dart packages |
+| `android` | Native Android JVM scenarios; requires an Android SDK and JDK; uses the existing Android build job |
 | `web` | The built web client in a real browser against fixture brokers |
 | `windows` | The broker on Windows: host primitives, secure files, service, installer |
 
@@ -168,6 +169,10 @@ open defect is fixed.
 (every suite this host can run, unsharded and unfiltered) for exactly the
 current commit. A dirty tree can be rehearsed but is never publication
 eligible.
+
+Native Android JVM scenarios run through `bun run check android`; unfiltered
+local checks include them when an Android SDK is configured. The existing
+Android build job supplies that platform's SDK/JDK and runs the same suite.
 
 Not covered by `bun run check`: release publication, replacing a running
 broker, native platform builds (CI builds them in separate jobs), and

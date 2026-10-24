@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -14,6 +15,7 @@ import 'package:cosyncing_client/src/features/storage/data/managed_file_access.d
 import 'package:cosyncing_client/src/features/storage/data/managed_memory_files.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as path_util;
 import 'package:path_provider/path_provider.dart';
@@ -50,6 +52,31 @@ class SessionArtifactCachedFile {
   final String? contentHash;
 }
 
+/// A successful save, including the document provider's actual display name.
+@immutable
+class ArtifactExportResult {
+  /// Creates an export receipt.
+  const ArtifactExportResult({
+    required this.destination,
+    required this.displayName,
+  });
+
+  /// Filesystem destination or Android content URI.
+  final String destination;
+
+  /// Name returned by the destination, independent of the source/cache name.
+  final String displayName;
+}
+
+/// The app's cached bytes no longer exist. UI copy is resolved by the caller.
+class CachedCopyMissingException implements Exception {
+  /// Creates a missing-copy failure without localized message matching.
+  const CachedCopyMissingException();
+
+  @override
+  String toString() => 'The cached copy no longer exists.';
+}
+
 /// Cache/export lifecycle phases for artifact actions.
 enum SessionArtifactActionPhase {
   /// No action is running.
@@ -78,6 +105,7 @@ class SessionArtifactActionState {
   const SessionArtifactActionState({
     required this.phase,
     this.message = '',
+    this.detail,
   });
 
   /// Current phase.
@@ -85,12 +113,19 @@ class SessionArtifactActionState {
 
   /// Supplemental message for the current phase.
   final String message;
+
+  /// Raw failure diagnostic for the explicit Technical details disclosure.
+  final String? detail;
 }
 
 /// Cooperative cancellation signal for artifact file operations.
 class SessionArtifactCancellationToken {
   var _isCanceled = false;
   String _reason = 'Canceled by user';
+  final _canceled = Completer<void>();
+
+  /// Completes once so native pickers/copies can be canceled cooperatively.
+  Future<void> get whenCanceled => _canceled.future;
 
   /// Whether cancellation has been requested.
   bool get isCanceled => _isCanceled;
@@ -102,6 +137,7 @@ class SessionArtifactCancellationToken {
   void cancel([String reason = 'Canceled by user']) {
     _isCanceled = true;
     _reason = reason;
+    if (!_canceled.isCompleted) _canceled.complete();
   }
 
   /// Throws when cancellation has been requested.
@@ -484,6 +520,109 @@ final class FileSelectorArtifactSaveTargetProvider
   }
 }
 
+/// Checks a cached filesystem copy at the native file-service boundary.
+bool cachedArtifactFileExists(String path) =>
+    !kIsWeb && File(path).existsSync();
+
+/// Exports a local cached file without reading its contents into Dart memory.
+// ignore: one_member_abstracts
+abstract interface class ArtifactExportTarget {
+  /// Returns a destination path/URI, or null when the user cancels.
+  Future<ArtifactExportResult?> export({
+    required String sourcePath,
+    required String suggestedName,
+    String? mimeType,
+    SessionArtifactCancellationToken? cancellationToken,
+  });
+}
+
+/// Desktop save picker and filesystem copy.
+final class FileSelectorArtifactExportTarget implements ArtifactExportTarget {
+  /// Creates a target with the existing desktop save picker.
+  const FileSelectorArtifactExportTarget(this.picker);
+
+  /// Local path picker.
+  final ArtifactSaveTargetProvider picker;
+
+  @override
+  Future<ArtifactExportResult?> export({
+    required String sourcePath,
+    required String suggestedName,
+    String? mimeType,
+    SessionArtifactCancellationToken? cancellationToken,
+  }) async {
+    final destination = await picker.pickSavePath(
+      suggestedName: suggestedName,
+      mimeType: mimeType,
+    );
+    cancellationToken?.throwIfCanceled();
+    if (destination == null) return null;
+    await File(sourcePath).copy(destination);
+    return ArtifactExportResult(
+      destination: destination,
+      displayName: path_util.basename(destination),
+    );
+  }
+}
+
+/// Android Storage Access Framework save picker and streamed native copy.
+final class AndroidArtifactExportTarget implements ArtifactExportTarget {
+  /// Creates the app-owned platform boundary.
+  AndroidArtifactExportTarget();
+
+  static const _channel = MethodChannel('com.cosyncing.client/file_export');
+  static int _requestSequence = 0;
+
+  @override
+  Future<ArtifactExportResult?> export({
+    required String sourcePath,
+    required String suggestedName,
+    String? mimeType,
+    SessionArtifactCancellationToken? cancellationToken,
+  }) async {
+    cancellationToken?.throwIfCanceled();
+    final requestId = ++_requestSequence;
+    var active = true;
+    if (cancellationToken != null) {
+      unawaited(
+        cancellationToken.whenCanceled.then((_) async {
+          if (!active) return;
+          try {
+            await _channel.invokeMethod<void>('cancelSaveAs', {
+              'requestId': requestId,
+            });
+          } on Object {
+            // Best effort: without a native handler there is no picker left to
+            // close, and the pending save still settles through its own reply.
+          }
+        }),
+      );
+    }
+    Map<String, dynamic>? result;
+    try {
+      result = await _channel.invokeMapMethod<String, dynamic>('saveAs', {
+        'requestId': requestId,
+        'sourcePath': sourcePath,
+        'suggestedName': suggestedName,
+        'mimeType': mimeType,
+      });
+    } finally {
+      active = false;
+    }
+    // A successful native write is committed even if cancellation arrived at
+    // the same instant. Native cancellation returns null before committing.
+    if (result == null) cancellationToken?.throwIfCanceled();
+    final uri = result?['uri'] as String?;
+    final name = result?['displayName'] as String?;
+    return uri == null
+        ? null
+        : ArtifactExportResult(
+            destination: uri,
+            displayName: (name?.isNotEmpty ?? false) ? name! : suggestedName,
+          );
+  }
+}
+
 /// Reports byte progress from cache/export operations.
 typedef SessionArtifactProgressCallback =
     void Function({required int bytesTransferred, int? totalBytes});
@@ -522,8 +661,9 @@ abstract interface class SessionArtifactFileService {
   });
 
   /// Exports cached artifact through destination picker/interaction.
-  Future<String?> exportCachedArtifact(
+  Future<ArtifactExportResult?> exportCachedArtifact(
     SessionArtifactCachedFile artifact, {
+    String? suggestedName,
     SessionArtifactCancellationToken? cancellationToken,
   });
 }
@@ -590,6 +730,9 @@ final sessionArtifactFileServiceProvider = Provider<SessionArtifactFileService>(
       downloadBackend: downloadBackend,
       onCompleted: ref.watch(deviceFileRegistryProvider).register,
       cacheDirectoryProvider: const TemporaryArtifactCacheDirectoryProvider(),
+      exportTarget: defaultTargetPlatform == TargetPlatform.android
+          ? AndroidArtifactExportTarget()
+          : null,
       saveTargetProvider: FileSelectorArtifactSaveTargetProvider(
         typeLabel: artifactSaveTypeLabel(
           appLocale: ref.watch(localeControllerProvider).valueOrNull,
@@ -718,8 +861,9 @@ final class BrowserSessionArtifactFileService
   }
 
   @override
-  Future<String?> exportCachedArtifact(
+  Future<ArtifactExportResult?> exportCachedArtifact(
     SessionArtifactCachedFile artifact, {
+    String? suggestedName,
     SessionArtifactCancellationToken? cancellationToken,
   }) async {
     cancellationToken?.throwIfCanceled();
@@ -733,11 +877,14 @@ final class BrowserSessionArtifactFileService
     try {
       await XFile.fromData(
         entry,
-        name: artifact.fileName,
+        name: suggestedName ?? artifact.fileName,
         mimeType: artifact.contentType,
       ).saveTo('');
       cancellationToken?.throwIfCanceled();
-      return artifact.fileName;
+      return ArtifactExportResult(
+        destination: suggestedName ?? artifact.fileName,
+        displayName: suggestedName ?? artifact.fileName,
+      );
     } finally {
       release();
     }
@@ -994,11 +1141,13 @@ final class DefaultSessionArtifactFileService
     required ArtifactDownloadBackend? downloadBackend,
     required ArtifactCacheDirectoryProvider cacheDirectoryProvider,
     required ArtifactSaveTargetProvider saveTargetProvider,
+    ArtifactExportTarget? exportTarget,
     ArtifactCopyCompleted? onCompleted,
   }) : this._(
          downloadBackend: downloadBackend,
          cacheDirectoryProvider: cacheDirectoryProvider,
          saveTargetProvider: saveTargetProvider,
+         exportTarget: exportTarget,
          onCompleted: onCompleted,
        );
 
@@ -1006,9 +1155,11 @@ final class DefaultSessionArtifactFileService
     required this._downloadBackend,
     required this._cacheDirectoryProvider,
     required this._saveTargetProvider,
+    this._exportTarget,
     this._onCompleted,
   });
 
+  final ArtifactExportTarget? _exportTarget;
   final ArtifactDownloadBackend? _downloadBackend;
   final ArtifactCacheDirectoryProvider _cacheDirectoryProvider;
   final ArtifactSaveTargetProvider _saveTargetProvider;
@@ -1374,196 +1525,205 @@ final class DefaultSessionArtifactFileService
       partialPath = '$finalPath.part';
     }
     final partialFile = File(partialPath);
-    await partialFile.parent.create(recursive: true);
-    var offset = 0;
-    if (partialFile.existsSync()) offset = partialFile.lengthSync();
-    var totalBytes = checkpoint?.totalBytes;
-    var etag = offset > 0 ? checkpoint?.etag : null;
-    var lastModified = offset > 0 ? checkpoint?.lastModified : null;
-    var resolvedMime = mimeType;
-    String? servedArtifactKey;
-    String? servedContentHash;
+    final release = ManagedFileAccess.shared.acquire(partialPath);
+    try {
+      await partialFile.parent.create(recursive: true);
+      var offset = 0;
+      if (partialFile.existsSync()) offset = partialFile.lengthSync();
+      var totalBytes = checkpoint?.totalBytes;
+      var etag = offset > 0 ? checkpoint?.etag : null;
+      var lastModified = offset > 0 ? checkpoint?.lastModified : null;
+      var resolvedMime = mimeType;
+      String? servedArtifactKey;
+      String? servedContentHash;
 
-    if (offset > 0 && etag == null && lastModified == null) {
-      await partialFile.writeAsBytes(const [], flush: true);
-      offset = 0;
-      totalBytes = null;
-      await onCheckpoint?.call(
-        SessionFileDownloadCheckpoint(
-          partialFilePath: partialPath,
-          bytesTransferred: 0,
-        ),
-      );
-    }
-
-    onProgress?.call(bytesTransferred: offset, totalBytes: totalBytes);
-    var restartedRepresentation = false;
-    while (totalBytes == null || offset < totalBytes) {
-      cancellationToken?.throwIfCanceled();
-      final validator = etag ?? lastModified;
-      final download = await fetchRange(
-        rangeStart: offset,
-        rangeEnd: offset + chunkBytes - 1,
-        ifRange: offset == 0 ? null : validator,
-      );
-      cancellationToken?.throwIfCanceled();
-      resolvedMime = download.contentType ?? resolvedMime;
-      servedArtifactKey = download.artifactKey ?? servedArtifactKey;
-      servedContentHash = download.contentHash ?? servedContentHash;
-      final range = _parseContentRange(download.contentRange);
-
-      if (download.statusCode == 416) {
-        final remoteLength = range?.total;
-        if (remoteLength != null && remoteLength == offset) {
-          if (!partialFile.existsSync()) {
-            await partialFile.writeAsBytes(const [], flush: true);
-          }
-          totalBytes = remoteLength;
-          break;
-        }
-        if (!restartedRepresentation) {
-          restartedRepresentation = true;
-          await partialFile.writeAsBytes(const [], flush: true);
-          offset = 0;
-          totalBytes = null;
-          etag = null;
-          lastModified = null;
-          await onCheckpoint?.call(
-            SessionFileDownloadCheckpoint(
-              partialFilePath: partialPath,
-              bytesTransferred: 0,
-            ),
-          );
-          continue;
-        }
-        throw const BrokerException(
-          message: 'Download range is outside the current file.',
-          statusCode: 416,
+      if (offset > 0 && etag == null && lastModified == null) {
+        await partialFile.writeAsBytes(const [], flush: true);
+        offset = 0;
+        totalBytes = null;
+        await onCheckpoint?.call(
+          SessionFileDownloadCheckpoint(
+            partialFilePath: partialPath,
+            bytesTransferred: 0,
+          ),
         );
       }
 
-      if (download.statusCode == 200) {
-        if (download.contentLength case final advertisedLength?
-            when advertisedLength != download.bytes.length) {
+      onProgress?.call(bytesTransferred: offset, totalBytes: totalBytes);
+      var restartedRepresentation = false;
+      while (totalBytes == null || offset < totalBytes) {
+        cancellationToken?.throwIfCanceled();
+        final validator = etag ?? lastModified;
+        final download = await fetchRange(
+          rangeStart: offset,
+          rangeEnd: offset + chunkBytes - 1,
+          ifRange: offset == 0 ? null : validator,
+        );
+        cancellationToken?.throwIfCanceled();
+        resolvedMime = download.contentType ?? resolvedMime;
+        servedArtifactKey = download.artifactKey ?? servedArtifactKey;
+        servedContentHash = download.contentHash ?? servedContentHash;
+        final range = _parseContentRange(download.contentRange);
+
+        if (download.statusCode == 416) {
+          final remoteLength = range?.total;
+          if (remoteLength != null && remoteLength == offset) {
+            if (!partialFile.existsSync()) {
+              await partialFile.writeAsBytes(const [], flush: true);
+            }
+            totalBytes = remoteLength;
+            break;
+          }
+          if (!restartedRepresentation) {
+            restartedRepresentation = true;
+            await partialFile.writeAsBytes(const [], flush: true);
+            offset = 0;
+            totalBytes = null;
+            etag = null;
+            lastModified = null;
+            await onCheckpoint?.call(
+              SessionFileDownloadCheckpoint(
+                partialFilePath: partialPath,
+                bytesTransferred: 0,
+              ),
+            );
+            continue;
+          }
           throw const BrokerException(
-            message: 'Server returned an incomplete full download.',
+            message: 'Download range is outside the current file.',
+            statusCode: 416,
           );
         }
-        await partialFile.writeAsBytes(download.bytes, flush: true);
-        offset = download.bytes.length;
-        totalBytes = offset;
-      } else if (download.statusCode == 206) {
-        if (download.etag == null && download.lastModified == null) {
-          // A 206 with no validator cannot guard later range requests with an
-          // If-Range header, so a mid-download representation change would be
-          // undetectable and could corrupt the file. Abandon the partial and
-          // fall back to one un-ranged full download.
-          if (partialFile.existsSync()) partialFile.deleteSync();
-          await onCheckpoint?.call(
-            SessionFileDownloadCheckpoint(
-              partialFilePath: partialPath,
-              bytesTransferred: 0,
-            ),
-          );
-          return fetchWhole(resolvedMime);
-        }
-        if (range == null ||
-            range.total == null ||
-            range.start != offset ||
-            range.end < range.start ||
-            range.end >= range.total! ||
-            range.end - range.start + 1 != download.bytes.length ||
-            download.bytes.isEmpty) {
-          throw const BrokerException(
-            message: 'Server returned an invalid download range.',
-          );
-        }
-        final representationChanged =
-            (etag != null && download.etag != etag) ||
-            (etag == null &&
-                lastModified != null &&
-                download.lastModified != lastModified);
-        if (representationChanged) {
-          if (restartedRepresentation) {
+
+        if (download.statusCode == 200) {
+          if (download.contentLength case final advertisedLength?
+              when advertisedLength != download.bytes.length) {
             throw const BrokerException(
-              message: 'Download representation changed repeatedly.',
+              message: 'Server returned an incomplete full download.',
             );
           }
-          restartedRepresentation = true;
-          await partialFile.writeAsBytes(const [], flush: true);
-          offset = 0;
-          totalBytes = null;
-          etag = null;
-          lastModified = null;
-          await onCheckpoint?.call(
-            SessionFileDownloadCheckpoint(
-              partialFilePath: partialPath,
-              bytesTransferred: 0,
-            ),
+          await partialFile.writeAsBytes(download.bytes, flush: true);
+          offset = download.bytes.length;
+          totalBytes = offset;
+        } else if (download.statusCode == 206) {
+          if (download.etag == null && download.lastModified == null) {
+            // A 206 with no validator cannot guard later range requests with an
+            // If-Range header, so a mid-download representation change would be
+            // undetectable and could corrupt the file. Abandon the partial and
+            // fall back to one un-ranged full download.
+            if (partialFile.existsSync()) partialFile.deleteSync();
+            await onCheckpoint?.call(
+              SessionFileDownloadCheckpoint(
+                partialFilePath: partialPath,
+                bytesTransferred: 0,
+              ),
+            );
+            // The whole-file writer may reuse this name once the abandoned
+            // partial is gone. Release before starting it, not on return.
+            release();
+            return fetchWhole(resolvedMime);
+          }
+          if (range == null ||
+              range.total == null ||
+              range.start != offset ||
+              range.end < range.start ||
+              range.end >= range.total! ||
+              range.end - range.start + 1 != download.bytes.length ||
+              download.bytes.isEmpty) {
+            throw const BrokerException(
+              message: 'Server returned an invalid download range.',
+            );
+          }
+          final representationChanged =
+              (etag != null && download.etag != etag) ||
+              (etag == null &&
+                  lastModified != null &&
+                  download.lastModified != lastModified);
+          if (representationChanged) {
+            if (restartedRepresentation) {
+              throw const BrokerException(
+                message: 'Download representation changed repeatedly.',
+              );
+            }
+            restartedRepresentation = true;
+            await partialFile.writeAsBytes(const [], flush: true);
+            offset = 0;
+            totalBytes = null;
+            etag = null;
+            lastModified = null;
+            await onCheckpoint?.call(
+              SessionFileDownloadCheckpoint(
+                partialFilePath: partialPath,
+                bytesTransferred: 0,
+              ),
+            );
+            continue;
+          }
+          await partialFile.writeAsBytes(
+            download.bytes,
+            mode: FileMode.append,
+            flush: true,
           );
-          continue;
+          offset += download.bytes.length;
+          totalBytes = range.total;
+        } else {
+          throw BrokerException(
+            message: 'Unexpected download status ${download.statusCode}.',
+            statusCode: download.statusCode,
+          );
         }
-        await partialFile.writeAsBytes(
-          download.bytes,
-          mode: FileMode.append,
-          flush: true,
-        );
-        offset += download.bytes.length;
-        totalBytes = range.total;
-      } else {
-        throw BrokerException(
-          message: 'Unexpected download status ${download.statusCode}.',
-          statusCode: download.statusCode,
-        );
-      }
 
-      etag = download.etag ?? etag;
-      lastModified = download.lastModified ?? lastModified;
-      await onCheckpoint?.call(
-        SessionFileDownloadCheckpoint(
-          partialFilePath: partialPath,
+        etag = download.etag ?? etag;
+        lastModified = download.lastModified ?? lastModified;
+        await onCheckpoint?.call(
+          SessionFileDownloadCheckpoint(
+            partialFilePath: partialPath,
+            bytesTransferred: offset,
+            totalBytes: totalBytes,
+            etag: etag,
+            lastModified: lastModified,
+          ),
+        );
+        onProgress?.call(
           bytesTransferred: offset,
           totalBytes: totalBytes,
-          etag: etag,
-          lastModified: lastModified,
-        ),
-      );
-      onProgress?.call(
-        bytesTransferred: offset,
-        totalBytes: totalBytes,
-      );
-      if (download.statusCode == 200) break;
-    }
+        );
+        if (download.statusCode == 200) break;
+      }
 
-    cancellationToken?.throwIfCanceled();
-    if (totalBytes == null || offset != totalBytes) {
-      throw const BrokerException(
-        message: 'Download ended before the complete file was received.',
+      cancellationToken?.throwIfCanceled();
+      if (totalBytes == null || offset != totalBytes) {
+        throw const BrokerException(
+          message: 'Download ended before the complete file was received.',
+        );
+      }
+      // Resolve the final name from the representation the broker served
+      // (its response content-type), matching the single-shot path. The `.part`
+      // staging name keeps its derivation; only the rename target picks
+      // up the server-sniffed extension.
+      final targetDirectory = partialFile.parent.path;
+      final resolvedFileName = resolveFileName(resolvedMime);
+      var finalPath = '$targetDirectory/$resolvedFileName';
+      if (File(finalPath).existsSync() ||
+          ManagedFileAccess.shared.inUse(finalPath)) {
+        finalPath = _nextAvailablePath(targetDirectory, resolvedFileName);
+      }
+      partialFile.renameSync(finalPath);
+      await _onCompleted?.call(
+        location: finalPath,
+        label: _filenameFromPath(finalPath),
       );
+      return SessionArtifactCachedFile(
+        cachedFilePath: finalPath,
+        fileName: _filenameFromPath(finalPath),
+        contentType: resolvedMime,
+        byteLength: offset,
+        artifactKey: servedArtifactKey,
+        contentHash: servedContentHash,
+      );
+    } finally {
+      release();
     }
-    // Resolve the final name from the representation the broker actually served
-    // (its response content-type), matching the single-shot path. The `.part`
-    // staging name keeps its original derivation; only the rename target picks
-    // up the server-sniffed extension.
-    final targetDirectory = partialFile.parent.path;
-    final resolvedFileName = resolveFileName(resolvedMime);
-    var finalPath = '$targetDirectory/$resolvedFileName';
-    if (File(finalPath).existsSync()) {
-      finalPath = _nextAvailablePath(targetDirectory, resolvedFileName);
-    }
-    partialFile.renameSync(finalPath);
-    await _onCompleted?.call(
-      location: finalPath,
-      label: _filenameFromPath(finalPath),
-    );
-    return SessionArtifactCachedFile(
-      cachedFilePath: finalPath,
-      fileName: _filenameFromPath(finalPath),
-      contentType: resolvedMime,
-      byteLength: offset,
-      artifactKey: servedArtifactKey,
-      contentHash: servedContentHash,
-    );
   }
 
   /// Downloads a session workspace file in one un-ranged request and persists
@@ -1613,27 +1773,32 @@ final class DefaultSessionArtifactFileService
     // foreground resumable path applies at its final rename.
     final safeFileName = _resolveSessionFileName(fileName, mimeType);
     final finalPath = _nextAvailablePath(cacheDirectory.path, safeFileName);
-    final targetFile = File(finalPath);
-    await targetFile.parent.create(recursive: true);
+    final release = ManagedFileAccess.shared.acquire(finalPath);
     try {
-      await source.rename(finalPath);
-    } on FileSystemException {
-      // Cross-device move (native temp differs from cache dir): copy + delete.
-      await source.copy(finalPath);
-      if (source.existsSync()) {
-        source.deleteSync();
+      final targetFile = File(finalPath);
+      await targetFile.parent.create(recursive: true);
+      try {
+        await source.rename(finalPath);
+      } on FileSystemException {
+        // Cross-device move: copy and delete the native temporary file.
+        await source.copy(finalPath);
+        if (source.existsSync()) {
+          source.deleteSync();
+        }
       }
+      await _onCompleted?.call(
+        location: finalPath,
+        label: _filenameFromPath(finalPath),
+      );
+      return SessionArtifactCachedFile(
+        cachedFilePath: finalPath,
+        fileName: _filenameFromPath(finalPath),
+        contentType: mimeType,
+        byteLength: byteLength,
+      );
+    } finally {
+      release();
     }
-    await _onCompleted?.call(
-      location: finalPath,
-      label: _filenameFromPath(finalPath),
-    );
-    return SessionArtifactCachedFile(
-      cachedFilePath: finalPath,
-      fileName: _filenameFromPath(finalPath),
-      contentType: mimeType,
-      byteLength: byteLength,
-    );
   }
 
   String? _validatedPartialPath(String? candidate, Directory cacheDirectory) {
@@ -1656,35 +1821,40 @@ final class DefaultSessionArtifactFileService
     final cacheDirectory = await _cacheDirectoryProvider.cacheDirectory();
     cancellationToken?.throwIfCanceled();
     final finalPath = _nextAvailablePath(cacheDirectory.path, safeFileName);
-    final targetFile = File(finalPath);
-    final stagingPath = '$finalPath.part';
-    final stagingFile = File(stagingPath);
-
+    final release = ManagedFileAccess.shared.acquire(finalPath);
     try {
-      await stagingFile.parent.create(recursive: true);
-      if (stagingFile.existsSync()) {
-        stagingFile.deleteSync();
+      final targetFile = File(finalPath);
+      final stagingPath = '$finalPath.part';
+      final stagingFile = File(stagingPath);
+
+      try {
+        await stagingFile.parent.create(recursive: true);
+        if (stagingFile.existsSync()) {
+          stagingFile.deleteSync();
+        }
+
+        await stagingFile.writeAsBytes(bytes, flush: true);
+        cancellationToken?.throwIfCanceled();
+        onProgress?.call(
+          bytesTransferred: bytes.length,
+          totalBytes: bytes.length,
+        );
+        if (targetFile.existsSync()) {
+          targetFile.deleteSync();
+        }
+        stagingFile.renameSync(finalPath);
+      } on Exception {
+        if (stagingFile.existsSync()) {
+          stagingFile.deleteSync();
+        }
+        rethrow;
       }
 
-      await stagingFile.writeAsBytes(bytes, flush: true);
-      cancellationToken?.throwIfCanceled();
-      onProgress?.call(
-        bytesTransferred: bytes.length,
-        totalBytes: bytes.length,
-      );
-      if (targetFile.existsSync()) {
-        targetFile.deleteSync();
-      }
-      stagingFile.renameSync(finalPath);
-    } on Exception {
-      if (stagingFile.existsSync()) {
-        stagingFile.deleteSync();
-      }
-      rethrow;
+      await _onCompleted?.call(location: finalPath, label: safeFileName);
+      return finalPath;
+    } finally {
+      release();
     }
-
-    await _onCompleted?.call(location: finalPath, label: safeFileName);
-    return finalPath;
   }
 
   /// Resolves a safe cache filename for a session workspace file, falling back
@@ -1699,38 +1869,40 @@ final class DefaultSessionArtifactFileService
   }
 
   @override
-  Future<String?> exportCachedArtifact(
+  Future<ArtifactExportResult?> exportCachedArtifact(
     SessionArtifactCachedFile artifact, {
+    String? suggestedName,
     SessionArtifactCancellationToken? cancellationToken,
   }) async {
     cancellationToken?.throwIfCanceled();
     final release = ManagedFileAccess.shared.acquire(artifact.cachedFilePath);
     try {
-      final selectedPath = await _saveTargetProvider.pickSavePath(
-        suggestedName: artifact.fileName,
-        mimeType: artifact.contentType,
-      );
-      cancellationToken?.throwIfCanceled();
-      if (selectedPath == null) {
-        return null;
-      }
-
-      final source = File(artifact.cachedFilePath);
-      await source.copy(selectedPath);
-      cancellationToken?.throwIfCanceled();
-      return selectedPath;
+      final destination =
+          await (_exportTarget ??
+                  FileSelectorArtifactExportTarget(_saveTargetProvider))
+              .export(
+                sourcePath: artifact.cachedFilePath,
+                suggestedName: suggestedName ?? artifact.fileName,
+                mimeType: artifact.contentType,
+                cancellationToken: cancellationToken,
+              );
+      return destination;
     } finally {
       release();
     }
   }
 
+  // Callers acquire the selected target or its .part lease synchronously,
+  // before any await, so concurrent writers cannot choose the same name.
   String _nextAvailablePath(String directoryPath, String fileName) {
     if (!fileName.contains('.')) {
       var index = 0;
       while (true) {
         final candidate = index == 0 ? fileName : '$fileName-$index';
         final candidatePath = '$directoryPath/$candidate';
-        if (!File(candidatePath).existsSync() &&
+        if (!ManagedFileAccess.shared.inUse(candidatePath) &&
+            !ManagedFileAccess.shared.inUse('$candidatePath.part') &&
+            !File(candidatePath).existsSync() &&
             !File('$candidatePath.part').existsSync()) {
           return candidatePath;
         }
@@ -1746,7 +1918,9 @@ final class DefaultSessionArtifactFileService
     while (true) {
       final candidateName = index == 0 ? fileName : '$stem-$index$extension';
       final candidatePath = '$directoryPath/$candidateName';
-      if (!File(candidatePath).existsSync() &&
+      if (!ManagedFileAccess.shared.inUse(candidatePath) &&
+          !ManagedFileAccess.shared.inUse('$candidatePath.part') &&
+          !File(candidatePath).existsSync() &&
           !File('$candidatePath.part').existsSync()) {
         return candidatePath;
       }

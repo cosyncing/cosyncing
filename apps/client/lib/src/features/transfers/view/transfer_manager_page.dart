@@ -9,6 +9,7 @@ import 'package:cosyncing_client/src/errors/diagnostic_details.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/sessions.dart';
 import 'package:cosyncing_client/src/features/transfers/data/local_transfer_file_opener.dart';
+import 'package:cosyncing_client/src/features/transfers/view/cached_transfer_actions.dart';
 import 'package:cosyncing_client/src/formatting/file_size.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -154,7 +155,8 @@ class _TransferManagerPageState extends ConsumerState<TransferManagerPage> {
         ? transfers
         : transfers
               .where(
-                (transfer) => _matchesSearchQuery(transfer, trimmedSearchQuery),
+                (transfer) =>
+                    _matchesSearchQuery(l10n, transfer, trimmedSearchQuery),
               )
               .toList();
     final hasTerminalTransfers = transfers.any(_isTerminalTransfer);
@@ -819,28 +821,30 @@ class _TransferRow extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final failureDetail = ref.watch(
+      sessionArtifactTransferDetailsProvider.select(
+        (details) => details[transfer.id],
+      ),
+    );
     final theme = Theme.of(context);
     final l10n = AppLocalizations.of(context);
     final localTransferFileOpener = ref.read(localTransferFileOpenerProvider);
     final canRetry = isOwningBrokerProfile && _isRetryableTransfer(transfer);
     final canCancel = _isCancelableTransfer(transfer);
     final isFailed = transfer.status == SessionArtifactTransferStatus.failed;
-    final localPath = _transferLocalPath(transfer);
-    final localPathLabel = _transferLocalPathLabel(l10n, transfer, localPath);
+    final localPath = transfer.localFilePath;
+    final localPathLabel = transfer.localizedLocalPath(l10n);
     final progressLabel = _transferProgressLabel(l10n, transfer);
     final primaryDetail = _transferDetailLabel(l10n, transfer);
     final detailLabel = progressLabel.isEmpty
-        ? '${_transferStatusLabel(l10n, transfer.status)} - $primaryDetail'
-        : '${_transferStatusLabel(l10n, transfer.status)} - $primaryDetail - '
+        ? '${transfer.localizedStatus(l10n)} - $primaryDetail'
+        : '${transfer.localizedStatus(l10n)} - $primaryDetail - '
               '$progressLabel';
 
     return ContextualDetails(
       label: transfer.fileName,
       detailsBuilder: isFailed
-          ? () => [
-              transfer.message,
-              if (transfer.error case final error?) error,
-            ].join('\n')
+          ? () => transfer.technicalDetail(failureDetail)
           : null,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
@@ -895,20 +899,9 @@ class _TransferRow extends ConsumerWidget {
                   ),
                   if (localPathLabel != null) ...[
                     const SizedBox(height: 4),
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Expanded(
-                          child: Text(
-                            localPathLabel,
-                            style: theme.textTheme.bodySmall?.copyWith(
-                              color: theme.colorScheme.onSurfaceVariant,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        const SizedBox(width: 6),
+                    TransferLocalFileActions(
+                      label: localPathLabel,
+                      actions: [
                         IconButton(
                           key: ValueKey('transfer-manager-copy-${transfer.id}'),
                           tooltip: l10n.copyPath,
@@ -980,6 +973,10 @@ class _TransferRow extends ConsumerWidget {
                         ),
                       ],
                     ),
+                    CachedTransferActions(
+                      transfer: transfer,
+                      keyPrefix: 'transfer-manager',
+                    ),
                   ],
                   const SizedBox(height: 4),
                   if (transfer.canSelectFileToResumeUpload &&
@@ -1045,6 +1042,7 @@ class _TransferRow extends ConsumerWidget {
                       transfer,
                       localTransferFileOpener,
                       isOwningBrokerProfile: isOwningBrokerProfile,
+                      failureDetail: failureDetail,
                     ),
                   ),
                 ],
@@ -1103,9 +1101,10 @@ Future<void> _showTransferDetails(
   SessionArtifactTransfer transfer,
   LocalTransferFileOpener localTransferFileOpener, {
   required bool isOwningBrokerProfile,
+  String? failureDetail,
 }) async {
   final l10n = AppLocalizations.of(context);
-  final localPath = _transferLocalPath(transfer);
+  final localPath = transfer.localFilePath;
   final progressLabel = _transferProgressLabel(l10n, transfer);
   final sourceUrl = _trimmedText(transfer.sourceUrl);
   final exportedPath = _trimmedText(transfer.exportedPath);
@@ -1118,10 +1117,7 @@ Future<void> _showTransferDetails(
     builder: (dialogContext) {
       return ContextualDetails(
         label: transfer.fileName,
-        detailsBuilder: () => [
-          transfer.message,
-          if (transfer.error case final error?) error,
-        ].join('\n'),
+        detailsBuilder: () => transfer.technicalDetail(failureDetail),
         child: AlertDialog(
           title: Text(
             l10n.transferDetailsTitle(transfer.fileName),
@@ -1147,7 +1143,7 @@ Future<void> _showTransferDetails(
                         ),
                         _TransferDetailsRow(
                           label: l10n.status,
-                          value: _transferStatusLabel(l10n, transfer.status),
+                          value: transfer.localizedStatus(l10n),
                         ),
                         if (progressLabel.isNotEmpty)
                           _TransferDetailsRow(
@@ -1226,6 +1222,10 @@ Future<void> _showTransferDetails(
                       spacing: 8,
                       runSpacing: 8,
                       children: [
+                        CachedTransferActions(
+                          transfer: transfer,
+                          keyPrefix: 'transfer-manager-details',
+                        ),
                         IconButton(
                           key: ValueKey(
                             'transfer-manager-details-copy-${transfer.id}',
@@ -1285,7 +1285,7 @@ Future<void> _showTransferDetails(
           ),
           actions: [
             TextButton(
-              onPressed: () => Navigator.of(context).pop(),
+              onPressed: () => Navigator.of(dialogContext).pop(),
               child: Text(l10n.close),
             ),
           ],
@@ -1313,7 +1313,7 @@ Future<void> _copySelectedTransferLocalPaths(
 ) async {
   final localPaths = <String>[];
   for (final transfer in visibleSelectedTransfers) {
-    final localPath = _transferLocalPath(transfer);
+    final localPath = transfer.localFilePath;
     if (localPath != null) {
       localPaths.add(localPath);
     }
@@ -1557,35 +1557,6 @@ class _TransferDetailsRow extends StatelessWidget {
   }
 }
 
-String? _transferLocalPath(SessionArtifactTransfer transfer) {
-  final exportedPath = transfer.exportedPath?.trim();
-  if (exportedPath != null && exportedPath.isNotEmpty) {
-    return exportedPath;
-  }
-
-  final cachedPath = transfer.cachedFilePath?.trim();
-  if (cachedPath != null && cachedPath.isNotEmpty) {
-    return cachedPath;
-  }
-
-  return null;
-}
-
-String? _transferLocalPathLabel(
-  AppLocalizations l10n,
-  SessionArtifactTransfer transfer,
-  String? path,
-) {
-  final exportedPath = transfer.exportedPath?.trim();
-  if (path == null) {
-    return null;
-  }
-  if (exportedPath != null && exportedPath.isNotEmpty) {
-    return l10n.transferSavedPath(path);
-  }
-  return l10n.transferCachedPath(path);
-}
-
 String _transferDirectionLabel(
   AppLocalizations l10n,
   SessionArtifactTransferDirection direction,
@@ -1593,18 +1564,6 @@ String _transferDirectionLabel(
   SessionArtifactTransferDirection.download => l10n.transferDirectionDownload,
   SessionArtifactTransferDirection.preview => l10n.transferDirectionPreview,
   SessionArtifactTransferDirection.upload => l10n.transferDirectionUpload,
-};
-
-String _transferStatusLabel(
-  AppLocalizations l10n,
-  SessionArtifactTransferStatus status,
-) => switch (status) {
-  SessionArtifactTransferStatus.queued => l10n.transferStatusQueued,
-  SessionArtifactTransferStatus.running => l10n.transferStatusRunning,
-  SessionArtifactTransferStatus.cached => l10n.transferStatusCached,
-  SessionArtifactTransferStatus.completed => l10n.transferStatusComplete,
-  SessionArtifactTransferStatus.canceled => l10n.transferStatusCanceled,
-  SessionArtifactTransferStatus.failed => l10n.transferStatusFailed,
 };
 
 String _transferProgressLabel(
@@ -1645,7 +1604,7 @@ String _transferDetailLabel(
         ? l10n.transferUploadedSize(formatFileSize(l10n, bytes))
         : l10n.transferDownloadedSize(formatFileSize(l10n, bytes));
   }
-  return _transferStatusLabel(l10n, transfer.status);
+  return transfer.localizedStatus(l10n);
 }
 
 class _TransferStatusIcon extends StatelessWidget {
@@ -1737,6 +1696,7 @@ String _emptyMessageForFilter(
       };
 
 bool _matchesSearchQuery(
+  AppLocalizations l10n,
   SessionArtifactTransfer transfer,
   String trimmedQuery,
 ) {
@@ -1747,6 +1707,7 @@ bool _matchesSearchQuery(
     transfer.sessionKey.sessionId,
     transfer.directionLabel,
     transfer.statusLabel,
+    transfer.localizedStatus(l10n),
     transfer.detailLabel,
     transfer.message,
     if (transfer.error != null) transfer.error!,
