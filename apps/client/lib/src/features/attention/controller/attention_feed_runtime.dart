@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:broker_client/broker_client.dart';
 import 'package:broker_client_flutter/broker_client_flutter.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_delivery_settings_controller.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_feed_coordinator.dart';
@@ -230,6 +229,10 @@ Future<AttentionFeedRunner> _createProfileRunner(
     resolveSetting: ref.read(attentionNotificationSettingResolverProvider),
     onDelivery: ref.read(attentionNotificationDeliveryRecorderProvider),
     presentationCoordinator: ref.read(attentionPresentationCoordinatorProvider),
+    // A network change, route switch or transport failure retires the
+    // connection generation this client was built on; the worker asks for a
+    // client on the current one rather than stopping.
+    reconnectClient: () => createAttentionBrokerClient(ref, profile),
     // Re-read the saved profiles: a token saved since this worker started (in
     // this tab or another) changes the credential and replaces the worker.
     onUnauthorized: () {
@@ -253,7 +256,7 @@ Future<AttentionFeedRunner> _createProfileRunner(
       ref.read(attentionInboxRevisionProvider.notifier).state += 1;
     },
   );
-  return _OwnedAttentionFeedRunner(worker: worker, client: client);
+  return _OwnedAttentionFeedRunner(worker: worker);
 }
 
 /// Shared exact-session matcher used by polling and opaque-wake refetch.
@@ -297,10 +300,9 @@ Future<void> _ignoreRuntimeError(Future<void> operation) async {
 }
 
 final class _OwnedAttentionFeedRunner implements AttentionFeedRunner {
-  _OwnedAttentionFeedRunner({required this.worker, required this.client});
+  _OwnedAttentionFeedRunner({required this.worker});
 
   final AttentionFeedWorker worker;
-  final BrokerClient client;
 
   @override
   void start() => worker.start();
@@ -310,7 +312,8 @@ final class _OwnedAttentionFeedRunner implements AttentionFeedRunner {
     try {
       await worker.stop();
     } finally {
-      client.close();
+      // The worker's current client: an earlier one it replaced is closed.
+      worker.brokerClient.close();
     }
   }
 

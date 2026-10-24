@@ -11,6 +11,7 @@ import 'package:cosyncing_client/src/features/attention/controller/notification_
 import 'package:cosyncing_client/src/features/attention/data/attention_notification_type_settings_store.dart';
 import 'package:cosyncing_client/src/features/attention/model/attention_notification_type.dart';
 import 'package:cosyncing_client/src/features/connection/data/active_broker_profile_store.dart';
+import 'package:cosyncing_client/src/features/connection/provider/broker_route_providers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -616,6 +617,25 @@ void main() {
         );
         await app.openInbox();
         await app.waitFor(app.inboxRow(arrival['id']!));
+      },
+    );
+
+    featureTest(
+      'completions keep arriving after the network changes under the feed',
+      (f) async {
+        final device = Device(f);
+        final desk = device.desk;
+        final app = await device.launch();
+        final first = desk.publish(sessionId: 's1', sessionTitle: 'Fix login');
+        await app.openInbox();
+        await app.waitFor(app.inboxRow(first['id']!));
+
+        app.container.read(brokerRouteCoordinatorProvider).networkChanged();
+        final second = desk.publish(
+          sessionId: 's2',
+          sessionTitle: 'Refactor build',
+        );
+        await app.waitFor(app.inboxRow(second['id']!));
       },
     );
   });

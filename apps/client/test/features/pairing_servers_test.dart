@@ -36,6 +36,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../support/feature/app_driver.dart';
+import '../support/feature/attention_wire.dart';
 import '../support/feature/cosyncing_app.dart';
 import '../support/feature/fake_broker.dart';
 import '../support/feature/roster_driver.dart';
@@ -417,6 +418,7 @@ void main() {
     (f) async {
       final studio = f.network.add('http://studio.test:7734')
         ..addSession('s1', 'Legacy notes');
+      final desk = AttentionDesk(studio);
       final saved = await f.storage.seedServer(studio);
       final app = await f.launch();
       await app.openFromRoster('s1', cwd: '/work/studio');
@@ -442,6 +444,13 @@ void main() {
       coordinator
         ..foreground(value: false)
         ..networkChanged();
+      // A completion while the app is away brings the feed back on a fresh
+      // binding of the address before the open session hears of it.
+      final arrival = desk.publish(sessionId: 's1', sessionTitle: 'Notes');
+      await app.pumpUntil(
+        () => desk.pollCursors.contains(arrival['cursor']),
+        reason: 'The feed catches up while the app is away',
+      );
       await reconnect(() => coordinator.foreground(value: true));
       await f.tester.pump(const Duration(minutes: 2));
       expect(studio.requestsTo('/api/connection/identity-proof'), isEmpty);
@@ -449,6 +458,87 @@ void main() {
       expect(f.tester.takeException(), isNull);
     },
   );
+
+  for (final (trigger, retire)
+      in <(String, void Function(AppDriver, FakeBroker))>[
+        (
+          'a network change',
+          (app, _) => app.container
+              .read(brokerRouteCoordinatorProvider)
+              .networkChanged(),
+        ),
+        (
+          'a dropped session socket',
+          (_, studio) => studio.socketsFor('s1').last.drop(),
+        ),
+      ]) {
+    featureTest(
+      'a verified session and the notification feed both recover from '
+      '$trigger while the feed waits for the new route',
+      (f) async {
+        final studio = f.network.add(
+          'http://studio.test:7734',
+          ownerToken: 'owner-secret',
+        )..addSession('s1', 'Route notes');
+        final desk = AttentionDesk(studio);
+        final identity = await PairingCrypto.generateIdentityKeyPair();
+        final wire = RoutesDesk(identity, f.now)..add(studio);
+        final saved = await f.storage.seedServer(
+          studio,
+          displayName: 'Studio',
+          ownerToken: 'owner-secret',
+        );
+        final server = BrokerRouteServer(
+          profileId: saved.id,
+          incarnation: saved.incarnationId!,
+          legacyOrigin: studio.baseUri,
+          identityPublicKey: identity.publicKey,
+          principalId: 'owner',
+          credentialReference: saved.credentialKey,
+          lastSuccessfulRouteId: 'studio',
+          addresses: [
+            BrokerAddress(
+              id: 'studio',
+              origin: studio.baseUri,
+              label: 'LAN',
+              order: 0,
+              verifiedIdentity: identity.publicKey,
+              legacyTrusted: true,
+            ),
+          ],
+        );
+        await f.storage.database.customStatement(
+          'INSERT OR REPLACE INTO broker_route_servers VALUES (?,?,?)',
+          [saved.id, saved.incarnationId, jsonEncode(server.toJson())],
+        );
+        final app = await f.launch();
+        await app.openFromRoster('s1', cwd: '/work/studio');
+        bool reconnected(int sockets) =>
+            studio.socketsFor('s1').length > sockets &&
+            studio.socketsFor('s1').last.isConnected;
+        await app.pumpUntil(
+          () => reconnected(0) && desk.polls >= 1,
+          reason: 'The session connects and the feed is long-polling',
+        );
+        final sockets = studio.socketsFor('s1').length;
+        // A slow readiness check keeps the recovery round running while the
+        // feed, refused on the retired route, asks for the new one.
+        wire.latency[studio.baseUri.origin] = const Duration(seconds: 2);
+        retire(app, studio);
+        final arrival = desk.publish(
+          sessionId: 's1',
+          sessionTitle: 'Route notes',
+        );
+        await app.pumpUntil(
+          () => reconnected(sockets),
+          reason: 'The open session rebuilds on the new route',
+        );
+        await app.openInbox();
+        await app.waitFor(app.inboxRow(arrival['id']!));
+        expect(f.tester.takeException(), isNull);
+      },
+    );
+  }
 
   featureTest(
     'automatic routes require two meaningful wins and preserve the working '
