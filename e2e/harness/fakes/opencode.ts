@@ -8,7 +8,7 @@
  *   const opencode = installFakeOpencode(paths, { installed: '1.1.0' });
  *   startBroker({ env: { ...opencodeServeEnvironment(port) } });
  */
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { FixturePaths } from '../broker.ts';
 import type { FakeOpencodeConfig } from './opencode-program.ts';
@@ -48,8 +48,14 @@ export class FakeOpencode {
   }
 
   configure(change: Partial<FakeOpencodeConfig>): void {
+    const upgraded = change.installed !== undefined && change.installed !== this.#config.installed;
     this.#config = { ...this.#config, ...change };
     this.#write();
+    if (upgraded) {
+      // A real install replaces the binary. Reflect that identity change for cached version probes.
+      const stamp = new Date(Math.max(Date.now(), statSync(this.executable).mtimeMs + 1));
+      utimesSync(this.executable, stamp, stamp);
+    }
   }
 
   ledger(): OpencodeLedgerEntry[] {

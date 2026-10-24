@@ -98,9 +98,24 @@ export async function diagnoseOpenCodeSetup(
     installMessage: 'Install the official OpenCode CLI, then rerun doctor.',
     upgradeCommand: 'opencode upgrade',
   });
+  const major = Number(binary.installedVersion?.split('.')[0]);
+  const unsupported = major >= 2;
+  if (unsupported) {
+    const version = binary.checks.find((check) => check.id === 'opencode.version');
+    if (version) {
+      version.status = 'warn';
+      version.detailCode = major === 2 ? 'generation-2-unsupported' : 'generation-unknown';
+      version.summary = major === 2
+        ? 'OpenCode 2 is detected but not yet supported. cosyncing supports OpenCode 1.'
+        : 'This OpenCode generation is not yet supported. cosyncing supports OpenCode 1.';
+      delete version.remediation;
+    }
+  }
   const checks: SetupCheck[] = [
     ...binary.checks,
-    storageCheck(context, dataDirectory(context, options.dataDir), !!binary.executable),
+    unsupported
+      ? { id: 'opencode.storage', status: 'skip', detailCode: 'storage-not-checked', summary: 'V1 storage checks do not apply to this OpenCode generation.' }
+      : storageCheck(context, dataDirectory(context, options.dataDir), !!binary.executable),
   ];
 
   const server = normalizedServerUrl(options.baseUrl || context.env.OPENCODE_URL?.trim() || 'http://127.0.0.1:4096');
@@ -152,7 +167,12 @@ export async function diagnoseOpenCodeSetup(
     }
 
     const loopback = ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(server.hostname);
-    if (!loopback) {
+    if (unsupported) {
+      checks.push({
+        id: 'opencode.managed-serve-eligibility', status: 'skip', detailCode: 'external-v2-service',
+        summary: 'cosyncing does not manage this OpenCode generation.',
+      });
+    } else if (!loopback) {
       checks.push({
         id: 'opencode.managed-serve-eligibility',
         status: 'skip',
@@ -178,6 +198,12 @@ export async function diagnoseOpenCodeSetup(
           : 'Managed serve eligibility was not checked because OpenCode is missing.',
       });
     }
+  }
+
+  if (unsupported) {
+    // Setup cannot reconcile a managed serve for an unsupported generation.
+    const serverCheck = checks.find((check) => check.id === 'opencode.server');
+    if (serverCheck) delete serverCheck.remediation;
   }
 
   return {

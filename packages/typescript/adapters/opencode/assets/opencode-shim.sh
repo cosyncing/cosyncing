@@ -45,6 +45,20 @@ opencode() {
     return
   fi
 
+  # V2 owns a shared service of its own. Do not route its TUI to a V1 serve.
+  local registration="${XDG_STATE_HOME:-$HOME/.local/state}/opencode/service.json"
+  local service_pid=""
+  if [ -f "$registration" ]; then
+    service_pid=$(grep -o '"pid"[[:space:]]*:[[:space:]]*[0-9][0-9]*' "$registration" 2>/dev/null | grep -o '[0-9][0-9]*$')
+    case "$service_pid" in
+      ''|0|*[!0-9]*) ;;
+      *) if kill -0 "$service_pid" 2>/dev/null; then
+           command opencode "$@"
+           return
+         fi ;;
+    esac
+  fi
+
   if _cosyncing_opencode_reachable "$host" "$port"; then
     command opencode attach "$url" --dir "$dir"
     return

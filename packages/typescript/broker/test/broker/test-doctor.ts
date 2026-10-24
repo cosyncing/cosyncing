@@ -859,6 +859,20 @@ try {
       plainChecks.length === 0, JSON.stringify(plainChecks));
   }
 
+  for (const [version, code] of [['2.1.4', 'generation-2-unsupported'], ['3.0.0', 'generation-unknown']] as const) {
+    const diagnosis = await diagnoseOpenCodeSetup(makeFixtureContext(testRoot, 'opencode', version));
+    const detected = checkById(diagnosis, 'opencode.version');
+    check(`OpenCode ${version} is detected as unsupported`, detected.status === 'warn' && detected.detailCode === code);
+    check(`OpenCode ${version} does not warn about missing V1 storage`, checkById(diagnosis, 'opencode.storage').status === 'skip');
+    check(`OpenCode ${version} is ineligible for managed serve`, checkById(diagnosis, 'opencode.managed-serve-eligibility').status === 'skip');
+    check(`OpenCode ${version} has no managed-server setup remediation`, !checkById(diagnosis, 'opencode.server').remediation);
+    const occupied = await diagnoseOpenCodeSetup({
+      ...makeFixtureContext(testRoot, 'opencode', version),
+      probeTcp: async () => 'open',
+    });
+    check(`OpenCode ${version} has no managed-server repair remediation on an occupied port`, !checkById(occupied, 'opencode.server').remediation);
+  }
+
   const opencodeConflict = await diagnoseOpenCodeSetup(fakeContext({
     executables: { opencode: '/fixture/bin/opencode' },
     runReadOnly: async () => ({ status: 'ok', stdout: '1.17.19', stderr: '' }),

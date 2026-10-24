@@ -13,7 +13,7 @@
  * clears it, as a serve that is slow to boot does; `POST /session` creates a
  * session and records `create`.
  */
-import { appendFileSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 declare const FAKE_OPENCODE_STATE: string;
@@ -23,6 +23,8 @@ export interface FakeOpencodeConfig {
   sessions?: Array<{ id: string; title: string; directory: string; busy?: boolean }>;
   /** A serve starting while this is set does not listen until it is cleared. */
   holdServe?: boolean;
+  /** Fail once without changing the executable, as a transient first-exec failure does. */
+  failFirstVersionProbe?: boolean;
 }
 
 const state = FAKE_OPENCODE_STATE;
@@ -96,7 +98,13 @@ async function serve(hostname: string, port: number): Promise<void> {
 const args = process.argv.slice(2);
 ledger({ kind: 'cli', argv: args });
 if (args[0] === '--version') {
-  process.stdout.write(`${config().installed}\n`);
+  const versionConfig = config();
+  const failedProbe = join(state, 'failed-version-probe');
+  if (versionConfig.failFirstVersionProbe && !existsSync(failedProbe)) {
+    writeFileSync(failedProbe, 'failed');
+    process.exit(1);
+  }
+  process.stdout.write(`${versionConfig.installed}\n`);
   process.exit(0);
 }
 if (args[0] === 'serve') {
