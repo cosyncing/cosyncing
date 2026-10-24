@@ -41,7 +41,7 @@ import { readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { resolveLocalOpencodeBaseUrl } from './implementation.ts';
-import { normalizeOpencodeVersion, opencodeAllowsV1, opencodeChildEnv, opencodeGeneration } from './generation.ts';
+import { normalizeOpencodeVersion, opencodeAllowsV1, opencodeChildEnv, opencodeGeneration, opencodeGenerationForLaunch } from './generation.ts';
 export { normalizeOpencodeVersion } from './generation.ts';
 
 const LOG_PREFIX = `[${PRODUCT_IDENTITY.productName}]`;
@@ -436,7 +436,7 @@ async function ensureManagedOpencodeServeInternal(shouldContinue: () => boolean)
     platform: process.platform,
   });
   if (!invocation) return; // not installed → OpenCode stays observe/resume only
-  const generation = opencodeGeneration(process.env, process.platform, invocation.originalPath);
+  const generation = opencodeGenerationForLaunch(process.env, process.platform, invocation.originalPath);
   if (generation.kind === 'v2' || generation.kind === 'future') {
     console.log(`${LOG_PREFIX} OpenCode ${generation.version} is detected but not supported; leaving managed serve stopped.`);
     return;
@@ -590,7 +590,7 @@ export async function restartManagedOpencodeRuntime(shouldContinue: () => boolea
   if (!managed) throw new Error('OpenCode serve is not managed by this broker.');
   managedLifecycleRestart = (async () => {
     if (!shouldContinue()) return;
-    if (!opencodeAllowsV1(opencodeGeneration(process.env, process.platform))) {
+    if (!opencodeAllowsV1(opencodeGenerationForLaunch(process.env, process.platform))) {
       throw new Error('The installed OpenCode generation is not supported; refusing to restart the managed V1 serve.');
     }
     await stopManagedOpencodeServe();

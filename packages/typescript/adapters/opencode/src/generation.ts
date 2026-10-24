@@ -18,7 +18,8 @@ export function opencodeChildEnv(
   return { ...env, OPENCODE_DISABLE_AUTOUPDATE: '1' };
 }
 
-const cache = new Map<string, { result: OpencodeGeneration; retryAt?: number }>();
+type GenerationProbe = { result: OpencodeGeneration; retryAt?: number };
+const cache = new Map<string, GenerationProbe>();
 
 /** Stat on every use so a replacement binary is noticed before any lifecycle or CLI action.
  * Successful probes, including unknown output, have no expiry. Failed probes retry after one
@@ -29,8 +30,28 @@ export function opencodeGeneration(
   platform: NodeJS.Platform = process.platform,
   command = 'opencode',
 ): OpencodeGeneration {
+  return readOpencodeGeneration(env, platform, command).result;
+}
+
+/** Retry a failed probe once at a launch boundary, including failures cached by a reader.
+ * A second failure keeps the historical V1 fallback; successful unknown output is conclusive. */
+export function opencodeGenerationForLaunch(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+  command = 'opencode',
+): OpencodeGeneration {
+  const probe = readOpencodeGeneration(env, platform, command);
+  return probe.retryAt === undefined ? probe.result : readOpencodeGeneration(env, platform, command, true).result;
+}
+
+function readOpencodeGeneration(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+  command: string,
+  ignoreFailedCache = false,
+): GenerationProbe {
   const invocation = resolveInvocation(command, { env, platform });
-  if (!invocation) return { kind: 'absent' };
+  if (!invocation) return { result: { kind: 'absent' } };
   const executable = invocation.originalPath;
   let identity: string | undefined;
   try {
@@ -38,7 +59,7 @@ export function opencodeGeneration(
     identity = `${executable}\0${stat.ino}\0${stat.size}\0${stat.mtimeMs}\0${stat.ctimeMs}`;
   } catch { /* An unstatable executable is probed without caching. */ }
   const remembered = identity ? cache.get(identity) : undefined;
-  if (remembered && (remembered.retryAt === undefined || Date.now() < remembered.retryAt)) return remembered.result;
+  if (remembered && (remembered.retryAt === undefined || (!ignoreFailedCache && Date.now() < remembered.retryAt))) return remembered;
   let version: string | undefined;
   let succeeded = false;
   try {
@@ -54,11 +75,12 @@ export function opencodeGeneration(
   const major = version?.match(/^(\d+)\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/)?.[1];
   const kind = major === '1' ? 'v1' : major === '2' ? 'v2' : major && Number(major) >= 3 ? 'future' : 'unparsable';
   const result: OpencodeGeneration = { kind, executable, ...(version ? { version } : {}) };
+  const probe: GenerationProbe = { result, ...(!succeeded ? { retryAt: Date.now() + 60_000 } : {}) };
   if (identity) {
-    cache.set(identity, { result, ...(!succeeded ? { retryAt: Date.now() + 60_000 } : {}) });
+    cache.set(identity, probe);
     while (cache.size > 64) cache.delete(cache.keys().next().value!);
   }
-  return result;
+  return probe;
 }
 
 export function opencodeAllowsV1(generation: OpencodeGeneration): boolean {

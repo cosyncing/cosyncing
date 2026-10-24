@@ -54,7 +54,7 @@ import { homedir } from 'node:os';
 import { Database } from 'bun:sqlite';
 import { attachedTuiSessions, tuiPresenceSupported } from './tui-presence.ts';
 import { diagnoseOpenCodeSetup } from './diagnostics.ts';
-import { opencodeAllowsV1, opencodeChildEnv, opencodeGeneration, OPENCODE_V1_READ_ONLY_REASON } from './generation.ts';
+import { opencodeAllowsV1, opencodeChildEnv, opencodeGeneration, opencodeGenerationForLaunch, OPENCODE_V1_READ_ONLY_REASON } from './generation.ts';
 import { mapOpenCodePart as mapSharedOpenCodePart } from '@cosyncing/opencode-wire';
 
 export { opencodeChildEnv } from './generation.ts';
@@ -4003,8 +4003,8 @@ function spawnOpenCode<
   const env = (options.env ?? process.env) as Readonly<Record<string, string | undefined>>;
   // Revalidate both PATH and the resolved child immediately before dispatch. A package-manager
   // symlink can move to V2 while an existing Resume connection still holds the old V1 target.
-  if (!opencodeAllowsV1(opencodeGeneration(env, process.platform))
-      || !opencodeAllowsV1(opencodeGeneration(env, process.platform, executable))) {
+  if (!opencodeAllowsV1(opencodeGenerationForLaunch(env, process.platform))
+      || !opencodeAllowsV1(opencodeGenerationForLaunch(env, process.platform, executable))) {
     if (args[0] === 'run') throw new NativeSessionUnresumableError(OPENCODE_V1_READ_ONLY_REASON);
     throw new ControlRefusedError(OPENCODE_V1_READ_ONLY_REASON, 'command-unsupported');
   }

@@ -416,6 +416,27 @@ test('a failed version probe expires, recovers V2, and prevents a managed spawn'
     setSystemTime(start + 2 * 86_400_000);
     expect(readGeneration()).toMatchObject({ kind: 'unparsable', version: 'development-build' });
     expect(probes()).toHaveLength(3);
+
+    // Startup must recover a transient probe failure before it can launch V2, without
+    // waiting for the display cache to expire. Reuse the fake with a new binary identity.
+    setSystemTime();
+    opencode.configure({ installed: '2.1.4' });
+    rmSync(join(opencode.state, 'failed-version-probe'));
+    const startupOffset = probes().length;
+    await ensureManagedOpencodeServe();
+    expect(opencode.serves()).toEqual([]);
+    expect(probes().slice(startupOffset)).toEqual([['--version'], ['--version']]);
+
+    // The same launch check must bypass a failure already cached by a roster/display read.
+    opencode.configure({ installed: '2.1.5' });
+    rmSync(join(opencode.state, 'failed-version-probe'));
+    const cachedFailureOffset = probes().length;
+    expect(readGeneration().kind).toBe('unparsable');
+    expect(readGeneration().kind).toBe('unparsable');
+    expect(probes().slice(cachedFailureOffset)).toEqual([['--version']]);
+    await ensureManagedOpencodeServe();
+    expect(opencode.serves()).toEqual([]);
+    expect(probes().slice(cachedFailureOffset)).toEqual([['--version'], ['--version']]);
   } finally {
     setSystemTime();
     try {
