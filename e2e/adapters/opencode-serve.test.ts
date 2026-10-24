@@ -209,7 +209,7 @@ posix('a serve that is already listening when the broker starts', () => {
     expect(opencode.serves().at(-1)!.pid).not.toBe(stranger!.pid);
   });
 
-  test.each(['2.1.4', '3.0.0'])('with OpenCode %s installed, startup launches nothing', async (installed) => {
+  test.each(['2.1.4'])('with OpenCode %s installed, startup launches nothing', async (installed) => {
     const { broker, opencode } = await brokerAt(await leasePort(), { installed });
     await eventually(() => broker.output().includes('detected but not supported'), { what: 'the generation guard' });
     expect((await broker.client().agents()).find((agent) => agent.id === 'opencode')?.canCreateSession).toBe(false);

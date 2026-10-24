@@ -18,9 +18,11 @@ export function opencodeChildEnv(
   return { ...env, OPENCODE_DISABLE_AUTOUPDATE: '1' };
 }
 
-const cache = new Map<string, { result: OpencodeGeneration; expiresAt: number }>();
+const cache = new Map<string, OpencodeGeneration>();
 
 /** Stat on every use so a replacement binary is noticed before any lifecycle or CLI action.
+ * Cache every probe outcome by executable identity without expiry: periodic roster sweeps must
+ * not repeat the synchronous version probe for an unchanged binary, even with unknown output.
  * Unknown output retains the historical V1 path; it must not become a new version floor. */
 export function opencodeGeneration(
   env: NodeJS.ProcessEnv = process.env,
@@ -33,11 +35,10 @@ export function opencodeGeneration(
   let identity: string | undefined;
   try {
     const stat = statSync(executable);
-    identity = `${executable}\0${stat.size}\0${stat.mtimeMs}`;
+    identity = `${executable}\0${stat.ino}\0${stat.size}\0${stat.mtimeMs}\0${stat.ctimeMs}`;
   } catch { /* An unstatable executable is probed without caching. */ }
-  const now = Date.now();
   const remembered = identity ? cache.get(identity) : undefined;
-  if (remembered && remembered.expiresAt > now) return remembered.result;
+  if (remembered) return remembered;
   let version: string | undefined;
   try {
     const result = bunSpawnSyncResolvedInvocation(invocation, ['--version'], {
@@ -50,7 +51,7 @@ export function opencodeGeneration(
   const kind = major === '1' ? 'v1' : major === '2' ? 'v2' : major && Number(major) >= 3 ? 'future' : 'unparsable';
   const result: OpencodeGeneration = { kind, executable, ...(version ? { version } : {}) };
   if (identity) {
-    cache.set(identity, { result, expiresAt: now + (kind === 'unparsable' ? 30_000 : 300_000) });
+    cache.set(identity, result);
     while (cache.size > 64) cache.delete(cache.keys().next().value!);
   }
   return result;
