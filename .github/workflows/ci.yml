@@ -10,8 +10,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('{0}-{1}', github.event_name, github.sha) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # Keep the tested runtime aligned with the installer pins and package floor.
@@ -112,10 +112,15 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
+      - run: bun install --frozen-lockfile
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        if: ${{ matrix.browser }}
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-1.61.1
       - name: Install the browser
         if: ${{ matrix.browser }}
-        run: npx --yes playwright@1.61.1 install --with-deps chromium-headless-shell
-      - run: bun install --frozen-lockfile
+        run: bash scripts/ci/install-browser.sh
       - run: bun run check ${{ matrix.suite }}${{ matrix.shard && format(' --shard {0}', matrix.shard) || '' }}
       - name: Keep the check report
         if: ${{ always() }}
