@@ -22,6 +22,11 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   turn is closed normally once every client disconnects. Previously it stayed
   loaded, and its Claude process kept running, until the broker restarted.
 
+### Changed
+
+- The session menu uses the same single-click Hide tool calls checkbox on
+  narrow and wide screens.
+
 ## 0.8.3 — 2026-10-25
 
 ### Fixed

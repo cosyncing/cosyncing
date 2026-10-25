@@ -457,19 +457,8 @@ Future<void> toggleSessionDetailViewOption(
 ) async {
   await openSessionDetailViewMenu(tester);
   if (name == 'report') {
-    final toggle = find.byKey(const Key('session-tool-visibility-toggle'));
-    if (toggle.evaluate().isNotEmpty) {
-      await tester.tap(toggle);
-      await tester.pumpAndSettle();
-      return;
-    }
-    final wasHidden =
-        find.text('Hide tool calls').evaluate().isNotEmpty ||
-        find.textContaining('(Hidden)').evaluate().isNotEmpty;
-    await tester.tap(find.byKey(const Key('session-tool-visibility')));
-    await tester.pumpAndSettle();
     await tester.tap(
-      find.text(wasHidden ? 'Show tool calls' : 'Hide tool calls').last,
+      find.byKey(const Key('session-tool-visibility-toggle')),
     );
   } else {
     await tester.tap(find.byKey(Key('session-detail-view-item-$name')));
