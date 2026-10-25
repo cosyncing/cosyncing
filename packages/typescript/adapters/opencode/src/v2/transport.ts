@@ -1,5 +1,10 @@
 export type V2Failure = 'credential-required' | 'credential-rejected' | 'not-found' | 'conflict' | 'rejected' | 'unavailable' | 'v2-service-starting' | 'invalid-response' | 'redirect';
 
+import { PROMPT_ATTACHMENT_LIMITS } from '@cosyncing/adapter-api';
+
+// A maximum-size image prompt is hydrated into a single native event.
+const MAX_SSE_FRAME_BYTES = PROMPT_ATTACHMENT_LIMITS.maxFiles * PROMPT_ATTACHMENT_LIMITS.maxInlineEncodedBytes + 4 * 1024 * 1024;
+
 export class V2Error extends Error {
   constructor(readonly reason: V2Failure, readonly ambiguous = false) {
     super(`OpenCode service request failed (${reason}).`);
@@ -114,14 +119,14 @@ export class V2Transport {
         while ((end = buffer.indexOf('\n\n')) !== -1) {
           const frame = buffer.slice(0, end);
           buffer = buffer.slice(end + 2);
-          if (frame.length > 1024 * 1024) throw new V2Error('invalid-response');
+          if (Buffer.byteLength(frame) > MAX_SSE_FRAME_BYTES) throw new V2Error('invalid-response');
           const data = frame.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trimStart()).join('\n');
           if (!data) continue;
           let event: any;
           try { event = JSON.parse(data); } catch { throw new V2Error('invalid-response'); }
           if (typeof event?.type === 'string' && event.data && typeof event.data === 'object' && !Array.isArray(event.data)) yield event;
         }
-        if (buffer.length > 1024 * 1024) throw new V2Error('invalid-response');
+        if (buffer.length > MAX_SSE_FRAME_BYTES) throw new V2Error('invalid-response');
       }
     } finally {
       clearTimeout(timer!);

@@ -53,7 +53,8 @@ import { mkdirSync, writeFileSync, existsSync, readdirSync, statSync, watch, typ
 import { join, basename, extname, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { Database } from 'bun:sqlite';
-import { attachedTuiSessions, tuiPresenceSupported } from './tui-presence.ts';
+import { attachedTuiSessions, tuiPresenceSupported, TUI_PRESENCE_WATCH_MS } from './tui-presence.ts';
+import { OPENCODE_SHARED_ACTIONS } from './commands.ts';
 import { diagnoseOpenCodeSetup } from './diagnostics.ts';
 import { normalizeOpencodeVersion, opencodeAllowsV1, opencodeChildEnv, opencodeGeneration, opencodeGenerationForLaunch, OPENCODE_V1_READ_ONLY_REASON } from './generation.ts';
 import { mapOpenCodePart as mapSharedOpenCodePart } from '@cosyncing/opencode-wire';
@@ -87,8 +88,6 @@ export function normalizeOpenCodeRetryDetail(message: unknown, attempt: unknown)
   return `${scalars.slice(0, OPENCODE_RETRY_DETAIL_MAX_SCALARS - 1).join('')}…`;
 }
 
-/** TUI join/leave watch cadence — slightly above the presence cache TTL so each tick re-scans. */
-const TUI_PRESENCE_WATCH_MS = 2_500;
 
 const CAPS: AgentCapabilities = {
   integrationKind: 'http-sse',
@@ -3004,10 +3003,7 @@ class OpenCodeConnection implements SessionConnection {
 
 /** Built-in OpenCode actions surfaced as slash commands (mapped to dedicated endpoints). */
 const BUILTIN_ACTIONS: SlashCommand[] = [
-  { name: 'compact', description: 'Compact / summarize the session', kind: 'action' },
-  { name: 'undo', description: 'Revert the last message', kind: 'action' },
-  { name: 'redo', description: 'Restore the reverted message', kind: 'action' },
-  { name: 'stop', description: 'Stop the running turn', kind: 'action' },
+  ...OPENCODE_SHARED_ACTIONS,
   { name: 'share', description: 'Create a share link', kind: 'action' },
   { name: 'unshare', description: 'Remove the share link', kind: 'action' },
 ];

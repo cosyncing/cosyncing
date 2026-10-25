@@ -1,7 +1,7 @@
-import { ControlRefusedError, PRODUCT_IDENTITY, type AgentMessage, type AgentMessageHandler, type CommandResult, type CommandInput, type FileInput, type HistoryQuery, type HistorySourceIdentity, type PermissionDecision, type PromptInput, type SessionConnection, type SessionInfo, type SlashCommand, type Unsubscribe } from '@cosyncing/adapter-api';
+import { ControlRefusedError, PRODUCT_IDENTITY, type AgentMessage, type AgentMessageHandler, type CommandResult, type CommandInput, type FileInput, type HistoryQuery, type HistoryResetSemantic, type HistorySourceIdentity, type PermissionDecision, type PromptInput, type SessionConnection, type SessionInfo, type SlashCommand, type Unsubscribe } from '@cosyncing/adapter-api';
 import { lstatSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { OPENCODE_SHARED_ACTIONS } from '../commands.ts';
 import type { V2Binding } from '../binding.ts';
 import type { OpenCodeV2Backend } from './backend.ts';
 import { arrayData, contentKey, finite, formAnswer, formCard, historyRows, messageRows, nativeId, newNativeId, object, permissionCard, runSummary, sessionPatch, toolMessages, type Native } from './mapping.ts';
@@ -129,7 +129,7 @@ class BoundV2Connection implements SessionConnection {
   private closed = false;
   private loading?: Promise<void>;
   private reloadNeeded = false;
-  private reloadNotice?: string;
+  private reloadNotice?: { notice: string; semantic: HistoryResetSemantic };
   private hasSnapshot = false;
   private lastEnqueued?: string;
   private published: Partial<SessionInfo> = {};
@@ -171,7 +171,7 @@ class BoundV2Connection implements SessionConnection {
     }
   }
 
-  async resnapshot(notice?: string): Promise<void> {
+  async resnapshot(notice?: { notice: string; semantic: HistoryResetSemantic }): Promise<void> {
     if (this.closed) return;
     if (notice) this.reloadNotice = notice;
     this.reloadNeeded = true;
@@ -179,11 +179,13 @@ class BoundV2Connection implements SessionConnection {
     this.loading = (async () => {
       while (this.reloadNeeded && !this.closed) {
         this.reloadNeeded = false;
+        const notice = this.reloadNotice;
+        this.reloadNotice = undefined;
         this.ready = false;
         const binding = this.backend.binding!;
         const [native, messages] = await Promise.all([this.backend.getSession(this.info.id), this.backend.history(this.info.id), this.backend.pending(this.info.id)]);
         if (this.closed) return;
-        if (binding !== this.backend.binding) { this.reloadNeeded = true; continue; }
+        if (binding !== this.backend.binding) { this.reloadNeeded = true; this.reloadNotice ??= notice; continue; }
         if (binding.identity !== this.binding.identity || binding.auth !== this.binding.auth) throw new V2Error('unavailable');
         this.updateInfo(native);
         this.tools.clear();
@@ -200,8 +202,7 @@ class BoundV2Connection implements SessionConnection {
         if (firstUser && this.backend.active.has(this.info.id)) this.run = { key: firstUser.id, startedAt: firstUser.time?.created };
         this.ready = true;
         this.syncPending();
-        if (this.hasSnapshot) this.emit({ type: 'history-reset', ...(this.reloadNotice ? { notice: this.reloadNotice, semantic: { kind: 'compaction' as const } } : {}) });
-        this.reloadNotice = undefined;
+        if (this.hasSnapshot) this.emit({ type: 'history-reset', ...notice });
         this.hasSnapshot = true;
         const buffered = this.buffered;
         this.buffered = []; this.bufferedBytes = 0;
@@ -263,7 +264,7 @@ class BoundV2Connection implements SessionConnection {
   private apply(event: V2Event): void {
     const data = event.data;
     if (event.type === 'session.inbox.enqueued' && nativeId(data.inboxID, 'msg_') && data.item?.type === 'user' && typeof data.item.payload?.text === 'string') {
-      const user = { id: data.inboxID, type: 'user', time: { created: event.created }, text: data.item.payload.text, files: data.item.payload.files };
+      const user = { ...data.item.payload, id: data.inboxID, type: 'user', time: { created: event.created } };
       this.inbox.set(user.id, user);
       if (!this.run) this.lastEnqueued = user.id;
       for (const row of messageRows(user, this.backend.clientKeys)) this.emit({ ...row, ...(row.type === 'user-message' ? { queued: true } : {}) });
@@ -324,9 +325,11 @@ class BoundV2Connection implements SessionConnection {
       this.emit({ type: 'status', status: 'running', detail });
     } else if (['permission.asked', 'permission.replied', 'form.created', 'form.replied', 'form.cancelled'].includes(event.type)) this.syncPending();
     else if (['session.revert.staged', 'session.revert.cleared', 'session.revert.committed'].includes(event.type)) {
-      void this.resnapshot().catch(() => {});
+      const notice = event.type === 'session.revert.staged' ? 'Reverted to an earlier message — /redo to restore'
+        : event.type === 'session.revert.cleared' ? 'Restored the reverted messages' : undefined;
+      void this.resnapshot(notice ? { notice, semantic: { kind: 'rollback' } } : undefined).catch(() => {});
     } else if (event.type === 'session.compaction.ended') {
-      void this.resnapshot('Compacted the conversation.').catch(() => {});
+      void this.resnapshot({ notice: 'Compacted the conversation.', semantic: { kind: 'compaction' } }).catch(() => {});
     } else if (event.type === 'session.compaction.failed') {
       this.emit({ type: 'error', message: 'OpenCode could not compact the conversation.' });
     }
@@ -339,7 +342,7 @@ class BoundV2Connection implements SessionConnection {
 
   async sendPrompt(input: PromptInput): Promise<void> {
     this.assertMutable();
-    const files = this.files(input);
+    const { text, files } = this.preparePrompt(input);
     await this.select(input);
     const id = newNativeId('msg');
     if (input.clientMessageId) {
@@ -347,7 +350,7 @@ class BoundV2Connection implements SessionConnection {
       if (this.backend.clientKeys.size > 4096) this.backend.clientKeys.delete(this.backend.clientKeys.keys().next().value!);
     }
     try {
-      const result = await this.backend.write(this.binding, this.path('/prompt'), { id, text: input.text, delivery: 'steer', ...(files.length ? { files } : {}) });
+      const result = await this.backend.write(this.binding, this.path('/prompt'), { id, text, delivery: 'steer', ...(files.length ? { files } : {}) });
       if (!object(result?.data) || result.data.id !== id) throw new V2Error('invalid-response', true);
     } catch (error) {
       if (!(error instanceof V2Error) || !error.ambiguous) { this.backend.clientKeys.delete(id); throw error; }
@@ -415,24 +418,24 @@ class BoundV2Connection implements SessionConnection {
     }
   }
 
-  private files(input: PromptInput): Native[] {
-    if (!input.files?.length && !input.images?.length) return [];
+  private preparePrompt(input: PromptInput): { text: string; files: Native[] } {
+    if (!input.files?.length && !input.images?.length) return { text: input.text, files: [] };
     if (!['127.0.0.1', 'localhost', '[::1]', '::1'].includes(new URL(this.binding.baseUrl).hostname)) throw new ControlRefusedError('File input requires a local OpenCode service.', 'command-unsupported');
     const inbox = this.info.cwd && resolve(this.info.cwd, PRODUCT_IDENTITY.repositoryDirectoryName, 'inbox');
-    return [
-      ...(input.files ?? []).map((file) => {
-        if (!inbox || !file.brokerPath || dirname(resolve(file.brokerPath)) !== inbox || !lstatSync(file.brokerPath).isFile()) throw new Error('OpenCode requires a broker-staged attachment.');
-        return { uri: pathToFileURL(file.brokerPath).href, name: file.name };
-      }),
-      ...(input.images ?? []).map((image) => ({ uri: `data:${image.mimeType};base64,${image.data}`, name: image.name ?? 'image' })),
-    ];
+    const refs = (input.files ?? []).map((file) => {
+      if (!inbox || !file.brokerPath || dirname(resolve(file.brokerPath)) !== inbox || !lstatSync(file.brokerPath).isFile()) throw new Error('OpenCode requires a broker-staged attachment.');
+      return `- ${file.name} (${file.mimeType}) → \`${file.brokerPath}\``;
+    });
+    const note = `Attached file(s) — read them from these paths:\n${refs.join('\n')}`;
+    const text = refs.length ? (input.text.trim() ? `${input.text}\n\n${note}` : note) : input.text;
+    return { text, files: (input.images ?? []).map((image) => ({ uri: `data:${image.mimeType};base64,${image.data}`, name: image.name ?? 'image' })) };
   }
 
   async listCommands(): Promise<SlashCommand[]> {
     const location = this.info.cwd ? `?location%5Bdirectory%5D=${encodeURIComponent(this.info.cwd)}` : '';
     const commands = arrayData(await this.backend.transport!.json('/api/command' + location));
-    const builtins = ['stop', 'compact', 'undo', 'redo'];
-    return [...builtins.map((name) => ({ name, kind: 'action' as const })), ...commands.filter((item) => typeof item.name === 'string' && item.name.trim() && !/[\r\n]/.test(item.name) && ![...builtins, 'share', 'unshare'].includes(item.name)).map((item) => ({ name: item.name, kind: 'prompt' as const, ...(typeof item.description === 'string' ? { description: item.description } : {}) }))];
+    const builtins = OPENCODE_SHARED_ACTIONS.map((command) => command.name);
+    return [...OPENCODE_SHARED_ACTIONS, ...commands.filter((item) => typeof item.name === 'string' && item.name.trim() && !/[\r\n]/.test(item.name) && ![...builtins, 'share', 'unshare'].includes(item.name)).map((item) => ({ name: item.name, kind: 'prompt' as const, ...(typeof item.description === 'string' ? { description: item.description } : {}) }))];
   }
 
   async runCommand(name: string, args?: string, input?: CommandInput): Promise<CommandResult | void> {
@@ -461,7 +464,7 @@ class BoundV2Connection implements SessionConnection {
           const boundary = messages.findIndex((message) => message.id === native.revert?.messageID);
           const users = (boundary < 0 ? messages : messages.slice(0, boundary)).filter((message) => message.type === 'user');
           if (users.length < 2) return { notice: 'Nothing to undo.' };
-          await this.backend.write(this.binding, this.path('/revert/stage'), { messageID: users.at(-1)!.id, files: false });
+          await this.backend.write(this.binding, this.path('/revert/stage'), { messageID: users.at(-1)!.id });
         }
       } catch (error) {
         if (error instanceof V2Error && error.reason === 'conflict') return { notice: 'OpenCode is busy; stop the running turn first.' };

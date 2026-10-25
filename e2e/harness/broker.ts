@@ -135,7 +135,7 @@ export class Broker {
 
   /** A protocol client. Owner by default (with the token when there is one). */
   client(auth: ClientAuth = this.token ? { kind: 'owner', token: this.token } : { kind: 'none' }): BrokerClient {
-    return new BrokerClient(this.url, this.wsUrl, auth);
+    return new BrokerClient(this.url, this.wsUrl, auth, () => this.pid);
   }
 
   async start(): Promise<void> {

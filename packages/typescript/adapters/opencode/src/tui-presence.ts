@@ -93,6 +93,8 @@ export function scanAttachedTuiSessions(servePort: string, procRoot = '/proc'): 
  *  amortized. 2s keeps badge flips near-live while bounding /proc traffic to one scan per window. */
 const cache = new Map<string, { at: number; sessions: Set<string> }>();
 export const TUI_PRESENCE_TTL_MS = 2_000;
+/** Scan after the presence cache expires. */
+export const TUI_PRESENCE_WATCH_MS = 2_500;
 
 export function attachedTuiSessions(baseUrl: string, procRoot = '/proc'): Set<string> {
   if (!tuiPresenceSupported(baseUrl)) return new Set();

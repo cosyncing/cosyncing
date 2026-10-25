@@ -2,9 +2,9 @@ import { ControlRefusedError, SessionCreateTemporarilyUnavailableError, SessionN
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BindingResolver, V2Binding } from '../binding.ts';
-import { attachedV2TuiSessions, v2TuiPresenceSupported } from '../tui-presence.ts';
+import { attachedV2TuiSessions, v2TuiPresenceSupported, TUI_PRESENCE_WATCH_MS } from '../tui-presence.ts';
 import { OpenCodeV2Connection } from './connection.ts';
-import { arrayData, formCard, isSession, modelsFrom, nativeId, newNativeId, object, permissionCard, sessionInfo, type Native } from './mapping.ts';
+import { arrayData, compactAttachments, formCard, isSession, modelsFrom, nativeId, newNativeId, object, permissionCard, sessionInfo, type Native } from './mapping.ts';
 import { V2Error, V2ResponseTooLargeError, V2Transport, type V2Event } from './transport.ts';
 
 export interface LegacySession { id: string; title?: string; directory?: string; time?: { created?: number; updated?: number }; model?: { providerID?: string; id?: string; modelID?: string }; }
@@ -75,7 +75,7 @@ export class OpenCodeV2Backend {
       const changed = [...new Set([...this.presence, ...next])].filter((id) => this.presence.has(id) !== next.has(id));
       this.presence = next;
       for (const id of changed) this.changed(id);
-    }, 2200);
+    }, TUI_PRESENCE_WATCH_MS);
     this.presenceTimer.unref?.();
   }
 
@@ -259,6 +259,9 @@ export class OpenCodeV2Backend {
       if (changed || pendingChanged) this.changed(id);
     }
     if (!['server.connected', 'server.heartbeat', 'session.created', 'session.updated', 'session.renamed', 'session.forked', 'session.deleted', 'session.status', 'session.execution.started', 'session.execution.succeeded', 'session.execution.failed', 'session.execution.interrupted', 'session.inbox.enqueued', 'session.inbox.delivered', 'session.text.started', 'session.text.delta', 'session.text.ended', 'session.reasoning.started', 'session.reasoning.delta', 'session.reasoning.ended', 'session.step.started', 'session.step.streamed', 'session.step.ended', 'session.step.failed', 'session.usage.updated', 'session.instructions.updated', 'session.revert.staged', 'session.revert.cleared', 'session.revert.committed', 'session.compaction.started', 'session.compaction.delta', 'session.compaction.ended', 'session.compaction.failed', 'session.tool.input.started', 'session.tool.input.ended', 'session.tool.progress', 'session.tool.called', 'session.tool.success', 'session.tool.failed', 'permission.asked', 'permission.replied', 'form.created', 'form.replied', 'form.cancelled'].includes(event.type)) this.unknownEvents++;
+    if (event.type === 'session.inbox.enqueued' && object(data.item?.payload)) {
+      event = { ...event, data: { ...data, item: { ...data.item, payload: compactAttachments(data.item.payload) } } };
+    }
     for (const connection of this.connections) connection.onEvent(event);
   }
 
@@ -357,11 +360,20 @@ export class OpenCodeV2Backend {
     const pages: Native[][] = [];
     const cursors = new Set<string>();
     let cursor: string | undefined;
+    let limit = 100;
     const deadline = Date.now() + 15_000;
     let bytes = 0;
-    for (let page = 0; page < 500 && Date.now() < deadline; page++) {
-      const value = await this.transport!.json(`/api/session/${encodeURIComponent(id)}/message?limit=100` + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '&order=desc'), { signal });
-      const data = arrayData(value);
+    for (let page = 0; page < 500 && Date.now() < deadline;) {
+      let value: any;
+      try {
+        value = await this.transport!.json(`/api/session/${encodeURIComponent(id)}/message?limit=${limit}` + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '&order=desc'), { signal });
+      } catch (error) {
+        if (!(error instanceof V2ResponseTooLargeError) || limit === 1) throw error;
+        limit = Math.max(1, Math.floor(limit / 2));
+        continue;
+      }
+      page++;
+      const data = arrayData(value).map(compactAttachments);
       bytes += Buffer.byteLength(JSON.stringify(data));
       if (bytes > 64 * 1024 * 1024) throw new V2Error('invalid-response');
       this.unknownMessages += data.filter((message) => !['user', 'assistant', 'idle', 'compaction'].includes(message.type)).length;

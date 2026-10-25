@@ -4,10 +4,52 @@
 import { EventEmitter } from 'node:events';
 import { randomBytes } from 'node:crypto';
 import net from 'node:net';
+import tls from 'node:tls';
 import { constants, inflateRawSync } from 'node:zlib';
 import { BROKER_CONTRACT_REVISION, BROKER_CONTRACT_SURFACE_HASH, CLIENT_MINIMUM_BROKER_CONTRACT_REVISION } from '../../packages/typescript/protocol/src/index.ts';
 import type { BrokerClient, Frame } from './client.ts';
 import { scaled } from './wait.ts';
+
+function upgradeRequest(url: URL, path: string, deflate = false): string {
+  return `GET ${path} HTTP/1.1\r\nHost: ${url.host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n` +
+    `Sec-WebSocket-Key: ${randomBytes(16).toString('base64')}\r\nSec-WebSocket-Version: 13\r\n` +
+    (deflate ? 'Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover; client_no_context_takeover\r\n' : '') + '\r\n';
+}
+
+/** One diagnostic upgrade. It closes immediately on 101 and never sends an application frame. */
+export function probeWebSocketUpgrade(url: URL): Promise<{ statusLine?: string; body: string; timedOut?: boolean; truncated?: boolean; error?: string }> {
+  return new Promise((resolve) => {
+    const secure = url.protocol === 'wss:';
+    const options = { host: url.hostname.replace(/^\[|\]$/g, ''), port: Number(url.port) || (secure ? 443 : 80) };
+    const socket = secure ? tls.connect(options) : net.createConnection(options);
+    const cap = 32 * 1024;
+    let bytes = Buffer.alloc(0), settled = false;
+    const finish = (extra: { timedOut?: boolean; error?: string } = {}) => {
+      if (settled) return;
+      settled = true; clearTimeout(timer); socket.destroy();
+      const end = bytes.indexOf('\r\n\r\n');
+      resolve({ statusLine: end < 0 ? undefined : bytes.subarray(0, end).toString().split('\r\n')[0],
+        body: end < 0 ? '' : bytes.subarray(end + 4).toString('utf8'), ...(bytes.length >= cap ? { truncated: true } : {}), ...extra });
+    };
+    const timer = setTimeout(() => finish({ timedOut: true }), scaled(3000));
+    socket.once(secure ? 'secureConnect' : 'connect', () => socket.write(upgradeRequest(url, url.pathname + url.search)));
+    socket.on('data', (chunk: Buffer) => {
+      bytes = Buffer.concat([bytes, chunk]).subarray(0, cap);
+      const end = bytes.indexOf('\r\n\r\n');
+      if (end >= 0) {
+        const head = bytes.subarray(0, end).toString();
+        if (/^HTTP\/1\.[01] 101\b/.test(head)) { bytes = bytes.subarray(0, end + 4); finish(); return; }
+        const length = /\r\ncontent-length:\s*(\d+)/i.exec(head)?.[1];
+        if (length !== undefined && bytes.length - end - 4 >= Number(length)) { finish(); return; }
+        if (bytes.subarray(end + 4).toString().endsWith('0\r\n\r\n')) { finish(); return; }
+      }
+      if (bytes.length >= cap) finish();
+    });
+    socket.once('end', () => finish());
+    socket.once('close', () => finish());
+    socket.once('error', (error) => finish({ error: error.message }));
+  });
+}
 
 export interface WireFrame {
   value: Frame;
@@ -30,11 +72,7 @@ export class WebSocketWire {
 
   private constructor(url: URL, path: string, deflate: boolean) {
     this.socket = net.createConnection(Number(url.port), url.hostname);
-    this.socket.on('connect', () => this.socket.write(
-      `GET ${path} HTTP/1.1\r\nHost: ${url.host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n` +
-      `Sec-WebSocket-Key: ${randomBytes(16).toString('base64')}\r\nSec-WebSocket-Version: 13\r\n` +
-      (deflate ? 'Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover; client_no_context_takeover\r\n' : '') + '\r\n',
-    ));
+    this.socket.on('connect', () => this.socket.write(upgradeRequest(url, path, deflate)));
     this.socket.on('data', (chunk) => {
       // No setEncoding: this socket always delivers binary buffers.
       try { this.receive(chunk as Buffer); } catch (error) { this.fail(error as Error); }

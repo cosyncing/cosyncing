@@ -23,6 +23,7 @@
  *   session/load    ← (no equivalent: a serve session is never loaded into a child)
  */
 import { expect } from 'bun:test';
+import { PROMPT_ATTACHMENT_LIMITS } from '../../../packages/typescript/protocol/src/index.ts';
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { eventually, fixturePath, type FixturePaths, type SessionStream } from '../../harness/index.ts';
@@ -517,7 +518,7 @@ export const opencodeV2Kit: ConformanceKit = {
         const card = await stream.waitForMessage((message) => message.type === 'question-request');
         const mark = fake.ledger.mark();
         const from = stream.frames.length;
-        fake.serve.emit('fixture.oversized', { sessionID: session.id, padding: 'x'.repeat(1024 * 1024 + 1) });
+        fake.serve.emit('fixture.oversized', { sessionID: session.id, padding: 'x'.repeat(PROMPT_ATTACHMENT_LIMITS.maxFiles * PROMPT_ATTACHMENT_LIMITS.maxInlineEncodedBytes * 2) });
         await stream.waitForFrame((frame) => frame.kind === 'history' && frame.reset === true, { after: from });
         await eventually(() => fake.ledger.routed('GET', new RegExp(`^/api/session/${session.id}/form$`), mark).length > 0, { what: 'session-scoped pending state after the gap' });
         await context.client.waitForSession((row) => row.id === session.id && row.status === 'needs-input');
@@ -1007,7 +1008,7 @@ opencodeV2Kit.extras!.push(
         await stream.waitForFrame((frame) => frame.kind === 'message' && frame.message?.text === 'reattached within the retry window', { after: eventFrom, timeoutMs: 10000 });
         stream.close();
 
-        await context.restart({ env: { COSYNCING_OPENCODE_SSE_RECONNECT_MS: '50' } });
+        await context.restart({ env: { COSYNCING_OPENCODE_SSE_RECONNECT_MS: '1' } });
         const retrying = await context.openDrive(session);
         const mark = fake.ledger.mark(), retryFrom = retrying.frames.length;
         fake.serve.failNext('GET', '/api/event', 503, 1);
@@ -1804,17 +1805,25 @@ opencodeV2Kit.extras!.push(
           const reset = await seat.waitForFrame((frame) => frame.kind === 'history' && frame.reset === true && userTexts(frame.messages).length === 1, { after });
           expect(userTexts(reset.messages)).toEqual(['seeded prompt 1']);
         }
+        for (const seat of [stream, observer]) {
+          const notice = await seat.waitForFrame((frame) => frame.kind === 'notice' && frame.message === 'Reverted to an earlier message — /redo to restore', { after: seat === stream ? from : otherFrom });
+          expect(notice.message).toBe('Reverted to an earlier message — /redo to restore');
+        }
         expect(fake.serve.session(seeded.id).messages.filter((message) => message.type === 'user')).toHaveLength(2);
-        expect(fake.ledger.routed('POST', /\/revert\/stage$/, mark).map((entry) => entry.body)).toEqual([{ messageID: users[1]!.id, files: false }]);
+        expect(fake.ledger.routed('POST', /\/revert\/stage$/, mark).map((entry) => entry.body)).toEqual([{ messageID: users[1]!.id }]);
         from = stream.frames.length;
         expect((await stream.sendAndAwait({ kind: 'command', name: 'redo' })).kind).toBe('ack');
         await stream.waitForFrame((frame) => frame.kind === 'history' && frame.reset === true && userTexts(frame.messages).length === 2, { after: from });
+        const restored = await stream.waitForFrame((frame) => frame.kind === 'notice' && frame.message === 'Restored the reverted messages', { after: from });
+        expect(restored.message).toBe('Restored the reverted messages');
         from = stream.frames.length;
         expect((await stream.sendAndAwait({ kind: 'command', name: 'undo' })).kind).toBe('ack');
         await stream.waitForFrame((frame) => frame.kind === 'history' && frame.reset === true && userTexts(frame.messages).length === 1, { after: from });
+        const replaceFrom = stream.frames.length;
         expect((await context.prompt(stream, 'replace the staged turn')).kind).toBe('ack');
         await stream.waitForMessage((message) => message.type === 'model-output' && message.text === 'answer: replace the staged turn');
         expect(fake.serve.session(seeded.id).messages.some((message) => message.id === users[1]!.id)).toBe(false);
+        expect(stream.frames.slice(replaceFrom).some((frame) => frame.kind === 'notice' && ['Reverted to an earlier message — /redo to restore', 'Restored the reverted messages'].includes(frame.message))).toBe(false);
         const noRedo = stream.frames.length;
         expect((await stream.sendAndAwait({ kind: 'command', name: 'redo' })).kind).toBe('ack');
         await stream.waitForFrame((frame) => frame.kind === 'notice' && /Nothing to redo/.test(String(frame.message)), { after: noRedo });
@@ -1831,6 +1840,10 @@ opencodeV2Kit.extras!.push(
       try {
         const names = stream.ofKind('commands').at(-1)!.commands.map((command: any) => command.name);
         expect(names).not.toContain('share'); expect(names).not.toContain('unshare');
+        const commands = stream.ofKind('commands').at(-1)!.commands;
+        for (const [name, description] of [['compact', 'Compact / summarize the session'], ['undo', 'Revert the last message'], ['redo', 'Restore the reverted message'], ['stop', 'Stop the running turn']]) {
+          expect(commands.find((command: any) => command.name === name)?.description).toBe(description);
+        }
         let from = stream.frames.length;
         expect((await stream.sendAndAwait({ kind: 'command', name: 'compact' })).kind).toBe('ack');
         fake.serve.finishCompaction(session.id);
@@ -1847,35 +1860,91 @@ opencodeV2Kit.extras!.push(
     },
   },
   {
-    title: 'file URIs and hydrated native echoes share one prompt and a rejected file creates no echo',
+    title: 'staged file references and maximum inline images keep shared stream and history usable',
     async run(context) {
       const fake = context.fake as OpencodeV2Fake;
       const cwd = fake.workspace('files with spaces'), id = `ses_files${crypto.randomUUID().replaceAll('-', '')}`;
       fake.serve.seed({ id, directory: cwd, title: 'native files', turns: 0 });
       const stream = await context.openDrive({ id, cwd, reason: 'takeover' });
+      const otherSession = await context.drivableSession('independent image-stream observer');
+      const other = await context.openDrive(otherSession);
       try {
         const mark = fake.ledger.mark();
-        expect((await context.prompt(stream, 'inspect the attachments', { files: [{ name: 'fixture file.txt', mimeType: 'text/plain', data: Buffer.from('synthetic file bytes').toString('base64') }], images: [{ name: 'image.png', mimeType: 'image/png', data: 'aW1hZ2U=' }] })).kind).toBe('ack');
-        const echo = await stream.waitForMessage((message) => message.type === 'user-message' && message.text === 'inspect the attachments' && !message.queued);
-        expect(echo.imageCount).toBe(1);
-        const sent = fake.ledger.routed('POST', /\/prompt$/, mark);
-        expect(sent).toHaveLength(1);
-        const files = (sent[0]!.body as any).files;
-        expect(files[0].uri).toStartWith('file://'); expect(files[0].uri).toContain('%20'); expect(files[0].uri).not.toContain(' ');
-        expect(files[1].uri).toBe('data:image/png;base64,aW1hZ2U=');
-        const hydrated = fake.serve.session(id).messages.find((message) => message.id === echo.key)!;
-        expect(hydrated.files[0]).toMatchObject({ data: Buffer.from('synthetic file bytes').toString('base64'), mime: 'text/plain', source: { type: 'uri' } });
+        const uploads = `/api/sessions/opencode/${id}/uploads`;
+        const payload = Buffer.alloc(3 * 1024 * 1024, 120);
+        const begin = await context.client.post(uploads, { name: 'multi megabyte.txt', mimeType: 'text/plain', size: payload.length });
+        expect(begin.status, begin.text).toBe(200);
+        const upload = `${uploads}/${begin.body.uploadId}`;
+        expect((await context.client.request('PATCH', upload, payload, { 'x-cosyncing-upload-offset': '0' })).status).toBe(200);
+        const completed = await context.client.post(`${upload}/complete`);
+        expect(completed.status, completed.text).toBe(200);
+        const stagedFrom = stream.frames.length;
+        expect((await stream.sendAndAwait({ kind: 'prompt', text: 'read the staged file', files: [{ stagedRef: completed.body.stagedRef, size: payload.length }] })).kind).toBe('ack');
+        const staged = await stream.waitForMessage((message) => message.type === 'user-message' && message.text.startsWith('read the staged file') && !message.queued);
+        await stream.waitForMessage((message) => message.type === 'run-summary' && message.status === 'done');
+        const request = fake.ledger.routed('POST', /\/prompt$/, mark)[0]!.body as any;
+        const path = join(cwd, '.cosyncing', 'inbox', completed.body.name);
+        expect(request.text).toBe(`read the staged file\n\nAttached file(s) — read them from these paths:\n- ${completed.body.name} (text/plain) → \`${path}\``);
+        expect(request.files).toBeUndefined();
+        expect(stream.frames.slice(stagedFrom).filter((frame) => frame.kind === 'message' && frame.message.type === 'user-message' && frame.message.key === staged.key && !frame.message.queued)).toHaveLength(1);
+
+        const imageData = Buffer.alloc(PROMPT_ATTACHMENT_LIMITS.maxInlineDecodedBytes, 73).toString('base64');
+        const images = Array.from({ length: PROMPT_ATTACHMENT_LIMITS.maxFiles }, (_, index) => ({ name: `image-${index}.png`, mimeType: 'image/png', data: imageData }));
+        const otherFrom = other.frames.length, imageMark = fake.ledger.mark();
+        expect((await context.prompt(stream, 'one full-limit image', { images: images.slice(0, 1) })).kind).toBe('ack');
+        const registration = fake.serve.registration();
+        for (const text of ['eight inline images', 'a second image batch']) {
+          const from = stream.frames.length;
+          // A terminal can enqueue a larger native batch than the broker's aggregate inline budget.
+          const nativeId = `msg_images_${crypto.randomUUID().replaceAll('-', '')}`;
+          const response = await fetch(`${fake.serve.url}/api/session/${id}/prompt`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Basic ${Buffer.from(`opencode:${registration.password}`).toString('base64')}` }, body: JSON.stringify({ id: nativeId, text, delivery: 'steer', files: images.map((image) => ({ uri: `data:${image.mimeType};base64,${image.data}`, name: image.name })) }) });
+          expect(response.status).toBe(200);
+          expect((await response.json() as any).data.id).toBe(nativeId);
+          const echo = await stream.waitForFrame((frame) => frame.kind === 'message' && frame.message.type === 'user-message' && frame.message.text === text && !frame.message.queued, { after: from });
+          expect(echo.message.imageCount).toBe(PROMPT_ATTACHMENT_LIMITS.maxFiles);
+          expect(stream.frames.slice(from).filter((frame) => frame.kind === 'message' && frame.message.type === 'user-message' && frame.message.key === echo.message.key && !frame.message.queued)).toHaveLength(1);
+          await stream.waitForFrame((frame) => frame.kind === 'message' && frame.message.type === 'run-summary' && frame.message.status === 'done', { after: from });
+        }
         const replay = await context.client.attach('opencode', id, { readOnly: true });
-        expect((await replay.waitForKind('history')).messages.find((message: any) => message.type === 'user-message' && message.key === echo.key)?.imageCount).toBe(1);
+        const history = (await replay.waitForKind('history')).messages;
+        for (const text of ['eight inline images', 'a second image batch']) {
+          expect(history.find((message: any) => message.type === 'user-message' && message.text === text)?.imageCount).toBe(PROMPT_ATTACHMENT_LIMITS.maxFiles);
+        }
+        expect(JSON.stringify(history)).not.toContain(imageData);
         replay.close();
+        expect(fake.ledger.routed('GET', new RegExp(`^/api/session/${id}/message$`), imageMark).some((entry) => Number((entry.query as any).limit) < 100)).toBe(true);
+        fake.serve.appendTurn(otherSession.id, 'image sentinel', 'the other stream stays connected');
+        await other.waitForMessage((message) => message.type === 'model-output' && message.text === 'the other stream stays connected');
+        expect(other.frames.slice(otherFrom).filter((frame) => frame.kind === 'history' && frame.reset === true)).toHaveLength(0);
+        expect(fake.ledger.routed('GET', /^\/api\/event$/, imageMark)).toHaveLength(0);
+
         fake.serve.failNext('POST', `/api/session/${id}/prompt`, 400);
         const from = stream.frames.length, rejectedMark = fake.ledger.mark();
-        expect((await context.prompt(stream, 'rejected attachment', { files: [{ name: 'refused.txt', mimeType: 'text/plain', data: 'eA==' }] })).kind).toBe('nack');
+        expect((await context.prompt(stream, 'rejected attachment', { images: [{ name: 'refused.png', mimeType: 'image/png', data: 'eA==' }] })).kind).toBe('nack');
         expect((await context.prompt(stream, 'after file rejection')).kind).toBe('ack');
         await stream.waitForMessage((message) => message.type === 'model-output' && message.text === 'answer: after file rejection');
         expect(stream.frames.slice(from).some((frame) => frame.kind === 'message' && frame.message.type === 'user-message' && frame.message.text === 'rejected attachment')).toBe(false);
         expect(fake.ledger.routed('GET', /\/inbox$/, rejectedMark)).toHaveLength(0);
-      } finally { stream.close(); }
+      } finally { stream.close(); other.close(); }
+
+      if (process.platform === 'linux') {
+        const saved = context.broker.env.OPENCODE_URL;
+        fake.serve.authenticationRequired = false;
+        try {
+          // Linux reaches this fixture locally while the configured origin is outside the supported local names.
+          await context.restart({ env: { OPENCODE_URL: `http://0.0.0.0:${fake.serve.port}` } });
+          const session = await context.drivableSession('non-local attachment refusal');
+          const seat = await context.openDrive(session);
+          try {
+            const mark = fake.ledger.mark();
+            expect((await seat.sendAndAwait({ kind: 'prompt', text: 'must stay local', files: [{ name: 'remote.txt', mimeType: 'text/plain', data: 'eA==' }] })).kind).toBe('nack');
+            expect(fake.ledger.routed('POST', /\/prompt$/, mark)).toHaveLength(0);
+          } finally { seat.close(); }
+        } finally {
+          fake.serve.authenticationRequired = true;
+          await context.restart({ env: { OPENCODE_URL: saved } });
+        }
+      }
     },
   },
   {

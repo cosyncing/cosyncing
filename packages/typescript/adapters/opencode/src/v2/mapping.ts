@@ -121,6 +121,13 @@ export function formAnswer(form: Native, answers: string[][]): Record<string, un
 
 export const contentKey = (id: string, ordinal: number): string => `${id}:${ordinal}`;
 
+/** Keep attachment metadata and image count without retaining hydrated base64. */
+export function compactAttachments(value: Native): Native {
+  if (!Array.isArray(value.files)) return value;
+  const imageCount = value.files.filter((file: Native) => typeof file?.data === 'string' && typeof file.mime === 'string' && file.mime.startsWith('image/') && object(file.source) && ['uri', 'inline'].includes(file.source.type)).length;
+  return { ...value, imageCount, files: value.files.filter(object).map(({ data: _data, ...file }: Native) => file) };
+}
+
 export function toolMessages(tool: Native): AgentMessage[] {
   if (typeof tool.id !== 'string' || typeof tool.name !== 'string') return [];
   const state = object(tool.state) ? tool.state : {};
@@ -137,7 +144,7 @@ export function messageRows(message: Native, clientKeys: ReadonlyMap<string, str
   if (!nativeId(message.id, 'msg_') || !object(message.time) || !finite(message.time.created)) return [];
   if (message.type === 'user' && typeof message.text === 'string') {
     const clientKey = clientKeys.get(message.id);
-    const imageCount = Array.isArray(message.files) ? message.files.filter((file: Native) => typeof file?.data === 'string' && typeof file.mime === 'string' && file.mime.startsWith('image/') && object(file.source) && ['uri', 'inline'].includes(file.source.type)).length : 0;
+    const imageCount = finite(message.imageCount) ? message.imageCount : compactAttachments(message).imageCount ?? 0;
     return [{ type: 'user-message', key: message.id, text: message.text, turnId: message.id, sentAt: message.time.created, ...(imageCount ? { imageCount } : {}), ...(clientKey ? { clientKey } : {}) }];
   }
   if (message.type === 'compaction' && message.status === 'completed' && typeof message.summary === 'string') return [{ type: 'model-output', key: `${message.id}:compaction`, text: message.summary, final: true }];

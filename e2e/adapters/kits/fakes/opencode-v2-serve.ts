@@ -173,7 +173,8 @@ export class FakeOpenCodeV2Serve {
     const url = new URL(request.url), path = url.pathname, method = request.method;
     const body = method === 'GET' || method === 'DELETE' ? undefined : await request.json().catch(() => undefined) as Json | undefined;
     const authorized = request.headers.get('authorization') === `Basic ${Buffer.from(`opencode:${this.credential}`).toString('base64')}`;
-    this.record({ kind: 'request', method, path, query: Object.fromEntries(url.searchParams), body, authorized });
+    const loggedBody = body?.files ? { ...body, files: body.files.map((file: Json) => typeof file.uri === 'string' && file.uri.length > 128 ? { ...file, uri: file.uri.slice(0, 128) + '…' } : file) } : body;
+    this.record({ kind: 'request', method, path, query: Object.fromEntries(url.searchParams), body: loggedBody, authorized });
     const redirect = this.redirects.get(path);
     if (redirect) { this.redirects.delete(path); return new Response(null, { status: 302, headers: { location: redirect } }); }
     const failure = this.failures.get(`${method} ${path}`);
