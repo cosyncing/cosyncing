@@ -38,7 +38,7 @@ export interface Task {
   serial?: boolean;
   /** Deterministic checks (lint, format, policy) are not retried. */
   retry?: boolean;
-  /** Expected duration; only balances shards. */
+  /** Expected duration; balances shards and schedules longest tasks first. */
   estimateMs?: number;
 }
 
@@ -80,11 +80,12 @@ function findTestFiles(base: string): string[] {
   return found.sort();
 }
 
-function bunTestTask(file: string, id: string): Task {
+function bunTestTask(file: string, id: string, concurrency?: number): Task {
   return {
     id,
     // Per-test bound; the task timeout bounds the file.
-    run: ['bun', 'test', '--timeout', '120000', `./${file}`],
+    run: ['bun', 'test', '--timeout', '120000',
+      ...(concurrency ? ['--max-concurrency', String(concurrency)] : []), `./${file}`],
     timeoutMs: 300_000,
   };
 }
@@ -92,7 +93,10 @@ function bunTestTask(file: string, id: string): Task {
 /** Feature e2e suites: `e2e/<suite>/**\/*.test.ts`. */
 function e2eTasks(suite: SuiteId): Task[] {
   return findTestFiles(`e2e/${suite}`).map((file) =>
-    bunTestTask(file, file.slice(`e2e/${suite}/`.length).replace(/\.test\.ts$/, ''))
+    // Browser scenarios each own real renderers and brokers. Bound their inner
+    // fanout as well as the runner's file pool; eight pages per file made the
+    // two longest artifact scenarios exhaust their unchanged 120-second bound.
+    bunTestTask(file, file.slice(`e2e/${suite}/`.length).replace(/\.test\.ts$/, ''), suite === 'web' ? 2 : undefined)
   );
 }
 
@@ -280,7 +284,7 @@ export const suites: Suite[] = [
       cwd: 'apps/client',
       serial: true,
       timeoutMs: 600_000,
-      estimateMs: 60_000,
+      estimateMs: 360_000,
     }],
   },
   {

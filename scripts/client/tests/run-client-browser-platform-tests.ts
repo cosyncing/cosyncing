@@ -33,7 +33,7 @@ const BROWSER_PLATFORM_TESTS = [
 function chromiumExecutable(): string {
   const explicit = process.env.COSYNCING_CHROMIUM_EXECUTABLE?.trim();
   if (explicit) return explicit;
-  const cache = join(process.env.HOME ?? tmpdir(), '.cache/ms-playwright');
+  const cache = process.env.PLAYWRIGHT_BROWSERS_PATH ?? join(process.env.HOME ?? tmpdir(), '.cache/ms-playwright');
   const shells = readdirSync(cache)
     .filter((entry) => entry.startsWith('chromium_headless_shell-'))
     .sort(
