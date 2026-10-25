@@ -9,6 +9,7 @@ import 'package:cosyncing_client/src/features/settings/view/quota_liquid_gauge.d
 import 'package:cosyncing_client/src/features/settings/view/quota_provider_logo.dart';
 import 'package:cosyncing_client/src/features/settings/view/settings_common.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 
 /// Remaining-percent threshold at or under which a quota row reads as a
 /// warning. Matches the broker's quota-warning evaluator
@@ -23,7 +24,7 @@ const double quotaCriticalRemainingPercent = 10;
 /// own expiry notice inside the last 48 hours, the edge included.
 const Duration quotaResetCreditsUseOrLose = Duration(hours: 48);
 
-/// Remaining quota in compact provider pairs, with one liquid circle per
+/// Remaining quota in compact provider columns, with one liquid circle per
 /// window. Provider selection, window normalization, stale/estimated readings
 /// and reset credits share the same presentation in Overview and Settings.
 /// Antigravity retains its two shared pools rather than repeating each model.
@@ -56,7 +57,7 @@ class QuotaStatusPanel extends StatelessWidget {
   /// Omits the Settings wrapper on an already titled reading surface.
   final bool embedded;
 
-  /// Content width from which providers sit two to a row.
+  /// Content width from which providers sit in two independent columns.
   static const double twoColumnWidth = 280;
 
   @override
@@ -163,30 +164,143 @@ class QuotaStatusPanel extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 8),
-              for (var start = 0; start < groups.length; start += columns) ...[
-                if (start > 0) SizedBox(height: gap),
-                if (columns == 1)
-                  groups[start]
-                else
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Expanded(child: groups[start]),
-                      SizedBox(width: gap),
-                      Expanded(
-                        child: start + 1 < groups.length
-                            ? groups[start + 1]
-                            : const SizedBox.shrink(),
-                      ),
-                    ],
-                  ),
-              ],
+              _QuotaProviderLayout(
+                columns: columns,
+                gap: gap,
+                textDirection: Directionality.of(context),
+                children: groups,
+              ),
             ],
           );
         },
       ),
     );
   }
+}
+
+/// Packs each provider below the shortest column using its actual laid-out
+/// height, including wrapped labels, stale notices and reset credits.
+class _QuotaProviderLayout extends MultiChildRenderObjectWidget {
+  const _QuotaProviderLayout({
+    required this.columns,
+    required this.gap,
+    required this.textDirection,
+    required super.children,
+  });
+
+  final int columns;
+  final double gap;
+  final TextDirection textDirection;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderQuotaProviderLayout(columns, gap, textDirection);
+
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    _RenderQuotaProviderLayout renderObject,
+  ) {
+    renderObject
+      ..columns = columns
+      ..gap = gap
+      ..textDirection = textDirection;
+  }
+}
+
+class _QuotaProviderParentData extends ContainerBoxParentData<RenderBox> {}
+
+class _RenderQuotaProviderLayout extends RenderBox
+    with
+        ContainerRenderObjectMixin<RenderBox, _QuotaProviderParentData>,
+        RenderBoxContainerDefaultsMixin<RenderBox, _QuotaProviderParentData> {
+  _RenderQuotaProviderLayout(this._columns, this._gap, this._textDirection);
+
+  int _columns;
+  double _gap;
+  TextDirection _textDirection;
+
+  int get columns => _columns;
+
+  set columns(int value) {
+    if (_columns == value) return;
+    _columns = value;
+    markNeedsLayout();
+  }
+
+  double get gap => _gap;
+
+  set gap(double value) {
+    if (_gap == value) return;
+    _gap = value;
+    markNeedsLayout();
+  }
+
+  TextDirection get textDirection => _textDirection;
+
+  set textDirection(TextDirection value) {
+    if (_textDirection == value) return;
+    _textDirection = value;
+    markNeedsLayout();
+  }
+
+  @override
+  void setupParentData(RenderBox child) {
+    if (child.parentData is! _QuotaProviderParentData) {
+      child.parentData = _QuotaProviderParentData();
+    }
+  }
+
+  Size _layout(BoxConstraints constraints, {required bool dry}) {
+    final width = constraints.maxWidth;
+    final columnWidth = math.max<double>(
+      0,
+      (width - _gap * (_columns - 1)) / _columns,
+    );
+    final childConstraints = BoxConstraints.tightFor(width: columnWidth);
+    final heights = List<double>.filled(_columns, 0);
+    var child = firstChild;
+    while (child != null) {
+      var column = 0;
+      for (var index = 1; index < _columns; index++) {
+        if (heights[index] < heights[column]) column = index;
+      }
+      final parentData = child.parentData! as _QuotaProviderParentData;
+      final Size childSize;
+      if (dry) {
+        childSize = child.getDryLayout(childConstraints);
+      } else {
+        child.layout(childConstraints, parentUsesSize: true);
+        childSize = child.size;
+        final visualColumn = _textDirection == TextDirection.ltr
+            ? column
+            : _columns - column - 1;
+        parentData.offset = Offset(
+          visualColumn * (columnWidth + _gap),
+          heights[column],
+        );
+      }
+      heights[column] += childSize.height + _gap;
+      child = parentData.nextSibling;
+    }
+    final height = childCount == 0 ? 0.0 : heights.reduce(math.max) - _gap;
+    return constraints.constrain(Size(width, height));
+  }
+
+  @override
+  Size computeDryLayout(BoxConstraints constraints) =>
+      _layout(constraints, dry: true);
+
+  @override
+  void performLayout() => size = _layout(constraints, dry: false);
+
+  @override
+  void paint(PaintingContext context, Offset offset) =>
+      defaultPaint(context, offset);
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) =>
+      defaultHitTestChildren(result, position: position);
 }
 
 /// Readings and meaningful failures, excluding empty provider shells.
@@ -229,7 +343,7 @@ class _QuotaProviderGroup extends StatelessWidget {
       key: Key('settings-quota-provider-$providerId'),
       padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
-        border: Border.all(color: tokens.separator),
+        color: tokens.surface2,
         borderRadius: BorderRadius.circular(tokens.radiusMd),
       ),
       child: Column(

@@ -21,6 +21,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - An app-driven Claude Code session that had a prompt queued behind a running
   turn is closed normally once every client disconnects. Previously it stayed
   loaded, and its Claude process kept running, until the broker restarted.
+- Quota cards pack into independent columns, avoiding gaps beneath providers
+  with fewer quota details. Borderless themed surfaces keep each provider
+  distinct in Overview and Settings.
 
 ### Changed
 
