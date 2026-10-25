@@ -84,9 +84,8 @@ function isModeToken(value: unknown): value is string {
  * The field is the older of the two intake routes and was forwarded verbatim:
  * only `WS_INBOUND_MAX_BYTES` (32 MiB) stood between a client and an adapter
  * that declares `supportsNativeFileInput: false` and has a dead `images` branch
- * waiting for it. Ceilings, codes and shape rules are the ones inline `files`
- * already obeys — deliberately no new error code, which would move the surface
- * hash for validation that adds no new failure mode.
+ * waiting for it. Each image has its own inline byte limit, with at most
+ * `maxFiles` images. Existing attachment codes and shape rules apply.
  */
 export function assertBoundedPromptImages(raw: unknown, supportsNativeFileInput: boolean): void {
   if (raw === undefined || raw === null) return;
@@ -106,7 +105,6 @@ export function assertBoundedPromptImages(raw: unknown, supportsNativeFileInput:
       `a prompt carries at most ${PROMPT_ATTACHMENT_LIMITS.maxFiles} images`,
     );
   }
-  let encoded = 0;
   for (const entry of raw) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
       throw new ClientMessagePolicyError('ATTACHMENT_INVALID', 'each prompt image must be an object');
@@ -141,11 +139,10 @@ export function assertBoundedPromptImages(raw: unknown, supportsNativeFileInput:
     // cost nothing, so an oversized entry is refused before the canonical-base64
     // regex scans it — a 30 MB string used to be walked end to end on its way to
     // being rejected anyway.
-    encoded += data.length;
-    if (encoded > PROMPT_ATTACHMENT_LIMITS.maxInlineEncodedBytes) {
+    if (data.length > PROMPT_ATTACHMENT_LIMITS.maxInlineEncodedBytes) {
       throw new ClientMessagePolicyError(
         'ATTACHMENT_LIMIT_EXCEEDED',
-        `prompt images exceed the ${PROMPT_ATTACHMENT_LIMITS.maxInlineEncodedBytes}-byte inline budget`,
+        `a prompt image exceeds the ${PROMPT_ATTACHMENT_LIMITS.maxInlineEncodedBytes}-byte inline budget`,
       );
     }
     // Derived, never decoded: measuring the base64 costs no allocation, so an

@@ -1892,14 +1892,9 @@ opencodeV2Kit.extras!.push(
         const images = Array.from({ length: PROMPT_ATTACHMENT_LIMITS.maxFiles }, (_, index) => ({ name: `image-${index}.png`, mimeType: 'image/png', data: imageData }));
         const otherFrom = other.frames.length, imageMark = fake.ledger.mark();
         expect((await context.prompt(stream, 'one full-limit image', { images: images.slice(0, 1) })).kind).toBe('ack');
-        const registration = fake.serve.registration();
         for (const text of ['eight inline images', 'a second image batch']) {
           const from = stream.frames.length;
-          // A terminal can enqueue a larger native batch than the broker's aggregate inline budget.
-          const nativeId = `msg_images_${crypto.randomUUID().replaceAll('-', '')}`;
-          const response = await fetch(`${fake.serve.url}/api/session/${id}/prompt`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Basic ${Buffer.from(`opencode:${registration.password}`).toString('base64')}` }, body: JSON.stringify({ id: nativeId, text, delivery: 'steer', files: images.map((image) => ({ uri: `data:${image.mimeType};base64,${image.data}`, name: image.name })) }) });
-          expect(response.status).toBe(200);
-          expect((await response.json() as any).data.id).toBe(nativeId);
+          expect((await context.prompt(stream, text, { images })).kind).toBe('ack');
           const echo = await stream.waitForFrame((frame) => frame.kind === 'message' && frame.message.type === 'user-message' && frame.message.text === text && !frame.message.queued, { after: from });
           expect(echo.message.imageCount).toBe(PROMPT_ATTACHMENT_LIMITS.maxFiles);
           expect(stream.frames.slice(from).filter((frame) => frame.kind === 'message' && frame.message.type === 'user-message' && frame.message.key === echo.message.key && !frame.message.queued)).toHaveLength(1);

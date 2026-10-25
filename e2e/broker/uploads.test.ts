@@ -477,7 +477,7 @@ describe('chunked uploads, staged attachments and inbox collection', () => {
       ['one inline file over 256 KiB', { files: [inline(256 * KiB + 1)] }, 'ATTACHMENT_LIMIT_EXCEEDED'],
       ['inline files over 1 MiB together', { files: Array.from({ length: 5 }, (_, index) => inline(250 * KiB, `f${index}.bin`)) }, 'ATTACHMENT_LIMIT_EXCEEDED'],
       ['an image over the inline bound', { images: [{ data: b64(Buffer.alloc(MiB + 3, 0x61)), mimeType: 'image/png' }] }, 'ATTACHMENT_LIMIT_EXCEEDED'],
-      ['images over the inline budget together', { images: Array.from({ length: 8 }, () => ({ data: b64(Buffer.alloc(MiB - 3, 0x62)), mimeType: 'image/png' })) }, 'ATTACHMENT_LIMIT_EXCEEDED'],
+      ['nine images', { images: Array.from({ length: 9 }, () => ({ data: png, mimeType: 'image/png' })) }, 'ATTACHMENT_LIMIT_EXCEEDED'],
       ['an image naming a broker path', { images: [{ data: png, mimeType: 'image/png', brokerPath: '/etc/passwd' }] }, 'ATTACHMENT_INVALID'],
       ['an image without a type', { images: [{ data: png }] }, 'ATTACHMENT_INVALID'],
       ['an image as a data: URL', { images: [{ data: `data:image/png;base64,${png}`, mimeType: 'image/png' }] }, 'ATTACHMENT_INVALID'],
@@ -493,7 +493,10 @@ describe('chunked uploads, staged attachments and inbox collection', () => {
     expect((await stream.waitForFrame((frame) => frame.kind === 'nack', { after })).code).toBe('ATTACHMENT_INVALID');
 
     expect((await stream.sendAndAwait({ kind: 'prompt', text: 'a well-formed image', images: [{ data: png, mimeType: 'image/png' }] })).kind).toBe('ack');
-    expect(await promptsThrough(pi, 'a well-formed image')).toEqual(['a well-formed image']);
+    const imageData = b64(Buffer.alloc(MiB, 0x62));
+    const images = Array.from({ length: 8 }, () => ({ data: imageData, mimeType: 'image/png' }));
+    expect((await stream.sendAndAwait({ kind: 'prompt', text: 'eight full-limit images', images })).kind).toBe('ack');
+    expect(await promptsThrough(pi, 'eight full-limit images')).toEqual(['a well-formed image', 'eight full-limit images']);
     expect(listInbox(pi.cwd)).toEqual([]);
     stream.close();
   });
