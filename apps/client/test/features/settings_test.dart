@@ -999,6 +999,9 @@ void main() {
               ),
             ],
           ),
+          'grok': quotaProvider('grok', buckets: [quotaBucket()]),
+          'minimax': quotaProvider('minimax', buckets: [quotaBucket()]),
+          'zai': quotaProvider('zai', buckets: [quotaBucket()]),
         });
       final tower = f.network.add('http://tower.test:7734');
       RuntimeDesk(tower).quotaBody = desk.quotaBody;
@@ -1007,6 +1010,9 @@ void main() {
       await app.tapKey('overview-quota-choose');
       await app.tapKey('overview-quota-provider-codex');
       await app.tapKey('overview-quota-provider-claude');
+      await app.tapKey('overview-quota-provider-grok');
+      await app.tapKey('overview-quota-provider-minimax');
+      await app.tapKey('overview-quota-provider-zai');
       await app.tapKey('overview-quota-done');
       await app.waitFor(find.byKey(const Key('settings-quota-row-codex-5h')));
       expect(
@@ -1017,7 +1023,27 @@ void main() {
         find.byKey(const Key('settings-quota-row-claude-session')),
         findsOneWidget,
       );
-      for (final width in [320.0, 390.0]) {
+      final providers = [
+        for (final id in ['codex', 'claude', 'grok', 'minimax', 'zai'])
+          find.byKey(Key('settings-quota-provider-$id')),
+      ];
+      void expectPackedColumns(int count) {
+        final columns = <double, List<Rect>>{};
+        for (final provider in providers) {
+          final bounds = app.tester.getRect(provider);
+          columns.putIfAbsent(bounds.left, () => []).add(bounds);
+        }
+        expect(columns, hasLength(count));
+        final gap = app.tester.view.physicalSize.width < 600 ? 12.0 : 16.0;
+        for (final cards in columns.values) {
+          cards.sort((a, b) => a.top.compareTo(b.top));
+          for (var i = 1; i < cards.length; i++) {
+            expect(cards[i].top - cards[i - 1].bottom, closeTo(gap, .01));
+          }
+        }
+      }
+
+      for (final width in [320.0, 390.0, 1440.0]) {
         app.tester.view.physicalSize = Size(width, 844);
         await app.settle();
         final codex = find.byKey(const Key('settings-quota-provider-codex'));
@@ -1034,9 +1060,25 @@ void main() {
           find.descendant(of: claude, matching: find.byType(QuotaLiquidGauge)),
           findsNWidgets(3),
         );
+        expectPackedColumns(2);
+        // The third card fills the space under the shorter first card,
+        // without waiting for Claude's extra window to finish the row.
+        final grok = app.tester.getRect(providers[2]);
+        expect(grok.left, app.tester.getRect(codex).left);
+        expect(grok.top, lessThan(app.tester.getRect(claude).bottom));
         expect(app.tester.takeException(), isNull);
+        await app.reveal(find.byKey(const Key('workspace-overview-quota')));
+        await app.captureReview('quota-packed-light-${width.toInt()}');
       }
-      await app.captureReview('quota-liquid-phone');
+      app.tester.view.physicalSize = const Size(320, 844);
+      app.tester.platformDispatcher.textScaleFactorTestValue = 2;
+      addTearDown(app.tester.platformDispatcher.clearTextScaleFactorTestValue);
+      await app.settle();
+      expectPackedColumns(1);
+      expect(app.tester.takeException(), isNull);
+      app.tester.platformDispatcher.clearTextScaleFactorTestValue();
+      app.tester.view.physicalSize = const Size(390, 844);
+      await app.settle();
       expect(desk.quotaPreferenceWrites, isEmpty);
       await app.tapKey('overview-quota-choose');
       await app.tapKey('overview-quota-provider-codex');
@@ -1045,7 +1087,12 @@ void main() {
         find.byKey(const Key('settings-quota-row-codex-5h')),
         findsOneWidget,
       );
+      await f.storage.preferences.setThemeMode('dark');
       app = await f.restart();
+      expect(app.theme.brightness, Brightness.dark);
+      expectPackedColumns(2);
+      await app.reveal(find.byKey(const Key('workspace-overview-quota')));
+      await app.captureReview('quota-packed-dark-desktop');
       expect(
         find.byKey(const Key('settings-quota-row-codex-5h')),
         findsOneWidget,
