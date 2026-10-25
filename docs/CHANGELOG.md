@@ -27,6 +27,16 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   move the bridge to the new session without mixing their events.
   Restart or `/reload` open Pi/OMP terminals after upgrading to load the updated
   bridge extension.
+- A network change no longer rebuilds every open session on a server with one
+  address. Stalled requests retry at once, sessions reconnect from where they
+  left off, and live roster updates resume after a connection is replaced. A
+  server that stops answering shows as offline until its address responds.
+- Recent roster windows share broker discovery and cached snapshots, reducing
+  repeated scans when devices use different activity ranges. Older clients and
+  wider windows keep their last settled rows while a scan refreshes them.
+- Home keeps quota readings for a minute after you leave it, keeps them visible
+  during refresh, and reserves their space while a new reading loads. Web quota
+  gauges stay static to avoid repeated screen repaints.
 - Transcript navigation buttons preserve the composer's focus and draft.
   Hidden scroll controls no longer remain in keyboard focus traversal.
 - Installer-owned Windows servers can apply updates from Settings → Updates.

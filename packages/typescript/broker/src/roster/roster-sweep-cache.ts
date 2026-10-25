@@ -141,6 +141,12 @@ export interface RosterSweepCacheOptions {
 
 export interface RosterSweepRead<T> {
   key: string;
+  /** Other discovery scopes that contain every row this caller requested. */
+  covers?: (key: string) => boolean;
+  /** Independent view to correct after serving a shared sweep early. */
+  consumerKey?: string;
+  /** Reuse fresh rows, but await revalidation rather than serving stale rows. */
+  waitForFresh?: boolean;
   /** `?refresh=1`: asks for this exact sweep, and is never answered early. */
   force: boolean;
   /**
@@ -166,8 +172,8 @@ export interface RosterSweepRead<T> {
    * A caller has been answered with rows the running sweep may supersede --
    * either a partial snapshot or a stale one.
    *
-   * Fires at most once per sweep, with that sweep, and exists because answering
-   * ahead of a sweep is only safe if something puts its result in front of the
+   * Fires at most once per consumer and sweep, with that sweep, because an
+   * early answer is only safe if something puts its result in front of the
    * client afterwards. A caller that ignores this leaves clients holding the
    * superseded answer until an unrelated change happens to disturb them.
    *
@@ -182,8 +188,10 @@ export interface RosterSweepRead<T> {
 export class RosterSweepCache<T> {
   private readonly snapshots = new Map<string, RosterSweepSnapshot<T>>();
   private readonly inflight = new Map<string, Promise<RosterSweepAnswer<T>>>();
-  /** Sweeps for which `onServedAheadOfSweep` has already fired. */
-  private readonly servedAhead = new Set<string>();
+  /** Views for which each sweep's `onServedAheadOfSweep` already fired. */
+  private readonly servedAhead = new WeakMap<Promise<RosterSweepAnswer<T>>, Set<string>>();
+  /** Wider reads queued behind narrower sweeps; see `expand`. */
+  private readonly expansions = new Map<string, Promise<RosterSweepAnswer<T>>>();
   private readonly now: () => number;
 
   constructor(private readonly options: RosterSweepCacheOptions) {
@@ -194,7 +202,6 @@ export class RosterSweepCache<T> {
   forget(key: string): boolean {
     if (this.inflight.has(key)) return false;
     this.snapshots.delete(key);
-    this.servedAhead.delete(key);
     return true;
   }
 
@@ -231,31 +238,65 @@ export class RosterSweepCache<T> {
 
   async read(read: RosterSweepRead<T>): Promise<RosterSweepAnswer<T>> {
     const { key, force, now } = read;
-    const snapshot = this.snapshots.get(key);
-    // A snapshot seeded mid-sweep is withheld from a caller that cannot read its
-    // coverage, on EVERY path that would serve it -- including a TTL hit, which
-    // is how a partial reaches a second caller seconds after the first was
-    // bounded out of the sweep that produced it.
-    const cached = snapshot !== undefined && !read.allowSweeping && snapshot.coverage.kind === 'sweeping'
+    const readings = this.readings(read);
+    if (!force) {
+      // A fresh reading avoids discovery, even for a view never opened before.
+      const fresh = readings.find((reading) => now - reading.snapshot.at < this.options.ttlMs);
+      if (fresh) {
+        const pending = this.inflight.get(fresh.key);
+        return pending ? this.serveAhead(fresh.snapshot, pending, read) : answerOf(fresh.snapshot);
+      }
+    }
+    // Stale-while-revalidate, for every caller that did not ask to wait. One
+    // that cannot read coverage is included: `readings` already withheld each
+    // mid-sweep snapshot from it, so what is left is a settled answer.
+    const stale = force || read.waitForFresh
       ? undefined
-      : snapshot;
-    if (!force && cached && now - cached.at < this.options.ttlMs) return answerOf(cached);
+      : readings.find((reading) => now - reading.snapshot.at < this.options.staleServeMaxMs);
+    const own = readings.find((reading) => reading.key === key);
 
     const pending = this.inflight.get(key);
     if (pending) {
       // Joining a running sweep is still the full remaining wait. A caller
       // holding usable rows takes them; only a caller with NOTHING to show, or
       // one that forced a refresh, has a reason to wait at all.
-      if (!force && cached && now - cached.at < this.options.staleServeMaxMs) {
-        return this.serveAhead(key, cached, pending, read);
-      }
+      if (stale) return this.serveAhead(stale.snapshot, pending, read);
       // ...and a caller with nothing to show is bounded exactly like the one
       // that STARTED the sweep. It used to fall through to the bare `pending`
       // promise, so the bound protected only whichever request happened to be
       // first: the second tab to open against a cold broker waited out the same
       // unbounded sweep the bound exists to prevent, and on a cold broker every
       // request is racing the same first sweep.
-      return force ? pending : await this.boundedPartial(key, pending, read);
+      return force || read.waitForFresh ? pending : await this.boundedPartial(key, pending, read);
+    }
+
+    if (read.covers) {
+      // A running covering sweep answers an ordinary read without another scan
+      // of the same stores. A forced or revalidating read does not queue behind
+      // one: it may have started long before the caller asked, and an archive
+      // scan takes tens of seconds where a recent one takes a few.
+      const covering = force || read.waitForFresh
+        ? undefined
+        : [...this.inflight.keys()].find((candidate) => read.covers!(candidate));
+      if (covering !== undefined) {
+        const sweep = this.inflight.get(covering)!;
+        if (stale) return this.serveAhead(stale.snapshot, sweep, read);
+        return await this.boundedPartial(covering, sweep, read);
+      }
+      // A wider range may need more history than a running narrower read.
+      // Serialize the expansion instead of scanning the same native stores
+      // concurrently.
+      const narrower = [...this.inflight.keys()].filter((candidate) => !read.covers!(candidate));
+      if (narrower.length > 0) {
+        const expansion = this.expand(read, narrower);
+        if (stale) return this.serveAhead(stale.snapshot, expansion, read);
+        // A cold wider client can receive the rows already read, marked partial
+        // until its own range is covered. Older clients and explicit refreshes
+        // await the full expansion.
+        return force || read.waitForFresh
+          ? expansion
+          : await this.boundedPartial(narrower[0]!, expansion, read, true);
+      }
     }
 
     const sweep = read
@@ -266,15 +307,56 @@ export class RosterSweepCache<T> {
       })
       .finally(() => {
         this.inflight.delete(key);
-        this.servedAhead.delete(key);
       });
     this.inflight.set(key, sweep);
 
-    if (!force && !cached) return await this.boundedPartial(key, sweep, read);
-    if (!force && cached && now - cached.at < this.options.staleServeMaxMs) {
-      return this.serveAhead(key, cached, sweep, read);
+    if (force || read.waitForFresh) return sweep;
+    if (stale) return this.serveAhead(stale.snapshot, sweep, read);
+    // Rows past the stale bound are not served, and not seeded into an early
+    // answer either: this sweep's first legs merge into them.
+    if (own) return sweep;
+    return await this.boundedPartial(key, sweep, read);
+  }
+
+  /**
+   * Rows that can answer [read], best first: settled before mid-sweep, then
+   * newest.
+   *
+   * A covering scope offers only a SETTLED reading. A running sweep's seed
+   * holds just the legs that have landed and is timed from that sweep's start,
+   * so it must never outrank, or stand in for, a complete reading of the
+   * caller's own range. Nothing here writes one scope's rows into another's.
+   */
+  private readings(read: RosterSweepRead<T>): { key: string; snapshot: RosterSweepSnapshot<T> }[] {
+    const readings: { key: string; snapshot: RosterSweepSnapshot<T> }[] = [];
+    for (const [key, snapshot] of this.snapshots) {
+      const own = key === read.key;
+      if (!own && !read.covers?.(key)) continue;
+      // A snapshot seeded mid-sweep is withheld from a caller that cannot read
+      // its coverage, on EVERY path that would serve it -- including a TTL hit,
+      // which is how a partial reaches a second caller seconds after the first
+      // was bounded out of the sweep that produced it.
+      if (snapshot.coverage.kind === 'sweeping' && (!own || !read.allowSweeping)) continue;
+      readings.push({ key, snapshot });
     }
-    return sweep;
+    const sweeping = (snapshot: RosterSweepSnapshot<T>) => Number(snapshot.coverage.kind === 'sweeping');
+    return readings.sort((a, b) => sweeping(a.snapshot) - sweeping(b.snapshot) || b.snapshot.at - a.snapshot.at);
+  }
+
+  /** Queue one read of [read]'s range behind the narrower sweeps now running. */
+  private expand(read: RosterSweepRead<T>, narrower: string[]): Promise<RosterSweepAnswer<T>> {
+    // Forced reads queue separately: an ordinary re-entry may settle for a
+    // fresh reading, and a forced caller asked for a sweep.
+    const slot = `${read.key}:${read.force ? 'forced' : 'read'}`;
+    const queued = this.expansions.get(slot);
+    if (queued) return queued;
+    const expansion = Promise.allSettled(narrower.map((key) => this.inflight.get(key)!)).then(() => {
+      // Released before re-entry, which may queue again behind a newer sweep.
+      this.expansions.delete(slot);
+      return this.read({ ...read, now: this.now(), allowSweeping: false, waitForFresh: true });
+    });
+    this.expansions.set(slot, expansion);
+    return expansion;
   }
 
   /**
@@ -290,6 +372,7 @@ export class RosterSweepCache<T> {
     key: string,
     sweep: Promise<RosterSweepAnswer<T>>,
     read: RosterSweepRead<T>,
+    partialOnly = false,
   ): Promise<RosterSweepAnswer<T>> {
     // Nothing to answer early WITH for such a caller: the only thing a running
     // sweep can offer is a partial, and it may not have one.
@@ -311,7 +394,11 @@ export class RosterSweepCache<T> {
     // over waiting, and an empty roster reads as "no sessions" rather than "not
     // yet" -- a caller cannot tell the difference and would write it down.
     if (!seeded || seeded.rows.length === 0) return sweep;
-    return this.serveAhead(key, seeded, sweep, read);
+    return this.serveAhead(
+      partialOnly ? { ...seeded, coverage: ROSTER_COVERAGE_SWEEPING } : seeded,
+      sweep,
+      read,
+    );
   }
 
   /**
@@ -329,13 +416,15 @@ export class RosterSweepCache<T> {
    * roster it belongs in.
    */
   private serveAhead(
-    key: string,
     snapshot: RosterSweepSnapshot<T>,
     sweep: Promise<RosterSweepAnswer<T>>,
     read: RosterSweepRead<T>,
   ): RosterSweepAnswer<T> {
-    if (!this.servedAhead.has(key)) {
-      this.servedAhead.add(key);
+    const consumers = this.servedAhead.get(sweep) ?? new Set<string>();
+    const consumer = read.consumerKey ?? read.key;
+    if (!consumers.has(consumer)) {
+      consumers.add(consumer);
+      this.servedAhead.set(sweep, consumers);
       read.onServedAheadOfSweep?.(sweep);
     }
     this.observe(sweep, read);

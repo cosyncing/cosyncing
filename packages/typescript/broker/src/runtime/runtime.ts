@@ -891,8 +891,11 @@ const UPLOAD_CHUNK_MAX_BYTES = envNumber('COSYNCING_UPLOAD_CHUNK_MAX_BYTES', UPL
 // How long one roster discovery result may be reused. Full discovery reads every session file of
 // every agent (measured ~30-40s of mostly-synchronous I/O on a real machine) while the app polls
 // /api/sessions every 6s per tab — without this cache, polls pile up and starve the event loop.
-const ROSTER_TTL_MS = envNumber('COSYNCING_ROSTER_TTL_MS', 4000);
 const ROSTER_REFRESH_MS = Math.max(1, envNumber('COSYNCING_ROSTER_REFRESH_MS', 15_000));
+// Matches the feed cadence so reads between two refreshes reuse the last one, but never grows with
+// a longer cadence: past the TTL, rows are served stale only up to ROSTER_STALE_SERVE_MAX_MS.
+const ROSTER_TTL_MS = envNumber('COSYNCING_ROSTER_TTL_MS', Math.min(ROSTER_REFRESH_MS, 15_000));
+const ROSTER_RECENT_WINDOW_MS = 7 * 86_400_000;
 // Past the TTL the previous rows are served while a fresh sweep runs, but only this far past it.
 // The bound is what separates "revalidating" from "the sweep has been failing for an hour and every
 // caller is being handed rows from before it started failing, with nothing said". Set well clear of
@@ -1496,7 +1499,9 @@ function pruneRosterWindows(): void {
   for (const [windowMs, store] of rosterWindowRevisions) {
     if (rosterWindowRevisions.size <= MAX_DORMANT_ROSTER_WINDOWS) break;
     if (rosterWindowUsers.has(windowMs) || rosterPollClients.has(windowMs)) continue;
-    if (!rosterSweeps.forget(String(windowMs))) continue;
+    // Recent views share a discovery scope; evicting a view cannot evict the
+    // active reading used by the other recent views.
+    if (windowMs > ROSTER_RECENT_WINDOW_MS && !rosterSweeps.forget(String(windowMs))) continue;
     rosterWindowCursorFloors.set(windowMs, store.revision + 1);
     rosterWindowRevisions.delete(windowMs);
     rosterWindowExpiresAt.delete(windowMs);
@@ -2583,8 +2588,7 @@ function scheduleRosterRefresh(): void {
   rosterRefreshTimer.unref?.();
 }
 
-/** One bounded discovery for all connected feeds: the narrowest requested
- * window, capped at seven days even for an all-only client. Returned native
+/** One bounded seven-day discovery for all connected feeds. Returned native
  * status reaches every feed within 15 s (configurable) plus bounded discovery
  * time; a change missed in flight can also wait that sweep's remaining time.
  * Rows absent from this recent reading have no removal authority in wider
@@ -2594,9 +2598,10 @@ function refreshPollingRosters(): Promise<void> {
   if (rosterRefreshInflight) return rosterRefreshInflight;
   if (rosterPollClients.size === 0) return Promise.resolve();
   clearTimeout(rosterRefreshTimer);
-  const windows = [...rosterPollClients.keys()];
-  const recentWindow = Math.min(7 * 86_400_000, ...windows.filter((windowMs): windowMs is number => windowMs !== undefined));
+  const recentWindow = ROSTER_RECENT_WINDOW_MS;
   rosterRefreshInflight = (async () => {
+    // Forced: a fresh-looking reading can predate this cadence tick by most of
+    // a TTL, which would double the freshness bound above.
     const roster = await discoverLocalRoster(true, recentWindow, attentionClock.now());
     const now = attentionClock.now();
     // Only equal/narrower views have removal authority. A bounded reading
@@ -2609,12 +2614,11 @@ function refreshPollingRosters(): Promise<void> {
       if (windowMs !== undefined && windowMs < recentWindow) {
         store.reconcile(rows, MACHINE, { withheldTools: withheldBackends(roster.coverage) });
         rosterSafetyReconciledAt.set(key, now);
-        rosterSweeps.publish(key, { rows: store.snapshot(), coverage: roster.coverage }, now);
       } else {
         for (const row of rows) store.observe(row, MACHINE);
         const cached = rosterSweeps.snapshot(key);
-        // Preserve the wider snapshot's coverage and age. This prevents a
-        // cached GET from undoing upserts without claiming a new full reading.
+        // Keep the broader cached reading in step with recent publications,
+        // without extending its age or claiming archive removal authority.
         if (cached) rosterSweeps.publish(key, { rows: store.snapshot(), coverage: cached.coverage }, cached.at);
       }
       ageRosterWindow(windowMs, now);
@@ -2648,7 +2652,7 @@ function safetyReconcileRoster(windowMs: number | undefined, now: number): Promi
   rosterSafetyReconciledAt.set(key, now);
   // Full removal authority belongs to this window's rate-limited safety read,
   // including for zero-wait clients that have not fetched an initial snapshot.
-  return discoverLocalSessions(true, windowMs, now).then(() => {});
+  return discoverLocalSessions(false, windowMs, now).then(() => {});
 }
 
 attentionClock.onMove(() => {
@@ -2679,6 +2683,8 @@ function startRosterSweep(
     id: string; ms: number; peak: number; rows: number; abandoned: boolean; failed: boolean;
   }[] = [];
   const sweepStartedAt = Date.now();
+  // Seeds are compared with published snapshots, so they use the cache's clock.
+  const seededAt = attentionClock.now();
   return registry
     .discoverAll({
       ...(windowMs === undefined ? {} : { updatedAfter: now - windowMs }),
@@ -2735,7 +2741,7 @@ function startRosterSweep(
       // already have ended. See `RosterSweepCache.seedLeg` for why the seeded
       // snapshot keeps the SWEEP's start time rather than the leg's.
       onLegRows: (backendId, rows) => {
-        rosterSweeps.seedLeg(key, sweepStartedAt, (existing) => mergeLegRows(existing, backendId, rows));
+        rosterSweeps.seedLeg(key, seededAt, (existing) => mergeLegRows(existing, backendId, rows));
       },
     })
     .then((sessions) => {
@@ -2789,57 +2795,28 @@ function startRosterSweep(
     });
 }
 
-/**
- * Whole-roster discovery, cached and single-flighted.
- *
- * Stale-while-revalidate. A caller that already has rows takes them NOW and lets
- * the sweep it just started land in the cache for the next read.
- *
- * Measured: ~5.4s on the window the client actually asks for (`7d`) and 7-17s on
- * `window=all`, against a ROSTER_TTL_MS of 4000 -- the TTL is shorter than the
- * time it takes to fill the thing it is caching, on every window. So every open
- * more than 4s after the last sweep completed paid a full sweep.
- *
- * The cost is NOT codex and claude: both honour `updatedAfter` and skip before
- * decoding, so on `7d` they are 86ms and 45ms. They dominate only `window=all`,
- * which is a diagnostic path. Do not "optimise" them on this comment's account.
- *
- * Serving the previous rows is sound here rather than merely faster: the only
- * consumer, `discoverLocalSessions`, overlays `hub.liveSnapshot()` on top of
- * whatever this returns and PUSHES live sessions that are not on disk yet, so
- * running/attached state is always fresh and a brand-new session cannot be
- * hidden by a stale disk sweep. What can lag by one sweep is a session that
- * changed on disk with no live owner, which is the case the roster revision and
- * the delta long-poll already exist to settle.
- *
- * A caller with NO snapshot for its window used to await the entire sweep
- * however long it ran. Measured on the installed candidate: 5.7-36.8s for seven
- * days and 41.5s for all time, with Cline abandoned at its 15s budget while OMP
- * had finished its own work in 60-304ms. Nothing bounded it: eight of twelve
- * adapters declare no budget at all, so one wedged local adapter can hold the
- * roster open indefinitely. Such a caller now waits a bounded time and is then
- * answered with the legs that HAVE landed -- and `onPartialServed` below is what
- * makes that safe.
- *
- * `force` (`?refresh=1`) still waits on THIS sweep and is never answered early.
- * Note the join is weaker than it reads: a forced call arriving while an unforced
- * sweep is already running joins it rather than starting its own, so it can
- * observe a sweep that began before the caller asked. That predates all of this;
- * it is called out so the guarantee is not read as stronger than it is.
- */
+/** Shared discovery with stale-while-revalidate and bounded cold answers.
+ * Recent windows share seven days of native discovery. Any window can reuse a
+ * settled covering read, and an ordinary read can join a running one, but
+ * never a narrower one's carry. Each view still reconciles its own filtered
+ * journal and receives its own correction after an early answer. Forced reads
+ * await a sweep of their own range, joining only one already running for it. */
 function discoverAllCached(
   force = false,
   windowMs?: number,
   now = attentionClock.now(),
   allowSweeping = true,
 ): Promise<RosterSweepAnswer<SessionInfo>> {
-  const key = windowMs === undefined ? 'all' : String(windowMs);
+  const scope = windowMs === undefined ? undefined : Math.max(ROSTER_RECENT_WINDOW_MS, windowMs);
+  const key = scope === undefined ? 'all' : String(scope);
   return rosterSweeps.read({
     key,
+    consumerKey: windowMs === undefined ? 'all' : String(windowMs),
+    covers: (candidate) => candidate === 'all' || (scope !== undefined && Number(candidate) >= scope),
     force,
     now,
     allowSweeping,
-    startSweep: () => startRosterSweep(key, windowMs, now),
+    startSweep: () => startRosterSweep(key, scope, now),
     // An answer served ahead of a sweep is not self-correcting, and assuming it
     // was is what made both early answers unsafe. The sweep's own cache write is
     // invisible to a client: `/api/sessions` answers 304 while the roster
@@ -2914,7 +2891,8 @@ async function discoverLocalRosterRetained(
   piBridgeIds.canonicalizeAll();
   ompBridgeIds.canonicalizeAll();
   const swept = await discoverAllCached(force, windowMs, now, allowSweeping);
-  const sessions = swept.rows.map((s) => ({ ...s, machine: MACHINE }));
+  const sessions = filterSessionsByWindow(swept.rows, windowMs, now)
+    .map((s) => ({ ...s, machine: MACHINE }));
   const withheldTools = withheldBackends(swept.coverage);
   // A native runtime may replace the adapter id while retaining one exact native identity (Claude
   // bridge continuation is the measured case). Retire every superseded Hub owner and remove its

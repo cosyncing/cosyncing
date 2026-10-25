@@ -592,7 +592,7 @@ class BrokerClient {
       }
       return SessionRosterDeltaBatch.fromJson(data);
     } on DioException catch (e) {
-      if (e.type == DioExceptionType.cancel) {
+      if (e.type == DioExceptionType.cancel && token.isCancelled) {
         throw const RosterDeltaWaitCancelled();
       }
       throw BrokerException(
