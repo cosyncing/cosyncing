@@ -305,8 +305,6 @@ export class PiBridgeConnection implements SessionConnection {
    *  unchanged (`history-page-cache.ts:142-146`), so a replacement that kept it let the cache go on
    *  serving rows the replacement had dropped. */
   private historySourceGeneration = randomUUID();
-  /** A hello has backfilled this connection: every later one is a re-hello, whatever the cache holds. */
-  private helloIngested = false;
   /** Outbound commands awaiting the extension's long-poll. */
   private queue: BridgeCommand[] = [];
   private waiter?: { signal?: AbortSignal; send(commands: BridgeCommand[]): void };
@@ -505,16 +503,11 @@ export class PiBridgeConnection implements SessionConnection {
 
   /** Backfill the conversation-so-far on hello: map relayed wire events to history.
    *
-   *  The FIRST hello emits nothing — no client is attached yet, and live clients pick the rows up via
-   *  getHistory on attach/resync. A re-hello is different, and the comment here used to claim it was
-   *  not: an extension reload delivers an authoritative whole-session snapshot, so when it differs
-   *  from the cache this REPLACES the rows, rotates `historySourceGeneration`, and emits
-   *  `history-reset` to make attached clients replay. Duplication is prevented by comparing the
-   *  mapped snapshot to the current history, NOT by the cache merely being non-empty: a re-hello
-   *  that recovers rows into a session announced empty reaches the clients already attached too. */
+   *  Admission can publish this connection before the first full snapshot arrives. Every changed
+   *  authoritative snapshot therefore replaces the rows, rotates the source generation and asks
+   *  attached clients to replay, including clients that joined during the initial upload. History
+   *  rows are never emitted as live events: replaying an old completion must not raise attention. */
   ingestHistory(events: unknown): void {
-    const firstHello = !this.helloIngested;
-    this.helloIngested = true;
     if (!Array.isArray(events)) return;
     const next = events
       .map((ev) => this.historyMessage(ev))
@@ -523,10 +516,6 @@ export class PiBridgeConnection implements SessionConnection {
     for (const m of next) {
       if (m.type === 'permission-request') this.openRequests.set(m.requestId, 'permission');
       else if (m.type === 'question-request') this.openRequests.set(m.requestId, 'question');
-    }
-    if (firstHello) {
-      for (const m of next) this.appendHistory(m);
-      return;
     }
     // A re-hello is an authoritative whole-session snapshot. The previous extension may have
     // persisted a prompt and crashed before POSTing its event; keeping the old non-empty cache

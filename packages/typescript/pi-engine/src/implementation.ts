@@ -2716,13 +2716,13 @@ class PiConnection implements SessionConnection {
       this.withdrawPendingUi((ui) => ui.duringRun);
       return { notice: 'Stopped the turn.' };
     }
+    if (this.closed) throw new Error(`${this.rt.dialect.displayName} Drive connection is closed.`);
+    await this.assertSessionFileOwned();
     if (name === 'compact') {
       this.write({ type: 'compact', ...(args ? { customInstructions: args } : {}) });
       return { notice: 'Compacting the conversation…' };
     }
     // A dynamic command (template/skill/extension): deliver as a prompt that Pi expands.
-    if (this.closed) throw new Error(`${this.rt.dialect.displayName} Drive connection is closed.`);
-    await this.assertSessionFileOwned();
     await this.applyModelOverride(input?.model);
     const message = '/' + name + (args ? ' ' + args : '');
     const cmd: Record<string, unknown> = { type: 'prompt', message };

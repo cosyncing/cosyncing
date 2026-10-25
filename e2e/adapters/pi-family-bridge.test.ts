@@ -74,7 +74,7 @@ describe.each([PI_DIALECT_FACTS, OMP_DIALECT_FACTS] as PiFamilyDialect[])('$disp
     message?.type === 'model-output' && new RegExp(text).test(message.delta ?? message.text ?? '');
 
   /** Integration wire fragments, without importing the product's reassembler into the scenario. */
-  async function transfer(path: string, body: unknown, beforeFinal?: () => Promise<void>) {
+  async function transfer(path: string, body: Record<string, unknown>, beforeFinal?: () => Promise<void>) {
     const bytes = Buffer.from(JSON.stringify(body));
     const count = Math.ceil(bytes.length / (128 * 1024));
     const transferId = crypto.randomUUID();
@@ -82,7 +82,7 @@ describe.each([PI_DIALECT_FACTS, OMP_DIALECT_FACTS] as PiFamilyDialect[])('$disp
     for (let index = 0; index < count; index++) {
       if (index === count - 1) await beforeFinal?.();
       response = await owner.post(path, { bridgeChunk: {
-        transferId, index, count, totalBytes: bytes.length,
+        transferId, epoch: body.epoch, index, count, totalBytes: bytes.length,
         data: bytes.subarray(index * 128 * 1024, (index + 1) * 128 * 1024).toString('base64'),
       } }, { 'x-cosyncing-bridge-transfer': '1' });
       expect(response.status).toBe(200);
@@ -146,6 +146,43 @@ describe.each([PI_DIALECT_FACTS, OMP_DIALECT_FACTS] as PiFamilyDialect[])('$disp
     await eventually(() => broker.output().includes(`${route}/hello rejected: HTTP 413`), { what: 'content-free rejection diagnostic' });
   });
 
+  test('a phone joining during the first history upload receives its snapshot without reattaching', async () => {
+    const stored = storedSession('prepared-history'), id = enc(stored.file), epoch = crypto.randomUUID();
+    const metadata = { sessionFile: stored.file, cwd: stored.cwd, ...nativeVersion, epoch };
+    const prior = `${dialect.name}:run:prior`, current = `${dialect.name}:run:current`;
+    const activeRun = { t: 'run-summary', key: current, turnId: 'current', userMessageKey: 'current', status: 'running', startedAt: 3000 };
+    expect((await owner.post(`${route}/hello`, { ...metadata, prepare: true, running: true })).status).toBe(200);
+    const stream = await owner.attach(dialect.name, id);
+    try {
+      const empty = await stream.waitForKind('history');
+      expect(empty.messages.some((message: any) => message.type === 'user-message')).toBe(false);
+      const before = stream.frames.length;
+      await transfer(`${route}/hello`, { ...metadata, running: true, activeRun, history: [
+        { t: 'user', key: 'prior', text: 'old prompt', sentAt: 1000 },
+        { t: 'final', key: 'old-answer', text: 'history '.repeat(25_000) },
+        { t: 'run-summary', key: prior, turnId: 'prior', userMessageKey: 'prior', status: 'done', startedAt: 1000, completedAt: 2000 },
+        { t: 'user', key: 'current', text: 'recovered open turn', sentAt: 3000 },
+        activeRun,
+      ] }, async () => {
+        expect((await owner.get(`${route}/status?id=${id}`)).body.bridged).toBe(true);
+      });
+      const replay = await stream.waitForFrame((frame) => frame.kind === 'history' && frame.reset === true
+        && frame.messages.some((message: any) => message.type === 'user-message' && message.text === 'recovered open turn'), { after: before });
+      expect(replay.messages.some((message: any) => message.type === 'run-summary' && message.key === prior && message.status === 'done')).toBe(true);
+      // A later live outcome is the sentinel: old completion history must raise no new outcome.
+      await owner.post(`${route}/events`, { id, epoch, events: [
+        { ...activeRun, status: 'done', completedAt: 4000 }, { t: 'status', running: false },
+      ] });
+      const events = await eventually(async () => {
+        const rows = (await owner.get(`/api/attention-events?clientId=prepared-${dialect.name}&limit=200`)).body.events
+          .filter((event: any) => event.sessionId === id);
+        return rows.some((event: any) => event.kind === 'run-finished' && event.turnId === 'current') ? rows : undefined;
+      }, { what: 'the recovered live turn outcome after initial snapshot publication' });
+      expect(events.filter((event: any) => event.kind === 'run-finished').map((event: any) => event.turnId)).toEqual(['current']);
+      expect(stream.isOpen).toBe(true);
+    } finally { stream.close(); await owner.post(`${route}/bye`, { id, epoch, reason: 'quit' }); }
+  });
+
   test('native lifetime ownership covers every RPC writer and removes reused identities', async () => {
     const stored = storedSession('native-owner');
     const id = enc(stored.file);
@@ -200,6 +237,13 @@ describe.each([PI_DIALECT_FACTS, OMP_DIALECT_FACTS] as PiFamilyDialect[])('$disp
       expect((await drive.waitForKind('session')).info.control.drive.state).toBe('driving');
       expect(existsSync(record)).toBe(false);
       expect(existsSync(directory)).toBe(false);
+      // A new terminal's synchronous claim precedes its asynchronous identity probe.
+      mark('');
+      const compactBefore = fake.ledger.commands('compact').length;
+      const compact = await drive.sendAndAwait({ kind: 'command', name: 'compact', args: 'must never reach a competing writer' });
+      expect(compact.kind).toBe('nack');
+      expect(fake.ledger.commands('compact')).toHaveLength(compactBefore);
+      expect((await owner.sessions()).find((row) => row.id === id)?.control.drive.state).toBe('driving');
       mark();
       const prompt = await drive.sendAndAwait({ kind: 'prompt', text: 'must never reach competing writer' });
       expect(prompt.kind).toBe('nack');
