@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { inspectInstallState } from '../installation/install-state.ts';
 import { inspectWindowsActiveInstall, windowsServiceActiveManifestPath, windowsServiceInstallPaths,
@@ -24,12 +24,18 @@ export function stageBrokerUpdateRunner(deps: BrokerUpdateTriggerDependencies): 
   // The active pointer must bind that root to this installation and build.
   const active = deps.service.provider === 'task-scheduler'
     ? inspectWindowsActiveInstall(windowsServiceActiveManifestPath(deps.stateHome)) : undefined;
-  const versionedApplication = state.committed && active?.status === 'ok'
+  const runnerOwned = inspectOwnerOnlyFile(deps.executablePath).status === 'ok';
+  const expectedApplication = active?.status === 'ok'
+    ? windowsServiceInstallPaths(deps.stateHome, active.manifest.versionKey).applicationPath : undefined;
+  const versionedApplication = runnerOwned && state.committed && active?.status === 'ok'
     && active.manifest.installationId === state.state.installationId
     && active.manifest.versionKey === windowsServiceVersionKey(deps.buildInfo)
-    && windowsServiceInstallPaths(deps.stateHome, active.manifest.versionKey).applicationPath === deps.executablePath;
+    && expectedApplication !== undefined && inspectOwnerOnlyFile(expectedApplication).status === 'ok'
+    // Bun.main expands Windows 8.3/case aliases; the receipt may retain them.
+    // Native canonical equality still binds this to the exact active file.
+    && realpathSync.native(expectedApplication) === realpathSync.native(deps.executablePath);
   if (!binary || (binary.target !== deps.executablePath && !versionedApplication)
-      || inspectOwnerOnlyFile(deps.executablePath).status !== 'ok') {
+      || !runnerOwned) {
     throw new Error('broker-update-runner-untrusted');
   }
   const bytes = readFileSync(deps.executablePath);

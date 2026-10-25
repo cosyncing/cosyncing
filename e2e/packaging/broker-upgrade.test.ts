@@ -175,6 +175,21 @@ process.exitCode = await runCli(process.argv.slice(2), {
 
   beforeAll(async () => {
     root = mkdtempSync(join(tmpdir(), 'cosyncing-e2e-windows-upgrade-'));
+    // Hosted Windows profiles use 8.3 names (for example RUNNER~1), whereas
+    // Bun.main expands them. Exercise the same alias on every supporting volume.
+    const { dlopen, ptr, FFIType } = await import('bun:ffi');
+    const kernel = dlopen('kernel32.dll', { GetShortPathNameW: {
+      args: [FFIType.ptr, FFIType.ptr, FFIType.u32], returns: FFIType.u32,
+    } });
+    try {
+      const input = Buffer.from(`${root}\0`, 'utf16le');
+      const output = Buffer.alloc(32768 * 2);
+      const count = kernel.symbols.GetShortPathNameW(ptr(input), ptr(output), 32768);
+      if (!count || count >= 32768) throw new Error('Windows fixture short path lookup failed');
+      const alias = output.subarray(0, count * 2).toString('utf16le');
+      console.info(JSON.stringify({ nativeWindowsShortPath: alias !== root }));
+      root = alias;
+    } finally { kernel.close(); }
     recordHarnessRoot(root);
     const runId = process.env.COSYNCING_WINDOWS_BROKER_RUN_ID ?? 'manual';
     if (!/^[A-Za-z0-9._-]{1,64}$/.test(runId)) throw new Error('invalid native update fixture run id');

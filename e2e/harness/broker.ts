@@ -22,7 +22,7 @@ import {
 } from '../../packages/typescript/broker/test/helpers/isolated-broker-fixture.ts';
 import { recordHarnessRoot } from '../../scripts/ci/lib/harness-leaks.ts';
 import { BrokerClient, type ClientAuth } from './client.ts';
-import { scaled } from './wait.ts';
+import { eventually, scaled } from './wait.ts';
 
 export const REPO_ROOT = resolve(import.meta.dir, '..', '..');
 
@@ -73,6 +73,13 @@ interface Child {
   readonly exitCode: number | null;
   readonly exited: Promise<number>;
   kill(signal?: number | NodeJS.Signals): void;
+}
+
+/** Wait for Windows sharing handles to release the exact fixture-owned root. */
+export async function removeFixtureRoot(root: string): Promise<void> {
+  if (process.platform !== 'win32') { rmSync(root, { recursive: true, force: true }); return; }
+  await eventually(() => { rmSync(root, { recursive: true, force: true }); return !existsSync(root); },
+    { timeoutMs: 10_000, what: 'Windows fixture handles to release the state root' });
 }
 
 export class Broker {
@@ -184,10 +191,20 @@ export class Broker {
         await child.exited.catch(() => undefined);
       }
     }
+    // Child exit and pipe EOF are separate events on Windows.
+    if (this.#capture) {
+      const capture = this.#capture;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([capture.done, new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error('fixture broker output did not close')), scaled(10_000));
+        })]);
+      } finally { clearTimeout(timer); }
+    }
     this.#previousOutput += this.#capture?.read() ?? '';
     this.#capture = undefined;
     if (!options.keepState && this.#ownsRoot) {
-      rmSync(this.paths.root, { recursive: true, force: true });
+      await removeFixtureRoot(this.paths.root);
     }
   }
 
