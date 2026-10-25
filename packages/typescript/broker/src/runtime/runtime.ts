@@ -7727,7 +7727,8 @@ server = Bun.serve<WsData>({
       conn.setCommands(b?.commands); // the user's skills/templates → richer palette than /stop
       conn.setModelOptions(b?.models, bridgeCurrentModel?.reasoningEffort);
       const adopted = hub.adopt('pi', id, conn); // pinned: lives as long as the terminal session, not the clients
-      await refreshRegisteredTitle('pi', id, conn);
+      // Complete hello without yielding; title enrichment has its own owner fence.
+      void refreshRegisteredTitle('pi', id, conn);
       // Journal the row now: the extension sends no frame until the user acts, so a delta or ETag
       // poller would otherwise learn of this live session only at its first frame.
       rosterPublication.publishOwnerFrame(adopted.conn.info);
@@ -7860,7 +7861,8 @@ server = Bun.serve<WsData>({
       conn.setCommands(b?.commands); // the user's skills/templates → richer palette than /stop
       conn.setModelOptions(b?.models, bridgeCurrentModel?.reasoningEffort);
       const adopted = hub.adopt('omp', id, conn); // pinned: lives as long as the terminal session, not the clients
-      await refreshRegisteredTitle('omp', id, conn);
+      // Complete hello without yielding; title enrichment has its own owner fence.
+      void refreshRegisteredTitle('omp', id, conn);
       // Journal the row now: the extension sends no frame until the user acts, so a delta or ETag
       // poller would otherwise learn of this live session only at its first frame.
       rosterPublication.publishOwnerFrame(adopted.conn.info);

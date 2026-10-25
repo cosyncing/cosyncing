@@ -103,6 +103,8 @@ native read and recheck it at admission. An accepted explicit Kimi name is
 authoritative even when its earlier fallback read was pending.
 Bridge and hook
 connections register before asynchronous title lookup.
+Pi/OMP hello also publishes and acknowledges registration without awaiting
+that lookup; deferred title enrichment checks the current owner before delivery.
 
 Persisted client identities carry a title-format marker. Older cached titles
 equal to their session ID migrate to unnamed, including while offline. A newly
