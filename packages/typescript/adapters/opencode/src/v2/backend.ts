@@ -111,7 +111,8 @@ export class OpenCodeV2Backend {
 
   private async stream(epoch: number, signal: AbortSignal, opened: () => void): Promise<void> {
     let first = true;
-    let failures = 0;
+    let failedAt: number | undefined;
+    let backoffs = 0;
     while (!signal.aborted && epoch === this.streamEpoch) {
       try {
         if (!first) {
@@ -126,7 +127,8 @@ export class OpenCodeV2Backend {
         const transport = this.transport!;
         for await (const event of transport.events(signal, () => {
           if (epoch !== this.streamEpoch) return;
-          failures = 0;
+          failedAt = undefined;
+          backoffs = 0;
           opened();
           const reconnecting = [...this.connections];
           if (!first || reconnecting.length > 0) {
@@ -146,10 +148,13 @@ export class OpenCodeV2Backend {
       first = false;
       this.resolver.invalidate();
       for (const connection of this.connections) connection.onGap(false);
+      const now = Date.now();
+      failedAt ??= now;
+      const delay = now - failedAt < this.options.sseReconnectMs
+        ? Math.min(500, Math.max(50, this.options.sseReconnectMs))
+        : Math.min(60_000, 2_000 * 2 ** Math.min(backoffs++, 5));
       await new Promise<void>((resolve) => {
         const done = () => { clearTimeout(timer); signal.removeEventListener('abort', done); resolve(); };
-        const base = Math.max(1, this.options.sseReconnectMs);
-        const delay = Math.min(Math.max(base, 300_000), base * 2 ** Math.min(failures++, 8));
         const timer = setTimeout(done, delay);
         timer.unref?.();
         signal.addEventListener('abort', done, { once: true });

@@ -993,21 +993,31 @@ opencodeV2Kit.extras!.push(
     async run(context) {
       const fake = context.fake as OpencodeV2Fake;
       const saved = { reconnect: context.broker.env.COSYNCING_OPENCODE_SSE_RECONNECT_MS, idle: context.broker.env.COSYNCING_OPENCODE_SSE_IDLE_MS };
-      await context.restart({ env: { COSYNCING_OPENCODE_SSE_RECONNECT_MS: '700', COSYNCING_OPENCODE_SSE_IDLE_MS: '2000' } });
+      await context.restart({ env: { COSYNCING_OPENCODE_SSE_RECONNECT_MS: '60000', COSYNCING_OPENCODE_SSE_IDLE_MS: '2000' } });
       try {
         const session = await context.drivableSession('reconnect policy');
         const stream = await context.openDrive(session);
-        const mark = fake.ledger.mark(), from = stream.frames.length;
+        const from = stream.frames.length;
+        fake.serve.stop();
+        fake.serve.start();
+        fake.serve.restartIdentity();
+        await stream.waitForFrame((frame) => frame.kind === 'history' && frame.reset === true, { after: from, timeoutMs: 10000 });
+        const eventFrom = stream.frames.length;
+        fake.serve.appendTurn(session.id, 'after native restart', 'reattached within the retry window');
+        await stream.waitForFrame((frame) => frame.kind === 'message' && frame.message?.text === 'reattached within the retry window', { after: eventFrom, timeoutMs: 10000 });
+        stream.close();
+
+        await context.restart({ env: { COSYNCING_OPENCODE_SSE_RECONNECT_MS: '50' } });
+        const retrying = await context.openDrive(session);
+        const mark = fake.ledger.mark(), retryFrom = retrying.frames.length;
         fake.serve.failNext('GET', '/api/event', 503, 1);
-        const disconnectedAt = Date.now();
         fake.serve.disconnectStreams();
-        await stream.waitForFrame((frame) => frame.kind === 'history' && frame.reset === true, { after: from });
+        await retrying.waitForFrame((frame) => frame.kind === 'history' && frame.reset === true, { after: retryFrom });
         const attempts = fake.ledger.routed('GET', /^\/api\/event$/, mark);
         expect(attempts).toHaveLength(2);
-        // These lower bounds check the configured retry policy, not execution speed.
-        expect(attempts[0]!.at - disconnectedAt).toBeGreaterThanOrEqual(700);
-        expect(attempts[1]!.at - attempts[0]!.at).toBeGreaterThanOrEqual(1400);
-        stream.close();
+        // After the retry window expires, failures use the two-second backoff base.
+        expect(attempts[1]!.at - attempts[0]!.at).toBeGreaterThanOrEqual(2000);
+        retrying.close();
         await eventually(() => fake.serve.openStreams === 0, { what: 'the unused shared stream lease to expire' });
         fake.serve.setBusy(session.id, true);
         const reopened = await context.openDrive(session);

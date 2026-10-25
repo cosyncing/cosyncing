@@ -375,6 +375,13 @@ export class OpenCodeAdapter implements AgentBackend {
   private readonly bindingResolver: BindingResolver;
   private readonly v2: OpenCodeV2Backend;
 
+  private trackV1Connection(connection: OpenCodeConnection | OpenCodeRunConnection): void {
+    for (const reference of this.v1LiveConnections) {
+      if (!reference.deref()) this.v1LiveConnections.delete(reference);
+    }
+    this.v1LiveConnections.add(new WeakRef(connection));
+  }
+
   get discoveryBudgetMs(): number | undefined {
     const kind = opencodeGeneration().kind;
     return this.v2.binding || kind === 'v2' || kind === 'future' || (kind === 'absent' && readRegistration().kind !== 'absent')
@@ -875,7 +882,7 @@ export class OpenCodeAdapter implements AgentBackend {
           drive: { supported: true, state: 'driving' },
         },
       });
-      this.v1LiveConnections.add(new WeakRef(connection));
+      this.trackV1Connection(connection);
       return connection;
     }
     if (mode !== 'live' && info.attachMode !== 'live') {
@@ -898,7 +905,7 @@ export class OpenCodeAdapter implements AgentBackend {
       (current) => this.loadModelCatalog(current),
       modelHint,
     );
-    this.v1LiveConnections.add(new WeakRef(conn));
+    this.trackV1Connection(conn);
     conn.start();
     // Wait until the /event SSE reader is actually connected before returning, so the
     // very first prompt sent on attach isn't fired into a not-yet-listening stream and
