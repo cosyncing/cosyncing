@@ -25,6 +25,11 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   with fewer quota details. Borderless themed surfaces keep each provider
   distinct in Overview and Settings.
 
+### Changed
+
+- The session menu uses the same single-click Hide tool calls checkbox on
+  narrow and wide screens.
+
 ## 0.8.3 — 2026-10-25
 
 ### Fixed

@@ -86,8 +86,8 @@ class _SessionViewMenu extends StatelessWidget {
         (toolVisibility == ToolVisibility.inherit && defaultHidden);
 
     return SizedBox(
-      width: MediaQuery.sizeOf(context).width < 600 ? 40 : 32,
-      height: MediaQuery.sizeOf(context).width < 600 ? 40 : 32,
+      width: compact ? 40 : 32,
+      height: compact ? 40 : 32,
       child: PopupMenuButton<_SessionViewMenuAction>(
         key: const Key('session-detail-view-menu'),
         popUpAnimationStyle: AnimationStyle.noAnimation,
@@ -188,52 +188,18 @@ class _SessionViewMenu extends StatelessWidget {
           // destinations from toggles, not open a gap in the middle of a
           // six-row menu.
           const PopupMenuDivider(height: 8),
-          if (compact)
-            CheckedPopupMenuItem(
-              key: const Key('session-tool-visibility-toggle'),
-              value: _SessionViewMenuAction.toggleToolCalls,
-              checked: toolsHidden,
-              enabled: onToolVisibilityChanged != null,
-              height: 40,
-              padding: _menuItemPadding,
-              child: Text(
-                l10n.toolsHide,
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-            )
-          else
-            _SessionPickerEntry(
-              child: SizedBox(
-                width: 240,
-                child: SettingsSelect<ToolVisibility>(
-                  key: const Key('session-tool-visibility'),
-                  title: l10n.toolsVisibility,
-                  value: toolVisibility,
-                  options: [
-                    SettingsSelectOption(
-                      value: ToolVisibility.inherit,
-                      label: l10n.toolsUseDefault(
-                        defaultHidden ? l10n.toolsHidden : l10n.toolsShown,
-                      ),
-                    ),
-                    SettingsSelectOption(
-                      value: ToolVisibility.show,
-                      label: l10n.toolsShow,
-                    ),
-                    SettingsSelectOption(
-                      value: ToolVisibility.hide,
-                      label: l10n.toolsHide,
-                    ),
-                  ],
-                  onChanged: onToolVisibilityChanged == null
-                      ? null
-                      : (value) {
-                          onToolVisibilityChanged!(value);
-                          Navigator.pop(context);
-                        },
-                ),
-              ),
+          CheckedPopupMenuItem(
+            key: const Key('session-tool-visibility-toggle'),
+            value: _SessionViewMenuAction.toggleToolCalls,
+            checked: toolsHidden,
+            enabled: onToolVisibilityChanged != null,
+            height: compact ? 40 : _menuItemHeight,
+            padding: _menuItemPadding,
+            child: Text(
+              l10n.toolsHide,
+              style: Theme.of(context).textTheme.bodySmall,
             ),
+          ),
         ],
       ),
     );
@@ -339,35 +305,4 @@ class _SessionMenuFade extends StatelessWidget {
       child: child,
     );
   }
-}
-
-/// A focusable selector owns its own gestures and semantics inside the menu.
-class _SessionPickerEntry extends PopupMenuEntry<_SessionViewMenuAction> {
-  const _SessionPickerEntry({required this.child});
-  final Widget child;
-  @override
-  double get height => 72;
-  @override
-  bool represents(_SessionViewMenuAction? value) => false;
-  @override
-  State<_SessionPickerEntry> createState() => _SessionPickerEntryState();
-}
-
-class _SessionPickerEntryState extends State<_SessionPickerEntry> {
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text(
-          AppLocalizations.of(context).toolsVisibility,
-          style: Theme.of(context).textTheme.labelSmall,
-        ),
-        const SizedBox(height: 4),
-        widget.child,
-      ],
-    ),
-  );
 }
