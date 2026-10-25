@@ -13,6 +13,8 @@ const RAW_BYTES = 1024 * 1024;
 const STRING_BYTES = 64 * 1024;
 const DEPTH = 64;
 const CHUNK_BYTES = 128 * 1024;
+// These controls are invalid everywhere in JSON, including inside strings.
+const INVALID_CONTROL_BYTES = /[\x00-\x08\x0b\x0c\x0e-\x1f]/;
 const BINARY_KEYS = new Set(['data', 'image_url', 'imageUrl']);
 const TEXT_KEYS = new Set([
   'text', 'content', 'message', 'prompt', 'title', 'name', 'sessionName',
@@ -57,12 +59,16 @@ export class TitleRecordProjection {
   }
 
   append(fragment: Buffer | string): void {
+    if (this.invalid || this.opaque) { this.bytes += fragment.length; return; }
     for (let start = 0; start < fragment.length; start += CHUNK_BYTES) {
-      const part = typeof fragment === 'string'
-        ? fragment.slice(start, start + CHUNK_BYTES)
-        : fragment.subarray(start, start + CHUNK_BYTES).toString('latin1');
-      this.bytes += part.length;
+      const end = Math.min(fragment.length, start + CHUNK_BYTES);
+      this.bytes += end - start;
       if (this.invalid || this.opaque) continue;
+      const part = typeof fragment === 'string'
+        ? fragment.slice(start, end)
+        : fragment.subarray(start, end).toString('latin1');
+      // Reject sparse/malformed input before the raw fast path retains it.
+      if (INVALID_CONTROL_BYTES.test(part)) { this.invalid = true; this.raw = ''; continue; }
       if (!this.projected && this.raw.length + part.length <= RAW_BYTES) {
         this.raw += part;
         continue;
@@ -96,7 +102,9 @@ export class TitleRecordProjection {
     this.outputBytes += text.length;
     this.outputChunk += text;
     if (this.outputChunk.length >= 4096) {
-      this.output.push(this.outputChunk);
+      // Per-character projection creates ropes. Retain flat byte strings so
+      // bounded output cannot keep thousands of concatenation nodes alive.
+      this.output.push(Buffer.from(this.outputChunk, 'latin1').toString('latin1'));
       this.outputChunk = '';
     }
   }
@@ -129,6 +137,10 @@ export class TitleRecordProjection {
       const char = fragment[index]!;
       if (!this.validUtf8(byte)) { this.invalid = true; break; }
       if (!this.inString) {
+        if (byte < 0x20 && byte !== 0x09 && byte !== 0x0a && byte !== 0x0d) {
+          this.invalid = true;
+          break;
+        }
         if (char === '"') {
           const parent = this.containers.at(-1);
           this.stringKey = parent?.kind === '{' && (this.previous === '{' || this.previous === ',');

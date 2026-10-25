@@ -82,6 +82,14 @@ describe('metadata while the native store keeps changing', () => {
       Buffer.from('{"data":"' + 'A'.repeat(2 * 1024 * 1024)), Buffer.from([0xc3, 0x28]), Buffer.from('"}'),
     ]));
     expect(invalidUtf8.finish().kind).toBe('malformed');
+    const nul = new TitleRecordProjection();
+    const sparseBytes = 2 * 1024 * 1024;
+    nul.append(Buffer.alloc(sparseBytes));
+    expect(nul.finish().kind).toBe('malformed');
+    const ignoredSuffix = Buffer.from('{"text":"cannot repair the same malformed record"}');
+    nul.append(ignoredSuffix);
+    expect(nul.finish().kind).toBe('malformed');
+    expect(nul.bytes).toBe(sparseBytes + ignoredSuffix.length);
   });
 
   test('an unfinished large first record resumes after cold EOF; an opaque row cannot certify a later prompt', async () => {
