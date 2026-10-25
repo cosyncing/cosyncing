@@ -119,7 +119,9 @@ class AgentsSettingsPage extends ConsumerWidget {
         children: [
           _ManagedRuntimeSection(
             state: managedRuntimeState,
-            quota: quotaState.valueOrNull,
+            quota: quotaState.isReloading || quotaState.hasError
+                ? null
+                : quotaState.valueOrNull,
             quotaLoading: quotaState.isLoading,
             onRefresh: () => ref
                 .read(managedRuntimeControllerProvider.notifier)

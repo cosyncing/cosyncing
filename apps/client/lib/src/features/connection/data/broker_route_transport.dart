@@ -92,8 +92,8 @@ final class BrokerRouteTransport {
 
   /// Invalidates the access binding after an authenticated 401.
   final void Function()? onAuthorizationRefused;
-  final Set<HttpClientAdapter> _clients = {};
-  final Set<WebSocketAdapter> _sockets = {};
+  final Set<_OwnedHttpAdapter> _clients = {};
+  final Set<_OwnedWebSocket> _sockets = {};
   final Set<void Function()> _retainedResources = {};
   var _retired = false;
   var _forceRetired = false;
@@ -139,7 +139,7 @@ final class BrokerRouteTransport {
     var closed = false;
     bool usable() => !closed && (!_retired || (pinned && !_forceRetired));
     adapter = _OwnedHttpAdapter(
-      httpOverride?.call() ?? platform.routeHttpAdapter(context),
+      () => httpOverride?.call() ?? platform.routeHttpAdapter(context),
       () {
         closed = true;
         _clients.remove(adapter);
@@ -277,6 +277,21 @@ final class BrokerRouteTransport {
     };
   }
 
+  /// Drops this generation's connections without fencing it. Requests held on
+  /// a path the network no longer carries fail and retry on new connections,
+  /// and session sockets, unless excluded, reconnect with their own cursors.
+  /// Pinned transfers keep their connections.
+  void resetConnections({bool sockets = true}) {
+    if (_retired) return;
+    for (final client in [..._clients]) {
+      client.reset();
+    }
+    if (!sockets) return;
+    for (final socket in [..._sockets]) {
+      socket.drop();
+    }
+  }
+
   /// Releases the coordinator's draining generation once its last view closes.
   void whenDrained(void Function() callback) {
     if (_retainedResources.isEmpty) {
@@ -315,19 +330,28 @@ final class BrokerRouteTransport {
 }
 
 final class _OwnedHttpAdapter implements HttpClientAdapter {
-  _OwnedHttpAdapter(this.inner, this.onClosed);
-  final HttpClientAdapter inner;
+  _OwnedHttpAdapter(this._create, this.onClosed) : _inner = _create();
+  final HttpClientAdapter Function() _create;
   final void Function() onClosed;
+  HttpClientAdapter _inner;
   @override
   Future<ResponseBody> fetch(
     RequestOptions options,
     Stream<Uint8List>? body,
     Future<void>? cancel,
-  ) => inner.fetch(options, body, cancel);
+  ) => _inner.fetch(options, body, cancel);
+
+  /// Fails requests on the current pool; later requests use a new one.
+  void reset() {
+    final old = _inner;
+    _inner = _create();
+    old.close(force: true);
+  }
+
   @override
   void close({bool force = false}) {
     onClosed();
-    inner.close(force: force);
+    _inner.close(force: force);
   }
 }
 
@@ -356,6 +380,12 @@ final class _OwnedWebSocket implements WebSocketAdapter {
     _reportedFailure = true;
     onFailure?.call();
   }
+
+  /// Ends the connection as a loss its session recovers from, without
+  /// reporting a route failure: the route itself was not observed to fail.
+  /// The session reconnects without closing this adapter, so it is released
+  /// here, exactly as [close] would.
+  void drop() => unawaited(close());
 
   @override
   bool get isConnected => inner.isConnected;

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:broker_client/broker_client.dart';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
@@ -121,16 +123,37 @@ final class ManagedRuntimeApiContext {
 /// proxy call failed with a [BrokerException] (Tokdash down, broker 502).
 /// Programming/decoding errors are not swallowed.
 ///
-/// Auto-disposed when the final consumer unsubscribes. Overview releases its
-/// subscription while offstage. Retained Settings consumers may stay
-/// subscribed.
+/// Successful readings survive for one minute after the last view leaves. The
+/// retention is admission-scoped and performs no background reads; switching
+/// broker or invalidating explicitly still discards the old admission
+/// immediately.
 final AutoDisposeFutureProvider<TokdashQuotaResponse?>
 managedRuntimeQuotaProvider = FutureProvider.autoDispose<TokdashQuotaResponse?>(
   (ref) async {
+    var disposed = false;
+    ref.onDispose(() => disposed = true);
     final context = await ref.watch(managedRuntimeApiContextProvider.future);
-    if (context == null) return null;
+    if (context == null || disposed) return null;
     try {
-      return await context.api.getQuota();
+      final quota = await context.api.getQuota();
+      if (disposed) return quota;
+      // Retention counts from when the last view leaves, not from the read: a
+      // long stay on Home must not leave the next visit without a reading.
+      final retention = ref.keepAlive();
+      Timer? expiry;
+      void release() {
+        expiry?.cancel();
+        expiry = null;
+      }
+
+      ref
+        ..onCancel(() {
+          release();
+          expiry = Timer(const Duration(minutes: 1), retention.close);
+        })
+        ..onResume(release)
+        ..onDispose(release);
+      return quota;
     } on BrokerException {
       return null;
     }
