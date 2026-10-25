@@ -6,8 +6,10 @@
  * needs a ready omp, so the fake runtime is installed).
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { existsSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+import { HostProcessProvider } from '../../packages/typescript/adapter-api/src/index.ts';
+import { defaultBrokerConfig, writeBrokerConfig } from '../../packages/typescript/broker/src/runtime/configuration.ts';
 import { BROKER_CONTRACT_REVISION, CLIENT_REVISION_WITH_OMP_ROSTER_IDENTITY } from '../../packages/typescript/protocol/src/index.ts';
 import { type Broker, type BrokerClient, eventually, startBroker } from '../harness/index.ts';
 import { PiBridgeSession } from '../harness/fakes/pi-bridge-driver.ts';
@@ -33,6 +35,7 @@ describe.each([PI_DIALECT_FACTS, OMP_DIALECT_FACTS] as PiFamilyDialect[])('$disp
       env: { COSYNCING_BRIDGE_GRACE_MS: String(GRACE_MS) },
       setup: (paths) => {
         fake = installPiFamily(dialect, paths);
+        writeBrokerConfig({ ...defaultBrokerConfig(), features: { httpTranscriptExport: true } }, paths.cosyncingHome);
       },
     });
     owner = broker.client();
@@ -191,6 +194,110 @@ describe.each([PI_DIALECT_FACTS, OMP_DIALECT_FACTS] as PiFamilyDialect[])('$disp
       const diagnostics = broker.output().split('\n').filter((line) => /attention|error/i.test(line)).slice(-8).join('\n');
       throw new Error(`${String(error)}; live=${JSON.stringify(live)}; attention=${JSON.stringify(feed.body)}; broker=${diagnostics}`);
     } finally { stream.close(); await owner.post(`${route}/bye`, { id, epoch, reason: 'quit' }); }
+  });
+
+  test('native lifetime ownership covers every RPC writer and removes reused identities', async () => {
+    const stored = storedSession('native-owner');
+    const id = enc(stored.file);
+    const directory = join(dirname(stored.file), '.cosyncing-presence', `${basename(stored.file)}.owners`);
+    const token = crypto.randomUUID();
+    const record = join(directory, `${process.pid}-${token}.json`);
+    const identity = new HostProcessProvider().liveProcess(process.pid);
+    expect(identity.state).toBe('running');
+    if (identity.state !== 'running') throw new Error('fixture process identity unavailable');
+    const mark = (start = identity.identity.start, boot = identity.identity.boot) => {
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(record, JSON.stringify({ schemaVersion: 3, pid: process.pid, sessionFile: stored.file, token, start, boot }));
+    };
+    const spawnCount = () => fake.ledger.spawns().filter((e) => e.session === stored.file).length;
+    try {
+      mark();
+      const before = spawnCount();
+      const refused = await owner.attach(dialect.name, id, { mode: 'resume', reason: 'takeover' });
+      expect((await refused.waitForKind('attach-conflict')).message).toContain('native terminal');
+      expect((await refused.waitForKind('session')).info.attachMode).toBe('observe');
+      refused.close();
+      const renamed = await owner.request('PATCH', `/api/sessions/${dialect.name}/${id}/rename`, { title: 'Refused competing rename' });
+      expect(renamed.status).toBeGreaterThanOrEqual(400);
+      const forked = await owner.post(`/api/sessions/${dialect.name}/${id}/fork`, {});
+      expect(forked.status).toBeGreaterThanOrEqual(400);
+      const preflight = await owner.post(`/api/sessions/${dialect.name}/${id}/export/preflight`, {});
+      expect(preflight.status).toBe(200);
+      {
+        const exported = await owner.post(`/api/sessions/${dialect.name}/${id}/export`, { nonce: preflight.body.nonce });
+        expect(exported.status).toBeGreaterThanOrEqual(400);
+      }
+      expect(spawnCount()).toBe(before);
+      mark('');
+      const unknown = await owner.attach(dialect.name, id, { mode: 'resume', reason: 'takeover' });
+      expect((await unknown.waitForKind('attach-conflict')).message).toContain('Cannot verify');
+      unknown.close();
+      mark();
+      const linked = join(dirname(stored.file), `linked-${token}.jsonl`);
+      if (process.platform !== 'win32') symlinkSync(stored.file, linked);
+      try {
+        const linkedStream = await owner.attach(dialect.name, enc(process.platform === 'win32' ? stored.file.toUpperCase() : linked), { mode: 'resume', reason: 'takeover' });
+        expect((await linkedStream.waitForKind('attach-conflict')).message).toContain('native terminal');
+        linkedStream.close();
+      } finally { rmSync(linked, { force: true }); }
+      expect(spawnCount()).toBe(before);
+      // Deterministic PID-reuse/reboot evidence: the PID is live, but its lifetime differs.
+      const staleStart = process.platform === 'linux' ? String(BigInt(identity.identity.start) + 1n)
+        : process.platform === 'win32' ? new Date(Date.parse(identity.identity.start) - 1000).toISOString().replace('Z', '0000Z')
+        : identity.identity.start.replace(/\d{4}$/, (year) => String(Number(year) + 1));
+      mark(staleStart, process.platform === 'linux' ? crypto.randomUUID() : '');
+      const drive = await owner.attach(dialect.name, id, { mode: 'resume', reason: 'takeover' });
+      expect((await drive.waitForKind('session')).info.control.drive.state).toBe('driving');
+      expect(existsSync(record)).toBe(false);
+      expect(existsSync(directory)).toBe(false);
+      // A new terminal's synchronous claim precedes its asynchronous identity probe.
+      mark('');
+      const compactBefore = fake.ledger.commands('compact').length;
+      const compact = await drive.sendAndAwait({ kind: 'command', name: 'compact', args: 'must never reach a competing writer' });
+      expect(compact.kind).toBe('nack');
+      expect(fake.ledger.commands('compact')).toHaveLength(compactBefore);
+      expect((await owner.sessions()).find((row) => row.id === id)?.control.drive.state).toBe('driving');
+      mark();
+      const prompt = await drive.sendAndAwait({ kind: 'prompt', text: 'must never reach competing writer' });
+      expect(prompt.kind).toBe('nack');
+      expect(fake.ledger.promptTexts()).not.toContain('must never reach competing writer');
+      await drive.waitForFrame((frame) => frame.kind === 'session' && frame.info?.attachMode === 'observe');
+      drive.close();
+    } finally { rmSync(directory, { recursive: true, force: true }); }
+  });
+
+  test('foreign records do not block this session and an unknown current owner preserves shared Drive', async () => {
+    const stored = storedSession('scoped-ownership'), id = enc(stored.file);
+    const otherUuid = crypto.randomUUID();
+    const other = piSessionFilePath(fake.sessionsRoot, stored.cwd, otherUuid, Date.now());
+    appendLines(other, piHeader(dialect.name, otherUuid, stored.cwd, Date.now(), 'other session in the same folder'));
+    const root = join(dirname(stored.file), '.cosyncing-presence');
+    const bucket = join(root, `${basename(stored.file)}.owners`);
+    const foreign = join(root, `${basename(other)}.owners`);
+    const token = crypto.randomUUID(), currentRecord = join(bucket, `${process.pid}-${token}.json`);
+    mkdirSync(foreign, { recursive: true });
+    mkdirSync(bucket, { recursive: true });
+    writeFileSync(join(foreign, `${process.pid}-${crypto.randomUUID()}.json`), '{truncated');
+    writeFileSync(currentRecord, JSON.stringify({ schemaVersion: 999, sessionFile: other }));
+    const spawns = () => fake.ledger.spawns().filter((event) => event.session === stored.file).length;
+    try {
+      const drive = await owner.attach(dialect.name, id, { mode: 'resume', reason: 'takeover' });
+      expect((await drive.waitForKind('session')).info.control.drive.state).toBe('driving');
+      const second = await owner.attach(dialect.name, id);
+      await second.waitForKind('history');
+      const before = spawns();
+      // Current-file evidence cannot establish identity: deny the operation, preserve the lease.
+      writeFileSync(currentRecord, JSON.stringify({ schemaVersion: 3, platform: process.platform, pid: process.pid, token, sessionFile: stored.file, start: 'unrecognized-format', boot: 'unrecognized-format' }));
+      expect((await drive.sendAndAwait({ kind: 'prompt', text: 'unknown owner must not receive this' })).kind).toBe('nack');
+      expect((await second.sendAndAwait({ kind: 'prompt', text: 'other viewer must keep its Drive' })).kind).toBe('nack');
+      expect(fake.ledger.promptTexts()).not.toContain('unknown owner must not receive this');
+      expect((await owner.sessions()).find((row) => row.id === id)?.control.drive.state).toBe('driving');
+      rmSync(currentRecord);
+      expect((await drive.sendAndAwait({ kind: 'prompt', text: 'retry on the same Drive' })).kind).toBe('ack');
+      await eventually(() => fake.ledger.promptTexts().includes('retry on the same Drive'), { what: 'existing Drive recovers without reattach' });
+      expect(spawns()).toBe(before);
+      drive.close(); second.close();
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
   test('one terminal owns the bridge until explicit reload, and stale owners cannot displace it', async () => {

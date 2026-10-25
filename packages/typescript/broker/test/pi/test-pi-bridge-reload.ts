@@ -9,8 +9,10 @@
  *   bun run packages/typescript/broker/test/pi/test-pi-bridge-reload.ts   (exit 0 = all pass)
  */
 export {};
-import { appendFileSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { basename, join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { HostProcessProvider } from '../../../adapter-api/src/index.ts';
 import { BrokerClient } from '../../../../../e2e/harness/client.ts';
 import { eventually } from '../../../../../e2e/harness/wait.ts';
 import {
@@ -26,7 +28,7 @@ const portLease = await reserveLoopbackFixturePort();
 const PORT = Number(process.env.COSYNCING_TEST_PORT ?? portLease.port);
 const BROKER = `http://127.0.0.1:${PORT}`;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const ROOT = join('/tmp', `cosyncing-pi-bridge-reload-${PORT}`);
+const ROOT = join(tmpdir(), `cosyncing-pi-bridge-reload-${PORT}`);
 const DISCOVERY_CWD = join(ROOT, 'work');
 const DISCOVERY_AGENT = join(ROOT, 'agent');
 const DISCOVERY_AGENT_LINK = join(ROOT, 'agent-link');
@@ -46,7 +48,7 @@ writeFileSync(
   DISCOVERY_SESSION_FILE,
   JSON.stringify({ type: 'session', version: 3, id: 'bridge-sync', timestamp: new Date().toISOString(), cwd: DISCOVERY_CWD }) + '\n',
 );
-symlinkSync(DISCOVERY_AGENT, DISCOVERY_AGENT_LINK, 'dir');
+symlinkSync(DISCOVERY_AGENT, DISCOVERY_AGENT_LINK, process.platform === 'win32' ? 'junction' : 'dir');
 
 // ── start an isolated broker ────────────────────────────────────────────────
 await portLease.release();
@@ -511,18 +513,38 @@ try {
     const client = new BrokerClient(BROKER, BROKER.replace('http:', 'ws:'), { kind: 'none' });
     try {
       await test('the real extension transfers large history and restores the original busy user turn', async () => {
-        await fire('session_start');
-        await eventually(() => statuses.includes('📱 bridged'), { what: 'large native registration' });
+        const savedIdentityEnv = { TZ: process.env.TZ, LC_ALL: process.env.LC_ALL };
+        try {
+          process.env.TZ = 'Pacific/Honolulu'; process.env.LC_ALL = 'fr_FR.UTF-8';
+          const starting = fire('session_start');
+          const bucket = join(DISCOVERY_SESSION_DIR, '.cosyncing-presence', `${basename(file)}.owners`);
+          const records = readdirSync(bucket).filter((name) => name.endsWith('.json'));
+          if (records.length !== 1 || JSON.parse(readFileSync(join(bucket, records[0]!), 'utf8')).sessionFile !== file) {
+            throw new Error('Native ownership must precede asynchronous registration');
+          }
+          await starting;
+          await eventually(() => statuses.includes('📱 bridged'), { what: 'large native registration' });
+          process.env.TZ = 'Asia/Tokyo'; process.env.LC_ALL = 'ja_JP.UTF-8';
+          const record = JSON.parse(readFileSync(join(bucket, records[0]!), 'utf8'));
+          const processRead = new HostProcessProvider().liveProcess(process.pid);
+          if (processRead.state !== 'running' || record.start !== processRead.identity.start || record.boot !== processRead.identity.boot) {
+            throw new Error('Native extension and provider disagree on process identity across locale/time zone');
+          }
+        } finally {
+          for (const [key, value] of Object.entries(savedIdentityEnv)) {
+            if (value === undefined) delete process.env[key]; else process.env[key] = value;
+          }
+        }
         const id = enc(file);
         const stream = await client.attach('pi', id);
         const info = (await stream.waitForKind('session')).info;
-        await stream.waitForMessage((m) => m.type === 'run-summary' && m.key === 'pi:run:u0' && m.status === 'running');
-        await stream.waitForMessage((m) => m.type === 'tool-call' && m.callId === 'during-upload');
+        await stream.waitForMessage((m) => m.type === 'run-summary' && m.key === 'pi:run:u0' && m.status === 'running', { what: 'original running turn after large registration' });
+        await stream.waitForMessage((m) => m.type === 'tool-call' && m.callId === 'during-upload', { what: 'tool started during the snapshot upload' });
         await fire('tool_execution_end', { toolCallId: 'long-call', toolName: 'bash', result: { content: [{ type: 'text', text: 'result '.repeat(180_000) }] } });
         busy = false;
         await fire('message_end', { timestamp: at + 500_000, message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'finished after long tool' }] } });
         await fire('agent_end', { timestamp: at + 500_000 });
-        const done = await stream.waitForMessage((m) => m.type === 'run-summary' && m.key === 'pi:run:u0' && m.status === 'done');
+        const done = await stream.waitForMessage((m) => m.type === 'run-summary' && m.key === 'pi:run:u0' && m.status === 'done', { what: 'original turn completion after a large result' });
         const physical = requests.filter((r) => r.path.endsWith('/hello'));
         const terminal = stream.messages().filter((m) => m.type === 'run-summary' && m.status === 'done');
         return [info.status === 'working' && done.totalRuntimeMs === 500_000 && terminal.every((m) => m.key === 'pi:run:u0')
@@ -753,7 +775,7 @@ try {
           release(); await switching;
           await eventually(() => destination.statuses.includes('📱 bridged'), { what: 'B bridges after A retirement' });
           const nextStream = await client.attach('pi', enc(destination.file));
-          await nextStream.waitForMessage((message) => message.type === 'model-output' && message.text === 'B finished');
+          await nextStream.waitForMessage((message) => message.type === 'model-output' && message.text === 'B finished', { what: 'B snapshot includes its completed answer' });
           await oldStream.waitForKind('ended');
           const leaked = oldStream.messages().some((message) => message.text === 'belongs only to B' || String(message.callId ?? '').startsWith('B-tool-'));
           return [!leaked, `B reached its own history; leakedToA=${leaked}`];
@@ -802,6 +824,31 @@ try {
           return [rejected === 1 && byeBytes < 70 * 1024 && finalEvents.some((event) => event.key === 'pi:run:u300' && event.status === 'done'),
             `rejectedUploads=${rejected} byeBytes=${byeBytes} lifecycleFrames=${finalEvents.length}`];
         } finally { intercept = undefined; await terminal.stop(); }
+      });
+      await test('a failed native claim keeps its warning and recovers on the next eligible heartbeat', async () => {
+        const terminal = native('recover-presence');
+        const presenceRoot = join(DISCOVERY_SESSION_DIR, '.cosyncing-presence');
+        const bucket = join(presenceRoot, `${basename(terminal.file)}.owners`);
+        mkdirSync(presenceRoot, { recursive: true });
+        writeFileSync(bucket, 'injected filesystem obstruction');
+        const originalNow = Date.now;
+        try {
+          await terminal.fire('session_start');
+          await eventually(() => terminal.statuses.some((value: string) => value.startsWith('📱 bridged') && value.includes('native ownership could not be recorded')), { what: 'claim warning survives successful bridge' });
+          rmSync(bucket);
+          const stream = await client.attach('pi', enc(terminal.file));
+          await stream.waitForKind('history');
+          // Controlled retry clock: real time still advances for every bounded wait.
+          Date.now = () => originalNow() + 6000;
+          await stream.sendAndAwait({ kind: 'prompt', text: 'trigger the next poll heartbeat' });
+          await eventually(() => existsSync(bucket) && terminal.statuses.at(-1) === '📱 bridged', { what: 'record and warning recover on heartbeat' });
+          const record = JSON.parse(readFileSync(join(bucket, readdirSync(bucket).find((name) => name.endsWith('.json'))!), 'utf8'));
+          return [record.schemaVersion === 3 && !!record.start, `schema=${record.schemaVersion} knownIdentity=${!!record.start}`];
+        } finally {
+          Date.now = originalNow;
+          await terminal.stop();
+          rmSync(bucket, { recursive: true, force: true });
+        }
       });
       await test('the real extension reports a rejected registration visibly', async () => {
         // No live mutation: a failed HTTP response is injected only at the extension boundary.

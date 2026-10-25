@@ -322,7 +322,7 @@ export class HostProcessProvider {
       if (!ps) return undefined;
       try {
         const result = Bun.spawnSync([ps, '-o', 'ppid=', '-o', 'lstart=', '-p', String(pid)], {
-          stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', env: { ...process.env }, timeout: 3_000,
+          stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' }, timeout: 3_000,
         });
         const value = new TextDecoder().decode(result.stdout).trim();
         const noise = new TextDecoder().decode(result.stderr).trim();
@@ -408,7 +408,7 @@ export class HostProcessProvider {
     const field = (format: string): { value?: string; absent: boolean } => {
       try {
         const result = Bun.spawnSync([ps, '-o', format, '-p', String(pid)], {
-          stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', env: { ...process.env }, timeout: 3_000,
+          stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' }, timeout: 3_000,
         });
         const value = new TextDecoder().decode(result.stdout).trim();
         const noise = new TextDecoder().decode(result.stderr).trim();
