@@ -137,8 +137,10 @@ export function messageRows(message: Native, clientKeys: ReadonlyMap<string, str
   if (!nativeId(message.id, 'msg_') || !object(message.time) || !finite(message.time.created)) return [];
   if (message.type === 'user' && typeof message.text === 'string') {
     const clientKey = clientKeys.get(message.id);
-    return [{ type: 'user-message', key: message.id, text: message.text, turnId: message.id, sentAt: message.time.created, ...(clientKey ? { clientKey } : {}) }];
+    const imageCount = Array.isArray(message.files) ? message.files.filter((file: Native) => typeof file?.data === 'string' && typeof file.mime === 'string' && file.mime.startsWith('image/') && object(file.source) && ['uri', 'inline'].includes(file.source.type)).length : 0;
+    return [{ type: 'user-message', key: message.id, text: message.text, turnId: message.id, sentAt: message.time.created, ...(imageCount ? { imageCount } : {}), ...(clientKey ? { clientKey } : {}) }];
   }
+  if (message.type === 'compaction' && message.status === 'completed' && typeof message.summary === 'string') return [{ type: 'model-output', key: `${message.id}:compaction`, text: message.summary, final: true }];
   if (message.type !== 'assistant' || !Array.isArray(message.content)) return [];
   return message.content.flatMap((part: Native, ordinal: number): AgentMessage[] => {
     if (!object(part)) return [];
@@ -174,5 +176,5 @@ export function historyRows(messages: Native[], clientKeys: ReadonlyMap<string, 
 export function sessionPatch(info: SessionInfo): Partial<SessionInfo> {
   return { title: info.title, status: info.status, attachMode: info.attachMode,
     model: info.model, currentModel: info.currentModel, currentAgent: info.currentAgent,
-    updatedAt: info.updatedAt, control: info.control };
+    updatedAt: info.updatedAt, control: info.control, terminalSyncHint: info.terminalSyncHint };
 }

@@ -1,8 +1,11 @@
-import { ControlRefusedError, SessionCreateTemporarilyUnavailableError, SessionNotFoundError, type AgentOption, type ModelOption, type PromptInput, type SessionDiscoveryOptions, type SessionInfo, type Unsubscribe } from '@cosyncing/adapter-api';
+import { ControlRefusedError, SessionCreateTemporarilyUnavailableError, SessionNotFoundError, TranscriptExportTooLargeError, type AgentOption, type ModelOption, type PromptInput, type SessionDiscoveryOptions, type SessionInfo, type Unsubscribe } from '@cosyncing/adapter-api';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { BindingResolver, V2Binding } from '../binding.ts';
+import { attachedV2TuiSessions, v2TuiPresenceSupported } from '../tui-presence.ts';
 import { OpenCodeV2Connection } from './connection.ts';
 import { arrayData, formCard, isSession, modelsFrom, nativeId, newNativeId, object, permissionCard, sessionInfo, type Native } from './mapping.ts';
-import { V2Error, V2Transport, type V2Event } from './transport.ts';
+import { V2Error, V2ResponseTooLargeError, V2Transport, type V2Event } from './transport.ts';
 
 export interface LegacySession { id: string; title?: string; directory?: string; time?: { created?: number; updated?: number }; model?: { providerID?: string; id?: string; modelID?: string }; }
 export interface V2BackendOptions {
@@ -33,6 +36,8 @@ export class OpenCodeV2Backend {
   private demandUntil = 0;
   private attaching = 0;
   private leaseTimer?: ReturnType<typeof setTimeout>;
+  private presenceTimer?: ReturnType<typeof setInterval>;
+  private presence = new Set<string>();
   unknownEvents = 0;
   unknownMessages = 0;
 
@@ -45,6 +50,7 @@ export class OpenCodeV2Backend {
     this.streamEpoch++;
     this.binding = binding;
     this.transport = new V2Transport(binding.baseUrl, binding.auth);
+    this.watchPresence();
     this.streamReady = undefined;
     this.sequences.clear();
     if (hadBinding) for (const connection of this.connections) connection.onGap(true);
@@ -55,14 +61,47 @@ export class OpenCodeV2Backend {
   }
 
   anyBusy(): boolean { return this.active.size > 0 || [...this.permissions.values(), ...this.forms.values()].some((list) => list.length > 0); }
-  watch(listener: (info: SessionInfo) => void): Unsubscribe { this.watchers.add(listener); return () => this.watchers.delete(listener); }
+  watch(listener: (info: SessionInfo) => void): Unsubscribe {
+    this.watchers.add(listener);
+    this.watchPresence();
+    return () => { this.watchers.delete(listener); if (!this.watchers.size) { clearInterval(this.presenceTimer); this.presenceTimer = undefined; } };
+  }
+
+  private watchPresence(): void {
+    if (this.presenceTimer || !this.watchers.size || !this.binding || !v2TuiPresenceSupported(this.binding.baseUrl)) return;
+    this.presenceTimer = setInterval(() => {
+      if (!this.binding) return;
+      const next = attachedV2TuiSessions(this.binding.baseUrl);
+      const changed = [...new Set([...this.presence, ...next])].filter((id) => this.presence.has(id) !== next.has(id));
+      this.presence = next;
+      for (const id of changed) this.changed(id);
+    }, 2200);
+    this.presenceTimer.unref?.();
+  }
+
   watchImport(id: string, listener: () => void): Unsubscribe {
     const listeners = this.importWatchers.get(id) ?? new Set<() => void>();
     listeners.add(listener); this.importWatchers.set(id, listeners);
     return () => { listeners.delete(listener); if (!listeners.size) this.importWatchers.delete(id); };
   }
 
-  info(value: Native): SessionInfo { return sessionInfo(value, this.status(value.id)); }
+  info(value: Native): SessionInfo {
+    const info = sessionInfo(value, this.status(value.id));
+    const binding = this.binding;
+    if (!binding) return info;
+    const quote = (text: string) => `'${text.replace(/'/g, `'\\''`)}'`;
+    const canJoin = binding.source === 'registration' || !binding.auth;
+    const supported = v2TuiPresenceSupported(binding.baseUrl);
+    const active = supported && attachedV2TuiSessions(binding.baseUrl).has(info.id);
+    const hint = canJoin ? { label: 'Sync with your terminal (optional)',
+      command: `opencode${binding.source === 'explicit' ? ` --server ${quote(binding.baseUrl)}` : ''}${info.cwd ? ` ${quote(info.cwd)}` : ''} -s ${quote(info.id)}`,
+      note: 'Run this on the host machine to open the same session in your OpenCode terminal.' } : undefined;
+    return { ...info, terminalSyncHint: hint, control: { ...info.control!, terminalSync: {
+      supported: !!hint || supported, syncAvailable: !!hint, active,
+      ...(active ? { presence: 'shared' as const, label: 'Synced with OpenCode terminal' } : {}),
+      ...(hint && !active ? { action: 'join' as const, ...hint } : {}),
+    } } };
+  }
 
   private changed(id: string): void {
     this.revisions.set(id, ++this.revision);
@@ -197,6 +236,12 @@ export class OpenCodeV2Backend {
         pendingChanged = true;
       } else if (event.type === 'session.status' && data.status?.type === 'retry') {
         changed = !this.active.has(id); this.active.add(id);
+      } else if (event.type === 'session.renamed' && (typeof data.title === 'string' || data.title === null)) {
+        const before = this.sessions.get(id);
+        if (before) {
+          changed = before.title !== data.title;
+          this.sessions.set(id, { ...before, title: data.title });
+        }
       } else if (event.type === 'session.step.started') {
         const before = this.sessions.get(id);
         if (before) {
@@ -213,7 +258,7 @@ export class OpenCodeV2Backend {
       if (pendingChanged) this.pendingRevisions.set(id, (this.pendingRevisions.get(id) ?? 0) + 1);
       if (changed || pendingChanged) this.changed(id);
     }
-    if (!['server.connected', 'server.heartbeat', 'session.created', 'session.updated', 'session.deleted', 'session.status', 'session.execution.started', 'session.execution.succeeded', 'session.execution.failed', 'session.execution.interrupted', 'session.inbox.enqueued', 'session.inbox.delivered', 'session.text.started', 'session.text.delta', 'session.text.ended', 'session.reasoning.started', 'session.reasoning.delta', 'session.reasoning.ended', 'session.step.started', 'session.step.streamed', 'session.step.ended', 'session.step.failed', 'session.usage.updated', 'session.instructions.updated', 'session.tool.input.started', 'session.tool.input.ended', 'session.tool.progress', 'session.tool.called', 'session.tool.success', 'session.tool.failed', 'permission.asked', 'permission.replied', 'form.created', 'form.replied', 'form.cancelled'].includes(event.type)) this.unknownEvents++;
+    if (!['server.connected', 'server.heartbeat', 'session.created', 'session.updated', 'session.renamed', 'session.forked', 'session.deleted', 'session.status', 'session.execution.started', 'session.execution.succeeded', 'session.execution.failed', 'session.execution.interrupted', 'session.inbox.enqueued', 'session.inbox.delivered', 'session.text.started', 'session.text.delta', 'session.text.ended', 'session.reasoning.started', 'session.reasoning.delta', 'session.reasoning.ended', 'session.step.started', 'session.step.streamed', 'session.step.ended', 'session.step.failed', 'session.usage.updated', 'session.instructions.updated', 'session.revert.staged', 'session.revert.cleared', 'session.revert.committed', 'session.compaction.started', 'session.compaction.delta', 'session.compaction.ended', 'session.compaction.failed', 'session.tool.input.started', 'session.tool.input.ended', 'session.tool.progress', 'session.tool.called', 'session.tool.success', 'session.tool.failed', 'permission.asked', 'permission.replied', 'form.created', 'form.replied', 'form.cancelled'].includes(event.type)) this.unknownEvents++;
     for (const connection of this.connections) connection.onEvent(event);
   }
 
@@ -319,7 +364,7 @@ export class OpenCodeV2Backend {
       const data = arrayData(value);
       bytes += Buffer.byteLength(JSON.stringify(data));
       if (bytes > 64 * 1024 * 1024) throw new V2Error('invalid-response');
-      this.unknownMessages += data.filter((message) => !['user', 'assistant', 'idle'].includes(message.type)).length;
+      this.unknownMessages += data.filter((message) => !['user', 'assistant', 'idle', 'compaction'].includes(message.type)).length;
       pages.push([...data].reverse());
       cursor = value.cursor?.next;
       const reachedRun = until && (until.messageId
@@ -343,14 +388,45 @@ export class OpenCodeV2Backend {
       .map((agent) => ({ name: agent.id, ...(typeof agent.description === 'string' ? { description: agent.description } : {}) }));
   }
 
-  async write(binding: V2Binding, path: string, body?: unknown, method = 'POST'): Promise<any> {
+  async write(binding: V2Binding, path: string, body?: unknown, method = 'POST', limits: { maxBytes?: number; timeoutMs?: number } = {}): Promise<any> {
     const now = await this.resolver.resolve(true);
     if (now.generation !== 2 || now.identity !== binding.identity || now.auth !== binding.auth) {
       if (now.generation === 2) this.useBinding(now);
       throw new ControlRefusedError('The OpenCode service changed; reconnect before sending.', 'request-not-pending');
     }
-    try { return await this.transport!.json(path, { method, body }); }
+    try { return await this.transport!.json(path, { method, body, ...limits }); }
     catch (error) { this.resolver.invalidate(); throw error; }
+  }
+
+  async rename(id: string, title: string | null): Promise<SessionInfo> {
+    if (!nativeId(id, 'ses')) throw new SessionNotFoundError('Invalid OpenCode session.');
+    await this.write(this.binding!, `/api/session/${encodeURIComponent(id)}`, { title: title?.trim().slice(0, 160) || null }, 'PATCH');
+    return this.info(await this.getSession(id));
+  }
+
+  async fork(id: string, messageId?: string | null): Promise<SessionInfo> {
+    if (!nativeId(id, 'ses')) throw new SessionNotFoundError('Invalid OpenCode session.');
+    const response = await this.write(this.binding!, `/api/session/${encodeURIComponent(id)}/fork`, { ...(messageId?.trim() ? { before: messageId.trim() } : {}) });
+    if (!isSession(response?.data)) throw new V2Error('invalid-response');
+    this.sessions.set(response.data.id, response.data);
+    return this.info(response.data);
+  }
+
+  async exportTranscript(id: string, options: { tempDir: string; maxBytes: number; timeoutMs: number }): Promise<{ path: string; format: 'json' }> {
+    if (!nativeId(id, 'ses')) throw new SessionNotFoundError('Invalid OpenCode session.');
+    let response: any;
+    try { response = await this.write(this.binding!, `/api/experimental/session/${encodeURIComponent(id)}/export?sanitize=true`, undefined, 'GET', options); }
+    catch (error) {
+      if (error instanceof V2ResponseTooLargeError) throw new TranscriptExportTooLargeError('OpenCode export exceeded the size cap.', options.maxBytes);
+      throw error;
+    }
+    if (!object(response?.data) || !isSession(response.data.info) || response.data.info.id !== id || !Array.isArray(response.data.messages)) throw new V2Error('invalid-response');
+    const text = JSON.stringify(response.data);
+    if (Buffer.byteLength(text) > options.maxBytes) throw new TranscriptExportTooLargeError('OpenCode export exceeded the size cap.', options.maxBytes);
+    mkdirSync(options.tempDir, { recursive: true });
+    const path = join(options.tempDir, 'export.json');
+    writeFileSync(path, text, { mode: 0o600 });
+    return { path, format: 'json' };
   }
 
   async create(options: { directory?: string; title?: string; model?: PromptInput['model'] }): Promise<SessionInfo> {

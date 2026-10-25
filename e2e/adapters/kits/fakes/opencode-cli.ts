@@ -187,7 +187,7 @@ async function main(): Promise<void> {
     process.stdout.write(config.versionOutput ?? `${config.version}\n`);
   } else if (argv[0] === 'run') {
     await run();
-  } else if (argv[0] === 'attach') {
+  } else if (argv[0] === 'attach' || (config.version.startsWith('2.') && argv.some((arg) => arg === '-s' || arg === '--session' || arg.startsWith('--session=')))) {
     // A terminal UI joined to a serve: it only has to exist, with this argv, until it is stopped.
     record({ kind: 'attach', argv });
     process.on('SIGTERM', () => process.exit(0));

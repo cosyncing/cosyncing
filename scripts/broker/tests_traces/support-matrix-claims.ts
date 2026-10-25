@@ -85,7 +85,7 @@ export const SUPPORT_MATRIX_CLAIMS: SupportClaim[] = [
   // actually does, including where it is refused.
   claim('claude', 'F02', 'partial', 'mod true sync over the local broker socket: prompt, steer, stop and approvals both ways on a terminal session the user owns; not offered on native Windows or below Claude Code 2.1.288, where the session keeps Observe and Take over'),
   claim('codex', 'F02', 'full', 'managed app-server live thread'),
-  claim('opencode', 'F02', 'full', 'shared opencode serve plus attach TUI'),
+  claim('opencode', 'F02', 'full', 'V1 shared `serve` plus `attach` TUI; V2 shared service plus `opencode <dir> -s <id>`'),
   claim('pi', 'F02', 'full', 'bridge extension'),
   claim('omp', 'F02', 'partial', 'bridge true-sync is physically proved for the measured version; reusable L3 TUI drift coverage remains outside the tracked matrix'),
   claim('reasonix', 'F02', 'n/a', 'broker-owned ACP has no terminal join; exact --resume session targeting is unpinned'),

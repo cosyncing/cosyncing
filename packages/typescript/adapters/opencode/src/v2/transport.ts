@@ -7,6 +7,10 @@ export class V2Error extends Error {
   }
 }
 
+export class V2ResponseTooLargeError extends V2Error {
+  constructor(readonly maxBytes: number, ambiguous: boolean) { super('invalid-response', ambiguous); }
+}
+
 export interface V2Event {
   type: string;
   data: Record<string, any>;
@@ -58,7 +62,7 @@ export class V2Transport {
             const chunk = await reader.read();
             if (chunk.done) break;
             bytes += chunk.value.byteLength;
-            if (bytes > cap) throw new V2Error('invalid-response', method !== 'GET' && response.ok);
+            if (bytes > cap) throw new V2ResponseTooLargeError(cap, method !== 'GET' && response.ok);
             text += decoder.decode(chunk.value, { stream: true });
           }
           text += decoder.decode();

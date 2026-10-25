@@ -37,9 +37,9 @@
     },
     "OpenCodeAdapter": {
       "coverage": {
-        "native-identity": ["conformance/opencode"],
+        "native-identity": ["conformance/opencode-v1", "conformance/opencode-v2-live"],
         "terminal-authority": ["opencode-completion-fence"],
-        "history-live-chronology": ["conformance/opencode"],
+        "history-live-chronology": ["conformance/opencode-v1", "conformance/opencode-v2-live"],
         "replacement": [],
         "hub-authority": ["status-truth"],
         "turn-attention": ["opencode-completion-fence"]

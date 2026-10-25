@@ -1,4 +1,7 @@
-import { ControlRefusedError, type AgentMessage, type AgentMessageHandler, type CommandResult, type HistoryQuery, type HistorySourceIdentity, type PermissionDecision, type PromptInput, type SessionConnection, type SessionInfo, type Unsubscribe } from '@cosyncing/adapter-api';
+import { ControlRefusedError, PRODUCT_IDENTITY, type AgentMessage, type AgentMessageHandler, type CommandResult, type CommandInput, type FileInput, type HistoryQuery, type HistorySourceIdentity, type PermissionDecision, type PromptInput, type SessionConnection, type SessionInfo, type SlashCommand, type Unsubscribe } from '@cosyncing/adapter-api';
+import { lstatSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import type { V2Binding } from '../binding.ts';
 import type { OpenCodeV2Backend } from './backend.ts';
 import { arrayData, contentKey, finite, formAnswer, formCard, historyRows, messageRows, nativeId, newNativeId, object, permissionCard, runSummary, sessionPatch, toolMessages, type Native } from './mapping.ts';
@@ -42,6 +45,7 @@ export function followV2Import(backend: OpenCodeV2Backend, legacy: SessionConnec
     async getHistorySourceIdentity() { await upgrading; return current.getHistorySourceIdentity?.(); },
     async getPending() { await upgrading; return current.getPending?.() ?? []; },
     async sendPrompt(input) { await upgrading; return current.sendPrompt(input); },
+    async sendFile(file) { await upgrading; return current.sendPrompt({ text: '', files: [file] }); },
     async respondPermission(id, decision) { await upgrading; return current.respondPermission(id, decision); },
     async answerQuestion(id, answers) { await upgrading; if (!current.answerQuestion) throw new ControlRefusedError('This form is read-only.', 'command-unsupported'); return current.answerQuestion(id, answers); },
     async rejectQuestion(id) { await upgrading; if (!current.rejectQuestion) throw new ControlRefusedError('This form is read-only.', 'command-unsupported'); return current.rejectQuestion(id); },
@@ -95,6 +99,7 @@ export class OpenCodeV2Connection implements SessionConnection {
   getHistorySourceIdentity() { return this.current.getHistorySourceIdentity(); }
   getPending() { return this.current.getPending(); }
   sendPrompt(input: PromptInput) { return this.current.sendPrompt(input); }
+  sendFile(file: FileInput) { return this.current.sendPrompt({ text: '', files: [file] }); }
   listModels() { return this.current.listModels(); }
   listAgents() { return this.current.listAgents(); }
   setAgent(agent: string) { return this.current.setAgent(agent); }
@@ -102,7 +107,7 @@ export class OpenCodeV2Connection implements SessionConnection {
   answerQuestion(id: string, answers: string[][]) { return this.current.answerQuestion(id, answers); }
   rejectQuestion(id: string) { return this.current.rejectQuestion(id); }
   listCommands() { return this.current.listCommands(); }
-  runCommand(name: string) { return this.current.runCommand(name); }
+  runCommand(name: string, args?: string, input?: CommandInput) { return this.current.runCommand(name, args, input); }
   async close(): Promise<void> {
     this.closed = true; this.unsubscribe(); this.handlers.clear();
     this.backend.releaseConnection(this);
@@ -124,6 +129,7 @@ class BoundV2Connection implements SessionConnection {
   private closed = false;
   private loading?: Promise<void>;
   private reloadNeeded = false;
+  private reloadNotice?: string;
   private hasSnapshot = false;
   private lastEnqueued?: string;
   private published: Partial<SessionInfo> = {};
@@ -142,7 +148,7 @@ class BoundV2Connection implements SessionConnection {
     this.info.status = this.backend.status(this.info.id);
     if (this.observe) {
       this.info.attachMode = 'observe';
-      this.info.control = { drive: native?.parentID ? { supported: false, state: 'observing', reason: 'This session is controlled by its parent agent.' } : { supported: true, state: 'observing' }, terminalSync: { supported: false, syncAvailable: false, active: false } };
+      this.info.control = { drive: native?.parentID ? { supported: false, state: 'observing', reason: 'This session is controlled by its parent agent.' } : { supported: true, state: 'observing' }, terminalSync: this.info.control!.terminalSync };
     }
     this.publishInfo();
   }
@@ -165,8 +171,9 @@ class BoundV2Connection implements SessionConnection {
     }
   }
 
-  async resnapshot(): Promise<void> {
+  async resnapshot(notice?: string): Promise<void> {
     if (this.closed) return;
+    if (notice) this.reloadNotice = notice;
     this.reloadNeeded = true;
     if (this.loading) return this.loading;
     this.loading = (async () => {
@@ -193,7 +200,8 @@ class BoundV2Connection implements SessionConnection {
         if (firstUser && this.backend.active.has(this.info.id)) this.run = { key: firstUser.id, startedAt: firstUser.time?.created };
         this.ready = true;
         this.syncPending();
-        if (this.hasSnapshot) this.emit({ type: 'history-reset' });
+        if (this.hasSnapshot) this.emit({ type: 'history-reset', ...(this.reloadNotice ? { notice: this.reloadNotice, semantic: { kind: 'compaction' as const } } : {}) });
+        this.reloadNotice = undefined;
         this.hasSnapshot = true;
         const buffered = this.buffered;
         this.buffered = []; this.bufferedBytes = 0;
@@ -209,7 +217,8 @@ class BoundV2Connection implements SessionConnection {
     const native = await this.backend.getSession(this.info.id);
     const messages = await this.backend.history(this.info.id, query?.signal);
     this.updateInfo(native);
-    return historyRows(messages, this.backend.clientKeys);
+    const boundary = messages.findIndex((message) => message.id === native.revert?.messageID);
+    return historyRows(boundary < 0 ? messages : messages.slice(0, boundary), this.backend.clientKeys);
   }
 
   async getHistorySourceIdentity(): Promise<HistorySourceIdentity> {
@@ -254,7 +263,7 @@ class BoundV2Connection implements SessionConnection {
   private apply(event: V2Event): void {
     const data = event.data;
     if (event.type === 'session.inbox.enqueued' && nativeId(data.inboxID, 'msg_') && data.item?.type === 'user' && typeof data.item.payload?.text === 'string') {
-      const user = { id: data.inboxID, type: 'user', time: { created: event.created }, text: data.item.payload.text };
+      const user = { id: data.inboxID, type: 'user', time: { created: event.created }, text: data.item.payload.text, files: data.item.payload.files };
       this.inbox.set(user.id, user);
       if (!this.run) this.lastEnqueued = user.id;
       for (const row of messageRows(user, this.backend.clientKeys)) this.emit({ ...row, ...(row.type === 'user-message' ? { queued: true } : {}) });
@@ -314,6 +323,13 @@ class BoundV2Connection implements SessionConnection {
       const detail = [...text.replace(/\p{Cc}/gu, ' ').trim()].slice(0, 240).join('');
       this.emit({ type: 'status', status: 'running', detail });
     } else if (['permission.asked', 'permission.replied', 'form.created', 'form.replied', 'form.cancelled'].includes(event.type)) this.syncPending();
+    else if (['session.revert.staged', 'session.revert.cleared', 'session.revert.committed'].includes(event.type)) {
+      void this.resnapshot().catch(() => {});
+    } else if (event.type === 'session.compaction.ended') {
+      void this.resnapshot('Compacted the conversation.').catch(() => {});
+    } else if (event.type === 'session.compaction.failed') {
+      this.emit({ type: 'error', message: 'OpenCode could not compact the conversation.' });
+    }
   }
 
   private path(suffix: string): string { return `/api/session/${encodeURIComponent(this.info.id)}${suffix}`; }
@@ -323,21 +339,15 @@ class BoundV2Connection implements SessionConnection {
 
   async sendPrompt(input: PromptInput): Promise<void> {
     this.assertMutable();
-    if (input.files?.length || input.images?.length) throw new ControlRefusedError('File input is not available for this connection.', 'command-unsupported');
-    if (input.agent && input.agent !== this.info.currentAgent) await this.setAgent(input.agent);
-    if (input.model) {
-      const models = await this.listModels();
-      if (!models.some((model) => model.providerID === input.model!.providerID && model.modelID === input.model!.modelID)) throw new Error('Choose an available OpenCode model.');
-      await this.backend.write(this.binding, this.path('/model'), { model: { providerID: input.model.providerID, id: input.model.modelID, ...(input.model.variant || input.model.reasoningEffort ? { variant: input.model.variant ?? input.model.reasoningEffort } : {}) } });
-      this.updateInfo(await this.backend.getSession(this.info.id));
-    }
+    const files = this.files(input);
+    await this.select(input);
     const id = newNativeId('msg');
     if (input.clientMessageId) {
       this.backend.clientKeys.set(id, input.clientMessageId);
       if (this.backend.clientKeys.size > 4096) this.backend.clientKeys.delete(this.backend.clientKeys.keys().next().value!);
     }
     try {
-      const result = await this.backend.write(this.binding, this.path('/prompt'), { id, text: input.text, delivery: 'steer' });
+      const result = await this.backend.write(this.binding, this.path('/prompt'), { id, text: input.text, delivery: 'steer', ...(files.length ? { files } : {}) });
       if (!object(result?.data) || result.data.id !== id) throw new V2Error('invalid-response', true);
     } catch (error) {
       if (!(error instanceof V2Error) || !error.ambiguous) { this.backend.clientKeys.delete(id); throw error; }
@@ -395,13 +405,74 @@ class BoundV2Connection implements SessionConnection {
     await this.backend.pending(this.info.id);
   }
 
-  async listCommands() { return [{ name: 'stop', description: 'Interrupt the current turn', kind: 'action' as const }]; }
-  async runCommand(name: string): Promise<CommandResult | void> {
+  private async select(input: CommandInput): Promise<void> {
+    if (input.agent && input.agent !== this.info.currentAgent) await this.setAgent(input.agent);
+    if (input.model) {
+      const models = await this.listModels();
+      if (!models.some((model) => model.providerID === input.model!.providerID && model.modelID === input.model!.modelID)) throw new Error('Choose an available OpenCode model.');
+      await this.backend.write(this.binding, this.path('/model'), { model: { providerID: input.model.providerID, id: input.model.modelID, ...(input.model.variant || input.model.reasoningEffort ? { variant: input.model.variant ?? input.model.reasoningEffort } : {}) } });
+      this.updateInfo(await this.backend.getSession(this.info.id));
+    }
+  }
+
+  private files(input: PromptInput): Native[] {
+    if (!input.files?.length && !input.images?.length) return [];
+    if (!['127.0.0.1', 'localhost', '[::1]', '::1'].includes(new URL(this.binding.baseUrl).hostname)) throw new ControlRefusedError('File input requires a local OpenCode service.', 'command-unsupported');
+    const inbox = this.info.cwd && resolve(this.info.cwd, PRODUCT_IDENTITY.repositoryDirectoryName, 'inbox');
+    return [
+      ...(input.files ?? []).map((file) => {
+        if (!inbox || !file.brokerPath || dirname(resolve(file.brokerPath)) !== inbox || !lstatSync(file.brokerPath).isFile()) throw new Error('OpenCode requires a broker-staged attachment.');
+        return { uri: pathToFileURL(file.brokerPath).href, name: file.name };
+      }),
+      ...(input.images ?? []).map((image) => ({ uri: `data:${image.mimeType};base64,${image.data}`, name: image.name ?? 'image' })),
+    ];
+  }
+
+  async listCommands(): Promise<SlashCommand[]> {
+    const location = this.info.cwd ? `?location%5Bdirectory%5D=${encodeURIComponent(this.info.cwd)}` : '';
+    const commands = arrayData(await this.backend.transport!.json('/api/command' + location));
+    const builtins = ['stop', 'compact', 'undo', 'redo'];
+    return [...builtins.map((name) => ({ name, kind: 'action' as const })), ...commands.filter((item) => typeof item.name === 'string' && item.name.trim() && !/[\r\n]/.test(item.name) && ![...builtins, 'share', 'unshare'].includes(item.name)).map((item) => ({ name: item.name, kind: 'prompt' as const, ...(typeof item.description === 'string' ? { description: item.description } : {}) }))];
+  }
+
+  async runCommand(name: string, args?: string, input?: CommandInput): Promise<CommandResult | void> {
     this.assertMutable();
-    if (name !== 'stop') throw new ControlRefusedError('This command is not supported.', 'command-unsupported');
-    const response = await this.backend.write(this.binding, this.path('/interrupt'));
-    if (typeof response?.interrupted !== 'boolean') throw new V2Error('invalid-response');
-    if (!response.interrupted) return { notice: 'Nothing is running.' };
+    if (name === 'stop') {
+      const response = await this.backend.write(this.binding, this.path('/interrupt'));
+      if (typeof response?.interrupted !== 'boolean') throw new V2Error('invalid-response');
+      if (!response.interrupted) return { notice: 'Nothing is running.' };
+      return;
+    }
+    if (name === 'compact') {
+      await this.select(input ?? {});
+      const response = await this.backend.write(this.binding, this.path('/compact'), {});
+      if (!nativeId(response?.data?.id, 'msg_') || response.data.type !== 'compaction') throw new V2Error('invalid-response', true);
+      return { notice: 'Compacting the session…' };
+    }
+    if (name === 'undo' || name === 'redo') {
+      const native = await this.backend.getSession(this.info.id);
+      if (this.backend.active.has(this.info.id)) return { notice: 'OpenCode is busy; stop the running turn first.' };
+      try {
+        if (name === 'redo') {
+          if (!native.revert) return { notice: 'Nothing to redo.' };
+          await this.backend.write(this.binding, this.path('/revert'), undefined, 'DELETE');
+        } else {
+          const messages = await this.backend.history(this.info.id);
+          const boundary = messages.findIndex((message) => message.id === native.revert?.messageID);
+          const users = (boundary < 0 ? messages : messages.slice(0, boundary)).filter((message) => message.type === 'user');
+          if (users.length < 2) return { notice: 'Nothing to undo.' };
+          await this.backend.write(this.binding, this.path('/revert/stage'), { messageID: users.at(-1)!.id, files: false });
+        }
+      } catch (error) {
+        if (error instanceof V2Error && error.reason === 'conflict') return { notice: 'OpenCode is busy; stop the running turn first.' };
+        throw error;
+      }
+      return;
+    }
+    if (!(await this.listCommands()).some((command) => command.name === name && command.kind === 'prompt')) throw new ControlRefusedError('This command is not supported.', 'command-unsupported');
+    await this.select(input ?? {});
+    await this.backend.write(this.binding, this.path('/command'), { name, text: args ?? '', delivery: 'steer' });
+    return { notice: `Running /${name}…` };
   }
 
   async close(): Promise<void> { this.closed = true; this.ready = false; this.handlers.clear(); }

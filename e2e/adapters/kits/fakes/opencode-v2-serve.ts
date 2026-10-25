@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
 type Json = Record<string, any>;
 
 export interface FakeV2Session {
@@ -32,7 +35,10 @@ export class FakeOpenCodeV2Serve {
   private raw: Json[] = [];
   private aborted = new Map<string, () => void>();
   private expectedCreate?: string;
+  private compactions = new Map<string, string>();
+  exportMessageCount = 0;
   version = '2.1.4';
+  authenticationRequired = true;
   migration: 'required' | 'running' | 'completed' | 'error' = 'completed';
   formFields?: Json[];
   malformedPendingFor?: string;
@@ -116,6 +122,18 @@ export class FakeOpenCodeV2Serve {
     this.emit('session.execution.succeeded', { sessionID: id }, true);
   }
 
+  finishCompaction(id: string, failed = false): void {
+    const session = this.session(id), inputID = this.compactions.get(id)!;
+    this.compactions.delete(id);
+    const summary = 'Synthetic compacted context.';
+    session.messages.push({ type: 'compaction', id: inputID, time: { created: this.now() }, status: failed ? 'failed' : 'completed', reason: 'manual', ...(failed ? { error: { type: 'compaction.failed', message: 'Compaction summary did not match the required template' } } : { summary, model: session.info.model }) });
+    this.emit(failed ? 'session.compaction.failed' : 'session.compaction.ended', { sessionID: id, reason: 'manual', ...(failed ? { inputID, error: { type: 'compaction.failed', message: 'Compaction summary did not match the required template' } } : { text: summary, model: session.info.model }), cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } }, true);
+    session.busy = false;
+    session.info.time.updated = this.now();
+    session.messages.push({ id: this.id('msg'), type: 'idle', time: { created: this.now() }, outcome: 'succeeded' });
+    this.emit('session.execution.succeeded', { sessionID: id }, true);
+  }
+
   appendPartial(id: string): string { return id; }
   completePartial(id: string): void { this.appendTurn(id, 'partial prompt', 'partial answer'); }
   rewriteFirstUserText(id: string, text: string): void {
@@ -160,7 +178,7 @@ export class FakeOpenCodeV2Serve {
     if (redirect) { this.redirects.delete(path); return new Response(null, { status: 302, headers: { location: redirect } }); }
     const failure = this.failures.get(`${method} ${path}`);
     if (failure && failure.count-- > 0) return Response.json(failure.body ?? { _tag: 'FixtureRequestError' }, { status: failure.status });
-    if (path.startsWith('/api/') && !authorized) return Response.json({ _tag: 'UnauthorizedError', message: 'Authentication required' }, { status: 401 });
+    if (path.startsWith('/api/') && this.authenticationRequired && !authorized) return Response.json({ _tag: 'UnauthorizedError', message: 'Authentication required' }, { status: 401 });
     if (path === '/api/info') return Response.json({ version: this.version, pid: process.pid, urls: [this.url], paths: { tmp: '/work/tmp' }, capabilities: { persistentPty: true } });
     if (path === '/api/event') {
       let controller: ReadableStreamDefaultController<Uint8Array>;
@@ -174,6 +192,17 @@ export class FakeOpenCodeV2Serve {
     if (path === '/api/provider') return Response.json({ location: { directory: '/work/project' }, data: [{ id: 'test-provider', name: 'Test Provider', activation: 'enabled' }] });
     if (path === '/api/model') return Response.json({ location: { directory: '/work/project' }, data: ['model-a', 'model-b'].map((id) => ({ id, modelID: id, providerID: 'test-provider', name: id === 'model-a' ? 'Model A' : 'Model B', enabled: true, variants: [{ id: 'low' }, { id: 'high' }] })) });
     if (path === '/api/agent') return Response.json({ location: { directory: '/work/project' }, data: [{ id: 'build', name: 'Build', mode: 'primary', hidden: false }, { id: 'plan', name: 'Plan', mode: 'primary', hidden: false }] });
+    if (path === '/api/command') return Response.json({ location: { directory: url.searchParams.get('location[directory]') ?? '/work/project' }, data: [{ name: 'review', description: 'Review changes' }] });
+    const exported = /^\/api\/experimental\/session\/([^/]+)\/export$/.exec(path);
+    if (exported) {
+      const session = this.session(decodeURIComponent(exported[1]!));
+      const messages = session.messages.map((message) => ({ ...message,
+        ...(message.type === 'user' ? { text: `[redacted:text:${message.id}]` } : {}),
+        ...(Array.isArray(message.content) ? { content: message.content.map((part: Json) => typeof part.text === 'string' ? { ...part, text: `[redacted:text:${message.id}]` } : part) } : {}),
+      }));
+      messages.push(...Array.from({ length: this.exportMessageCount }, (_, index) => ({ id: `msg_fixture_export_${index}`, time: { created: 1 }, type: 'user', text: '[redacted:text]' })));
+      return Response.json({ data: { info: { ...session.info, title: '[redacted:session-title]', location: { directory: '/[redacted:session-directory]' } }, messages } });
+    }
     if (path === '/api/session' && method === 'GET') {
       const rows = [...this.sessions.values()].map((session) => session.info).filter((info) => url.searchParams.get('archived') !== 'false' || !info.time.archived).sort((a, b) => b.time.updated - a.time.updated);
       return this.page([...rows, ...this.raw], url);
@@ -193,6 +222,45 @@ export class FakeOpenCodeV2Serve {
     const id = decodeURIComponent(match[1]!), sub = match[2]!, session = this.sessions.get(id);
     if (!session) return Response.json({ _tag: 'SessionNotFoundError', sessionID: id }, { status: 404 });
     if (!sub && method === 'GET') return Response.json({ data: session.info });
+    if (!sub && method === 'PATCH') {
+      session.info.title = body?.title ?? id; session.info.time.updated = this.now();
+      this.emit('session.renamed', { sessionID: id, title: session.info.title }, true);
+      return new Response(null, { status: 204 });
+    }
+    if (sub === '/fork' && method === 'POST') {
+      const boundary = body?.before ? session.messages.findIndex((message) => message.id === body.before) : session.messages.length;
+      if (boundary < 0) return Response.json({ _tag: 'MessageNotFoundError' }, { status: 404 });
+      const fork = this.seed({ id: this.id('ses'), directory: session.info.location.directory, title: `${session.info.title} (fork #1)`, turns: 0 });
+      fork.info.fork = { sessionID: id, boundary: body?.before ? { type: 'before', messageID: body.before } : { type: 'all' } };
+      fork.messages = structuredClone(session.messages.slice(0, boundary));
+      return Response.json({ data: fork.info });
+    }
+    if (sub === '/revert/stage' && method === 'POST') {
+      if (session.busy) return Response.json({ _tag: 'SessionBusyError' }, { status: 409 });
+      if (!session.messages.some((message) => message.id === body?.messageID)) return Response.json({ _tag: 'MessageNotFoundError' }, { status: 404 });
+      session.info.revert = { messageID: body!.messageID, files: [] };
+      this.emit('session.revert.staged', { sessionID: id, revert: session.info.revert }, true);
+      return Response.json({ data: session.info.revert });
+    }
+    if (sub === '/revert' && method === 'DELETE') {
+      if (session.busy) return Response.json({ _tag: 'SessionBusyError' }, { status: 409 });
+      delete session.info.revert;
+      this.emit('session.revert.cleared', { sessionID: id }, true);
+      return new Response(null, { status: 204 });
+    }
+    if (sub === '/compact' && method === 'POST') {
+      const input = { id: this.id('msg'), sessionID: id, time: { created: this.now() }, type: 'compaction', payload: {}, delivery: 'steer' };
+      this.compactions.set(id, input.id); session.busy = true;
+      this.emit('session.inbox.enqueued', { sessionID: id, inboxID: input.id, item: { type: input.type, payload: {}, delivery: 'steer' } }, true);
+      this.emit('session.execution.started', { sessionID: id }, true);
+      this.emit('session.compaction.started', { sessionID: id, reason: 'manual', inputID: input.id }, true);
+      return Response.json({ data: input });
+    }
+    if (sub === '/command' && method === 'POST') {
+      if (body?.name !== 'review' || typeof body.text !== 'string') return Response.json({ _tag: 'CommandNotFoundError' }, { status: 404 });
+      this.appendTurn(id, `/review${body.text ? ` ${body.text}` : ''}`, 'Synthetic command response.');
+      return new Response(null, { status: 204 });
+    }
     if (sub === '/message') return this.page([...session.messages].reverse(), url);
     if (sub.startsWith('/message/')) {
       const message = session.messages.find((item) => item.id === decodeURIComponent(sub.slice(9)));
@@ -208,7 +276,23 @@ export class FakeOpenCodeV2Serve {
     }
     if (sub === '/prompt' && method === 'POST') {
       if (!body || typeof body.id !== 'string' || typeof body.text !== 'string') return Response.json({ _tag: 'InvalidRequestError' }, { status: 400 });
-      const input = { id: body.id, sessionID: id, time: { created: this.now() }, type: 'user', payload: { text: body.text }, delivery: body.delivery ?? 'steer' };
+      let files: Json[];
+      try {
+        files = (body.files ?? []).map((file: Json) => {
+          const uri = new URL(file.uri);
+          if (uri.protocol === 'file:') return { data: readFileSync(fileURLToPath(uri)).toString('base64'), mime: /\.(png|jpe?g)$/i.test(uri.pathname) ? 'image/png' : 'text/plain', source: { type: 'uri', uri: file.uri }, name: file.name };
+          const inline = /^data:([^;]+);base64,(.*)$/.exec(file.uri);
+          if (inline) return { data: inline[2], mime: inline[1], source: { type: 'inline' }, name: file.name };
+          throw new Error('Invalid attachment URI');
+        });
+      } catch { return Response.json({ _tag: 'InvalidRequestError', field: 'files' }, { status: 400 }); }
+      if (session.info.revert) {
+        const boundary = session.messages.findIndex((message) => message.id === session.info.revert.messageID);
+        if (boundary >= 0) session.messages = session.messages.slice(0, boundary);
+        const to = session.info.revert.messageID; delete session.info.revert;
+        this.emit('session.revert.committed', { sessionID: id, to }, true);
+      }
+      const input = { id: body.id, sessionID: id, time: { created: this.now() }, type: 'user', payload: { text: body.text, ...(files.length ? { files } : {}) }, delivery: body.delivery ?? 'steer' };
       session.inbox.push(input);
       this.record({ kind: 'prompt-model', sessionId: id, model: session.info.model });
       this.emit('session.inbox.enqueued', { sessionID: id, inboxID: input.id, item: { type: 'user', payload: input.payload, delivery: input.delivery } }, true);
@@ -259,7 +343,7 @@ export class FakeOpenCodeV2Serve {
       const input = session.inbox.splice(index < 0 ? 0 : index, 1)[0]!;
       const text = input.payload.text as string;
       const visible = text.replace(/\[\[(?:hold:[^\]]+|permission|question|error)\]\]\s*/g, '');
-      session.messages.push({ id: input.id, time: input.time, type: 'user', text });
+      session.messages.push({ id: input.id, time: input.time, type: 'user', text, ...(input.payload.files ? { files: input.payload.files } : {}) });
       this.emit('session.inbox.delivered', { sessionID: id, inboxID: input.id }, true);
       const assistant = { id: this.id('msg'), type: 'assistant', agent: session.info.agent, model: session.info.model, time: { created: this.now(), completed: undefined as number | undefined }, content: [] as Json[], tokens: { input: 8, output: 4, cache: { read: 0, write: 0 } }, cost: 0, finish: 'stop' };
       session.messages.push(assistant);

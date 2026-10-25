@@ -1141,7 +1141,9 @@ export class OpenCodeAdapter implements AgentBackend {
   }
 
   async renameSession(sessionId: string, title: string | null): Promise<SessionInfo> {
-    if ((await this.resolveBinding()).generation !== 1) throw new ControlRefusedError('Native rename is not available for this connection.', 'command-unsupported');
+    const binding = await this.resolveBinding();
+    if (binding.generation === 2) return this.v2.rename(sessionId, title);
+    if (binding.generation !== 1) throw new ControlRefusedError('Native rename is not available for this connection.', 'command-unsupported');
     if (!isOpaqueSessionId(sessionId)) throw new SessionNotFoundError('This OpenCode session id is not a session id.');
     const trimmed = title == null ? null : Array.from(title.trim()).slice(0, 160).join('');
     const res = await fetch(this.url(`/session/${encodeURIComponent(sessionId)}`), {
@@ -1170,7 +1172,9 @@ export class OpenCodeAdapter implements AgentBackend {
   }
 
   async forkSession(sessionId: string, opts: { messageId?: string | null } = {}): Promise<SessionInfo> {
-    if ((await this.resolveBinding()).generation !== 1) throw new ControlRefusedError('Fork is not available for this connection.', 'command-unsupported');
+    const binding = await this.resolveBinding();
+    if (binding.generation === 2) return this.v2.fork(sessionId, opts.messageId);
+    if (binding.generation !== 1) throw new ControlRefusedError('Fork is not available for this connection.', 'command-unsupported');
     if (!isOpaqueSessionId(sessionId)) throw new SessionNotFoundError('This OpenCode session id is not a session id.');
     const messageID = opts.messageId?.trim() || undefined;
     const res = await fetch(this.url(`/session/${encodeURIComponent(sessionId)}/fork`), {
@@ -1210,7 +1214,9 @@ export class OpenCodeAdapter implements AgentBackend {
     sessionId: string,
     opts: { tempDir: string; maxBytes: number; timeoutMs: number },
   ): Promise<{ path: string; format: 'json' }> {
-    if ((await this.resolveBinding()).generation !== 1) throw new ControlRefusedError('Transcript export is not available for this connection.', 'command-unsupported');
+    const binding = await this.resolveBinding();
+    if (binding.generation === 2) return this.v2.exportTranscript(sessionId, opts);
+    if (binding.generation !== 1) throw new ControlRefusedError('Transcript export is not available for this connection.', 'command-unsupported');
     if (!this.opencodeBin) throw new Error('OpenCode CLI is not available on PATH; cannot export transcript.');
     // The id becomes an argv word: one that is not a session id must never reach the CLI.
     if (!isOpaqueSessionId(sessionId)) throw new SessionNotFoundError('This OpenCode session id is not a session id.');
