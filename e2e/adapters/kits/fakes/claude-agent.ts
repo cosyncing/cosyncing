@@ -27,12 +27,18 @@
  *   [[permission]]   run a gated Bash tool: `control_request` can_use_tool, then wait for the
  *                    product's `control_response` (allow runs the tool, deny refuses it)
  *   [[question]]     AskUserQuestion gated the same way; the answers ride `updatedInput.answers`
- *   [[hold:TAG]]     keep the turn open until the control file `release-TAG` appears (or the
- *                    process is terminated, as Stop does)
+ *   [[hold:TAG]]     keep the turn open until the control file `release-TAG` appears, an
+ *                    interrupt ends it, or the process is terminated
+ *
+ * Control requests on stdin, answered as Claude Code 2.1.310 answers them: `interrupt` ends the
+ * running turn as aborted (withdrawing an open permission or question gate with
+ * `control_cancel_request` first) and, with `cancel_queued`, drops the turns queued behind it;
+ * `set_model` switches the model for later turns and records the switch in the transcript as the
+ * CLI's `/model` command rows; `set_permission_mode` and `apply_flag_settings` are accepted.
  *
  * Everything observable is appended to the ledger (JSONL): every start with its argv, cwd and the
  * credential variables it inherited, every version and `agents` probe, every stdin frame (`recv`),
- * every turn start (`turn`) and end (`turn-end`), every signal, and every exit. Tests read the
+ * every turn start (`turn`) and end (`turn-end`), every interrupt, every signal, and every exit. Tests read the
  * ledger; they never patch the fake.
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -40,6 +46,13 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 type Json = Record<string, any>;
+
+/** Thrown through a turn that an interrupt ended; `toolUse` when it stopped at a gated tool. */
+class TurnInterrupted extends Error {
+  constructor(readonly toolUse = true) {
+    super('turn interrupted');
+  }
+}
 
 export interface FakeClaudeConfig {
   /** JSONL ledger every fake process appends to. */
@@ -229,9 +242,10 @@ function runFakeClaude(): void {
   const configDir = process.env.CLAUDE_CONFIG_DIR?.trim() || join(homedir(), '.claude');
   const cwd = process.cwd();
   const transcript = claudeTranscriptPath(configDir, cwd, sessionId);
-  const requestedModel = argValue('--model');
-  const model = (requestedModel && CLAUDE_FAKE_MODELS[requestedModel]) ?? requestedModel ?? config.model ?? 'claude-opus-4-8';
-  const permissionMode = argValue('--permission-mode') ?? 'default';
+  const resolveModel = (requested: string | undefined): string =>
+    (requested && CLAUDE_FAKE_MODELS[requested]) ?? requested ?? config.model ?? 'claude-opus-4-8';
+  let model = resolveModel(argValue('--model'));
+  let permissionMode = argValue('--permission-mode') ?? 'default';
   const context: TranscriptContext = { sessionId, cwd, entrypoint: 'sdk-cli', version: config.version };
   record({
     kind: 'spawn',
@@ -267,6 +281,9 @@ function runFakeClaude(): void {
   let stdinClosed = false;
   const queue: Json[] = [];
   const awaiting = new Map<string, (frame: Json) => void>();
+  /** Ends the running turn early, as an interrupt does. Set while a turn runs. */
+  let interruptTurn: (() => void) | undefined;
+  let interruption: Promise<'interrupted'> = new Promise(() => {});
 
   const exit = (reason: string, code: number): never => {
     record({ kind: 'exit', reason, midTurn: running !== undefined, turnText: running ?? null });
@@ -293,12 +310,18 @@ function runFakeClaude(): void {
     tick();
   });
 
-  const control = (request: Json): Promise<Json> => {
+  const control = async (request: Json): Promise<Json> => {
     const id = `${request.tool_name === 'AskUserQuestion' ? 'question' : 'permission'}-${process.pid}-${turns}`;
-    return new Promise((resolve) => {
+    const answered = new Promise<Json>((resolve) => {
       awaiting.set(id, resolve);
       out({ type: 'control_request', request_id: id, request });
     });
+    const outcome = await Promise.race([answered, interruption]);
+    if (outcome !== 'interrupted') return outcome;
+    // An interrupt withdraws the gate it found open before the turn ends.
+    awaiting.delete(id);
+    out({ type: 'control_cancel_request', request_id: id });
+    throw new TurnInterrupted();
   };
 
   /** Stream one assistant message (one text block) and write its durable row. */
@@ -351,12 +374,46 @@ function runFakeClaude(): void {
     return { decision: response, parent: result.uuid as string };
   };
 
+  /** End an interrupted turn the way the CLI records one: the interruption row, then an aborted result. */
+  const endInterrupted = (text: string, parent: string | null, toolUse: boolean): void => {
+    const row = claudeUserRow(context, parent, toolUse ? '[Request interrupted by user for tool use]' : '[Request interrupted by user]', { permissionMode, sdk: true });
+    append([row]);
+    out({ type: 'user', parent_tool_use_id: null, message: row.message });
+    out({
+      type: 'result',
+      subtype: 'error_during_execution',
+      is_error: true,
+      terminal_reason: toolUse ? 'aborted_tools' : 'aborted_streaming',
+      duration_ms: 3,
+      num_turns: turns,
+      total_cost_usd: 0.0001,
+      usage: { input_tokens: 11, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    });
+    record({ kind: 'turn-end', text, sessionId, interrupted: true });
+    running = undefined;
+  };
+
   const runTurn = async (frame: Json): Promise<void> => {
     config = readConfig();
     turns += 1;
     const content = frame.message?.content;
     const text = textOf(content);
     running = text;
+    interruption = new Promise((resolve) => {
+      interruptTurn = () => resolve('interrupted');
+    });
+    try {
+      await playTurn(text, content);
+    } catch (error) {
+      if (!(error instanceof TurnInterrupted)) throw error;
+      endInterrupted(text, lastThreadUuid(transcript), error.toolUse);
+    } finally {
+      interruptTurn = undefined;
+      interruption = new Promise(() => {});
+    }
+  };
+
+  const playTurn = async (text: string, content: string | Json[]): Promise<void> => {
     if (!initSent) {
       initSent = true;
       out({
@@ -397,7 +454,7 @@ function runFakeClaude(): void {
       outcome = answers && Object.keys(answers).length ? ` (answered ${Object.values(answers).join(', ')})` : ' (question unanswered)';
     }
     const hold = /\[\[hold:([\w-]+)\]\]/.exec(text)?.[1];
-    if (hold) await released(hold);
+    if (hold && await Promise.race([released(hold), interruption]) === 'interrupted') throw new TurnInterrupted(false);
     const visible = text.replace(/\[\[[^\]]*\]\]/g, '').trim();
     const answer = `answer: ${visible}${outcome}`;
     say(answer, 'end_turn', parent);
@@ -449,6 +506,42 @@ function runFakeClaude(): void {
       if (resolve) resolve(frame);
       else record({ kind: 'fault', message: `control_response for an unknown request ${id}` });
       return;
+    }
+    if (frame.type === 'control_request') {
+      const request = frame.request ?? {};
+      const reply = (response?: Json): void => out({
+        type: 'control_response',
+        response: { subtype: 'success', request_id: frame.request_id, ...(response ? { response } : {}) },
+      });
+      if (request.subtype === 'interrupt') {
+        const dropped = request.cancel_queued === true ? queue.splice(0) : [];
+        record({ kind: 'interrupt', midTurn: running !== undefined, turnText: running ?? null, dropped: dropped.length });
+        reply({ still_queued: [], ...(request.cancel_queued === true ? { cancelled: dropped.map(() => crypto.randomUUID()) } : {}) });
+        interruptTurn?.();
+        return;
+      }
+      if (request.subtype === 'set_model') {
+        model = resolveModel(String(request.model ?? ''));
+        const parent = lastThreadUuid(transcript);
+        const caveat = claudeUserRow(context, parent, '<local-command-caveat>The command below was run directly in Claude Code, not sent to you as a request, and its output goes straight to the user. It\'s recorded here as context for later messages.</local-command-caveat>', { permissionMode, sdk: true, extra: { isMeta: true } });
+        const command = claudeUserRow(context, caveat.uuid, `<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args>${String(request.model ?? '')}</command-args>`, { permissionMode, sdk: true });
+        const stdout = `<local-command-stdout>Set model to \`${String(request.model ?? '')} (${model})\`</local-command-stdout>`;
+        const result = claudeUserRow(context, command.uuid, stdout, { permissionMode, sdk: true });
+        append([caveat, command, result]);
+        out({ type: 'user', parent_tool_use_id: null, message: { role: 'user', content: stdout } });
+        reply({ model });
+        return;
+      }
+      if (request.subtype === 'set_permission_mode') {
+        permissionMode = String(request.mode ?? permissionMode);
+        out({ type: 'system', subtype: 'status', permissionMode });
+        reply({ mode: permissionMode });
+        return;
+      }
+      if (request.subtype === 'apply_flag_settings') {
+        reply();
+        return;
+      }
     }
     record({ kind: 'unimplemented', what: String(frame.type) });
   };

@@ -131,13 +131,14 @@ async function main(): Promise<void> {
     await conn.close();
   }
 
-  // ── #17 interrupt: runCommand('stop') kills the child + emits idle ──────────────
+  // ── #17 interrupt: runCommand('stop') interrupts the turn and keeps the child ────
   {
-    const { conn, killed, msgs } = newConn();
+    const { conn, killed, msgs, stdin } = newConn();
     await conn.sendPrompt({ text: 'long task' }); // installs the fake proc, running=true
     const res = await conn.runCommand('stop');
-    check('runCommand(stop) terminates the child process', killed());
-    check('runCommand(stop) emits status idle + a notice', msgs.some((m: any) => m.type === 'status' && m.status === 'idle') && !!(res && (res as any).notice));
+    check('runCommand(stop) asks the child to interrupt and keeps it', stdin.some((s: any) => s.type === 'control_request' && s.request?.subtype === 'interrupt') && !killed());
+    (conn as any).handleEvent({ type: 'result', subtype: 'error_during_execution', is_error: true, terminal_reason: 'aborted_tools' });
+    check('the interrupted result emits status idle; Stop returns a notice', msgs.some((m: any) => m.type === 'status' && m.status === 'idle') && !!(res && (res as any).notice));
     await conn.close();
   }
 
