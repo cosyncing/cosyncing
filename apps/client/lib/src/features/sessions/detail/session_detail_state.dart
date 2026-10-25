@@ -1851,6 +1851,12 @@ const int kMaxActiveTranscriptMessages =
 /// Estimated decoded object/string budget for one active transcript window.
 const int kMaxActiveTranscriptDecodedBytes = 4 * 1024 * 1024;
 
+/// Capacity borrowed from the rendered window for one prompt-search reply.
+const int kPromptNavigationScratchRows = 128;
+
+/// Decoded scratch capacity; oversized navigation pages are retried smaller.
+const int kPromptNavigationScratchBytes = 1024 * 1024;
+
 /// Conservative decoded-memory estimate without JSON-encoding the transcript.
 ///
 /// The estimate counts UTF-16 string storage plus collection/object overhead.

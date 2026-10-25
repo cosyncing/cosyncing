@@ -2116,5 +2116,15 @@
     }
   },
   "transferSaveBusy": "Hay otro archivo guardándose. Vuelve a guardar cuando termine.",
-  "transferSaveDeferred": "Descargado. Pulsa Guardar para elegir un destino."
+  "transferSaveDeferred": "Descargado. Pulsa Guardar para elegir un destino.",
+  "sessionHistoryPreviousPrompt": "Mensaje de usuario anterior",
+  "sessionHistoryPromptFinding": "Buscando el mensaje de usuario anterior. Cancelar",
+  "sessionHistoryPromptUnavailable": "No se pueden cargar mensajes de usuario anteriores",
+  "sessionHistoryPromptOffline": "Conéctate para cargar mensajes de usuario anteriores",
+  "sessionHistoryPromptCanceled": "Navegación cancelada",
+  "sessionHistoryPromptStart": "Inicio de la conversación",
+  "sessionHistoryPromptLimit": "Se alcanzó el límite de búsqueda. ¿Continuar buscando un mensaje de usuario anterior?",
+  "sessionHistoryPromptFailed": "No se pudo cargar el mensaje de usuario anterior.",
+  "sessionHistoryPromptContinue": "Continuar",
+  "sessionHistoryPromptRetry": "Reintentar"
 }

@@ -11,8 +11,16 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Added
+
+- Transcript navigation includes an up arrow that steps through earlier user
+  messages, including prompts outside the loaded history window. Searches are
+  bounded and can be canceled or continued; the down arrow returns to live updates.
+
 ### Fixed
 
+- Transcript navigation buttons preserve the composer's focus and draft.
+  Hidden scroll controls no longer remain in keyboard focus traversal.
 - Background commands and agents started in an app-driven Claude Code session
   keep running when every client disconnects, when you press Stop, and when you
   change the model, permission mode or effort. Previously the broker ended the

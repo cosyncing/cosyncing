@@ -48,6 +48,9 @@ extension _SessionDetailToolSlotRecovery on SessionDetailController {
 
   void _drainToolSlotReloads() {
     if (_disposed ||
+        promptNavigationActive ||
+        state.historyPageLoading ||
+        _hiddenRowRefresh?.id != null ||
         _toolSlotInFlight != null ||
         _toolSlotTimer != null ||
         state.connectionStatus != SessionDetailConnectionStatus.connected ||
@@ -92,6 +95,7 @@ extension _SessionDetailToolSlotRecovery on SessionDetailController {
     _toolSlotTimer?.cancel();
     _toolSlotTimer = null;
     _toolSlotInFlight = null;
+    _wakePromptNavigation();
     final request = _toolSlotReloads[active.callId];
     if (transient &&
         request != null &&

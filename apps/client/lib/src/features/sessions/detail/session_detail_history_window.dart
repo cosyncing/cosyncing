@@ -2333,6 +2333,8 @@ _fitTranscriptBudget(
   bool reportView = false,
   Set<String> notWaiting = const {},
   TranscriptHistoryWorkCounter? work,
+  int rowBudget = kMaxActiveTranscriptMessages,
+  int byteBudget = kMaxActiveTranscriptDecodedBytes,
 }) {
   var entries = 0;
   var bytes = 0;
@@ -2359,8 +2361,7 @@ _fitTranscriptBudget(
   }
 
   bool over() =>
-      entries - exempt.rows > kMaxActiveTranscriptMessages ||
-      bytes - exempt.bytes > kMaxActiveTranscriptDecodedBytes;
+      entries - exempt.rows > rowBudget || bytes - exempt.bytes > byteBudget;
   TranscriptHistoryPage? measuredTail;
   var tailExempt = (rows: 0, bytes: 0);
   bool tailOver(List<TranscriptHistoryPage> pages) {
@@ -2474,8 +2475,7 @@ _fitTranscriptBudget(
         exempt.bytes -
         readerBytes -
         (seen < room ? seen : (room < 0 ? 0 : room));
-    return rows > kMaxActiveTranscriptMessages ||
-        held > kMaxActiveTranscriptDecodedBytes;
+    return rows > rowBudget || held > byteBudget;
   }
 
   // 1. Whole non-tail pages, farthest from the focus first.

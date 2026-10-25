@@ -102,6 +102,137 @@ _placeAfterAnchors(
 
 /// Forward navigation over a [TranscriptHistoryWindow].
 extension TranscriptHistoryNavigation on TranscriptHistoryWindow {
+  /// Borrows scratch space for a second reader without the prepend corridor.
+  /// Existing reader/actionable-row exemptions remain in force.
+  TranscriptHistoryWindow reservePromptNavigation({
+    required String? preserveMessageKey,
+    required Set<String> inView,
+  }) {
+    final reader = pages
+        .where(
+          (page) =>
+              preserveMessageKey != null &&
+              page.containsStableKey(preserveMessageKey),
+        )
+        .firstOrNull;
+    final fitted = _fitTranscriptBudget(
+      pages,
+      releasedRanges,
+      protectedKey: preserveMessageKey,
+      pinned: reader,
+      inView: inView,
+      rowBudget: kMaxActiveTranscriptMessages - kPromptNavigationScratchRows,
+      byteBudget:
+          kMaxActiveTranscriptDecodedBytes - kPromptNavigationScratchBytes,
+      notWaiting: questionState.withdrawnRequestIds,
+    );
+    return identical(fitted.pages, pages)
+        ? this
+        : _with(
+            pages: fitted.pages,
+            releasedRanges: fitted.released,
+            unsavedReleasedElsewhere:
+                unsavedReleasedElsewhere || fitted.unsavedOverflow,
+          );
+  }
+
+  /// Adopts a second reader's non-adjacent page, retaining truthful gaps.
+  /// Unlike ordinary prepend, the destination owns the reader protection.
+  TranscriptHistoryPageMutation adoptPromptNavigationPage({
+    required List<AgentMessage> messages,
+    required String requestedCursor,
+    required String? olderCursor,
+    required String targetKey,
+    required String sourceCursor,
+    required Set<String> crossedPageEnds,
+  }) {
+    if (!messages.any(
+      (message) => stableTranscriptMessageKey(message) == targetKey,
+    )) {
+      return TranscriptHistoryPageMutation(
+        window: this,
+        rejection: TranscriptHistoryPageRejection.stale,
+      );
+    }
+    // A scan can meet a range already held on the older side of a gap.
+    // That row already has the exact page/identity needed for landing.
+    if (pages.any((page) => page.containsStableKey(targetKey))) {
+      return TranscriptHistoryPageMutation(window: this);
+    }
+    final next = List<TranscriptHistoryPage>.of(pages);
+    final released = Map<String, TranscriptReleasedRange>.of(releasedRanges);
+    final keys = {
+      for (final message in messages) ?stableTranscriptMessageKey(message),
+    };
+    for (var index = next.length - 1; index >= 0; index--) {
+      final page = next[index];
+      if (page.isTail || page.isResidue || page.isReleasedResidueMarker) {
+        continue;
+      }
+      if (crossedPageEnds.contains(page.newerCursor) ||
+          page.messages.any(
+            (message) => keys.contains(stableTranscriptMessageKey(message)),
+          )) {
+        _releaseTranscriptPage(
+          next,
+          index,
+          released,
+          draws: transcriptReportDraws,
+        );
+      }
+    }
+    var at = -1;
+    for (var index = 0; index < next.length && at < 0; index++) {
+      var boundary = next[index].olderCursor;
+      final seen = <String>{};
+      // Reserving scratch may release the original source page. Its issued
+      // boundary still locates the gap through the released-range chain.
+      while (boundary != null && seen.add(boundary)) {
+        if (boundary == sourceCursor) {
+          at = index;
+          break;
+        }
+        boundary = released[boundary]?.olderCursor;
+      }
+    }
+    if (at < 0) {
+      return TranscriptHistoryPageMutation(
+        window: this,
+        rejection: TranscriptHistoryPageRejection.stale,
+      );
+    }
+    final inserted = TranscriptHistoryPage(
+      messages: messages,
+      olderCursor: olderCursor,
+      newerCursor: requestedCursor,
+      isTail: false,
+      reloadLimit: _pageableRowCount(messages),
+    );
+    final fitted = _fitTranscriptBudget(
+      [...next.take(at), inserted, ...next.skip(at)],
+      released,
+      protectedKey: targetKey,
+      pinned: inserted,
+      keepReaderRows: false,
+      notWaiting: questionState.withdrawnRequestIds,
+    );
+    if (!fitted.fits) {
+      return TranscriptHistoryPageMutation(
+        window: this,
+        rejection: TranscriptHistoryPageRejection.overBudget,
+      );
+    }
+    return TranscriptHistoryPageMutation(
+      window: _with(
+        pages: fitted.pages,
+        releasedRanges: fitted.released,
+        latestHistoryTruncation: null,
+        unsavedReleasedElsewhere:
+            unsavedReleasedElsewhere || fitted.unsavedOverflow,
+      ),
+    );
+  }
+
   /// Rows a newer page from [cursor] should request to restore exactly the
   /// released range starting there, or null when no such range is known.
   int? forwardReloadLimitFor(String cursor) {

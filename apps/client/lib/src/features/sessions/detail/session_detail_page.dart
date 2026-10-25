@@ -121,10 +121,12 @@ import 'package:flutter/rendering.dart'
         RenderSliverMultiBoxAdaptor,
         RenderViewport,
         ScrollCacheExtent,
+        ScrollDirection,
         SelectedContent,
         SelectionStatus,
         SliverMultiBoxAdaptorParentData,
         ViewportOffset;
+import 'package:flutter/semantics.dart' show SemanticsService;
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
