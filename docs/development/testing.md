@@ -34,6 +34,12 @@ real renderers and fixture brokers; the outer check pool separately limits
 concurrent files. This keeps nested browser fanout within the execution budget
 without extending test deadlines or removing assertions.
 
+The browser setup probe checks rendering and Linux font coverage for Latin,
+Chinese, Japanese, Korean, Arabic and emoji. Missing system libraries trigger
+Playwright dependency setup; missing fonts trigger a minimal Noto/fontconfig
+installation. Other browser failures stop immediately. A successful launch
+alone is insufficient: the hosted image can render CJK text as missing glyphs.
+
 Run concurrent checks in separate worktrees. Every client selection runs its
 shared preparation, including rebuilding `build/unit_test_assets`, even when
 `--only` selects a policy task. Each running Flutter test needs that bundle to

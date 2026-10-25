@@ -13,17 +13,18 @@ if (directory) {
     throw new Error('browser probe output must be below this checkout\'s output/');
   }
   mkdirSync(directory, {recursive: true});
-  const fonts: Record<string, unknown> = {};
-  for (const [language, codepoint] of Object.entries({Latin: '0041', Chinese: '4e2d', Japanese: '3042', Korean: 'ac00', Arabic: '0627', Emoji: '1f680'})) {
-    const result = Bun.spawnSync(['fc-list', '--format=%{family}\n', `:charset=${codepoint}`],
-      {stdout: 'pipe', stderr: 'pipe', timeout: 5_000, maxBuffer: 1 << 20});
-    const families = [...new Set(result.stdout.toString().trim().split('\n').filter(Boolean))].sort();
-    fonts[language] = {toolAvailable: result.success, available: result.success && families.length > 0, families};
-  }
-  diagnostics.systemFonts = fonts;
 }
 
 try {
+  const fontTool = Bun.which('fc-list');
+  const fonts: Record<string, {toolAvailable: boolean; available: boolean; families: string[]}> = {};
+  for (const [language, codepoint] of Object.entries({Latin: '0041', Chinese: '4e2d', Japanese: '3042', Korean: 'ac00', Arabic: '0627', Emoji: '1f680'})) {
+    const result = fontTool ? Bun.spawnSync([fontTool, '--format=%{family}\n', `:charset=${codepoint}`],
+      {stdout: 'pipe', stderr: 'pipe', timeout: 5_000, maxBuffer: 1 << 20}) : undefined;
+    const families = result?.success ? [...new Set(result.stdout.toString().trim().split('\n').filter(Boolean))].sort() : [];
+    fonts[language] = {toolAvailable: Boolean(result?.success), available: families.length > 0, families};
+  }
+  diagnostics.systemFonts = fonts;
   const browser = await chromium.launch({headless: true, timeout: 30_000,
     args: ['--disable-gpu', '--disable-features=Vulkan,VizDisplayCompositor']});
   try {
@@ -34,8 +35,18 @@ try {
   } finally {
     await browser.close();
   }
-  console.log('PASS pinned browser launch and rendering');
-  diagnostics.status = 'pass';
+  // Linux dependency setup must preserve the font coverage --with-deps supplied.
+  // Launch first so hosts missing both libraries and fonts diagnose libraries first.
+  const missingFonts = Object.entries(fonts).filter(([, coverage]) => !coverage.available).map(([language]) => language);
+  if (process.platform === 'linux' && missingFonts.length > 0) {
+    const reason = `Missing browser fonts: ${missingFonts.join(', ')}`;
+    console.error(reason);
+    diagnostics.status = 'fail';diagnostics.error = reason;diagnostics.missingFonts = missingFonts;
+    process.exitCode = 79;
+  } else {
+    console.log('PASS pinned browser launch, rendering and font coverage');
+    diagnostics.status = 'pass';
+  }
 } catch (error) {
   const reason = error instanceof Error ? error.message : String(error);
   console.error(reason);

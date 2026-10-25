@@ -305,7 +305,7 @@ record(
 )
 
 # Browser acquisition is tested at its command boundary without changing host
-# packages. Only a diagnosed missing-library failure may install dependencies.
+# packages. Only diagnosed missing libraries/fonts may install dependencies.
 Dir.mktmpdir('cosyncing-browser-bootstrap-') do |fixture|
   bin = File.join(fixture, 'bin')
   FileUtils.mkdir_p(bin)
@@ -320,15 +320,20 @@ Dir.mktmpdir('cosyncing-browser-bootstrap-') do |fixture|
       if [ -f "$BROWSER_FIXTURE_COUNT" ]; then count="$(cat "$BROWSER_FIXTURE_COUNT")"; fi
       count=$((count + 1))
       printf '%s\n' "$count" > "$BROWSER_FIXTURE_COUNT"
-      case "$BROWSER_FIXTURE_CASE" in
-        missing) if [ "$count" = 1 ]; then exit 78; fi ;;
-        broken) exit 1 ;;
-        still-broken) if [ "$count" = 1 ]; then exit 78; else exit 1; fi ;;
+      case "$BROWSER_FIXTURE_CASE:$count" in
+        missing:1|still-broken:1|both:1) exit 78 ;;
+        fonts:1|still-fonts:1|still-fonts:2|both:2) exit 79 ;;
+        broken:*|still-broken:2) exit 1 ;;
       esac
     fi
   SH
   FileUtils.chmod(0o755, File.join(bin, 'bun'))
-  %w[ready missing broken still-broken].each do |scenario|
+  File.write(File.join(bin, 'sudo'), <<~'SH')
+    #!/usr/bin/env bash
+    printf '%s\n' "$*" >> "$BROWSER_FIXTURE_LOG"
+  SH
+  FileUtils.chmod(0o755, File.join(bin, 'sudo'))
+  %w[ready missing fonts both broken still-broken still-fonts].each do |scenario|
     log = File.join(fixture, "#{scenario}.log")
     output, status = Open3.capture2e(
       { 'PATH' => "#{bin}:#{ENV.fetch('PATH')}", 'BROWSER_FIXTURE_CASE' => scenario,
@@ -336,13 +341,18 @@ Dir.mktmpdir('cosyncing-browser-bootstrap-') do |fixture|
       'bash', ROOT.join('scripts/ci/install-browser.sh').to_s, chdir: fixture
     )
     calls = File.readlines(log, chomp: true)
-    expected_success = %w[ready missing].include?(scenario)
-    expected_dependency_setup = %w[missing still-broken].include?(scenario)
+    expected_success = %w[ready missing fonts both].include?(scenario)
+    expected_dependency_setup = %w[missing still-broken both].include?(scenario)
+    expected_font_setup = %w[fonts both still-fonts].include?(scenario)
+    expected_probes = { 'ready' => 1, 'missing' => 2, 'fonts' => 2, 'both' => 3,
+                        'broken' => 1, 'still-broken' => 2, 'still-fonts' => 2 }.fetch(scenario)
     record("#{scenario} browser bootstrap has the expected outcome", status.success? == expected_success, output)
     record("#{scenario} browser bootstrap installs dependencies only for missing libraries",
       calls.count { |call| call.include?('install-deps') } == (expected_dependency_setup ? 1 : 0), calls.inspect)
+    record("#{scenario} browser bootstrap installs fonts only for missing coverage",
+      calls.count { |call| call.start_with?('apt-get install ') && call.include?('fonts-noto-cjk') } == (expected_font_setup ? 1 : 0), calls.inspect)
     record("#{scenario} browser bootstrap does not retry other rendering failures",
-      calls.count { |call| call.start_with?('run ') } == (expected_dependency_setup ? 2 : 1), calls.inspect)
+      calls.count { |call| call.start_with?('run ') } == expected_probes, calls.inspect)
   end
 end
 
