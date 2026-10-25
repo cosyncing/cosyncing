@@ -166,10 +166,15 @@ describe.each([PI_DIALECT_FACTS, OMP_DIALECT_FACTS] as PiFamilyDialect[])('$disp
       const replay = await stream.waitForFrame((frame) => frame.kind === 'history' && frame.reset === true
         && frame.messages.some((message: any) => message.type === 'user-message' && message.text === 'recovered open turn'), { after: before });
       expect(replay.messages.some((message: any) => message.type === 'run-summary' && message.key === prior && message.status === 'done')).toBe(true);
+      await stream.waitForFrame((frame) => frame.kind === 'message' && frame.message?.type === 'run-summary'
+        && frame.message.key === current && frame.message.status === 'running', { after: before, what: 'live start observation for the recovered turn' });
       // A later live outcome is the sentinel: old completion history must raise no new outcome.
-      await owner.post(`${route}/events`, { id, epoch, events: [
+      const completed = await owner.post(`${route}/events`, { id, epoch, events: [
         { ...activeRun, status: 'done', completedAt: 4000 }, { t: 'status', running: false },
       ] });
+      expect(completed.status, completed.text).toBe(200);
+      await stream.waitForFrame((frame) => frame.kind === 'message' && frame.message?.type === 'run-summary'
+        && frame.message.key === current && frame.message.status === 'done', { after: before, what: 'live completion for the recovered turn' });
       const events = await eventually(async () => {
         const rows = (await owner.get(`/api/attention-events?clientId=prepared-${dialect.name}&limit=200`)).body.events
           .filter((event: any) => event.sessionId === id);
@@ -177,6 +182,12 @@ describe.each([PI_DIALECT_FACTS, OMP_DIALECT_FACTS] as PiFamilyDialect[])('$disp
       }, { what: 'the recovered live turn outcome after initial snapshot publication' });
       expect(events.filter((event: any) => event.kind === 'run-finished').map((event: any) => event.turnId)).toEqual(['current']);
       expect(stream.isOpen).toBe(true);
+    } catch (error) {
+      const feed = await owner.get(`/api/attention-events?clientId=prepared-${dialect.name}&limit=200`);
+      const live = stream.frames.filter((frame) => frame.kind === 'message'
+        && (frame.message?.type === 'run-summary' || frame.message?.type === 'status')).map((frame) => frame.message);
+      const diagnostics = broker.output().split('\n').filter((line) => /attention|error/i.test(line)).slice(-8).join('\n');
+      throw new Error(`${String(error)}; live=${JSON.stringify(live)}; attention=${JSON.stringify(feed.body)}; broker=${diagnostics}`);
     } finally { stream.close(); await owner.post(`${route}/bye`, { id, epoch, reason: 'quit' }); }
   });
 
