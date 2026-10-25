@@ -283,7 +283,6 @@ final class BrokerRouteCoordinator extends ChangeNotifier {
     if (cached != null &&
         !cached.retired &&
         cached.context.routeGeneration == address.generation &&
-        cached.context.networkGeneration == _networkGeneration &&
         cached.context.origin == address.origin &&
         cached.context.proxyId == address.proxyId &&
         cached.context.proxy?.generation == proxy?.generation) {
@@ -312,7 +311,6 @@ final class BrokerRouteCoordinator extends ChangeNotifier {
       socketOverride: socketOverride,
       onAuthorizationRefused: () {
         if (_disposed ||
-            context.networkGeneration != _networkGeneration ||
             (state.transports[address.id]?.context != context &&
                 !state.draining.any(
                   (transport) => transport.context == context,
@@ -325,6 +323,13 @@ final class BrokerRouteCoordinator extends ChangeNotifier {
       },
       onTransportFailure: () {
         if (_disposed || state.active?.context != context) return;
+        // A session socket owns its reconnect cursor. With no alternate path,
+        // rebuilding every consumer cannot improve its recovery: recheck the
+        // one route in place, so the status still follows the server.
+        if (state.server.principalId != null && _ordered(state).length < 2) {
+          _recheck(state, failed: true);
+          return;
+        }
         unawaited(
           transportFailed(state.profile, hard: true).catchError((Object error) {
             state.failures[address.id] = error;
@@ -370,6 +375,34 @@ final class BrokerRouteCoordinator extends ChangeNotifier {
     final ready = state.firstReady ??= Completer<BrokerRouteTransport>();
     unawaited(_round(state, alternates: alternates));
     return ready.future;
+  }
+
+  /// The addresses this server can bind. Old brokers have no identity proof,
+  /// so only their original trusted address is ever used.
+  List<BrokerAddress> _usable(_ServerRoutes state) {
+    final routes = _ordered(state);
+    if (state.server.principalId != null) return routes;
+    return [
+      for (final route in routes)
+        if (route.legacyTrusted &&
+            route.origin.origin == state.server.legacyOrigin.origin)
+          route,
+    ];
+  }
+
+  /// Rechecks a server's only route without retiring it. Sessions reconnect
+  /// with their own cursors and no consumer is rebuilt; the status follows the
+  /// check, and a failed check retries with backoff.
+  void _recheck(_ServerRoutes state, {required bool failed}) {
+    final active = state.active;
+    if (active == null || active.retired) return;
+    // A network change can strand every connection. One failed session
+    // socket says nothing about the others, which keep their own liveness.
+    active.resetConnections(sockets: !failed);
+    state.observations.remove(active.context.routeId);
+    if (failed) state.phase = BrokerRoutePhase.recovering;
+    _changed();
+    if (_foreground && _relevant(state)) unawaited(_round(state));
   }
 
   List<BrokerAddress> _ordered(_ServerRoutes state) {
@@ -675,7 +708,10 @@ final class BrokerRouteCoordinator extends ChangeNotifier {
     final routes = _ordered(state);
     state
       ..lastRound = now()
-      ..phase = state.active == null
+      ..phase =
+          state.active == null ||
+              state.phase == BrokerRoutePhase.recovering ||
+              state.phase == BrokerRoutePhase.offline
           ? BrokerRoutePhase.recovering
           : BrokerRoutePhase.evaluating;
     final selected = alternates ? routes : routes.take(1);
@@ -719,9 +755,21 @@ final class BrokerRouteCoordinator extends ChangeNotifier {
     ]);
     if (_disposed || epoch != state.epoch) return;
     if (state.preparingRoute == null && state.switching == null) {
-      state.phase = state.active == null
+      // A server's only route stays bound while it is down, so its own check
+      // decides the status; alternates are judged by the switch above.
+      final active = state.active;
+      final unanswered =
+          active != null &&
+          routes.length < 2 &&
+          !state.observations.containsKey(active.context.routeId);
+      state.phase = active == null || unanswered
           ? BrokerRoutePhase.offline
           : BrokerRoutePhase.connected;
+      if (unanswered) {
+        _scheduleRetry(state);
+      } else if (active != null && routes.length < 2) {
+        state.backoff = 0;
+      }
     }
     if (state.active == null) {
       final pending = state.firstReady;
@@ -983,14 +1031,26 @@ final class BrokerRouteCoordinator extends ChangeNotifier {
     _proxyFailures.clear();
     for (final state in _servers.values) {
       final relevant = _relevant(state);
+      final preserveActive =
+          _usable(state).length == 1 &&
+          state.switching == null &&
+          state.active != null &&
+          !state.active!.retired;
       // Configuration and credential edits rebuild their own clients; nothing
       // else tells the clients on a generation a network change retired.
-      if (state.active != null) state.retiredUnannounced = true;
-      _retire(state);
-      if (_foreground && relevant) {
+      if (!preserveActive && state.active != null) {
+        state.retiredUnannounced = true;
+      }
+      _retire(state, preserveActive: preserveActive);
+      if (preserveActive) {
+        // The same route may now take another path. Nothing may keep waiting
+        // on connections the old network carried.
+        _recheck(state, failed: false);
+      } else if (_foreground && relevant) {
         unawaited(_round(state));
       }
     }
+    _changed();
   }
 
   void _scheduleRefresh() {
@@ -1098,32 +1158,36 @@ final class BrokerRouteCoordinator extends ChangeNotifier {
     return onSwitch(state.profile);
   }
 
-  void _retire(_ServerRoutes state) {
+  void _retire(_ServerRoutes state, {bool preserveActive = false}) {
+    final active = preserveActive ? state.active : null;
     state.epoch++;
     state.round = null;
     for (final probe in state.probes.values) {
       probe.cancel();
     }
-    state.active?.retire();
+    if (active == null) state.active?.retire();
     for (final transport in [...state.draining]) {
       transport.retire();
     }
     state.draining.clear();
     for (final transport in state.transports.values) {
-      transport.retire();
+      if (!identical(transport, active)) transport.retire();
     }
     state.probes.clear();
     state.transports.clear();
+    if (active != null) state.transports[active.context.routeId] = active;
     state.observations.clear();
     state.attempts.clear();
     state.fasterRounds.clear();
     state
       ..preparingRoute = null
-      ..active = null;
+      ..active = active;
     state.retry?.cancel();
     state
       ..retry = null
-      ..phase = BrokerRoutePhase.offline;
+      ..phase = active == null
+          ? BrokerRoutePhase.offline
+          : BrokerRoutePhase.connected;
     final waiting = state.firstReady;
     state.firstReady = null;
     if (waiting != null && !waiting.isCompleted) {

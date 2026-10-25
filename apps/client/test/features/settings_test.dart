@@ -975,6 +975,62 @@ void main() {
   });
 
   group('quota', () {
+    featureTest('Home retains quota across visits and preserves its layout '
+        'during an explicit refresh', (f) async {
+      final studio = await studioSeeded(f);
+      final desk = RuntimeDesk(studio)
+        ..quotaBody = quotaSnapshot({
+          'codex': quotaProvider('codex', buckets: [quotaBucket()]),
+        });
+      final app = await f.launch();
+      await app.tapKey('overview-quota-choose');
+      await app.tapKey('overview-quota-provider-codex');
+      await app.tapKey('overview-quota-done');
+      final row = find.byKey(const Key('settings-quota-row-codex-5h'));
+      await app.waitFor(row);
+      final reads = desk.quotaReads;
+      // Retention counts from leaving Home, so a long stay there does not
+      // leave the next visit without its reading.
+      await app.elapse(const Duration(minutes: 2));
+      await app.go(settingsRoute);
+      await app.openCategory('general');
+      await app.go(sessionsRoute);
+      await app.waitFor(row);
+      expect(desk.quotaReads, reads);
+
+      final quota = find.byKey(const Key('workspace-overview-quota'));
+      final size = app.tester.getSize(quota);
+      final hold = studio.hold('GET', '/api/tokdash/quota');
+      addTearDown(hold.release);
+      await app.tapKey('overview-quota-refresh');
+      expect(hold.arrivals, 1);
+      expect(row, findsOneWidget);
+      expect(app.tester.getSize(quota), size);
+      desk.quotaBody = quotaSnapshot({
+        'codex': quotaProvider('codex', buckets: [quotaBucket(remaining: 78)]),
+      });
+      hold.release();
+      await app.waitFor(find.text('78%'));
+
+      await app.go(settingsRoute);
+      await app.openCategory('general');
+      await app.elapse(const Duration(minutes: 1, seconds: 1));
+      final beforeReturn = desk.quotaReads;
+      final reload = studio.hold('GET', '/api/tokdash/quota');
+      addTearDown(reload.release);
+      await app.go(sessionsRoute);
+      await app.pumpUntil(
+        () => reload.arrivals == 1,
+        reason: 'The expired reading is read again',
+      );
+      // The cold load reserves the space the last reading occupied.
+      expect(row, findsNothing);
+      expect(app.tester.getSize(quota), size);
+      reload.release();
+      await app.waitFor(row);
+      expect(desk.quotaReads, greaterThan(beforeReturn));
+    });
+
     featureTest('Overview saves chosen providers per broker without changing '
         'quota warning consent', (f) async {
       final studio = await studioSeeded(f);
@@ -1118,11 +1174,12 @@ void main() {
         final app = await f.launch(initialLocation: settingsRoute);
         final now = DateTime.now();
 
-        // Each snapshot is read when the Agents page opens, so leaving the page
-        // and coming back is a new read.
+        // Advance the controlled clock past retention while quota is hidden.
+        // Returning then reads the next state through the normal screen flow.
         Future<void> read(Map<String, Object?> body) async {
           desk.quotaBody = body;
           await app.openCategory('general');
+          await app.elapse(const Duration(minutes: 1, seconds: 1));
           await app.openCategory('agents');
           await app.waitFor(find.byKey(const Key('settings-quota-panel')));
         }
@@ -1579,10 +1636,14 @@ void main() {
         // Studio's quota read and its restart-everything are both still out
         // when the user moves to the tower.
         await app.openCategory('general');
+        await app.elapse(const Duration(minutes: 1, seconds: 1));
         final quotaHold = studio.hold('GET', '/api/tokdash/quota');
         final restartHold = studio.hold('POST', '/api/broker/restart-all');
         await app.openCategory('agents');
-        expect(quotaHold.arrivals, 1);
+        await app.pumpUntil(
+          () => quotaHold.arrivals == 1,
+          reason: 'The expired quota cache starts the held broker read',
+        );
         await app.tapKey('settings-restart-everything');
         await app.confirm(en.settingsRestartEverythingAction);
         expect(restartHold.arrivals, 1);
