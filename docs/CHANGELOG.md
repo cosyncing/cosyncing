@@ -11,8 +11,16 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Added
+
+- Transcript navigation includes an up arrow that steps through earlier user
+  messages, including prompts outside the loaded history window. Searches are
+  bounded and can be canceled or continued; the down arrow returns to live updates.
+
 ### Fixed
 
+- Transcript navigation buttons preserve the composer's focus and draft.
+  Hidden scroll controls no longer remain in keyboard focus traversal.
 - Installer-owned Windows servers can apply updates from Settings → Updates.
   The independent updater survives the service restart, preserves a running
   desktop app, and removes stale updater tasks before the next update or uninstall.

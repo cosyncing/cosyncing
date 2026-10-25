@@ -2116,5 +2116,15 @@
     }
   },
   "transferSaveBusy": "別のファイルを保存中です。完了してからもう一度保存してください。",
-  "transferSaveDeferred": "ダウンロードしました。「保存」で保存先を選んでください。"
+  "transferSaveDeferred": "ダウンロードしました。「保存」で保存先を選んでください。",
+  "sessionHistoryPreviousPrompt": "前のユーザーメッセージ",
+  "sessionHistoryPromptFinding": "前のユーザーメッセージを検索中。キャンセル",
+  "sessionHistoryPromptUnavailable": "以前のユーザーメッセージを読み込めません",
+  "sessionHistoryPromptOffline": "接続して以前のユーザーメッセージを読み込む",
+  "sessionHistoryPromptCanceled": "移動をキャンセルしました",
+  "sessionHistoryPromptStart": "会話の先頭",
+  "sessionHistoryPromptLimit": "検索の上限に達しました。以前のユーザーメッセージの検索を続けますか？",
+  "sessionHistoryPromptFailed": "前のユーザーメッセージを読み込めませんでした。",
+  "sessionHistoryPromptContinue": "続ける",
+  "sessionHistoryPromptRetry": "再試行"
 }
