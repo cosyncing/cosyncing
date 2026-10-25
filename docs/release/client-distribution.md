@@ -74,13 +74,49 @@ pointer is what makes
 
 `.github/workflows/client-release.yml` requires the tag version to equal both
 the root package version and the base version in `apps/client/pubspec.yaml`. The
-tagged commit must already be on `main`, and the complete repository check runs
-before packaging.
+tagged commit must already be on `main`. The existing feature suites run in
+isolated jobs, including all three Flutter test shards and native Android JVM
+scenarios. A contract gate combines their reports and validates exact coverage,
+clean source, commands and toolchain identity for that commit.
 
-The workflow creates or resets only the matching draft, builds each platform on
-its native hosted runner, uploads the five final assets, generates
+All four platform builds run alongside verification and produce workflow
+artifacts after source validation. Android signing keeps its protected environment
+and approval. No build job can write GitHub releases. Draft creation and asset
+attachment wait for verification and every required build to succeed.
+
+The signed Android artifact produced before verification expires after one day.
+Once the gate and all builds pass, a read-only handoff retains the complete
+verified archive set for 30 days. Long publication-approval waits use that
+verified set. Desktop staging and verification evidence also last 30 days.
+
+```mermaid
+flowchart LR
+  source[Validate tag and source] --> suites[Isolated verification suites]
+  source --> desktop[Linux macOS Windows builds]
+  source --> android[Protected Android build]
+  suites --> gate[Validate complete coverage]
+  gate --> verified[Retain verified inputs for 30 days]
+  desktop --> verified
+  android --> verified
+  verified --> draft[Prepare candidate draft]
+  draft --> publish[Attach verify and publish prerelease]
+```
+
+The workflow builds each platform on its native hosted runner, creates or resets
+only the matching draft after the gates pass, attaches the five final assets, generates
 `SHA256SUMS`, downloads and verifies the remote set, and publishes a GitHub
 prerelease for physical acceptance. It never builds or ships the native broker.
+
+Manual `workflow_dispatch` runs are no-publish rehearsals on a public branch.
+They exercise suite aggregation, native builds and the verified artifact handoff.
+The Android rehearsal uses debug signing without production keys. Rehearsal
+artifacts have a distinct name prefix; production signing, draft writes and
+publication run only for a version-tag push. A rehearsal report cannot be
+reused by a production broker gate.
+
+Before merging workflow changes, dispatch the existing workflow at the reviewed
+branch, for example `gh workflow run client-release.yml --repo cosyncing/cosyncing
+--ref <review-branch>`. Retain the successful run ID for the broker rehearsal.
 
 After physical acceptance, `.github/workflows/client-release-promote.yml`
 requires the exact tag plus typed `PROMOTE` confirmation. It verifies the same

@@ -15,7 +15,7 @@
  */
 import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { cpus, platform } from 'node:os';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import {
   describeHarnessProcesses,
   findHarnessProcesses,
@@ -25,17 +25,21 @@ import {
   staleHarnessProcesses,
 } from './lib/harness-leaks.ts';
 import { runSupervised, signalSupervisedGroups, testEnvironment, type SupervisedResult } from './lib/process.ts';
+import { planChecks, type PlannedTask, type FlutterLayout } from './check-plan.ts';
 import {
   DEFAULT_TIMEOUT_MS,
   suiteRunsOn,
   suites,
-  type Suite,
   type SuiteId,
-  type Task,
 } from './suites.ts';
 
 const ROOT = resolve(import.meta.dir, '..', '..');
-const OUTPUT = join(ROOT, 'output', 'check');
+const OUTPUT = resolve(ROOT, process.env.COSYNCING_CHECK_OUTPUT?.trim() || 'output/check');
+const outputRelative = relative(join(ROOT, 'output'), OUTPUT);
+if (!outputRelative || outputRelative === '..' || outputRelative.startsWith(`..${sep}`) || isAbsolute(outputRelative)) {
+  console.error('check: COSYNCING_CHECK_OUTPUT must be a directory below this checkout\'s output/');
+  process.exit(2);
+}
 const IN_CI = process.env.GITHUB_ACTIONS === 'true';
 const HOST = platform();
 let cancelling = false;
@@ -50,12 +54,15 @@ interface Options {
   concurrency: number;
   retry: boolean;
   list: boolean;
+  json: boolean;
+  flutterLayout?: FlutterLayout;
 }
 
 function usage(code: number): never {
   console.log(
     'Usage: bun run check [SUITE...] [--shard I/N] [--only TEXT[,TEXT]] [--repeat N]\n'
-      + '                     [--concurrency N] [--no-retry] [--list]\n\n'
+      + '                     [--concurrency N] [--no-retry] [--list [--json]]\n'
+      + '                     [--flutter-layout combined|serial-shards]\n\n'
       + `Suites: ${suites.map((suite) => suite.id).join(', ')}`,
   );
   process.exit(code);
@@ -69,6 +76,7 @@ function parseOptions(argv: string[]): Options {
     concurrency: defaultConcurrency(),
     retry: true,
     list: false,
+    json: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]!;
@@ -79,6 +87,12 @@ function parseOptions(argv: string[]): Options {
     };
     if (arg === '--help' || arg === '-h') usage(0);
     else if (arg === '--list') options.list = true;
+    else if (arg === '--json') options.json = true;
+    else if (arg === '--flutter-layout') {
+      const layout = value();
+      if (layout !== 'combined' && layout !== 'serial-shards') usage(2);
+      options.flutterLayout = layout;
+    }
     else if (arg === '--suites') {
       for (const suite of suites) console.log(suite.id);
       process.exit(0);
@@ -91,7 +105,7 @@ function parseOptions(argv: string[]): Options {
       const match = /^(\d+)\/(\d+)$/.exec(value());
       if (!match) usage(2);
       const shard = { index: Number(match[1]), total: Number(match[2]) };
-      if (shard.total < 1 || shard.index < 1 || shard.index > shard.total) usage(2);
+      if (shard.total < 1 || shard.total > 32 || shard.index < 1 || shard.index > shard.total) usage(2);
       options.shard = shard;
     } else if (known.has(arg as SuiteId)) options.suites.push(arg as SuiteId);
     else {
@@ -102,6 +116,12 @@ function parseOptions(argv: string[]): Options {
   if (options.suites.length === 0) {
     options.suites = suites.filter((suite) => suiteRunsOn(suite, HOST)).map((suite) => suite.id);
   }
+  if (options.json && !options.list) usage(2);
+  if (options.shard && options.flutterLayout === 'combined') usage(2);
+  if (options.only && options.only.length === 0) usage(2);
+  // The combined invocation remains an explicit experiment until mixed-load
+  // evidence supports changing the established local and hosted behavior.
+  options.flutterLayout ??= 'serial-shards';
   // Repeating is for finding flakes; a retry would hide exactly what it looks for.
   if (options.repeat > 1) options.retry = false;
   return options;
@@ -121,60 +141,6 @@ function defaultConcurrency(): number {
   if (raw) return boundedInteger(raw, 1, 32, 'COSYNCING_CHECK_CONCURRENCY');
   const cores = cpus().length || 4;
   return Math.max(2, Math.min(8, Math.floor(cores * 0.75)));
-}
-
-// ---------------------------------------------------------------- planning
-
-interface PlannedTask {
-  suite: Suite;
-  task: Task;
-  iteration: number;
-}
-
-/** Longest-processing-time-first assignment of tasks to N shards. */
-function shardOf(tasks: Task[], shard: { index: number; total: number }): Set<string> {
-  const loads = Array.from({ length: shard.total }, () => ({ ms: 0, ids: new Set<string>() }));
-  const ordered = [...tasks].sort((a, b) =>
-    estimate(b) - estimate(a) || a.id.localeCompare(b.id)
-  );
-  for (const task of ordered) {
-    const lightest = loads.reduce((best, load) => (load.ms < best.ms ? load : best));
-    lightest.ms += estimate(task);
-    lightest.ids.add(task.id);
-  }
-  return loads[shard.index - 1]!.ids;
-}
-
-function estimate(task: Task): number {
-  return task.estimateMs ?? (task.run[1] === 'test' ? 60_000 : 20_000);
-}
-
-function plan(options: Options): { prepare: PlannedTask[]; tasks: PlannedTask[] } {
-  const prepare: PlannedTask[] = [];
-  const tasks: PlannedTask[] = [];
-  for (const id of options.suites) {
-    const suite = suites.find((candidate) => candidate.id === id)!;
-    if (!suiteRunsOn(suite, HOST)) {
-      console.error(`check: suite ${id} does not run on ${HOST}`);
-      process.exit(2);
-    }
-    let selected = suite.tasks;
-    if (options.only) {
-      selected = selected.filter((task) => options.only!.some((text) => task.id.includes(text)));
-    }
-    if (options.shard) {
-      const mine = shardOf(selected, options.shard);
-      selected = selected.filter((task) => mine.has(task.id));
-    }
-    if (selected.length === 0) continue;
-    for (const task of suite.prepare ?? []) prepare.push({ suite, task, iteration: 1 });
-    for (let iteration = 1; iteration <= options.repeat; iteration += 1) {
-      for (const task of selected) tasks.push({ suite, task, iteration });
-    }
-  }
-  // Longest first, so the slowest work is never the tail nobody overlaps.
-  tasks.sort((a, b) => estimate(b.task) - estimate(a.task));
-  return { prepare, tasks };
 }
 
 // ---------------------------------------------------------------- execution
@@ -386,25 +352,26 @@ function writeReports(
 ): 'pass' | 'fail' {
   const counts = { pass: 0, fail: 0, flaky: 0, blocked: 0 };
   for (const result of results) counts[result.status] += 1;
-  const status = counts.fail + counts.blocked === 0 ? 'pass' : 'fail';
+  const status = !cancelling && counts.fail + counts.blocked === 0 ? 'pass' : 'fail';
   const report = {
-    schemaVersion: 6,
+    schemaVersion: 7,
     kind: 'repository-check',
     commit: git(['rev-parse', 'HEAD']),
     dirty: git(['status', '--porcelain', '--untracked-files=normal']).length > 0,
     host: { platform: HOST, arch: process.arch, bun: Bun.version },
     selection: {
       suites: options.suites,
+      flutterLayout: options.flutterLayout,
       shard: options.shard ? `${options.shard.index}/${options.shard.total}` : null,
       only: options.only ?? null,
       repeat: options.repeat,
-      // Every suite this host can run, unsharded and unfiltered: the only
-      // shape a release checkpoint accepts.
+      // Every suite this host can run, unsharded and unfiltered.
       complete,
     },
     startedAt: startedAt.toISOString(),
     durationMs,
     status,
+    cancelled: cancelling,
     counts,
     tasks: results,
   };
@@ -412,7 +379,7 @@ function writeReports(
 
   const notable = results.filter((result) => result.status !== 'pass');
   const slowest = [...results]
-    .sort((a, b) => b.attempts[0]!.durationMs - a.attempts[0]!.durationMs)
+    .sort((a, b) => (b.attempts[0]?.durationMs ?? 0) - (a.attempts[0]?.durationMs ?? 0))
     .slice(0, 10);
   const markdown = [
     `### Check ${status === 'pass' ? 'passed' : 'FAILED'} — ${options.suites.join(', ')}`
@@ -437,7 +404,7 @@ function writeReports(
     '',
     '| Task | Time |',
     '|---|---|',
-    ...slowest.map((result) => `| \`${result.suite}/${result.id}\` | ${seconds(result.attempts[0]!.durationMs)} |`),
+    ...slowest.map((result) => `| \`${result.suite}/${result.id}\` | ${seconds(result.attempts[0]?.durationMs ?? 0)} |`),
     '',
     '</details>',
     '',
@@ -450,7 +417,21 @@ function writeReports(
 // ---------------------------------------------------------------- main
 
 const options = parseOptions(process.argv.slice(2));
-const { prepare, tasks } = plan(options);
+const { prepare, tasks } = (() => {
+  try {
+    const planned = planChecks(options);
+    if (planned.tasks.length === 0) throw new Error('no tasks match the selected suites, filters and shard');
+    return planned;
+  } catch (error) {
+    console.error(`check: ${error instanceof Error ? error.message : String(error)}`);
+    usage(2);
+  }
+})();
+
+if (options.list && options.json) {
+  console.log(JSON.stringify({ selection: options, prepare: prepare.map(({suite, task}) => ({suite: suite.id, ...task})), tasks: tasks.map(({suite, task}) => ({suite: suite.id, ...task})) }, null, 2));
+  process.exit(0);
+}
 
 if (options.list) {
   for (const planned of prepare) console.log(`prepare  ${planned.suite.id}/${planned.task.id}: ${planned.task.run.join(' ')}`);
@@ -543,7 +524,16 @@ try {
   for (const id of options.suites) suites.find((suite) => suite.id === id)!.cleanup?.();
 }
 
-if (cancelling) process.exit(130);
+if (cancelling) {
+  const observed = new Set(results.map(result => `${result.suite}/${result.id}/${result.iteration}`));
+  for (const planned of tasks) {
+    if (observed.has(`${planned.suite.id}/${planned.task.id}/${planned.iteration}`)) continue;
+    results.push({suite: planned.suite.id, id: planned.task.id, iteration: planned.iteration,
+      command: planned.task.run, status: 'blocked', attempts: []});
+  }
+  writeReports(options, results, startedAt, Math.round(performance.now() - started), false);
+  process.exit(130);
+}
 
 // A process can escape a task late (a relaunch it scheduled, a host started on its way out). Look
 // once more under every root this run recorded; whatever is found fails the task that made the root.
@@ -571,6 +561,6 @@ const flaky = results.filter((result) => result.status === 'flaky').length;
 const failed = results.filter((result) => result.status === 'fail' || result.status === 'blocked').length;
 console.log(
   `${status === 'pass' ? 'PASS' : 'FAIL'} ${results.length - failed - flaky} passed, ${flaky} flaky, ${failed} failed`
-    + ` in ${seconds(performance.now() - started)} — report: output/check/report.md`,
+    + ` in ${seconds(performance.now() - started)} — report: ${relative(ROOT, OUTPUT)}/report.md`,
 );
 process.exit(status === 'pass' ? 0 : 1);
