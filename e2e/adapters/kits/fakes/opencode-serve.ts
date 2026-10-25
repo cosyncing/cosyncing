@@ -514,6 +514,7 @@ export class FakeOpenCodeServe {
       }), { headers: { 'content-type': 'text/event-stream' } });
     }
     if (path === '/global/health') return Response.json({ healthy: true, version: this.#version });
+    if (path === '/api/info') return new Response('<!doctype html><title>OpenCode</title>');
     if (path === '/project') {
       const directories = new Set([...this.sessions.values()].map((session) => String(session.info.directory)));
       for (const raw of this.#raw) directories.add(raw.directory);

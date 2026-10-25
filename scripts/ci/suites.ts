@@ -92,12 +92,20 @@ function bunTestTask(file: string, id: string, concurrency?: number): Task {
 
 /** Feature e2e suites: `e2e/<suite>/**\/*.test.ts`. */
 function e2eTasks(suite: SuiteId): Task[] {
-  return findTestFiles(`e2e/${suite}`).map((file) =>
+  return findTestFiles(`e2e/${suite}`).flatMap((file) => {
+    const id = file.slice(`e2e/${suite}/`.length).replace(/\.test\.ts$/, '');
+    // The two service generations share one conformance file but exceed a minute together.
+    if (suite === 'adapters' && id === 'conformance/opencode') {
+      return ['OpenCode', 'OpenCode V2'].map((profile, index) => ({
+        ...bunTestTask(file, `${id}-v${index + 1}`),
+        run: [...bunTestTask(file, id).run, '--test-name-pattern', `^${profile} adapter conformance`],
+      }));
+    }
     // Browser scenarios each own real renderers and brokers. Bound their inner
     // fanout as well as the runner's file pool; eight pages per file made the
     // two longest artifact scenarios exhaust their unchanged 120-second bound.
-    bunTestTask(file, file.slice(`e2e/${suite}/`.length).replace(/\.test\.ts$/, ''), suite === 'web' ? 2 : undefined)
-  );
+    return [bunTestTask(file, id, suite === 'web' ? 2 : undefined)];
+  });
 }
 
 /**

@@ -874,10 +874,10 @@ try {
       plainChecks.length === 0, JSON.stringify(plainChecks));
   }
 
-  for (const [version, code] of [['2.1.4', 'generation-2-unsupported'], ['3.0.0', 'generation-unknown']] as const) {
+  for (const [version, code, status] of [['2.1.3', 'version-below-minimum', 'warn'], ['2.1.4', 'version-supported', 'pass'], ['3.0.0', 'generation-unknown', 'warn']] as const) {
     const diagnosis = await diagnoseOpenCodeSetup(makeFixtureContext(testRoot, 'opencode', version));
     const detected = checkById(diagnosis, 'opencode.version');
-    check(`OpenCode ${version} is detected as unsupported`, detected.status === 'warn' && detected.detailCode === code);
+    check(`OpenCode ${version} has its generation-aware version verdict`, detected.status === status && detected.detailCode === code);
     check(`OpenCode ${version} does not warn about missing V1 storage`, checkById(diagnosis, 'opencode.storage').status === 'skip');
     check(`OpenCode ${version} is ineligible for managed serve`, checkById(diagnosis, 'opencode.managed-serve-eligibility').status === 'skip');
     check(`OpenCode ${version} has no managed-server setup remediation`, !checkById(diagnosis, 'opencode.server').remediation);

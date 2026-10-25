@@ -41,6 +41,7 @@ import {
   SessionCreateTemporarilyUnavailableError,
   SessionNotFoundError,
   TranscriptExportTooLargeError,
+  EXTERNAL_HOST_DISCOVERY_BUDGET_MS,
   bunSpawnResolvedInvocation,
   compareSemanticVersions,
   isOpaqueSessionId,
@@ -57,6 +58,11 @@ import { attachedTuiSessions, tuiPresenceSupported } from './tui-presence.ts';
 import { diagnoseOpenCodeSetup } from './diagnostics.ts';
 import { normalizeOpencodeVersion, opencodeAllowsV1, opencodeChildEnv, opencodeGeneration, opencodeGenerationForLaunch, OPENCODE_V1_READ_ONLY_REASON } from './generation.ts';
 import { mapOpenCodePart as mapSharedOpenCodePart } from '@cosyncing/opencode-wire';
+import { BindingResolver, type OpenCodeBinding } from './binding.ts';
+import { hasManagedOpencodeServe } from './managed-server.ts';
+import { OpenCodeV2Backend } from './v2/backend.ts';
+import { followV2Import } from './v2/connection.ts';
+import { readRegistration } from './v2/registration.ts';
 
 export { opencodeChildEnv } from './generation.ts';
 
@@ -364,6 +370,24 @@ export class OpenCodeAdapter implements AgentBackend {
   private modelCatalogCache: ModelOption[] = [];
   /** Present only when the source authoritatively names the connected providers. */
   private modelCatalogProviders?: Set<string>;
+  private readonly bindingResolver: BindingResolver;
+  private readonly v2: OpenCodeV2Backend;
+
+  get discoveryBudgetMs(): number | undefined {
+    const kind = opencodeGeneration().kind;
+    return this.v2.binding || kind === 'v2' || kind === 'future' || (kind === 'absent' && readRegistration().kind !== 'absent')
+      ? EXTERNAL_HOST_DISCOVERY_BUDGET_MS : undefined;
+  }
+
+  private async resolveBinding(): Promise<OpenCodeBinding> {
+    const binding = await this.bindingResolver.resolve();
+    if (binding.generation === 2) this.v2.useBinding(binding);
+    return binding;
+  }
+
+  private unavailable(binding: Extract<OpenCodeBinding, { generation: 'none' }>): never {
+    throw new SessionCreateTemporarilyUnavailableError('The OpenCode service is unavailable. Start OpenCode on its host, then reconnect.', binding.reason);
+  }
 
   constructor(opts: OpenCodeAdapterOptions = {}) {
     this.serverExplicitlyConfigured = opts.baseUrl !== undefined || !!process.env.OPENCODE_URL?.trim();
@@ -380,6 +404,12 @@ export class OpenCodeAdapter implements AgentBackend {
     this.sessionStoreDir = this.dataDir ? join(this.dataDir, 'storage', 'session') : '';
     this.storageRoot = this.dataDir ? join(this.dataDir, 'storage') : '';
     this.opencodeBin = resolveBin('opencode');
+    this.bindingResolver = new BindingResolver(this.baseUrl, this.serverExplicitlyConfigured, hasManagedOpencodeServe);
+    this.v2 = new OpenCodeV2Backend(this.bindingResolver, {
+      sseIdleMs: this.sseIdleMs,
+      sseReconnectMs: this.sseReconnectMs,
+      legacySessions: (options) => this.readDbSessions(options, true).parents,
+    });
   }
 
   /**
@@ -458,6 +488,12 @@ export class OpenCodeAdapter implements AgentBackend {
   }
 
   async isAvailable(): Promise<boolean> {
+    const binding = await this.resolveBinding();
+    if (binding.generation === 2) return true;
+    if (binding.generation === 'none') {
+      if (binding.reason === 'v2-service-starting') this.unavailable(binding);
+      return this.readPrivateSessions().parents.length > 0;
+    }
     if (this.sessionStoreDir || this.opencodeBin) return true;
     return this.serverAvailable();
   }
@@ -487,11 +523,26 @@ export class OpenCodeAdapter implements AgentBackend {
    *  `discoverSessions` hasn't polled recently. Used by the broker-owned serve watcher to defer a
    *  config-reload restart until idle. */
   anySessionBusy(): boolean {
+    if ((this.v2.binding || !opencodeAllowsV1(opencodeGeneration())) && !hasManagedOpencodeServe()) return this.v2.anyBusy();
     this.tracker.ensureStarted();
     return this.tracker.anyBusy();
   }
 
   async discoverSessions(options?: SessionDiscoveryOptions): Promise<SessionInfo[]> {
+    const binding = await this.resolveBinding();
+    if (binding.generation === 2) {
+      try { return await this.v2.discover(options); }
+      catch (error) { this.bindingResolver.invalidate(); throw error; }
+    }
+    if (binding.generation === 'none') {
+      if (binding.reason === 'v2-service-starting') this.unavailable(binding);
+      return this.readPrivateSessions(options).parents.map((session): SessionInfo => ({
+        id: session.id, tool: this.id, title: session.title || session.id, cwd: session.directory,
+        status: this.diskActivity(session.id), attachMode: 'observe', createdAt: session.time?.created, updatedAt: session.time?.updated,
+        currentModel: currentModelOf(session), currentAgent: currentAgentOf(session),
+        control: opencodePrivateControlState({ canDrive: false }),
+      }));
+    }
     const serverOk = await this.serverAvailable();
     if (serverOk) this.tracker.ensureStarted(); // begin (or keep) the global status subscription
     // GET /session is scoped to the serve's DEFAULT project (its CWD) — it returns only that one
@@ -616,13 +667,13 @@ export class OpenCodeAdapter implements AgentBackend {
     };
   }
 
-  private readDbSessions(options?: SessionDiscoveryOptions): { parents: OcSession[]; dirs: string[]; migrated?: boolean } {
+  private readDbSessions(options?: SessionDiscoveryOptions, allowMigrated = false): { parents: OcSession[]; dirs: string[]; migrated?: boolean } {
     const db = this.openDb();
     if (!db) return { parents: [], dirs: [] };
     try {
       // V2's presence makes its roster authoritative. Inspect only the DB the V1 reader opened,
       // read-only, and suppress legacy JSON too so already-imported sessions cannot leak back in.
-      if (!opencodeAllowsV1(opencodeGeneration(process.env, process.platform))
+      if (!allowMigrated && !opencodeAllowsV1(opencodeGeneration(process.env, process.platform))
           && db.query("select 1 from sqlite_master where type = 'table' and name = 'session_v2' limit 1").get()) {
         return { parents: [], dirs: [], migrated: true };
       }
@@ -775,6 +826,23 @@ export class OpenCodeAdapter implements AgentBackend {
 
   async attach(sessionId: string, mode?: AttachMode): Promise<SessionConnection> {
     if (!isOpaqueSessionId(sessionId)) throw new SessionNotFoundError('This OpenCode session id is not a session id.');
+    const binding = await this.resolveBinding();
+    if (binding.generation === 2) {
+      try { return await this.v2.attach(sessionId, mode === 'observe'); }
+      catch (error) {
+        if (!(error instanceof SessionNotFoundError)) throw error;
+        const row = (await this.v2.discover()).find((info) => info.id === sessionId && info.attachMode === 'observe');
+        if (!row) throw error;
+        if (mode === 'resume') throw new NativeSessionUnresumableError('This session has not yet been imported by OpenCode.');
+        return followV2Import(this.v2, new OpenCodeObserveConnection(this.storageRoot, row), mode === 'observe');
+      }
+    }
+    if (binding.generation === 'none') {
+      const info = this.privateSessionInfo(sessionId, false);
+      if (!info) this.unavailable(binding);
+      if (mode === 'resume' || mode === 'live') throw new NativeSessionUnresumableError(OPENCODE_V1_READ_ONLY_REASON);
+      return new OpenCodeObserveConnection(this.storageRoot, info);
+    }
     const serverOk = await this.serverAvailable();
     const list = await this.discoverSessions();
     // GET /session (used by discoverSessions) is scoped to the serve's default project dir, so a
@@ -873,6 +941,8 @@ export class OpenCodeAdapter implements AgentBackend {
   }
 
   async canCreateSession(): Promise<boolean> {
+    const binding = await this.resolveBinding();
+    if (binding.generation !== 1) return binding.generation === 2;
     return this.serverAvailable();
   }
 
@@ -880,6 +950,9 @@ export class OpenCodeAdapter implements AgentBackend {
    * A connection refusal may be the bounded broker-managed startup/restart window, so only that branch
    * waits and re-probes. HTTP responses are authoritative application/server answers and are never retried. */
   async prepareCreateSession(): Promise<void> {
+    const binding = await this.resolveBinding();
+    if (binding.generation === 2) return;
+    if (binding.generation === 'none') this.unavailable(binding);
     const first = await this.createReadinessProbe();
     if (first.kind === 'ready') return;
     if (first.kind === 'http-error') {
@@ -914,6 +987,9 @@ export class OpenCodeAdapter implements AgentBackend {
 
   /** Adapter-owned catalog shared by pre-session creation and attached-session pickers. */
   async listModels(): Promise<ModelOption[]> {
+    const binding = await this.resolveBinding();
+    if (binding.generation === 2) return this.v2.listModels();
+    if (binding.generation === 'none') this.unavailable(binding);
     return this.loadModelCatalog(undefined, false);
   }
 
@@ -943,7 +1019,10 @@ export class OpenCodeAdapter implements AgentBackend {
    *  waiting for the next roster sweep. First scan is a baseline (no events); scan errors keep the
    *  last confirmed set rather than synthesizing a mass detach. */
   watchSessionInfo(onChange: (info: SessionInfo, observationStartedAt?: number) => void): Unsubscribe {
-    if (!tuiPresenceSupported(this.baseUrl)) return () => {};
+    const stopV2 = this.v2.watch(onChange);
+    const generation = opencodeGeneration();
+    if (!opencodeAllowsV1(generation) || (generation.kind === 'absent' && readRegistration().kind !== 'absent')) return stopV2;
+    if (!tuiPresenceSupported(this.baseUrl)) return stopV2;
     let stopped = false;
     let prev: Set<string> | undefined;
     const poll = async () => {
@@ -966,6 +1045,7 @@ export class OpenCodeAdapter implements AgentBackend {
     const timer = setInterval(() => void poll(), TUI_PRESENCE_WATCH_MS);
     void poll();
     return () => {
+      stopV2();
       stopped = true;
       clearInterval(timer);
     };
@@ -1009,6 +1089,9 @@ export class OpenCodeAdapter implements AgentBackend {
     title?: string;
     model?: PromptInput['model'];
   } = {}): Promise<SessionInfo> {
+    const binding = await this.resolveBinding();
+    if (binding.generation === 2) return this.v2.create(opts);
+    if (binding.generation === 'none') this.unavailable(binding);
     const q = opts.directory ? `?directory=${encodeURIComponent(opts.directory)}` : '';
     const body: Record<string, unknown> = {};
     if (opts.title) body.title = opts.title;
@@ -1042,6 +1125,7 @@ export class OpenCodeAdapter implements AgentBackend {
   }
 
   async renameSession(sessionId: string, title: string | null): Promise<SessionInfo> {
+    if ((await this.resolveBinding()).generation !== 1) throw new ControlRefusedError('Native rename is not available for this connection.', 'command-unsupported');
     if (!isOpaqueSessionId(sessionId)) throw new SessionNotFoundError('This OpenCode session id is not a session id.');
     const trimmed = title == null ? null : Array.from(title.trim()).slice(0, 160).join('');
     const res = await fetch(this.url(`/session/${encodeURIComponent(sessionId)}`), {
@@ -1070,6 +1154,7 @@ export class OpenCodeAdapter implements AgentBackend {
   }
 
   async forkSession(sessionId: string, opts: { messageId?: string | null } = {}): Promise<SessionInfo> {
+    if ((await this.resolveBinding()).generation !== 1) throw new ControlRefusedError('Fork is not available for this connection.', 'command-unsupported');
     if (!isOpaqueSessionId(sessionId)) throw new SessionNotFoundError('This OpenCode session id is not a session id.');
     const messageID = opts.messageId?.trim() || undefined;
     const res = await fetch(this.url(`/session/${encodeURIComponent(sessionId)}/fork`), {
@@ -1109,6 +1194,7 @@ export class OpenCodeAdapter implements AgentBackend {
     sessionId: string,
     opts: { tempDir: string; maxBytes: number; timeoutMs: number },
   ): Promise<{ path: string; format: 'json' }> {
+    if ((await this.resolveBinding()).generation !== 1) throw new ControlRefusedError('Transcript export is not available for this connection.', 'command-unsupported');
     if (!this.opencodeBin) throw new Error('OpenCode CLI is not available on PATH; cannot export transcript.');
     // The id becomes an argv word: one that is not a session id must never reach the CLI.
     if (!isOpaqueSessionId(sessionId)) throw new SessionNotFoundError('This OpenCode session id is not a session id.');

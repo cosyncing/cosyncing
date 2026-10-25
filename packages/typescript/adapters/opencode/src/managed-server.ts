@@ -53,6 +53,11 @@ let managedLifecycleRestart: Promise<void> | null = null;
 let managedStartupInFlight: Promise<void> | null = null;
 let teardownRegistered = false;
 
+/** Whether the upgrade transition still has a broker-owned V1 runtime to finish. */
+export function hasManagedOpencodeServe(): boolean {
+  return managed !== null;
+}
+
 /** Broker-owned persistence effects used by the adapter-owned managed-server lifecycle. */
 export interface ManagedOpencodeServeState {
   readOwnership(): OpencodeServeOwnership | null;

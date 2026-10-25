@@ -294,6 +294,25 @@ const ZH_HUMAN_TEXT: Readonly<Record<string, string>> = Object.freeze({
   'OpenCode 2 is detected but not yet supported. cosyncing supports OpenCode 1.': '已检测到 OpenCode 2，但尚不支持。cosyncing 支持 OpenCode 1。',
   'This OpenCode generation is not yet supported. cosyncing supports OpenCode 1.': '尚不支持此 OpenCode 版本代系。cosyncing 支持 OpenCode 1。',
   'V1 storage checks do not apply to this OpenCode generation.': 'V1 存储检查不适用于此 OpenCode 版本代系。',
+  'V2 session history is read from the service.': 'V2 会话历史从服务读取。',
+  'cosyncing never starts, stops or pairs the OpenCode service.': 'cosyncing 不会启动、停止或配对 OpenCode 服务。',
+  'OpenCode service version is supported.': '支持此 OpenCode 服务版本。',
+  'The OpenCode service is below the supported minimum.': 'OpenCode 服务低于支持的最低版本。',
+  'This OpenCode service generation is not supported.': '不支持此 OpenCode 服务版本代系。',
+  'No usable OpenCode service registration was found. Start OpenCode on its host.': '未找到可用的 OpenCode 服务注册信息。请在其主机上启动 OpenCode。',
+  'OpenCode shared service is reachable.': '可以访问 OpenCode 共享服务。',
+  'The OpenCode service is starting. Existing sessions are retained.': 'OpenCode 服务正在启动，现有会话会保留。',
+  'OpenCode service credentials are required or were rejected.': '需要 OpenCode 服务凭据，或凭据已被拒绝。',
+  'Registration identity does not match the OpenCode service.': '注册身份与 OpenCode 服务不匹配。',
+  'The configured OpenCode URL is not a valid origin.': '配置的 OpenCode URL 不是有效的源地址。',
+  'Registration PID must be a positive integer.': '注册进程 ID 必须为正整数。',
+  'Registration URL is missing.': '缺少注册 URL。',
+  'Registration must name an HTTP(S) loopback origin with an explicit port and no path or credentials.': '注册信息必须指定带明确端口、不含路径或凭据的 HTTP(S) 回环源地址。',
+  'Registration identity or credential has an invalid type or size.': '注册身份或凭据的类型或大小无效。',
+  'Registration is not valid bounded JSON.': '注册信息不是大小受限的有效 JSON。',
+  'Registration must be owned by this user and not writable by other users.': '注册信息必须属于当前用户，且其他用户不可写入。',
+  'Registration exceeds its size limit.': '注册信息超过大小限制。',
+  'Registration is not a readable regular file.': '注册信息不是可读的普通文件。',
   'cosyncing does not manage this OpenCode generation.': 'cosyncing 不管理此 OpenCode 版本代系。',
   'OpenCode local session storage is readable.': 'OpenCode 本地会话存储可读。',
   'OpenCode local session storage is not present yet.': 'OpenCode 本地会话存储尚不存在。',
@@ -495,6 +514,7 @@ export function translateDoctorTextToChinese(source: string): string | undefined
     ?? replaceMatch(source, /^Install Node ([^ ]+) or newer, ensure the durable broker service PATH selects it, then restart cosyncing\.$/, (minimum) => `请安装 Node ${minimum} 或更高版本，确保持久 broker 服务 PATH 选择该版本，然后重启 cosyncing。`)
     ?? replaceMatch(source, /^Pi requires Node ([^ ]+) or newer, but its effective interpreter is unavailable\.$/, (minimum) => `Pi 需要 Node ${minimum} 或更高版本，但其实际解释器不可用。`)
     ?? replaceMatch(source, /^Pi requires Node ([^ ]+) or newer, but its effective interpreter is Node ([^ ]+)\.$/, (minimum, installed) => `Pi 需要 Node ${minimum} 或更高版本，但其实际解释器为 Node ${installed}。`)
+    ?? replaceMatch(source, /^(\d+) V1 sessions were not imported by OpenCode\.$/, (count) => `OpenCode 未导入 ${count} 个 V1 会话。`)
     ?? replaceMatch(source, /^Pi requires Node ([^ ]+) or newer, but its effective interpreter version could not be verified\.$/, (minimum) => `Pi 需要 Node ${minimum} 或更高版本，但无法验证实际解释器版本。`)
     ?? replaceMatch(source, /^Pi effective Node ([^ ]+) satisfies the installed distribution floor\.$/, (installed) => `Pi 的实际 Node ${installed} 满足已安装发行版的最低要求。`)
     ?? replaceMatch(source, /^No (.*) managed-start failure is recorded\.$/, (name) => `没有记录 ${name} 的托管启动失败。`)

@@ -28,7 +28,11 @@ import { delimiter, join } from 'node:path';
 import { eventually, fixturePath, type FixturePaths, type SessionStream } from '../../harness/index.ts';
 import { openCodeRows } from '../../harness/fakes/opencode-server.ts';
 import { FakeOpenCodeServe } from './fakes/opencode-serve.ts';
-import type { FakeOpencodeCliConfig } from './fakes/opencode-cli.ts';
+import { FakeOpenCodeV2Serve } from './fakes/opencode-v2-serve.ts';
+import { chmodSync, readFileSync, rmSync } from 'node:fs';
+import { OpencodeStore, type FakeOpencodeCliConfig } from './fakes/opencode-cli.ts';
+import { Database } from 'bun:sqlite';
+import { runCli } from '../../harness/cli.ts';
 import {
   type ConformanceContext,
   type ConformanceExtra,
@@ -368,6 +372,538 @@ export const opencodeKit: ConformanceKit = {
     return controller;
   },
 };
+
+export interface OpencodeV2Fake extends FakeController {
+  readonly ledger: OpencodeLedger;
+  readonly serve: FakeOpenCodeV2Serve;
+  readonly cli: InstalledFake;
+  readonly paths: FixturePaths;
+  readonly registrationPath: string;
+  readonly legacyStore: OpencodeStore;
+}
+
+class OpencodeV2Ledger extends OpencodeLedger {
+  override requests(method: string, from = 0): LedgerEntry[] {
+    const entries = this.since(from);
+    return entries.flatMap((entry): LedgerEntry[] => {
+      if (entry.kind !== 'request' || entry.method !== 'POST') return [];
+      const match = /^\/api\/session\/([^/]+)(.*)$/.exec(String(entry.path));
+      const native = entry.path === '/api/session' ? 'session/new' : match?.[2] === '/prompt' ? 'session/prompt' : match?.[2] === '/interrupt' ? 'session/cancel' : undefined;
+      if (native !== method) return [];
+      const body = entry.body as Record<string, any> | undefined;
+      const model = entries.findLast((item) => item.kind === 'prompt-model' && item.sessionId === match?.[1])?.model;
+      return [{ ...entry, kind: 'recv', frame: { method, params: { sessionId: match?.[1], cwd: body?.location?.directory, prompt: native === 'session/prompt' ? [{ text: body?.text }] : undefined, model }, native: body } }];
+    });
+  }
+
+  override replies(prefix: string, from = 0): LedgerEntry[] {
+    return this.since(from).filter((entry) => entry.kind === 'permission-reply' && (prefix === 'permission-' ? String(entry.id).startsWith('per_') : String(entry.id).startsWith(prefix)))
+      .map((entry) => ({ ...entry, kind: 'recv', frame: { id: entry.id, result: { outcome: entry.reply } } }));
+  }
+}
+
+export const opencodeV2Kit: ConformanceKit = {
+  profile: {
+    ...opencodeProfile,
+    displayName: 'OpenCode',
+    version: {
+      ...opencodeProfile.version, current: '2.1.4', below: '2.1.3', newer: '2.2.0',
+      doctor: {
+        current: { check: 'version', status: 'pass', detailCode: 'version-supported' },
+        below: { check: 'version', status: 'warn', detailCode: 'version-below-minimum' },
+        newer: { check: 'version', status: 'pass', detailCode: 'version-supported' },
+        missing: { check: 'binary', status: 'warn', detailCode: 'binary-missing' },
+      },
+    },
+    catalog: { ...opencodeProfile.catalog, commands: ['stop'], unknownCommandsForwarded: false },
+    terminal: { resumeHint: null, syncAvailable: false, handoff: false },
+    readOnlyAttach: { params: { readOnly: true }, attachMode: 'observe' },
+    subagents: true,
+    scenarios: {
+      ...opencodeProfile.scenarios,
+      C16: { skip: 'The service version controls availability independently of CLI banners; the service-floor profile scenario covers this boundary.' },
+      C17: { skip: 'A running V2 service works without a local CLI; the service lifecycle profile scenario covers this boundary.' },
+      C19: { skip: 'Prompt commands belong to the parity implementation; core stop and crafted unsupported controls are covered separately.' },
+      C22: { skip: 'Concurrent CLI variants cannot change one shared service version; the V2 doctor profile scenarios change the service itself.' },
+    },
+    hostileStore: opencodeProfile.hostileStore,
+  },
+  env(paths) {
+    return { OPENCODE_URL: `http://127.0.0.1:${leasedPort(paths)}`, XDG_STATE_HOME: join(paths.root, 'xdg-state'), OPENCODE_DATA: join(paths.root, 'opencode-data'), COSYNCING_OPENCODE_NO_AUTOSERVE: '1' };
+  },
+  install(paths): OpencodeV2Fake {
+    const root = join(paths.root, 'fakes', 'opencode-v2');
+    const controlDir = join(root, 'control');
+    mkdirSync(controlDir, { recursive: true });
+    const ledger = new OpencodeV2Ledger(join(root, 'ledger.jsonl'));
+    const registrationPath = join(paths.root, 'xdg-state', 'opencode', 'service.json');
+    const legacyStore = new OpencodeStore(join(paths.root, 'opencode-data'), 'sqlite');
+    const database = new Database(join(paths.root, 'opencode-data', 'opencode.db'));
+    database.exec('CREATE TABLE session_v2 (id TEXT PRIMARY KEY)');
+    database.close();
+    mkdirSync(join(paths.root, 'xdg-state', 'opencode'), { recursive: true });
+    const serve = new FakeOpenCodeV2Serve({
+      record: (entry) => appendFileSync(ledger.path, JSON.stringify({ at: Date.now(), pid: process.pid, ...entry }) + '\n'),
+      onRegistration: (value) => {
+        if (!value) { rmSync(registrationPath, { force: true }); return; }
+        writeFileSync(registrationPath, JSON.stringify(value), { mode: 0o600 });
+        chmodSync(registrationPath, 0o600);
+      },
+    });
+    serve.start(0); leases.set(paths.root, serve.port);
+    const cli = installFakeExecutable(paths.bin, 'opencode', 'opencode-cli.ts', { ledger: ledger.path, controlDir, version: '2.1.4' } satisfies FakeOpencodeCliConfig);
+    let workspaces = 0, seeded = 0;
+    const controller: OpencodeV2Fake = {
+      ledger, serve, cli, paths, registrationPath, legacyStore, storeRoot: join(paths.root, 'opencode-data'),
+      workspace(name = 'workspace') { const path = join(paths.root, 'workspaces', `${name}-${++workspaces}`); mkdirSync(path, { recursive: true }); return path; },
+      seedSession(options = {}) {
+        const id = `ses_seedv2${++seeded}${crypto.randomUUID().replaceAll('-', '').slice(0, 10)}`;
+        const cwd = options.childOf?.cwd ?? controller.workspace('seed');
+        const title = options.title ?? `OpenCode V2 seeded ${seeded}`;
+        serve.seed({ id, directory: cwd, title, turns: options.turns ?? 1, ...(options.childOf ? { parentID: options.childOf.id } : {}) });
+        const texts: string[] = [];
+        for (let i = 1; i <= (options.turns ?? 1); i++) texts.push(`seeded prompt ${i}`, `seeded answer ${i}`);
+        return { id, cwd, title, texts };
+      },
+      prepareCreate: (id) => serve.prepareCreate(id),
+      appendTurn: (session, user, answer) => serve.appendTurn(session.id, user, answer),
+      appendForeignUser: (session, text) => serve.appendTurn(session.id, text, 'terminal answer'),
+      appendPartial: (session) => { serve.appendPartial(session.id); },
+      completePartial: (session) => serve.completePartial(session.id),
+      rewriteHistory: (session) => serve.rewriteFirstUserText(session.id, 'rewritten first prompt'),
+      replaceLog: (session) => serve.rewriteFirstUserText(session.id, 'rewritten first prompt'),
+      watcherNoise: (session) => serve.noise(session.id),
+      setVersion(version, output) { cli.writeConfig({ ...cli.readConfig<FakeOpencodeCliConfig>(), version, versionOutput: output }); serve.setVersion(version); },
+      setInstalled(installed) { cli.setInstalled(installed); },
+      release: (tag) => serve.release(tag),
+      configure: () => ({}),
+      doctorEnvironment: () => ({ OPENCODE_URL: serve.url }),
+      storeSnapshot() { return new Map([...serve.sessions].map(([id, session]) => [`sessions/${id}.json`, JSON.stringify({ info: session.info, rows: session.messages })])); },
+      promptSettled(_stream, text) { const mark = ledger.mark(); return () => eventually(() => ledger.since(mark).some((entry) => (entry.kind === 'turn-end' || entry.kind === 'turn-aborted') && entry.text === text), { what: 'the V2 input to settle' }).then(() => {}); },
+      async cleanup() { serve.releaseAll(); serve.stop(); legacyStore.close(); },
+    };
+    return controller;
+  },
+  extras: [
+    {
+      title: 'caller-generated create identity and V2 source history keep cwd and lineage',
+      async run(context) {
+        const fake = context.fake as OpencodeV2Fake;
+        const cwd = fake.workspace('create');
+        fake.serve.ambiguousNext('/api/session');
+        const mark = fake.ledger.mark();
+        const response = await context.client.post('/api/sessions/opencode', { directory: cwd, title: 'V2 created', model: { providerID: OPENCODE_PROVIDER, modelID: 'model-b' } });
+        expect(response.status, response.text).toBe(200);
+        const id = response.body.session.id;
+        expect(fake.ledger.routed('POST', /^\/api\/session$/, mark)).toHaveLength(1);
+        expect(fake.ledger.routed('GET', new RegExp(`^/api/session/${id}$`), mark).length).toBeGreaterThan(0);
+        expect(id).toMatch(/^ses_/);
+        expect(fake.serve.session(id).info.location.directory).toBe(cwd);
+        const request = fake.ledger.routed('POST', /^\/api\/session$/).at(-1)!;
+        expect(request.body).toMatchObject({ id, location: { directory: cwd }, model: { providerID: OPENCODE_PROVIDER, id: 'model-b' } });
+        const stream = await context.client.attach('opencode', id);
+        await stream.waitForKind('history');
+        expect((await stream.waitForKind('session')).info.cwd).toBe(cwd);
+        stream.close();
+      },
+    },
+    {
+      title: 'pending input in another location survives stream overflow and resolves externally',
+      async run(context) {
+        const fake = context.fake as OpencodeV2Fake;
+        const session = await context.drivableSession('pending question');
+        const stream = await context.openDrive(session);
+        const turn = context.prompt(stream, '[[question]] choose one');
+        const card = await stream.waitForMessage((message) => message.type === 'question-request');
+        const mark = fake.ledger.mark();
+        const from = stream.frames.length;
+        fake.serve.emit('fixture.oversized', { sessionID: session.id, padding: 'x'.repeat(1024 * 1024 + 1) });
+        await stream.waitForFrame((frame) => frame.kind === 'history' && frame.reset === true, { after: from });
+        await eventually(() => fake.ledger.routed('GET', new RegExp(`^/api/session/${session.id}/form$`), mark).length > 0, { what: 'session-scoped pending state after the gap' });
+        await context.client.waitForSession((row) => row.id === session.id && row.status === 'needs-input');
+        fake.serve.pending.get(card.requestId)!.settle({ q0: 'Proceed' });
+        await stream.waitForMessage((message) => message.type === 'question-resolved' && message.requestId === card.requestId);
+        expect((await turn).kind).toBe('ack');
+        expect((await stream.sendAndAwait({ kind: 'answer', requestId: card.requestId, answers: [['Proceed']] })).kind).toBe('nack');
+        stream.close();
+      },
+    },
+    {
+      title: 'service identity change reloads history and refuses a resolved permission',
+      async run(context) {
+        const fake = context.fake as OpencodeV2Fake;
+        const session = await context.drivableSession('restart');
+        const stream = await context.openDrive(session);
+        const turn = context.prompt(stream, '[[permission]] externally resolved permission');
+        const permission = await stream.waitForMessage((message) => message.type === 'permission-request');
+        fake.serve.pending.get(permission.requestId)!.settle('once');
+        expect((await turn).kind).toBe('ack');
+        const from = stream.frames.length;
+        fake.serve.restartIdentity();
+        await stream.waitForFrame((frame) => frame.kind === 'history' && frame.reset === true, { after: from });
+        const mark = fake.ledger.mark();
+        expect((await stream.sendAndAwait({ kind: 'approve', requestId: permission.requestId, decision: 'approve' })).kind).toBe('nack');
+        expect(fake.ledger.routed('POST', /\/permission\/[^/]+\/reply$/, mark)).toHaveLength(0);
+        expect((await context.prompt(stream, 'after replacement')).kind).toBe('ack');
+        await stream.waitForMessage((message) => message.type === 'model-output' && message.text === 'answer: after replacement');
+        stream.close();
+      },
+    },
+    {
+      title: 'accepted prompt with an ambiguous response is reread without another POST',
+      async run(context) {
+        const fake = context.fake as OpencodeV2Fake;
+        const session = await context.drivableSession('ambiguous');
+        const stream = await context.openDrive(session);
+        const path = `/api/session/${session.id}/prompt`;
+        fake.serve.ambiguousNext(path);
+        const mark = fake.ledger.mark();
+        expect((await context.prompt(stream, 'ambiguous input')).kind).toBe('ack');
+        expect(fake.ledger.routed('POST', new RegExp(`^${path}$`), mark)).toHaveLength(1);
+        expect(fake.ledger.routed('GET', new RegExp(`^/api/session/${session.id}/inbox$`), mark)).toHaveLength(1);
+        expect(fake.ledger.routed('GET', new RegExp(`^/api/session/${session.id}/message/msg_`), mark)).toHaveLength(1);
+        stream.close();
+      },
+    },
+    {
+      title: 'stop is offered and crafted unsupported commands are refused',
+      async run(context) {
+        const session = await context.drivableSession('controls');
+        const stream = await context.openDrive(session);
+        expect((await stream.sendAndAwait({ kind: 'command', name: 'stop' })).kind).toBe('ack');
+        expect((await stream.sendAndAwait({ kind: 'command', name: 'not-a-command' })).kind).toBe('nack');
+        stream.close();
+      },
+    },
+    {
+      title: 'the shared service stays usable without a CLI and only the server version gates create',
+      async run(context) {
+        const fake = context.fake as OpencodeV2Fake;
+        fake.cli.setInstalled(false);
+        try {
+          expect((await context.client.post('/api/sessions/opencode', { directory: fake.workspace('no-cli') })).status).toBe(200);
+        } finally { fake.cli.setInstalled(true); }
+        for (const [version, expected] of [['2.1.3', 503], ['2.2.0', 200]] as const) {
+          fake.serve.setVersion(version);
+          await context.restart();
+          const response = await context.client.post('/api/sessions/opencode', { directory: fake.workspace('version') });
+          expect(response.status, response.text).toBe(expected);
+        }
+        fake.serve.setVersion('2.1.4');
+        await context.restart();
+      },
+    },
+  ],
+};
+
+async function v2Doctor(context: ConformanceContext, overrides: Record<string, string> = {}): Promise<{ checks: any[]; raw: string }> {
+  const result = await runCli(['doctor', '--json'], { env: { ...context.broker.env, ...overrides }, timeoutMs: 60_000 });
+  expect(result.timedOut).toBe(false);
+  const report = JSON.parse(result.stdout);
+  return { checks: (report.sections ?? []).flatMap((section: any) => section.checks ?? []).filter((check: any) => check.id.startsWith('opencode.')), raw: result.output };
+}
+
+opencodeV2Kit.extras!.push(
+  {
+    title: 'registration binds the broker without an explicit URL or a local CLI',
+    async run(context) {
+      const fake = context.fake as OpencodeV2Fake;
+      const explicit = context.broker.env.OPENCODE_URL;
+      try {
+        delete context.broker.env.OPENCODE_URL;
+        fake.cli.setInstalled(false);
+        await context.restart();
+        const response = await context.client.post('/api/sessions/opencode', { directory: fake.workspace('registration') });
+        expect(response.status, response.text).toBe(200);
+        expect((await context.client.sessions({ refresh: true })).some((row: any) => row.id === response.body.session.id)).toBe(true);
+        const original = readFileSync(fake.registrationPath, 'utf8');
+        for (const invalid of [{ ...JSON.parse(original), url: `http://0.0.0.0:${fake.serve.port}` }, { ...JSON.parse(original), pid: process.pid + 1 }]) {
+          writeFileSync(fake.registrationPath, JSON.stringify(invalid));
+          const mark = fake.ledger.mark();
+          const refused = await context.client.post('/api/sessions/opencode', { directory: fake.workspace('invalid-registration') });
+          expect(refused.status).toBe(503);
+          expect(fake.ledger.since(mark).filter((entry) => entry.kind === 'request' && entry.method === 'POST')).toHaveLength(0);
+        }
+        fake.serve.publishRegistration();
+      } finally { fake.serve.publishRegistration(); context.broker.env.OPENCODE_URL = explicit; fake.cli.setInstalled(true); await context.restart(); }
+    },
+  },
+  {
+    title: 'registration discovery validates identity and rejects non-loopback, unsafe and stale records',
+    async run(context) {
+      const fake = context.fake as OpencodeV2Fake;
+      const original = readFileSync(fake.registrationPath, 'utf8');
+      try {
+        const good = await v2Doctor(context, { OPENCODE_URL: '' });
+        expect(good.checks.find((check) => check.id === 'opencode.server')?.detailCode).toBe('server-reachable');
+        for (const patch of [{ url: `http://0.0.0.0:${fake.serve.port}` }, { pid: process.pid + 100000 }]) {
+          writeFileSync(fake.registrationPath, JSON.stringify({ ...JSON.parse(original), ...patch }));
+          const report = await v2Doctor(context, { OPENCODE_URL: '' });
+          expect(report.checks.find((check) => check.id === 'opencode.server')?.detailCode).toBe('registration-invalid');
+        }
+        writeFileSync(fake.registrationPath, original);
+        if (process.platform !== 'win32') {
+          chmodSync(fake.registrationPath, 0o666);
+          const report = await v2Doctor(context, { OPENCODE_URL: '' });
+          expect(report.checks.find((check) => check.id === 'opencode.server')?.detailCode).toBe('registration-invalid');
+        }
+      } finally { writeFileSync(fake.registrationPath, original); chmodSync(fake.registrationPath, 0o600); }
+    },
+  },
+  {
+    title: 'an explicit URL never uses another origin credential or follows a redirect',
+    async run(context) {
+      const fake = context.fake as OpencodeV2Fake;
+      const requests: { path: string; authorization: boolean }[] = [];
+      const decoy = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch(request) {
+        requests.push({ path: new URL(request.url).pathname, authorization: request.headers.has('authorization') });
+        return Response.json({ _tag: 'UnauthorizedError' }, { status: 401 });
+      } });
+      try {
+        const url = `http://127.0.0.1:${decoy.port}`;
+        const mark = fake.ledger.mark();
+        const report = await v2Doctor(context, { OPENCODE_URL: url });
+        expect(report.checks.find((check) => check.id === 'opencode.server')?.detailCode).toBe('credential-required');
+        expect(requests.length).toBeGreaterThan(0);
+        expect(requests.every((request) => request.path === '/api/info' && !request.authorization)).toBe(true);
+        expect(fake.ledger.since(mark).filter((entry) => entry.kind === 'request' && entry.method === 'POST')).toHaveLength(0);
+        requests.length = 0;
+        fake.serve.redirectNext('/api/info', url + '/redirected');
+        await context.restart();
+        const refused = await context.client.post('/api/sessions/opencode', { directory: fake.workspace('redirect') });
+        expect(refused.status).toBe(503);
+        expect(requests).toHaveLength(0);
+      } finally { decoy.stop(true); fake.serve.publishRegistration(); await context.restart(); }
+    },
+  },
+  {
+    title: 'doctor checks the service floor and rejected credentials without managed-server remediation',
+    async run(context) {
+      const fake = context.fake as OpencodeV2Fake;
+      const credential = fake.serve.registration().password;
+      try {
+        for (const [version, expected, status] of [['2.1.4', 'version-supported', 'pass'], ['2.1.3', 'version-below-minimum', 'warn'], ['2.2.0', 'version-supported', 'pass']] as const) {
+          fake.serve.setVersion(version);
+          const report = await v2Doctor(context);
+          expect(report.checks.find((check) => check.id === 'opencode.version')).toMatchObject({ detailCode: expected, status });
+          expect(report.checks.find((check) => check.id === 'opencode.managed-serve-eligibility')).toMatchObject({ status: 'skip', detailCode: 'external-v2-service' });
+          expect(report.raw).not.toContain(credential);
+        }
+        fake.serve.setVersion('2.1.4');
+        fake.serve.failNext('GET', '/api/info', 401, 100);
+        const mark = fake.ledger.mark();
+        const rejected = await v2Doctor(context);
+        expect(rejected.checks.find((check) => check.id === 'opencode.server')?.detailCode).toBe('credential-rejected');
+        expect(fake.ledger.paths(mark).some((path) => path.includes('/global/health') || path === 'GET /session')).toBe(false);
+        expect(rejected.checks.find((check) => check.id === 'opencode.server')?.remediation).toBeUndefined();
+      } finally { fake.serve.failNext('GET', '/api/info', 401, 0); fake.serve.setVersion('2.1.4'); await context.restart(); }
+    },
+  },
+  {
+    title: 'startup and failed roster reads preserve existing rows until a successful sweep',
+    async run(context) {
+      const fake = context.fake as OpencodeV2Fake;
+      const session = fake.seedSession({ title: 'retained during startup' });
+      await context.client.waitForSession((row) => row.id === session.id);
+      fake.serve.failNext('GET', '/api/session', 503, 100, { code: 'service_starting' });
+      try {
+        expect((await context.client.sessions({ refresh: true })).some((row: any) => row.id === session.id)).toBe(true);
+      } finally { fake.serve.failNext('GET', '/api/session', 503, 0); }
+      fake.serve.failNext('GET', '/api/info', 503, 100, { code: 'service_starting' });
+      try {
+        const report = await v2Doctor(context);
+        expect(report.checks.find((check) => check.id === 'opencode.server')?.detailCode).toBe('v2-service-starting');
+      } finally { fake.serve.failNext('GET', '/api/info', 503, 0); await context.restart(); }
+    },
+  },
+  {
+    title: 'migration augments missing V1 rows read-only and completion makes the service authoritative',
+    async run(context) {
+      const fake = context.fake as OpencodeV2Fake;
+      const id = 'ses_fixture_imported';
+      const omittedId = 'ses_fixture_unimported';
+      const cwd = fake.workspace('import');
+      const now = Date.now();
+      fake.legacyStore.putSession({ id, directory: cwd, title: 'not imported yet', created: now, updated: now, model: { providerID: OPENCODE_PROVIDER, modelID: 'model-b' } });
+      fake.legacyStore.putMessage(id, { id: 'msg_fixture_legacy_import', role: 'user', time: { created: now } });
+      fake.legacyStore.putPart(id, 'msg_fixture_legacy_import', { id: 'prt_fixture_legacy_import', type: 'text', text: 'legacy history before import' });
+      fake.serve.migration = 'running';
+      try {
+        const before = await context.client.waitForSession((row) => row.id === id);
+        expect(before.attachMode).toBe('observe');
+        expect(before.control.drive.supported).toBe(false);
+        expect(before.currentModel).toMatchObject({ providerID: OPENCODE_PROVIDER, modelID: 'model-b' });
+        const legacy = await context.client.attach('opencode', id);
+        const legacyHistory = await legacy.waitForKind('history');
+        expect(legacyHistory.messages.some((message: any) => message.type === 'user-message' && message.text === 'legacy history before import')).toBe(true);
+        const from = legacy.frames.length;
+        fake.serve.seed({ id, directory: cwd, title: 'imported', turns: 1, model: { providerID: OPENCODE_PROVIDER, modelID: 'model-b' } });
+        const imported = await context.client.waitForSession((row) => row.id === id && row.attachMode === 'live');
+        expect(imported.cwd).toBe(cwd);
+        expect(imported.currentModel).toMatchObject({ providerID: OPENCODE_PROVIDER, modelID: 'model-b' });
+        const history = await legacy.waitForFrame((frame) => frame.kind === 'history' && frame.reset === true, { after: from });
+        expect(history.messages.some((message: any) => message.type === 'model-output' && message.text === 'seeded answer 1')).toBe(true);
+        expect(history.messages.some((message: any) => message.text === 'legacy history before import')).toBe(false);
+        expect((await context.prompt(legacy, 'after import')).kind).toBe('ack');
+        legacy.close();
+        fake.legacyStore.putSession({ id: omittedId, directory: cwd, title: 'omitted by importer', created: now, updated: now });
+        await context.client.waitForSession((row) => row.id === omittedId && row.attachMode === 'observe');
+        fake.serve.migration = 'completed';
+        const report = await v2Doctor(context);
+        expect(report.checks.find((check) => check.id === 'opencode.storage')).toMatchObject({ detailCode: 'v1-sessions-not-imported', evidence: { count: 1 } });
+        const rows = await context.client.sessions({ refresh: true });
+        expect(rows.some((row: any) => row.id === omittedId)).toBe(false);
+        expect(rows.some((row: any) => row.id === id)).toBe(true);
+      } finally { fake.serve.migration = 'completed'; }
+    },
+  },
+  {
+    title: 'multiple roster pages exclude archived rows and history pages keep stable text keys',
+    async run(context) {
+      const fake = context.fake as OpencodeV2Fake;
+      const cwd = fake.workspace('pages');
+      const ids = Array.from({ length: 110 }, (_, i) => `ses_fixture_page_${i}`);
+      for (const id of ids) fake.serve.seed({ id, directory: cwd, turns: 0 });
+      const archived = 'ses_fixture_archived';
+      fake.serve.seed({ id: archived, directory: cwd, turns: 0 }).info.time.archived = Date.now();
+      const rows = await context.client.sessions({ refresh: true });
+      expect(ids.every((id) => rows.some((row: any) => row.id === id))).toBe(true);
+      expect(rows.some((row: any) => row.id === archived)).toBe(false);
+      const historyId = 'ses_fixture_history_pages';
+      fake.serve.seed({ id: historyId, directory: cwd, turns: 90 });
+      await context.client.waitForSession((row) => row.id === historyId);
+      const stream = await context.client.attach('opencode', historyId);
+      const history = await stream.waitForKind('history');
+      expect(history.messages.filter((message: any) => message.type === 'user-message')).toHaveLength(90);
+      expect(history.messages.filter((message: any) => message.type === 'model-output')).toHaveLength(90);
+      const keys = history.messages.filter((message: any) => message.type === 'model-output').map((message: any) => message.key);
+      expect(new Set(keys).size).toBe(90);
+      stream.close();
+    },
+  },
+  {
+    title: 'unsupported forms stay needs-input and answer in terminal without a guessed reply',
+    async run(context) {
+      const fake = context.fake as OpencodeV2Fake;
+      fake.serve.formFields = [{ key: 'q0', type: 'string', title: 'Code', pattern: '^[A-Z]+$' }];
+      const session = await context.drivableSession('terminal-only form');
+      const stream = await context.openDrive(session);
+      try {
+        const turn = context.prompt(stream, '[[question]] enter a code');
+        const card = await stream.waitForMessage((message) => message.type === 'question-request');
+        expect(card).toMatchObject({ readOnly: true, answerInTerminal: true });
+        await context.client.waitForSession((row) => row.id === session.id && row.status === 'needs-input');
+        const mark = fake.ledger.mark();
+        expect((await stream.sendAndAwait({ kind: 'answer', requestId: card.requestId, answers: [['ABC']] })).kind).toBe('nack');
+        expect((await stream.sendAndAwait({ kind: 'reject-question', requestId: card.requestId })).kind).toBe('nack');
+        expect(fake.ledger.routed('POST', /\/form\/[^/]+\/reply$/, mark)).toHaveLength(0);
+        expect(fake.ledger.routed('DELETE', /\/form\/[^/]+$/, mark)).toHaveLength(0);
+        fake.serve.pending.get(card.requestId)!.settle({ q0: 'ABC' });
+        expect((await turn).kind).toBe('ack');
+      } finally { fake.serve.formFields = undefined; stream.close(); }
+    },
+  },
+  {
+    title: 'form fields retain native values and validate typed answers before posting',
+    async run(context) {
+      const fake = context.fake as OpencodeV2Fake;
+      fake.serve.formFields = [
+        { key: 'choice', type: 'string', title: 'Choice', required: true, options: [{ value: 'native-value', label: 'Visible choice' }] },
+        { key: 'many', type: 'multiselect', title: 'Several', options: [{ value: 'one', label: 'One' }, { value: 'two', label: 'Two' }] },
+        { key: 'number', type: 'integer', title: 'Count', required: true, min: 1, max: 3 },
+        { key: 'enabled', type: 'boolean', title: 'Enabled' },
+        { key: 'text', type: 'string', title: 'Text', minLength: 2, maxLength: 5 },
+        { key: 'hidden', type: 'string', hidden: true, required: true, default: 'default-value' },
+      ];
+      const session = await context.drivableSession('typed form');
+      const stream = await context.openDrive(session);
+      try {
+        const turn = context.prompt(stream, '[[question]] typed answers');
+        const card = await stream.waitForMessage((message) => message.type === 'question-request');
+        expect(card.readOnly).not.toBe(true);
+        const mark = fake.ledger.mark();
+        const answers = [['Visible choice'], ['One', 'Two'], ['9'], ['true'], ['hello']];
+        expect((await stream.sendAndAwait({ kind: 'answer', requestId: card.requestId, answers })).kind).toBe('nack');
+        expect(fake.ledger.routed('POST', /\/form\/[^/]+\/reply$/, mark)).toHaveLength(0);
+        answers[2] = ['2'];
+        expect((await stream.sendAndAwait({ kind: 'answer', requestId: card.requestId, answers })).kind).toBe('ack');
+        expect(fake.ledger.routed('POST', /\/form\/[^/]+\/reply$/, mark).at(-1)?.body).toEqual({ answer: { choice: 'native-value', many: ['one', 'two'], number: 2, enabled: true, text: 'hello', hidden: 'default-value' } });
+        expect((await turn).kind).toBe('ack');
+      } finally { fake.serve.formFields = undefined; stream.close(); }
+    },
+  },
+  {
+    title: 'agent selection uses native IDs and rejects an unavailable agent',
+    async run(context) {
+      const fake = context.fake as OpencodeV2Fake;
+      const session = await context.drivableSession('agent choice');
+      const stream = await context.openDrive(session);
+      try {
+        expect((await context.prompt(stream, 'plan a change', { agent: 'plan' })).kind).toBe('ack');
+        expect(fake.serve.session(session.id).info.agent).toBe('plan');
+        const mark = fake.ledger.mark();
+        expect((await stream.sendAndAwait({ kind: 'prompt', text: 'invalid agent', agent: 'unknown-agent' })).kind).toBe('nack');
+        expect(fake.ledger.routed('POST', /\/agent$/, mark)).toHaveLength(0);
+      } finally { stream.close(); }
+    },
+  },
+  {
+    title: 'durable text and tool results replace live slots and unknown events are dropped',
+    async run(context) {
+      const fake = context.fake as OpencodeV2Fake;
+      const session = await context.drivableSession('native blocks');
+      const stream = await context.openDrive(session);
+      try {
+        const from = stream.frames.length;
+        const messageId = 'msg_fixture_native_blocks';
+        const common = { sessionID: session.id, assistantMessageID: messageId };
+        fake.serve.emit('session.reasoning.delta', { ...common, ordinal: 0, delta: 'thinking' });
+        fake.serve.emit('session.reasoning.ended', { ...common, ordinal: 0, text: 'finished reasoning' }, true);
+        fake.serve.emit('session.text.delta', { ...common, ordinal: 1, delta: 'partial' });
+        fake.serve.emit('session.text.ended', { ...common, ordinal: 1, text: 'complete answer' }, true);
+        fake.serve.emit('session.text.delta', { ...common, ordinal: 1, delta: 'stale delta' });
+        fake.serve.emit('session.future-event', { sessionID: session.id, text: 'unknown payload' });
+        fake.serve.emit('session.tool.input.started', { ...common, id: 'call_fixture_shell', name: 'shell' }, true);
+        fake.serve.emit('session.tool.called', { ...common, id: 'call_fixture_shell', input: { command: 'printf fixture' } }, true);
+        fake.serve.emit('session.tool.success', { ...common, id: 'call_fixture_shell', content: [{ type: 'text', text: 'fixture' }], metadata: { exit: 0 } }, true);
+        await stream.waitForFrame((frame) => frame.kind === 'message' && frame.message.type === 'tool-result' && frame.message.callId === 'call_fixture_shell' && !frame.message.pending, { after: from });
+        const messages = stream.frames.slice(from).filter((frame) => frame.kind === 'message').map((frame) => frame.message);
+        expect(messages.some((message) => message.delta === 'stale delta' || message.text === 'unknown payload')).toBe(false);
+        expect(messages.find((message) => message.type === 'model-output' && message.text === 'complete answer')?.key).toBe(`${messageId}:1`);
+        expect(messages.find((message) => message.type === 'thinking' && message.text === 'finished reasoning')?.key).toBe(`${messageId}:0`);
+        expect(messages.find((message) => message.type === 'tool-call')).toMatchObject({ callId: 'call_fixture_shell', args: { command: 'printf fixture' } });
+        expect(messages.findLast((message) => message.type === 'tool-result')).toMatchObject({ callId: 'call_fixture_shell', result: 'fixture', exitCode: 0 });
+      } finally { stream.close(); }
+    },
+  },
+  {
+    title: 'failed executions, form dismissal and saved or rejected permissions use native outcomes',
+    async run(context) {
+      const fake = context.fake as OpencodeV2Fake;
+      const session = await context.drivableSession('outcomes');
+      const stream = await context.openDrive(session);
+      try {
+        const from = stream.frames.length;
+        expect((await context.prompt(stream, '[[error]] failed execution')).kind).toBe('ack');
+        await stream.waitForFrame((frame) => frame.kind === 'message' && frame.message.type === 'run-summary' && frame.message.status === 'error', { after: from });
+        for (const [decision, native] of [['approve-session', 'always'], ['reject', 'reject']] as const) {
+          const mark = fake.ledger.mark();
+          const turn = context.prompt(stream, `[[permission]] ${decision}`);
+          const card = await stream.waitForFrame((frame) => frame.kind === 'message' && frame.message.type === 'permission-request' && fake.serve.pending.has(frame.message.requestId), { after: from });
+          expect((await stream.sendAndAwait({ kind: 'approve', requestId: card.message.requestId, decision })).kind).toBe('ack');
+          expect((await turn).kind).toBe('ack');
+          expect(fake.ledger.routed('POST', /\/permission\/[^/]+\/reply$/, mark).at(-1)?.body).toEqual({ decision: native });
+        }
+        const turn = context.prompt(stream, '[[question]] dismiss form');
+        const card = await stream.waitForMessage((message) => message.type === 'question-request');
+        const mark = fake.ledger.mark();
+        expect((await stream.sendAndAwait({ kind: 'reject-question', requestId: card.requestId })).kind).toBe('ack');
+        expect((await turn).kind).toBe('ack');
+        expect(fake.ledger.routed('DELETE', /\/form\/[^/]+$/, mark)).toHaveLength(1);
+      } finally { stream.close(); }
+    },
+  },
+);
 
 // ------------------------------------------------------------- port leasing
 

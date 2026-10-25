@@ -87,11 +87,11 @@ function lastSessionFrame(stream: SessionStream): Frame | undefined {
   return stream.frames.findLast((frame) => frame.kind === 'session');
 }
 
-export function conformanceSuite(kit: ConformanceKit): void {
+export function conformanceSuite(kit: ConformanceKit, suiteName = kit.profile.displayName): void {
   const { profile } = kit;
   const agent = profile.agent;
 
-  describe(`${profile.displayName} adapter conformance`, () => {
+  describe(`${suiteName} adapter conformance`, () => {
     let broker: Broker;
     let fake: FakeController;
     let client: BrokerClient;
