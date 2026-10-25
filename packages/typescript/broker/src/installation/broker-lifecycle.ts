@@ -1,3 +1,4 @@
+import { WindowsTaskSchedulerPowerShellBackend } from './windows-task-scheduler-powershell.ts';
 import { createHash } from 'node:crypto';
 import { desktopBridgeIsOwned, desktopBridgePaths, removeDesktopBridge } from '../updates/desktop-update-bridge.ts';
 import { DESKTOP_HELPER_RESOURCE_ID } from '../updates/desktop-updater-support.ts';
@@ -657,7 +658,10 @@ async function environment(options: LifecycleBaseOptions): Promise<LifecycleEnvi
   const config = configInspection.status === 'ok' ? configInspection.config : undefined;
   const setupState = readSetupState(home);
   const install = inspectInstallState(home);
+  // Windows service identity comes from the install receipt. A completed
+  // uninstall can leave setup preferences, but cannot authorize a service.
   const provider = isDurableServiceChoice(setupState.serviceChoice)
+    && (context.platform !== 'win32' || install.committed && !!install.state.installationId)
     ? createLifecycleDurableServiceProvider({ ...options, home, context })
     : undefined;
   // Same reason as the provider above: the omp/Pi agent directories are receipt-owned service
@@ -2814,6 +2818,15 @@ export async function runUninstall(options: UninstallOptions): Promise<Lifecycle
     env = await environment(options);
     remaining = [...plan.warnings.map((warning) => warning.detailCode)];
     retainedResources = env.install.committed ? [...env.install.state.resources] : [];
+    // Independent update tasks live outside the service folder. Sweep even if
+    // the service itself is already absent; running/queued workers are preserved.
+    if (process.platform === 'win32' && env.context.platform === 'win32') {
+      try { new WindowsTaskSchedulerPowerShellBackend().cleanupUpdateTasks(); }
+      catch {
+        remaining.push('windows-update-task-cleanup-failed');
+        leftBehind.push('stale Windows updater tasks; retry uninstall to remove them');
+      }
+    }
     for (const action of plan.actions) {
       try {
         if (action.id === 'desktop-helper.remove') {

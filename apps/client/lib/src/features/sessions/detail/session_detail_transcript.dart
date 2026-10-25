@@ -770,6 +770,7 @@ final class _SemanticViewportCapture {
 class _TranscriptSurface extends ConsumerStatefulWidget {
   const _TranscriptSurface({
     required this.state,
+    required this.composerTapGroup,
     required this.controller,
     required this.isConnected,
     required this.hasActiveBrokerClient,
@@ -784,6 +785,7 @@ class _TranscriptSurface extends ConsumerStatefulWidget {
   });
 
   final SessionDetailState state;
+  final Object composerTapGroup;
   final SessionDetailController controller;
   final bool isConnected;
   final bool hasActiveBrokerClient;
@@ -1071,24 +1073,328 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     ),
   );
 
-  /// The jump-to-latest button, built once for the same reason as
-  /// [_readingScrollbar]; it reads its tooltip in its own build.
+  final _navigationRevision = ValueNotifier<int>(0);
+  final Set<GlobalKey<State<StatefulWidget>>> _promptKeys = {};
+  final Map<GlobalKey<State<StatefulWidget>>, TranscriptHistoryGapSegment>
+  _promptGaps = {};
+  bool _readingLatched = false;
+  bool _promptBusy = false;
+  bool _promptWasFollowing = false;
+  final List<int> _promptStopIndices = [];
+  ({GlobalKey<State<StatefulWidget>>? key, String? cursor, String? blocked})?
+  _promptTargetSnapshot;
+  int _promptIntent = 0;
+  ({int pointer, bool cancel, int intent})? _promptPress;
+  String? _pendingPromptIdentity;
+  String? _pendingPromptMessageKey;
+  void _announcePromptNavigation(String message) {
+    unawaited(
+      SemanticsService.sendAnnouncement(
+        View.of(context),
+        message,
+        Directionality.of(context),
+      ),
+    );
+  }
+
+  ({GlobalKey<State<StatefulWidget>>? key, String? cursor, String? blocked})?
+  _previousPromptTarget() {
+    final position = _transcriptPosition();
+    if (position == null || !position.hasContentDimensions) return null;
+    final pending = _pendingPromptIdentity;
+    final pendingIndex = pending == null ? -1 : _rowIdentities.indexOf(pending);
+    final reader = pendingIndex >= 0 ? null : _readerRow(position);
+    if (pendingIndex < 0 && reader == null) return null;
+    final start = pendingIndex >= 0
+        ? pendingIndex - 1
+        : (_itemIndexByKey[reader!.key] ?? 0);
+    final l10n = AppLocalizations.of(context);
+    for (final index in _promptStopIndices.reversed) {
+      if (index > start) continue;
+      final key = _orderedItemKeys[index];
+      final geometry = _rowGeometry(key);
+      if (pendingIndex < 0 &&
+          geometry != null &&
+          geometry.top - position.pixels >= 8) {
+        continue;
+      }
+      if (_promptKeys.contains(key)) {
+        if (geometry != null &&
+            pendingIndex < 0 &&
+            (geometry.top - 16).clamp(
+                  position.minScrollExtent,
+                  position.maxScrollExtent,
+                ) >=
+                position.pixels - 0.5) {
+          // At the beginning, valid-range clamping is already the landing.
+          continue;
+        }
+        return (key: key, cursor: null, blocked: null);
+      }
+      final gap = _promptGaps[key];
+      if (gap != null) {
+        final cursor = gap.reloadCursor;
+        if (cursor != null && widget.controller.promptStartKnownAt(cursor)) {
+          return null;
+        }
+        return (
+          key: null,
+          cursor: cursor,
+          blocked: cursor == null || widget.state.historyGapRefused(gap)
+              ? l10n.sessionHistoryPromptUnavailable
+              : _promptLoadingBlock(cursor),
+        );
+      }
+    }
+    final state = widget.state;
+    final cursor = state.olderHistoryCursor;
+    if (cursor != null && widget.controller.promptStartKnownAt(cursor)) {
+      return null;
+    }
+    if (state.historyStartReached &&
+        cursor == null &&
+        !state.activeTranscriptWindow.leadingEdgeReleased) {
+      return null;
+    }
+    if (cursor == null &&
+        !state.hasEarlierHistory &&
+        !state.activeTranscriptWindow.leadingEdgeReleased &&
+        state.activeTranscriptWindow.latestHistoryGap == null) {
+      return null;
+    }
+    return (
+      key: null,
+      cursor: cursor,
+      blocked: cursor == null
+          ? l10n.sessionHistoryPromptUnavailable
+          : _promptLoadingBlock(cursor),
+    );
+  }
+
+  String? _promptLoadingBlock(String cursor) {
+    final l10n = AppLocalizations.of(context);
+    if (!widget.isConnected) return l10n.sessionHistoryPromptOffline;
+    if (!widget.controller.canFindPreviousPrompt ||
+        widget.state.historyPagingBlockedAt(cursor) ||
+        widget.controller.promptSearchBlockedAt(cursor)) {
+      return l10n.sessionHistoryPromptUnavailable;
+    }
+    return null;
+  }
+
   late final Widget _jumpLatestButton = Positioned(
     right: 16,
     bottom: 16,
-    child: ValueListenableBuilder<bool>(
-      valueListenable: _showJumpLatest,
-      builder: (context, visible, _) => Offstage(
-        offstage: !visible,
-        child: IconButton.filledTonal(
-          key: const Key('session-history-jump-latest'),
-          onPressed: _jumpToLatest,
-          tooltip: AppLocalizations.of(context).sessionHistoryJumpLatest,
-          icon: const Icon(Icons.arrow_downward),
-        ),
+    child: TextFieldTapRegion(
+      groupId: widget.composerTapGroup,
+      child: AnimatedBuilder(
+        animation: Listenable.merge([_showJumpLatest, _navigationRevision]),
+        builder: (context, _) {
+          final target = _promptTargetSnapshot;
+          final l10n = AppLocalizations.of(context);
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              if (_promptBusy || target != null)
+                Listener(
+                  onPointerDown: (event) {
+                    _promptPress ??= (
+                      pointer: event.pointer,
+                      cancel: _promptBusy,
+                      intent: _promptIntent,
+                    );
+                  },
+                  onPointerUp: (event) => _releasePromptPress(event.pointer),
+                  onPointerCancel: (event) =>
+                      _releasePromptPress(event.pointer, canceled: true),
+                  child: IconButton.filledTonal(
+                    key: const Key('session-history-previous-prompt'),
+                    tooltip: _promptBusy
+                        ? l10n.sessionHistoryPromptFinding
+                        : target?.blocked ?? l10n.sessionHistoryPreviousPrompt,
+                    onPressed: !_promptBusy && target?.blocked != null
+                        ? null
+                        : _activatePromptControl,
+                    icon: _promptBusy
+                        ? const SizedBox.square(
+                            dimension: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.arrow_upward),
+                  ),
+                ),
+              if ((_promptBusy || target != null) && _showJumpLatest.value)
+                const SizedBox(height: 8),
+              if (_showJumpLatest.value)
+                IconButton.filledTonal(
+                  key: const Key('session-history-jump-latest'),
+                  onPressed: _jumpToLatest,
+                  tooltip: l10n.sessionHistoryJumpLatest,
+                  icon: const Icon(Icons.arrow_downward),
+                ),
+            ],
+          );
+        },
       ),
     ),
   );
+
+  void _releasePromptPress(int pointer, {bool canceled = false}) {
+    final press = _promptPress;
+    if (press == null || press.pointer != pointer) return;
+    if (canceled) {
+      _promptPress = null;
+      return;
+    }
+    // Tap recognition runs during this pointer-up dispatch. Keep its original
+    // action until dispatch ends, even if the scan rebuilt the same button.
+    scheduleMicrotask(() {
+      if (_promptPress == press) _promptPress = null;
+    });
+  }
+
+  void _activatePromptControl() {
+    final press = _promptPress;
+    if (press != null) {
+      if (press.intent != _promptIntent) return;
+      if (press.cancel) {
+        if (_promptBusy) _cancelPromptNavigation(restoreFollow: true);
+        return;
+      }
+      if (_promptBusy) return;
+    }
+    // Keyboard activation has no pointer press and uses the current action.
+    if (_promptBusy) {
+      _cancelPromptNavigation(restoreFollow: true);
+    } else {
+      unawaited(_jumpToPreviousPrompt());
+    }
+  }
+
+  void _landOnPrompt(GlobalKey<State<StatefulWidget>> key) {
+    _pendingPromptIdentity = _identityByItemKey[key];
+    _pendingPromptMessageKey = _messageStableKeyByItemKey[key];
+    _readingLatched = true;
+    _followTail = false;
+    _showJumpLatest.value = true;
+    _anchorKey = null;
+    _announcePromptNavigation(
+      AppLocalizations.of(context).sessionHistoryPreviousPrompt,
+    );
+    setState(() {});
+  }
+
+  void _restorePromptFollow() {
+    final position = _positionOrNull();
+    if (_promptWasFollowing &&
+        position != null &&
+        position.pixels >= position.maxScrollExtent - _bottomThreshold) {
+      _readingLatched = false;
+      _followTail = true;
+      _showJumpLatest.value = false;
+    }
+  }
+
+  void _cancelPromptNavigation({required bool restoreFollow}) {
+    final busy = _promptBusy;
+    _promptIntent += 1;
+    _promptBusy = false;
+    _pendingPromptIdentity = null;
+    _pendingPromptMessageKey = null;
+    widget.controller.cancelPromptNavigation();
+    if (busy && restoreFollow) _restorePromptFollow();
+    if (busy && mounted) {
+      _announcePromptNavigation(
+        AppLocalizations.of(context).sessionHistoryPromptCanceled,
+      );
+      _navigationRevision.value += 1;
+      _schedulePrefetchEvaluation();
+    }
+  }
+
+  Future<void> _jumpToPreviousPrompt({
+    String? resumeCursor,
+    String? resumeSourceCursor,
+  }) async {
+    final target = _previousPromptTarget();
+    if (resumeCursor != null && _promptLoadingBlock(resumeCursor) != null) {
+      return;
+    }
+    if (resumeCursor == null && (target == null || target.blocked != null)) {
+      return;
+    }
+    if (resumeCursor == null && target?.key != null) {
+      _landOnPrompt(target!.key!);
+      return;
+    }
+    final cursor = resumeCursor ?? target?.cursor;
+    if (cursor == null) return;
+    final intent = ++_promptIntent;
+    _promptWasFollowing = _followTail;
+    _readingLatched = true;
+    _followTail = false;
+    _showJumpLatest.value = true;
+    _promptBusy = true;
+    _announcePromptNavigation(
+      AppLocalizations.of(context).sessionHistoryPromptFinding,
+    );
+    _navigationRevision.value += 1;
+    _protectVisibleHistoryRow();
+    final result = await widget.controller.findPreviousPrompt(
+      cursor,
+      sourceCursor: resumeSourceCursor,
+    );
+    if (!mounted || intent != _promptIntent) return;
+    _promptBusy = false;
+    final l10n = AppLocalizations.of(context);
+    switch (result.outcome) {
+      case PromptNavigationOutcome.found:
+        _pendingPromptMessageKey = result.messageKey;
+        _announcePromptNavigation(l10n.sessionHistoryPreviousPrompt);
+        setState(() {});
+      case PromptNavigationOutcome.start:
+        _announcePromptNavigation(l10n.sessionHistoryPromptStart);
+        _restorePromptFollow();
+      case PromptNavigationOutcome.canceled:
+        _announcePromptNavigation(l10n.sessionHistoryPromptCanceled);
+        _restorePromptFollow();
+      case PromptNavigationOutcome.failed:
+      case PromptNavigationOutcome.limited:
+        _restorePromptFollow();
+        final canContinue = result.outcome == PromptNavigationOutcome.limited;
+        final message = canContinue
+            ? l10n.sessionHistoryPromptLimit
+            : l10n.sessionHistoryPromptFailed;
+        _announcePromptNavigation(message);
+        final retryIntent = _promptIntent;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(message),
+            action: canContinue || result.retryable
+                ? SnackBarAction(
+                    label: canContinue
+                        ? l10n.sessionHistoryPromptContinue
+                        : l10n.sessionHistoryPromptRetry,
+                    onPressed: () {
+                      if (mounted && retryIntent == _promptIntent) {
+                        unawaited(
+                          _jumpToPreviousPrompt(
+                            resumeCursor: result.cursor,
+                            resumeSourceCursor: result.sourceCursor,
+                          ),
+                        );
+                      }
+                    },
+                  )
+                : null,
+          ),
+        );
+    }
+    _navigationRevision.value += 1;
+    _scheduleSemanticViewportCapture();
+    _schedulePrefetchEvaluation();
+  }
 
   /// The fork callback rows hold. A method, so it is the same function on
   /// every build however the page passes its own (see [_keptRows]).
@@ -1097,6 +1403,7 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
 
   void _reportHostVisible() {
     if (!mounted) return;
+    if (!_hostVisible) _cancelPromptNavigation(restoreFollow: true);
     ref
         .read(inlineScheduledMessageControllerProvider(_inlineTarget).notifier)
         .setHostVisible(visible: _hostVisible);
@@ -1139,6 +1446,8 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     _progressValue.dispose();
     _progressViewportFraction.dispose();
     _progressActive.dispose();
+    widget.controller.cancelPromptNavigation();
+    _navigationRevision.dispose();
     _showJumpLatest.dispose();
     _selectionRegistry.dispose();
     _historyShortcutFocusNode.dispose();
@@ -1151,12 +1460,19 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
   @override
   void didUpdateWidget(_TranscriptSurface oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.state.source != widget.state.source ||
+        oldWidget.state.transcriptResetGeneration !=
+            widget.state.transcriptResetGeneration ||
+        (oldWidget.isConnected && !widget.isConnected)) {
+      _cancelPromptNavigation(restoreFollow: true);
+    }
     if (oldWidget.state.source != widget.state.source) {
       _viewportKey = null;
       _viewportMembershipGeneration = null;
       _semanticRestoreRecord = null;
       _semanticRestoreItemKey = null;
       _semanticViewportRestorePending = false;
+      _readingLatched = false;
       _followTail = true;
       _showJumpLatest.value = false;
       _tailRevealPending = true;
@@ -1268,6 +1584,18 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     final position = _positionOrNull();
     if (position == null || !position.hasContentDimensions) return;
     _refreshReaderAnchor();
+    if (_pendingPromptIdentity case final identity?) {
+      final key = _itemKeysByIdentity[identity];
+      if (key != null && _rowGeometry(key) != null) {
+        _pendingPromptIdentity = null;
+        _pendingPromptMessageKey = null;
+      }
+    }
+    final target = _previousPromptTarget();
+    if (target != _promptTargetSnapshot) {
+      _promptTargetSnapshot = target;
+      _navigationRevision.value += 1;
+    }
     // The list is centered, so rows above its center have negative offsets
     // and a range can end below zero while the rows before it still scroll:
     // only the range between the two extents says whether anything does.
@@ -1329,15 +1657,23 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     // travel earns loading intent the way pointer movement does, so reaching a
     // released range or the loaded edge at speed asks for that side's page
     // instead of stopping there. Only a scroll that began with the user's own
-    // drag counts; a jump, an animation or a layout correction never does.
+    // drag or wheel/trackpad activity counts; a jump, an animation or a layout
+    // correction never does.
+    if (notification is UserScrollNotification) {
+      _userDrivenScroll = notification.direction != ScrollDirection.idle;
+    }
     if (notification is ScrollStartNotification) {
-      _userDrivenScroll = notification.dragDetails != null;
+      _userDrivenScroll = notification.dragDetails != null || _userDrivenScroll;
     } else if (notification is ScrollUpdateNotification &&
         (notification.dragDetails != null || _userDrivenScroll)) {
       // After the list has moved, so the boundary ahead is measured from
       // where the reader now is. A drag's own speed comes from its pointer
       // events; a fling's from the fling.
       final delta = notification.scrollDelta ?? 0;
+      if (delta > 0 && _readingLatched) {
+        _readingLatched = false;
+        _onScroll();
+      }
       if (delta.abs() > 0.01) {
         _recordRealScrollMovement(
           upward: delta < 0,
@@ -1368,12 +1704,16 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
   /// fling carrying on after the finger left. [delta] is the signed distance
   /// toward the newest rows, with [time] its event time, for the reader's
   /// speed; a fling reports its own.
+  /// Raw input uses [confirmed] false to estimate prefetch speed without
+  /// treating unrecognized touch jitter as reader movement or cancellation.
   void _recordRealScrollMovement({
     required bool upward,
     bool physical = true,
     Duration? time,
     double delta = 0,
+    bool confirmed = true,
   }) {
+    if (confirmed) _cancelPromptNavigation(restoreFollow: false);
     final direction = upward
         ? TranscriptPrefetchDirection.older
         : TranscriptPrefetchDirection.newer;
@@ -1459,7 +1799,12 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
   /// the prefetch policy says it is time (see [TranscriptPrefetchController]).
   void _evaluatePrefetch() {
     final direction = _movingToward;
-    if (direction == null || !mounted) return;
+    if (direction == null ||
+        !mounted ||
+        _promptBusy ||
+        widget.controller.promptNavigationActive) {
+      return;
+    }
     final state = widget.state;
     if (!widget.isConnected ||
         state.historyPageLoading ||
@@ -1688,8 +2033,8 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
   }
 
   /// Settles a request the controller declined to send. Its refusal is in
-  /// the state the next build brings, or nowhere: either way, not retried
-  /// until the reader asks explicitly or a new generation starts.
+  /// the state the next build brings. A local decline without a broker error
+  /// remains transient; only a recorded permanent error blocks this edge.
   void _declinePrefetchRequest(String key) {
     if (_prefetch.inFlightKey != key) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1698,7 +2043,7 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
       _prefetch.fail(
         _prefetchNow(),
         transient:
-            widget.state.historyPageError != null &&
+            widget.state.historyPageError == null ||
             isTransientHistoryPageErrorCode(code),
       );
       _armPrefetchRetry();
@@ -1802,6 +2147,7 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
       _prefetch.observeOffset(position.travelled);
     }
     final atBottom =
+        !_readingLatched &&
         position.pixels >= position.maxScrollExtent - _bottomThreshold;
     if (atBottom != _followTail) {
       _followTail = atBottom;
@@ -1848,12 +2194,17 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
       // A jump to the latest rows reads no released range on the way.
       _prefetchSettleTimer?.cancel();
       _prefetch.settle();
-    } else {
-      // Before the jump, from what the reader was looking at when they
-      // pressed it: a released range on screen is filled even when the jump
-      // carries them past it.
-      _recordRealScrollMovement(upward: upward);
+      // End is explicit tail intent even when its offset is already the end.
+      _jumpToLatest();
+      if (!_historyShortcutFocusNode.hasFocus) {
+        _historyShortcutFocusNode.requestFocus();
+      }
+      return KeyEventResult.handled;
     }
+    // Before the jump, from what the reader was looking at when they
+    // pressed it: a released range on screen is filled even when the jump
+    // carries them past it.
+    _recordRealScrollMovement(upward: upward);
     final position = _positionOrNull();
     if (position == null || !position.hasContentDimensions) {
       return KeyEventResult.handled;
@@ -1861,7 +2212,6 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     final page = position.viewportDimension * 0.9;
     final target = switch (key) {
       LogicalKeyboardKey.home => position.minScrollExtent,
-      LogicalKeyboardKey.end => position.maxScrollExtent,
       LogicalKeyboardKey.pageUp => (position.pixels - page).clamp(
         position.minScrollExtent,
         position.maxScrollExtent,
@@ -1879,9 +2229,15 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
         position.maxScrollExtent,
       ),
     };
+    final before = position.pixels;
     position.jumpTo(target);
+    if (target > before &&
+        position.pixels >= position.maxScrollExtent - _bottomThreshold) {
+      _readingLatched = false;
+      _onScroll();
+    }
     // And again from where the jump put them.
-    if (key != LogicalKeyboardKey.end) _schedulePrefetchEvaluation();
+    _schedulePrefetchEvaluation();
     // Handling the key ourselves prevents the browser's page-scroll default
     // from moving focus outside the transcript after lazy-list reshaping.
     if (!_historyShortcutFocusNode.hasFocus) {
@@ -2115,6 +2471,8 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
   }
 
   void _jumpToLatest() {
+    _cancelPromptNavigation(restoreFollow: false);
+    _readingLatched = false;
     final position = _positionOrNull();
     if (position == null || !position.hasContentDimensions) return;
     _followTail = true;
@@ -2236,6 +2594,58 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
   void _focusHistoryAfterCompletedTap() {
     _historyShortcutFocusNode.requestFocus();
   }
+
+  Widget _listenToTranscriptPointers(Widget child) => Listener(
+    behavior: HitTestBehavior.translucent,
+    onPointerDown: _preparePointerFileSelection,
+    onPointerUp: (_) => _openPointerFileSelection(),
+    // A drag moves the content with the finger, so the reader
+    // heads the other way; a wheel scrolls the way it turns.
+    onPointerMove: (event) {
+      if (_fileSelectionPointerOrigin case final origin?) {
+        if ((event.position - origin).distance > 4) {
+          _pointerSelectedFile = null;
+        }
+      }
+      if (event.delta.dy.abs() > 0.01) {
+        _recordRealScrollMovement(
+          upward: event.delta.dy > 0,
+          time: event.timeStamp,
+          delta: -event.delta.dy,
+          confirmed: false,
+        );
+      }
+    },
+    onPointerCancel: (_) {
+      _pointerSelectedFile = null;
+      _prefetchSettleTimer?.cancel();
+      _prefetch.settle();
+    },
+    onPointerSignal: (event) {
+      if (event is PointerScrollEvent && event.scrollDelta.dy.abs() > 0.01) {
+        _recordRealScrollMovement(
+          upward: event.scrollDelta.dy < 0,
+          time: event.timeStamp,
+          delta: event.scrollDelta.dy,
+          confirmed: false,
+        );
+        // The wheel moves the list after this event; the
+        // boundary ahead is measured again from there.
+        _schedulePrefetchEvaluation();
+      }
+    },
+    onPointerPanZoomUpdate: (event) {
+      if (event.panDelta.dy.abs() > 0.01) {
+        _recordRealScrollMovement(
+          upward: event.panDelta.dy > 0,
+          time: event.timeStamp,
+          delta: -event.panDelta.dy,
+          confirmed: false,
+        );
+      }
+    },
+    child: child,
+  );
 
   void _preparePointerFileSelection(PointerDownEvent event) {
     _pointerSelectedFile = null;
@@ -2419,6 +2829,18 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     if (identities.isEmpty) {
       _centerIdentity = null;
       return 0;
+    }
+    final pending = _pendingPromptIdentity;
+    final pendingIndex = pending == null ? -1 : identities.indexOf(pending);
+    if (pendingIndex >= 0) {
+      // correctBy does not notify the viewport. Rebuild its slivers even
+      // when this prompt was already the center, so layout applies the jump.
+      _centerGeneration += 1;
+      _centerIdentity = pending;
+      _anchorKey = null;
+      final position = _transcriptPosition();
+      if (position != null) position.correctBy(-16 - position.pixels);
+      return pendingIndex;
     }
     final oldCenter = _centerIdentity;
     final centerIndex = oldCenter == null ? -1 : identities.indexOf(oldCenter);
@@ -2701,6 +3123,8 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     }
     _semanticRestoreRecord = record;
     _semanticRestoreItemKey = null;
+    _followTail = false;
+    _showJumpLatest.value = true;
     _semanticViewportRestoreAttempts = 0;
     _semanticViewportStableChecks = 0;
     _semanticViewportRestorePending = true;
@@ -3212,6 +3636,10 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
           rowWork?.reconciledRows += totalItems;
           // Decided against last frame's rows and geometry, so this runs
           // before the registry below is replaced.
+          if (_pendingPromptMessageKey case final key?) {
+            final index = canonicalMessageKeys.indexOf(key);
+            if (index >= 0) _pendingPromptIdentity = itemIdentities[index];
+          }
           final centerIndex = _resolveCenter(
             itemIdentities,
             preferredIndex: messageCount > 0 ? messageOffset : 0,
@@ -3222,6 +3650,27 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
             messageIndices: messageIndices,
             canonicalMessageKeys: canonicalMessageKeys,
           );
+          _promptKeys.clear();
+          _promptGaps.clear();
+          _promptStopIndices.clear();
+          for (var index = 0; index < chatItems.length; index++) {
+            final item = chatItems[index];
+            final key = _orderedItemKeys[messageOffset + index];
+            if (item is _ChatUserItem ||
+                (item is _ChatEntryItem &&
+                    item.entry is MessageTranscriptDisplayEntry &&
+                    (item.entry as MessageTranscriptDisplayEntry)
+                            .message
+                            .type ==
+                        AgentMessageType.userMessage)) {
+              _promptKeys.add(key);
+              _promptStopIndices.add(messageOffset + index);
+            }
+            if (item is _ChatHistoryGapItem) {
+              _promptGaps[key] = item.gap;
+              _promptStopIndices.add(messageOffset + index);
+            }
+          }
           _reloadableGapByItemKey.clear();
           for (var index = 0; index < chatItems.length; index++) {
             final item = chatItems[index];
@@ -3432,73 +3881,27 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
             },
             child: NotificationListener<ScrollNotification>(
               onNotification: _onScrollNotification,
-              child: Listener(
+              child: GestureDetector(
                 behavior: HitTestBehavior.translucent,
-                onPointerDown: _preparePointerFileSelection,
-                onPointerUp: (_) => _openPointerFileSelection(),
-                // A drag moves the content with the finger, so the reader
-                // heads the other way; a wheel scrolls the way it turns.
-                onPointerMove: (event) {
-                  if (_fileSelectionPointerOrigin case final origin?) {
-                    if ((event.position - origin).distance > 4) {
-                      _pointerSelectedFile = null;
-                    }
-                  }
-                  if (event.delta.dy.abs() > 0.01) {
-                    _recordRealScrollMovement(
-                      upward: event.delta.dy > 0,
-                      time: event.timeStamp,
-                      delta: -event.delta.dy,
-                    );
-                  }
-                },
-                onPointerCancel: (_) {
-                  _pointerSelectedFile = null;
-                  _prefetchSettleTimer?.cancel();
-                  _prefetch.settle();
-                },
-                onPointerSignal: (event) {
-                  if (event is PointerScrollEvent &&
-                      event.scrollDelta.dy.abs() > 0.01) {
-                    _recordRealScrollMovement(
-                      upward: event.scrollDelta.dy < 0,
-                      time: event.timeStamp,
-                      delta: event.scrollDelta.dy,
-                    );
-                    // The wheel moves the list after this event; the
-                    // boundary ahead is measured again from there.
-                    _schedulePrefetchEvaluation();
-                  }
-                },
-                onPointerPanZoomUpdate: (event) {
-                  if (event.panDelta.dy.abs() > 0.01) {
-                    _recordRealScrollMovement(
-                      upward: event.panDelta.dy > 0,
-                      time: event.timeStamp,
-                      delta: -event.panDelta.dy,
-                    );
-                  }
-                },
-                child: GestureDetector(
-                  behavior: HitTestBehavior.translucent,
-                  onTap: _focusHistoryAfterCompletedTap,
-                  child: CallbackShortcuts(
-                    bindings: {
-                      const SingleActivator(
-                        LogicalKeyboardKey.pageUp,
-                        alt: true,
-                      ): _requestEarlierExplicitly,
-                    },
-                    child: SelectionArea(
-                      key: const Key('session-history-shortcut-focus'),
-                      focusNode: _historyShortcutFocusNode,
-                      onSelectionChanged: _onTranscriptSelectionChanged,
-                      contextMenuBuilder: _transcriptSelectionMenu,
-                      child: _TranscriptSelectionScope(
-                        selectionDelegate: _fileSelectionDelegate,
-                        registry: _selectionRegistry,
-                        child: Stack(
-                          children: [
+                onTap: _focusHistoryAfterCompletedTap,
+                child: CallbackShortcuts(
+                  bindings: {
+                    const SingleActivator(
+                      LogicalKeyboardKey.pageUp,
+                      alt: true,
+                    ): _requestEarlierExplicitly,
+                  },
+                  child: SelectionArea(
+                    key: const Key('session-history-shortcut-focus'),
+                    focusNode: _historyShortcutFocusNode,
+                    onSelectionChanged: _onTranscriptSelectionChanged,
+                    contextMenuBuilder: _transcriptSelectionMenu,
+                    child: _TranscriptSelectionScope(
+                      selectionDelegate: _fileSelectionDelegate,
+                      registry: _selectionRegistry,
+                      child: Stack(
+                        children: [
+                          _listenToTranscriptPointers(
                             ScrollConfiguration(
                               behavior: ScrollConfiguration.of(
                                 context,
@@ -3576,10 +3979,10 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
                                 ),
                               ),
                             ),
-                            _readingScrollbar,
-                            _jumpLatestButton,
-                          ],
-                        ),
+                          ),
+                          _readingScrollbar,
+                          _jumpLatestButton,
+                        ],
                       ),
                     ),
                   ),

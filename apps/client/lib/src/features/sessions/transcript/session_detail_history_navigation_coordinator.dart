@@ -74,6 +74,7 @@ extension _SessionDetailHistoryNavigation on SessionDetailController {
   /// capped one, so a window hydrated from the local snapshot is still
   /// replaced (see [TranscriptHistoryWindow.applyHistory]).
   void _startHistoryNavigationEpoch() {
+    _promptNavigationUnsupported = false;
     _clearToolSlotReloads();
     // No answer comes on this socket: the event that started it releases the
     // reader's page of shells, if tool calls are shown.
@@ -314,7 +315,17 @@ extension _SessionDetailHistoryNavigation on SessionDetailController {
     required String until,
     int limit = kTranscriptHistoryPageMessages,
   }) async {
-    if (!_canLoadNewerHistory || state.historyPageLoading) return false;
+    if ((_hiddenRowRefresh?.id != null || _toolSlotInFlight != null) &&
+        !await _waitForBackgroundHistorySlot()) {
+      return false;
+    }
+    if (!_canLoadNewerHistory ||
+        state.historyPageLoading ||
+        promptNavigationActive ||
+        _hiddenRowRefresh?.id != null ||
+        _toolSlotInFlight != null) {
+      return false;
+    }
     if (state.historyPagingBlockedAt(cursor, until: until)) return false;
     if (cursor.trim().isEmpty || until.trim().isEmpty) return false;
     final navigation = switch (_connection) {

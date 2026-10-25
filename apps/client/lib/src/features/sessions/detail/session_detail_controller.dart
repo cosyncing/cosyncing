@@ -29,7 +29,9 @@ import 'package:cosyncing_client/src/features/sessions/requests/session_command_
 import 'package:cosyncing_client/src/features/sessions/roster/session_status_registry.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/session_draft_store.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/session_outbox.dart';
+import 'package:cosyncing_client/src/features/sessions/transcript/session_transcript_display.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/session_transcript_store.dart';
+import 'package:cosyncing_client/src/features/sessions/transcript/tool_display_mode.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/created_session_attach_intents.dart';
 import 'package:cosyncing_client/src/features/settings/controller/tool_visibility_controller.dart';
 import 'package:cosyncing_client/src/platform/clock/app_clock.dart';
@@ -42,6 +44,7 @@ part '../transcript/session_detail_draft_coordinator.dart';
 part '../transcript/session_detail_hidden_row_restore.dart';
 part '../transcript/session_detail_history_navigation_coordinator.dart';
 part '../transcript/session_detail_messaging_coordinator.dart';
+part '../transcript/session_detail_prompt_navigation.dart';
 part '../transcript/session_detail_tool_slot_recovery.dart';
 part '../transcript/session_detail_transcript_persistence.dart';
 part 'session_detail_bootstrap.dart';
@@ -216,6 +219,12 @@ class SessionDetailController
   // waits to be asked again.
   ({String? id, String cursor, int limit, int attempts})? _hiddenRowRefresh;
   Timer? _hiddenRowRefreshTimer;
+  _PromptNavigation? _promptNavigation;
+  Completer<void>? _promptSlotChanged;
+  Completer<WireEvent?>? _promptPageReply;
+  bool _promptNavigationUnsupported = false;
+  final Set<String> _promptStartCursors = {};
+  final Set<String> _promptFailedCursors = {};
   // When each of those stops holding back the next refresh from its cursor,
   // and those that no longer do (still answerable: the transport still takes
   // their answers).
@@ -406,6 +415,7 @@ class SessionDetailController
     });
     _cacheWriteFence = ref.read(sessionCacheWriteFenceProvider);
     ref.onDispose(() {
+      _cancelPromptNavigation();
       _disposed = true;
       _releaseRouteInterest?.call();
       _releaseRouteInterest = null;
@@ -1745,6 +1755,14 @@ class SessionDetailController
       }
       if (_handleToolSlotReply(event)) return;
       if (_handleHiddenRowRefreshReply(event)) return;
+      if (_handlePromptNavigationReply(event)) return;
+      if (event is HelloWireEvent ||
+          (event is HistoryWireEvent && event.reset)) {
+        _cancelPromptNavigation();
+        _promptStartCursors.clear();
+        _promptFailedCursors.clear();
+        _promptNavigationUnsupported = false;
+      }
       // A timed-out or superseded page is no longer part of the active cursor
       // chain. Ignore it wholesale: merging its messages would advance the
       // projection behind a retry that is still using the prior cursor.
@@ -1963,6 +1981,13 @@ class SessionDetailController
       }
       // With tool calls shown, no row stays a shell beyond the page asked for
       // to replace the reader's (see [setHistoryReportView]).
+      if (_promptNavigation != null &&
+          !identical(transcriptWindow, state.transcriptWindow)) {
+        transcriptWindow = transcriptWindow.reservePromptNavigation(
+          preserveMessageKey: _historyViewportAnchorKey,
+          inView: historyViewportRowKeys,
+        );
+      }
       if (!historyReportView &&
           _hiddenRowRefresh == null &&
           transcriptWindow.holdsHiddenRowShells) {
@@ -2630,6 +2655,30 @@ class SessionDetailController
     String? cursor,
   }) => _loadEarlierHistoryCoordinated(limit: limit, cursor: cursor);
 
+  /// Whether explicit prompt navigation owns or is waiting for the page slot.
+  bool get promptNavigationActive => _promptNavigation != null;
+
+  /// Whether this connection supports existing backward history requests.
+  bool get canFindPreviousPrompt =>
+      !_promptNavigationUnsupported && _connection is SessionHistoryConnection;
+
+  /// A validated backward boundary whose preceding range has no user rows.
+  bool promptStartKnownAt(String cursor) =>
+      _promptStartCursors.contains(cursor);
+
+  /// A prompt-search boundary refused permanently for this source generation.
+  bool promptSearchBlockedAt(String cursor) =>
+      _promptFailedCursors.contains(cursor);
+
+  /// Scans pages without rendering them, then adopts the nearest user row.
+  Future<PromptNavigationResult> findPreviousPrompt(
+    String cursor, {
+    String? sourceCursor,
+  }) => _findPreviousPrompt(cursor, sourceCursor: sourceCursor);
+
+  /// Invalidates navigation without canceling an unrelated physical request.
+  void cancelPromptNavigation() => _cancelPromptNavigation();
+
   /// Whether this attach can page NEWER history (contract revision 28): its
   /// broker offered it on the last history frame and has not refused it.
   bool get canLoadNewerHistory => _canLoadNewerHistory;
@@ -2677,6 +2726,7 @@ class SessionDetailController
   /// every other page of shells is released, to reload as the reader reaches
   /// it.
   void setHistoryReportView({required bool reportView}) {
+    _cancelPromptNavigation();
     historyReportView = reportView;
     if (reportView) {
       _finishHiddenRowRefresh();

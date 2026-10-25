@@ -7144,5 +7144,15 @@
     }
   },
   "transferSaveBusy": "Another save is in progress. Try Save again when it finishes.",
-  "transferSaveDeferred": "Downloaded. Use Save to choose a destination."
+  "transferSaveDeferred": "Downloaded. Use Save to choose a destination.",
+  "sessionHistoryPreviousPrompt": "Previous user message",
+  "sessionHistoryPromptFinding": "Finding previous user message. Cancel",
+  "sessionHistoryPromptUnavailable": "Earlier user messages cannot be loaded",
+  "sessionHistoryPromptOffline": "Connect to load earlier user messages",
+  "sessionHistoryPromptCanceled": "Navigation canceled",
+  "sessionHistoryPromptStart": "Start of conversation",
+  "sessionHistoryPromptLimit": "The search limit was reached. Continue looking for an earlier user message?",
+  "sessionHistoryPromptFailed": "Could not load the previous user message.",
+  "sessionHistoryPromptContinue": "Continue",
+  "sessionHistoryPromptRetry": "Retry"
 }

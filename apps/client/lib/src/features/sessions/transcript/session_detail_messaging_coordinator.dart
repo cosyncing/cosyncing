@@ -411,6 +411,10 @@ extension _SessionDetailMessaging on SessionDetailController {
   }
 
   void _clearHistoryPageTracking() {
+    final promptReply = _promptPageReply;
+    _promptPageReply = null;
+    if (promptReply != null && !promptReply.isCompleted) promptReply.complete();
+    _wakePromptNavigation();
     _historyPageRequestId = null;
     _historyPageCursorInFlight = null;
     _historyPageLimitInFlight = null;
@@ -430,7 +434,12 @@ extension _SessionDetailMessaging on SessionDetailController {
     _historyPageTimeout = Timer(timeout, () {
       _historyPageTimeout = null;
       if (_historyPageRequestId != clientMessageId) return;
+      final promptRequest = _promptPageReply != null;
       _clearHistoryPageTracking();
+      if (promptRequest) {
+        state = state.copyWith(historyPageLoading: false);
+        return;
+      }
       state = state.copyWith(
         historyPageLoading: false,
         historyPageErrorCode: 'HISTORY_PAGE_TIMEOUT',
@@ -446,7 +455,16 @@ extension _SessionDetailMessaging on SessionDetailController {
     int limit = kTranscriptHistoryPageMessages,
     String? cursor,
   }) async {
-    if (state.historyPageLoading) return false;
+    if ((_hiddenRowRefresh?.id != null || _toolSlotInFlight != null) &&
+        !await _waitForBackgroundHistorySlot()) {
+      return false;
+    }
+    if (state.historyPageLoading ||
+        promptNavigationActive ||
+        _hiddenRowRefresh?.id != null ||
+        _toolSlotInFlight != null) {
+      return false;
+    }
     final requestedCursor = cursor ?? state.olderHistoryCursor;
     if (state.historyPagingBlockedAt(requestedCursor)) return false;
     final pageConnection = _connection;
@@ -507,6 +525,34 @@ extension _SessionDetailMessaging on SessionDetailController {
         );
       }
       return false;
+    }
+  }
+
+  /// Background reads occupy the wire slot, not a permanently refused edge.
+  /// Keep an ordinary request pending until they settle, while bounding the
+  /// wait and invalidating it when a new source or explicit navigation wins.
+  Future<bool> _waitForBackgroundHistorySlot() async {
+    final connection = _connection;
+    final generation = state.transcriptResetGeneration;
+    var expired = false;
+    final timer = Timer(ref.read(sessionHistoryPageTimeoutProvider), () {
+      expired = true;
+      _wakePromptNavigation();
+    });
+    try {
+      while (!_disposed &&
+          !expired &&
+          identical(connection, _connection) &&
+          generation == state.transcriptResetGeneration &&
+          !promptNavigationActive) {
+        if (_hiddenRowRefresh?.id == null && _toolSlotInFlight == null) {
+          return true;
+        }
+        await (_promptSlotChanged ??= Completer<void>()).future;
+      }
+      return false;
+    } finally {
+      timer.cancel();
     }
   }
 

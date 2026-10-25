@@ -3094,5 +3094,15 @@
     }
   },
   "transferSaveBusy": "另一个文件正在保存。完成后请再次点按保存。",
-  "transferSaveDeferred": "已下载。请点按保存以选择保存位置。"
+  "transferSaveDeferred": "已下载。请点按保存以选择保存位置。",
+  "sessionHistoryPreviousPrompt": "上一条用户消息",
+  "sessionHistoryPromptFinding": "正在查找上一条用户消息。取消",
+  "sessionHistoryPromptUnavailable": "无法加载更早的用户消息",
+  "sessionHistoryPromptOffline": "连接后可加载更早的用户消息",
+  "sessionHistoryPromptCanceled": "已取消导航",
+  "sessionHistoryPromptStart": "对话开始处",
+  "sessionHistoryPromptLimit": "已达到查找上限。继续查找更早的用户消息？",
+  "sessionHistoryPromptFailed": "无法加载上一条用户消息。",
+  "sessionHistoryPromptContinue": "继续",
+  "sessionHistoryPromptRetry": "重试"
 }

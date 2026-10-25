@@ -90,6 +90,126 @@ void main() {
     });
   });
 
+  group('sharing the history request slot', () {
+    featureTest('ordinary paging waits for a pending tool-slot reload', (
+      f,
+    ) async {
+      final (app, broker) = await openPaging(
+        f,
+        total: 200,
+        row: (index) => index == 150
+            ? toolResultRow(
+                'pending-slot',
+                extra: {
+                  'historySlot': true,
+                  'pending': true,
+                  'reloadCursor': 'b151',
+                },
+              )
+            : markedRow(index),
+        configure: (broker) => broker.holding = true,
+      );
+      expect(broker.requests, hasLength(1));
+      expect(broker.requests.single.limit, 1);
+      await app.askForEarlier();
+      expect(
+        broker.requests,
+        hasLength(1),
+        reason: 'ordinary paging waits rather than refusing the edge',
+      );
+      broker.release();
+      await app.frames(5);
+      expect(broker.requests, hasLength(2));
+      expect(broker.requests.last.cursor, 'b100');
+      broker
+        ..holding = false
+        ..release();
+      await app.frames(10);
+      await app.jumpToStart();
+      expect(app.topOf(0), isNotNull);
+    });
+
+    featureTest(
+      'scrolling respects hidden-row retry backoff and paging resumes',
+      (f) async {
+        final (app, broker) = await openPaging(f, row: commandHeavyRow);
+        await app.hideToolCalls();
+        for (var tick = 0; tick < 80; tick++) {
+          await app.wheel(-40);
+          await f.tester.pump(const Duration(milliseconds: 16));
+        }
+        await app.tapKey('session-detail-view-menu');
+        final asked = broker.requests.length;
+        broker.failNext = 1;
+        // Keep control of fake time around the backoff boundary: driver settle
+        // would also advance through the timer being tested.
+        var toggle = find.byKey(const Key('session-tool-visibility-toggle'));
+        if (toggle.evaluate().isEmpty) {
+          await app.tapKey('session-tool-visibility');
+          toggle = find.text('Show tool calls').last;
+        }
+        await f.tester.tap(toggle);
+        for (
+          var frame = 0;
+          frame < 30 &&
+              (broker.requests.length == asked ||
+                  broker.requests.last.answeredAt == null);
+          frame++
+        ) {
+          await f.tester.pump(const Duration(milliseconds: 16));
+        }
+        expect(broker.requests, hasLength(asked + 1));
+        final failed = broker.requests.last;
+        expect(failed.failed, isTrue);
+        Iterable<PagingRequest> refreshes() => broker.requests
+            .skip(asked)
+            .where(
+              (request) => request.cursor == failed.cursor && !request.newer,
+            );
+        final retryAt = failed.answeredAt!.add(
+          const Duration(milliseconds: 500),
+        );
+        for (var tick = 0; tick < 3; tick++) {
+          await app.wheel(tick.isEven ? -1 : 1);
+        }
+        expect(
+          refreshes(),
+          hasLength(1),
+          reason: 'reader movement does not shorten the retry delay',
+        );
+        final remaining = retryAt.difference(f.tester.binding.clock.now());
+        expect(remaining, greaterThan(Duration.zero));
+        broker.holding = true;
+        await f.tester.pump(remaining + const Duration(milliseconds: 16));
+        expect(refreshes(), hasLength(2));
+        expect(refreshes().last.requestedAt.isBefore(retryAt), isFalse);
+        final held = broker.requests.length;
+        await app.pumpFor(const Duration(seconds: 1));
+        expect(
+          refreshes(),
+          hasLength(2),
+          reason:
+              'there is one held retry, no abandoned timer sends a duplicate',
+        );
+        await app.askForEarlier();
+        expect(broker.requests, hasLength(held));
+        broker.release();
+        await app.frames(5);
+        expect(
+          broker.requests.length,
+          greaterThan(held),
+          reason:
+              'automatic paging continues as soon as '
+              'the refresh frees the slot',
+        );
+        broker
+          ..holding = false
+          ..release();
+        await app.frames(10);
+      },
+    );
+  });
+
   group('moving toward a released range', () {
     featureTest('down, it fills from its older edge with a newer page', (
       f,

@@ -35,9 +35,19 @@ extension _SessionDetailHiddenRowRestore on SessionDetailController {
       : null;
 
   void _askHiddenRowRefresh() {
-    _hiddenRowRefreshTimer = null;
     final refresh = _hiddenRowRefresh;
-    if (_disposed || refresh == null) return;
+    // Slot wakeups never shorten retry backoff or duplicate an active request.
+    if (_disposed ||
+        refresh == null ||
+        refresh.id != null ||
+        _hiddenRowRefreshTimer != null) {
+      return;
+    }
+    if (state.historyPageLoading ||
+        promptNavigationActive ||
+        _toolSlotInFlight != null) {
+      return;
+    }
     final connection = _hiddenRowConnection;
     if (connection == null) {
       _giveUpHiddenRowRefresh();
@@ -81,8 +91,12 @@ extension _SessionDetailHiddenRowRestore on SessionDetailController {
     );
     _hiddenRowRefreshTimer = Timer(
       Duration(milliseconds: 500 * (1 << refresh.attempts)),
-      _askHiddenRowRefresh,
+      () {
+        _hiddenRowRefreshTimer = null;
+        _askHiddenRowRefresh();
+      },
     );
+    _wakePromptNavigation();
   }
 
   bool _handleHiddenRowRefreshReply(WireEvent event) {
@@ -127,6 +141,7 @@ extension _SessionDetailHiddenRowRestore on SessionDetailController {
     _hiddenRowRefreshTimer?.cancel();
     _hiddenRowRefreshTimer = null;
     _hiddenRowRefresh = null;
+    _wakePromptNavigation();
   }
 
   // The start of the session stays reached only while the window still

@@ -217,6 +217,7 @@ class _ChatPanel extends ConsumerWidget {
       data: _transcriptTheme.of(Theme.of(context), display.fontSize),
       child: _TranscriptSurface(
         state: state,
+        composerTapGroup: promptFocusNode,
         controller: controller,
         isConnected: isConnected,
         hasActiveBrokerClient: hasActiveBrokerClient,
