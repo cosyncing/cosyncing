@@ -11,7 +11,7 @@
  *   afterAll(() => broker.stop());
  *   const client = broker.client();
  */
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import {
@@ -230,8 +230,8 @@ export function fixturePaths(root: string): FixturePaths {
 
 /**
  * The fake-agent directory, Bun, and the system directories: nothing a
- * developer installed. Windows keeps its PATH, which a runner populates with
- * system tools only.
+ * developer installed. Host tools require an explicit hostPath opt-in on
+ * every platform.
  *
  * Bun is reached through a private directory holding only a `bun` link, not
  * through Bun's own install directory: on a developer box that directory is
@@ -239,19 +239,26 @@ export function fixturePaths(root: string): FixturePaths {
  * and a test that removed its fake would silently run the real agent.
  */
 export function fixturePath(bin: string, hostPath?: string): string {
-  if (hostPath !== undefined || process.platform === 'win32') {
-    return [bin, hostPath ?? process.env.PATH ?? ''].join(delimiter);
+  if (hostPath !== undefined) return [bin, hostPath].join(delimiter);
+  if (process.platform === 'win32') {
+    const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
+    if (!systemRoot) throw new Error('Windows fixture requires SystemRoot');
+    return [bin, bunOnlyDirectory(bin), join(systemRoot, 'System32'),
+      join(systemRoot, 'System32/WindowsPowerShell/v1.0')].join(delimiter);
   }
   return [bin, bunOnlyDirectory(bin), '/usr/bin', '/bin'].join(delimiter);
 }
 
-/** `<bin>/../runtime-bin` with a single `bun` link to the running Bun. */
+/** A private runtime entry; Windows hard links do not require symlink privileges. */
 function bunOnlyDirectory(bin: string): string {
   const directory = join(dirname(bin), 'runtime-bin');
-  const link = join(directory, 'bun');
+  const link = join(directory, process.platform === 'win32' ? 'bun.exe' : 'bun');
   if (!existsSync(link)) {
     mkdirSync(directory, { recursive: true });
-    symlinkSync(process.execPath, link);
+    if (process.platform === 'win32') {
+      try { linkSync(process.execPath, link); }
+      catch { copyFileSync(process.execPath, link); } // Cross-volume fixtures cannot hard link.
+    } else symlinkSync(process.execPath, link);
   }
   return directory;
 }

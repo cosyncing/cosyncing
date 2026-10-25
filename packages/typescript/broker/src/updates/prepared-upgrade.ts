@@ -12,7 +12,7 @@ import { BUN_RELEASE_DOWNLOAD_BASE } from '../runtime/application-identity.ts';
 import { bunRuntimeHost } from './bun-runtime-upgrade.ts';
 import { UpdateOperationStore } from './update-operation-store.ts';
 import { compareReleaseVersions } from './updater-metadata.ts';
-import { releaseIdFromManifest, type UpgradeCandidate } from './release-upgrade.ts';
+import { releaseIdFromManifest, type UpgradeCandidate, type UpgradeCommandResult } from './release-upgrade.ts';
 
 const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const FILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,180}$/;
@@ -57,6 +57,7 @@ export async function stageUpgradeArtifacts(options: {
  * latest, downloads a missing file, or honors a path from a remote request. */
 export function preparedUpgradeInput(home: string, jobId: string): {
   fetch: typeof fetch; pinnedReleaseId: string; authorizeCommit: () => void;
+  recordOutcome: (result: UpgradeCommandResult) => void;
 } {
   if (!JOB_ID.test(jobId)) throw new Error('update-job-invalid');
   const store = new UpdateOperationStore(join(home, 'updates'));
@@ -111,5 +112,22 @@ export function preparedUpgradeInput(home: string, jobId: string): {
     if (bytes.length !== artifact.size || digest(bytes) !== artifact.sha256) throw new Error('update-preparation-changed');
     return new Response(new Uint8Array(bytes));
   };
-  return { fetch: fetcher as typeof fetch, pinnedReleaseId: job.releaseId, authorizeCommit };
+  return { fetch: fetcher as typeof fetch, pinnedReleaseId: job.releaseId, authorizeCommit,
+    recordOutcome: (result) => {
+      // Success still needs the answering build and committed installer receipt.
+      // A completed rollback can report failure without waiting for the lease.
+      if (result.exitCode === 0) return;
+      const current = store.readJob(jobId);
+      if (!current.ok || !current.value.applyAcceptedAt
+          || !['applying', 'verifying'].includes(current.value.phase)) return;
+      const phase = result.status === 'rolled-back' ? 'rolled_back'
+        : result.status === 'cleanup-required' ? 'needs_attention' : 'failed';
+      store.transition(jobId, 'host', phase, result.detailCode,
+        current.value.components.map((component) => ({
+          component: component.component,
+          outcome: phase === 'needs_attention' ? 'needs_attention' : 'failed',
+          actual: component.actual,
+        })));
+    },
+  };
 }

@@ -13,6 +13,12 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Installer-owned Windows servers can apply updates from Settings → Updates.
+  The independent updater survives the service restart, preserves a running
+  desktop app, and removes stale updater tasks before the next update or uninstall.
+  Older servers need one terminal upgrade to a release containing this support.
+- In-app server updates report failures and completed rollbacks right away on
+  Windows and Linux, while retaining the installer result if job recording fails.
 - Background commands and agents started in an app-driven Claude Code session
   keep running when every client disconnects, when you press Stop, and when you
   change the model, permission mode or effort. Previously the broker ended the

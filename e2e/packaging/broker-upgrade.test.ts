@@ -1,5 +1,5 @@
 /**
- * A signed Windows update through the CLI, real Scheduled Tasks, and real HTTP.
+ * Signed Windows updates through the CLI and in-app HTTP API, using real Scheduled Tasks.
  * All tasks use a fixture-only namespace; all agents, state and ports are isolated.
  * Routine CI builds both versions from this tree. Native acceptance may supply
  * COSYNCING_TEST_BASELINE_APPLICATION and COSYNCING_TEST_BASELINE_RUNTIME to run
@@ -8,7 +8,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { createHash, generateKeyPairSync, randomUUID, sign } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { buildDefines } from '../../scripts/broker/lib/build-metadata.ts';
@@ -21,6 +21,8 @@ import { writeZipFixture } from '../../packages/typescript/broker/test/helpers/z
 import { captureProcessOutput, isolatedBrokerFixtureEnvironment, reserveLoopbackFixturePort } from '../../packages/typescript/broker/test/helpers/isolated-broker-fixture.ts';
 import { eventually, scaled } from '../harness/index.ts';
 import { recordHarnessRoot } from '../../scripts/ci/lib/harness-leaks.ts';
+import { feedUpdater } from '../../packages/typescript/broker/test/helpers/update-release-feed.ts';
+import type { UpdateInventory, UpdateJob, UpdatePlan } from '../../packages/typescript/protocol/src/index.ts';
 
 const ROOT = join(import.meta.dir, '../..');
 const digest = (bytes: Uint8Array | string) => createHash('sha256').update(bytes).digest('hex');
@@ -129,7 +131,9 @@ process.exitCode = await runCli(process.argv.slice(2), {
     if (!result.success) throw new Error(result.logs.join('\n'));
     // Run isolation before the bundled module initializers too: ESM imports
     // execute before an entry module's body and may resolve profile paths.
-    return Buffer.from(`${isolationPrelude}\n${await result.outputs[0]!.text()}`);
+    // Independent updater tasks do not inherit --preload from the test's CLI.
+    // Keep the fixture transport in every build that can run outside this process.
+    return Buffer.from(`${isolationPrelude}\nawait import(${JSON.stringify(preload.replaceAll('\\', '/'))});\n${await result.outputs[0]!.text()}`);
   }
 
   function web(version: string): Uint8Array {
@@ -153,6 +157,8 @@ process.exitCode = await runCli(process.argv.slice(2), {
     const unsigned = { schemaVersion: 1 as const, product: 'cosyncing' as const, version, channel: 'stable' as const,
       sourceCommit: '2222222', publishedAt: '2026-10-23T00:00:00.000Z', artifacts: [],
       contract: { revision: 35, minimumClientRevision: 16, surfaceHash: 'fnv1a32:00000000' },
+      updater: feedUpdater({ version, sourceCommit: '2222222',
+        clientContract: { revision: 35, minimumBrokerRevision: 17 } }),
       jsApp: { name: jsName, target: 'universal', size: bundle.length, sha256: digest(bundle),
         url: `https://fixture.invalid/${jsName}`, provenanceUrl: 'https://fixture.invalid/provenance',
         minimumBunVersion: Bun.version,
@@ -186,6 +192,8 @@ process.exitCode = await runCli(process.argv.slice(2), {
     // A Scheduled Task starts with the service's own environment, not its
     // parent's test environment. Pin these in the fixture entry too, so no
     // service restart can discover or adopt a developer's agent host.
+    const longServicePath = Array.from({ length: 90 }, (_, index) =>
+      join(root, `absent-toolchain-directory-${index}`)).join(';');
     isolationPrelude = `Object.assign(process.env, ${JSON.stringify({
       ...Object.fromEntries(['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA',
         'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME', 'CLAUDE_CONFIG_DIR',
@@ -197,7 +205,11 @@ process.exitCode = await runCli(process.argv.slice(2), {
       COSYNCING_TOKDASH_URL: env.COSYNCING_TOKDASH_URL, COSYNCING_DSH_BASE_URL: env.COSYNCING_DSH_BASE_URL,
       COSYNCING_KIMI_MANAGED_HOST: '0', COSYNCING_DSH_MANAGED_HOST: '0',
       COSYNCING_CLINE_MANAGED_HOST: '0', COSYNCING_KILO_MANAGED_HOST: '0',
-    })});`;
+      PSModuleAnalysisCachePath: 'NUL',
+    })});
+// A scheduled updater must carry the service's PATH without expanding it into
+// a Windows process command line or falling back to the real user's tool PATH.
+if (process.argv[2] === 'broker') process.env.PATH += ${JSON.stringify(`;${longServicePath}`)};`;
     const lease = await reserveLoopbackFixturePort(); url = `http://127.0.0.1:${lease.port}`;
     writeBrokerConfig({ ...defaultBrokerConfig(), broker: { port: lease.port, machineLabel: 'native-update-fixture' } } as never, home);
     const acquisition = join(root, 'acquisition'); ensureOwnerOnlyDirectory(acquisition);
@@ -210,7 +222,7 @@ process.exitCode = await runCli(process.argv.slice(2), {
       data: process.env.COSYNCING_TEST_BASELINE_RUNTIME ? readFileSync(process.execPath) : Buffer.from('unused fixture runtime'), method: 'deflate' }]);
     assets.set('bun-windows-x64.zip', runtimeArchive);
     clientBytes = readFileSync(join(process.env.SystemRoot!, 'System32', 'cmd.exe'));
-    for (const version of ['0.7.0', '2.0.0', '3.0.0']) bundles.set(version, await build(version));
+    for (const version of ['0.7.0', '2.0.0', '3.0.0', '4.0.0', '5.0.0']) bundles.set(version, await build(version));
     atomicWriteOwnerOnly(helper, bundles.get('0.7.0')!);
     const baseline = process.env.COSYNCING_TEST_BASELINE_APPLICATION;
     if (baseline) {
@@ -280,6 +292,46 @@ globalThis.fetch = (input, init) => {
       `executableSha256=${digest(clientBytes)}`, ''].join('\n'));
   }, scaled(120_000));
 
+  async function updaterTasks(cleanup = false, seed = false): Promise<string[]> {
+    const prefix = `${namespace.slice(1)}-Update-`;
+    const script = `$ErrorActionPreference = 'Stop'
+Import-Module "$PSHOME\\Modules\\Microsoft.PowerShell.Utility\\Microsoft.PowerShell.Utility.psd1" -ErrorAction Stop
+$scheduler = New-Object -ComObject 'Schedule.Service'; $scheduler.Connect()
+$folder = $scheduler.GetFolder('\\')
+${seed ? `
+$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+foreach ($kind in @('stale', 'foreign', 'live')) {
+  try { $null = $folder.GetTask('${prefix}' + $kind); continue } catch {}
+  $task = $scheduler.NewTask(0)
+  $task.RegistrationInfo.Description = if ($kind -eq 'foreign') { 'foreign fixture' } else { 'cosyncing:update-runner:v1' }
+  $task.Principal.UserId = $sid; $task.Principal.LogonType = 3
+  $task.Settings.AllowDemandStart = $true
+  $task.Settings.DisallowStartIfOnBatteries = $false
+  $task.Settings.StopIfGoingOnBatteries = $false
+  $action = $task.Actions.Create(0)
+  $action.Path = '${join(process.env.SystemRoot!, 'System32/WindowsPowerShell/v1.0/powershell.exe').replaceAll("'", "''")}'
+  $hold = "[IO.Pipes.NamedPipeServerStream]::new('${prefix}live').WaitForConnection()"
+  $action.Arguments = '-NoProfile -NonInteractive -EncodedCommand ' + [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($hold))
+  $registered = $folder.RegisterTaskDefinition('${prefix}' + $kind, $task, 2, $sid, $null, 3, $null)
+  if ($kind -eq 'live') { $null = $registered.Run($null) }
+}
+` : ''}
+$names = @($folder.GetTasks(1) | Where-Object { $_.Name.StartsWith('${prefix}') } | ForEach-Object {
+  ${cleanup ? '$_.Stop(0); $folder.DeleteTask($_.Name, 0)' : '$_.Name'}
+})
+ConvertTo-Json -InputObject $names -Compress
+`;
+    const child = Bun.spawn([join(process.env.SystemRoot!, 'System32/WindowsPowerShell/v1.0/powershell.exe'),
+      '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
+    { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
+    const capture = captureProcessOutput(child);
+    const timer = setTimeout(() => child.kill(), scaled(30_000));
+    try {
+      expect(await child.exited, capture.read()).toBe(0); await capture.done;
+      return JSON.parse(capture.read());
+    } finally { clearTimeout(timer); }
+  }
+
   afterAll(async () => {
     let cleanup: Awaited<ReturnType<typeof command>> | undefined;
     try {
@@ -290,7 +342,16 @@ globalThis.fetch = (input, init) => {
         rmSync(env.FIXTURE_UPDATE_CONTROL!, { force: true });
         if (existsSync(join(home, 'upgrade-journal.json'))) await command(['update', '--yes', '--json']);
         if (existsSync(receipt)) runtime = readFileSync(receipt, 'utf8').match(/^runtime=(.+)$/m)?.[1] ?? runtime;
+        await updaterTasks(false, true);
         cleanup = await command(['uninstall', '--yes', '--json']);
+        const preserved = [`${namespace.slice(1)}-Update-foreign`, `${namespace.slice(1)}-Update-live`].sort();
+        expect((await updaterTasks()).sort()).toEqual(preserved);
+        // Repeat after the service and its receipts are gone: root tasks still
+        // belong to uninstall even when there is no service.remove action.
+        await updaterTasks(false, true);
+        const again = await command(['uninstall', '--yes', '--json'], { app: helper });
+        expect(again.code, again.output).toBe(0);
+        expect((await updaterTasks()).sort()).toEqual(preserved);
       }
     } finally {
       server?.stop(true);
@@ -298,6 +359,7 @@ globalThis.fetch = (input, init) => {
       // uninstall must not leave a fixture service behind. This namespace and
       // command-line prefix belong solely to the root created by this file.
       if (root && namespace) {
+        await updaterTasks(true);
         const quote = (value: string) => `'${value.replaceAll("'", "''")}'`;
         const script = `$ErrorActionPreference = 'Stop'
 $scheduler = New-Object -ComObject 'Schedule.Service'; $scheduler.Connect()
@@ -400,5 +462,107 @@ Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('bun.exe', 'cosynci
     expect(retried.code, retried.output).toBe(0);
     expect(await (await fetch(`${url}/cosy/version.json`)).json()).toEqual({ version: '3.0.0' });
     expect(existsSync(join(home, 'logs/last-upgrade-failure.json'))).toBe(false);
+  }, scaled(120_000));
+
+  async function api<T>(path: string, body?: unknown): Promise<T> {
+    const response = await fetch(`${url}/api/broker/updates${path}`, {
+      method: body === undefined ? 'GET' : 'POST',
+      headers: { [PRODUCT_IDENTITY.tokenHeader]: readFileSync(join(home, 'secrets/broker-token'), 'utf8').trim(),
+        'content-type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      signal: AbortSignal.timeout(scaled(30_000)),
+    });
+    const result = await response.json() as T;
+    expect(response.ok, JSON.stringify(result)).toBe(true);
+    return result;
+  }
+
+  async function applyFromApp(version: string): Promise<string> {
+    const { inventory } = await api<{ inventory: UpdateInventory }>('?refresh=1');
+    const broker = inventory.components.find((row) => row.component === 'broker')!;
+    expect(broker.ownership).toBe('cosyncing-installer');
+    expect(broker.canApply, JSON.stringify(broker.blockers)).toBe(true);
+    const review = { releaseId: `rel-${version}+2222222`, components: ['broker'], expected: broker.running };
+    const { plan: initial } = await api<{ plan: UpdatePlan }>('/plans', review);
+    expect(initial.blockers).toEqual([]);
+    const { plan } = await api<{ plan: UpdatePlan }>('/plans', {
+      ...review, acknowledgements: initial.requiredAcknowledgements,
+    });
+    const { job } = await api<{ job: UpdateJob }>('/jobs', { planId: plan.planId, idempotencyKey: randomUUID() });
+    expect(job.phase).toBe('ready');
+    const startedAt = performance.now();
+    await api(`/jobs/${job.jobId}/apply`, { idempotencyKey: randomUUID() });
+    console.info(JSON.stringify({ nativeWindowsHandoff: { version, elapsedMs: Math.round(performance.now() - startedAt) } }));
+    return job.jobId;
+  }
+
+  async function appOutcome(jobId: string): Promise<UpdateJob> {
+    try {
+      return await eventually(async () => {
+        const { job } = await api<{ job: UpdateJob }>(`/jobs/${jobId}`);
+        return ['succeeded', 'failed', 'rolled_back', 'needs_attention'].includes(job.phase) ? job : undefined;
+      }, { timeoutMs: 90_000, what: 'native Windows in-app update result' });
+    } catch (error) {
+      const runners = join(home, 'updates/runners');
+      const output = existsSync(runners) ? readdirSync(runners).map((name) => {
+        const text = (file: string) => {
+          const path = join(runners, name, file);
+          if (!existsSync(path)) return '(missing)';
+          const bytes = readFileSync(path);
+          return bytes.toString(bytes[0] === 0xff && bytes[1] === 0xfe ? 'utf16le' : 'utf8').slice(-8000);
+        };
+        return { name, result: text('result.json'), error: text('error.log') };
+      }) : [];
+      console.error(JSON.stringify({ fixtureInAppFailure: {
+        job: JSON.parse(readFileSync(join(home, 'updates/jobs', `${jobId}.json`), 'utf8')),
+        runners: output, tasks: await updaterTasks(),
+        brokerLog: readFileSync(join(home, 'logs/broker.log'), 'utf8').slice(-4000),
+      } }));
+      throw error;
+    }
+  }
+
+  test('an in-app server update survives its service stopping and leaves the running desktop alone', async () => {
+    promote('4.0.0');
+    await updaterTasks(false, true);
+    const receipt = readFileSync(join(home, 'client-receipt'), 'utf8');
+    const client = join(env.LOCALAPPDATA!, 'cosyncing', 'client', 'cosyncing.exe');
+    const desktop = Bun.spawn([client, '/d', '/q', '/c', 'echo fixture-ready & set /p fixture_input='], {
+      env, stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' });
+    const capture = captureProcessOutput(desktop);
+    try {
+      await eventually(() => capture.read().includes('fixture-ready'), { what: 'desktop during server-only update' });
+      const jobId = await applyFromApp('4.0.0');
+      const done = await appOutcome(jobId);
+      expect(done.phase, JSON.stringify(done)).toBe('succeeded');
+      expect(done.components).toMatchObject([{ component: 'broker', outcome: 'verified', actual: { version: '4.0.0' } }]);
+      expect(await (await fetch(`${url}/api/health`)).json()).toMatchObject({ version: '4.0.0' });
+      expect(readFileSync(join(home, 'client-receipt'), 'utf8')).toBe(receipt);
+      expect(desktop.exitCode).toBeNull();
+      const retained = [`${namespace.slice(1)}-Update-foreign`, `${namespace.slice(1)}-Update-live`].sort();
+      await eventually(async () => JSON.stringify((await updaterTasks()).sort()) === JSON.stringify(retained),
+        { what: 'stale and completed updater cleanup, preserving foreign and live tasks' });
+      await updaterTasks(true);
+      const status = await command(['status', '--json']);
+      expect(JSON.parse(status.output).service, status.output).toMatchObject({
+        active: 'active', definition: 'current', environment: 'current',
+      });
+    } finally {
+      desktop.stdin.end(); await desktop.exited; await capture.done;
+    }
+  }, scaled(120_000));
+
+  test('an in-app failed candidate restores the answering service and reports rollback without a lease wait', async () => {
+    promote('5.0.0', '9.9.9');
+    const jobId = await applyFromApp('5.0.0');
+    const done = await appOutcome(jobId);
+    expect(done.phase, JSON.stringify(done)).toBe('rolled_back');
+    expect(done.result).toBe('failed');
+    expect(await (await fetch(`${url}/api/health`)).json()).toMatchObject({ version: '4.0.0' });
+    expect(await (await fetch(`${url}/cosy/version.json`)).json()).toEqual({ version: '4.0.0' });
+    expect(existsSync(join(home, 'upgrade-journal.json'))).toBe(false);
+    const { inventory } = await api<{ inventory: UpdateInventory }>('');
+    expect(inventory.components.find((row) => row.component === 'broker')?.activeJobId).toBeUndefined();
+    await eventually(async () => (await updaterTasks()).length === 0, { what: 'failed updater task cleanup' });
   }, scaled(120_000));
 });

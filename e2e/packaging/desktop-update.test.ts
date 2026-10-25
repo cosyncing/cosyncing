@@ -7,6 +7,10 @@ import { createHash, generateKeyPairSync, randomUUID, sign } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { openUpdateManagementHost } from '../../packages/typescript/broker/src/updates/update-management-host.ts';
+import { updateCheck, createUpdatePlan, createUpdateJob, applyUpdateJob } from '../../packages/typescript/broker/src/updates/update-management.ts';
+import type { BuildInfo } from '../../packages/typescript/broker/src/runtime/build-info.ts';
+import { captureProcessOutput, isolatedBrokerFixtureEnvironment } from '../../packages/typescript/broker/test/helpers/isolated-broker-fixture.ts';
 import { runDesktopUpdateCommand } from '../../packages/typescript/broker/src/cli/desktop-update-command.ts';
 import { committedInstallState, writeInstallState } from '../../packages/typescript/broker/src/installation/install-state.ts';
 import { acquireInstallationLock } from '../../packages/typescript/broker/src/installation/installation-lock.ts';
@@ -15,7 +19,7 @@ import { renderDesktopClientReceipt } from '../../packages/typescript/broker/src
 import { acknowledgeDesktopUpdate, type DesktopUpdateDependencies } from '../../packages/typescript/broker/src/updates/desktop-update.ts';
 import { releaseManifestForTests } from '../../packages/typescript/broker/src/updates/release-upgrade.ts';
 import { desktopClientAssetName } from '../../packages/typescript/broker/src/updates/desktop-client-types.ts';
-import { feedUpdater } from '../../packages/typescript/broker/test/helpers/update-release-feed.ts';
+import { feedUpdater, createFakeReleaseFeed, FEED_MANIFEST_URL, FEED_TRUSTED_KEYS, feedSurfaceHash } from '../../packages/typescript/broker/test/helpers/update-release-feed.ts';
 import { desktopBridgePaths, startDesktopBridge } from '../../packages/typescript/broker/src/updates/desktop-update-bridge.ts';
 import { desktopClientExecutable } from '../../packages/typescript/broker/src/updates/desktop-client.ts';
 
@@ -106,6 +110,59 @@ function fixture(options: { startup?: 'ack' | 'crash' | 'unknown'; safeDowngrade
 }
 
 describe.skipIf(process.platform !== 'linux')('desktop in-app update lifecycle', () => {
+  test('a failed prepared server update reports its CLI result and settles the job immediately on Linux', async () => {
+    const f = fixture();
+    const contract = { revision: 35, minimumClientRevision: 16, surfaceHash: feedSurfaceHash(35) };
+    const feed = createFakeReleaseFeed({ releases: [{ name: 'candidate', version: '2.0.0', sourceCommit: '2222222',
+      publishedAt: '2026-01-01T00:00:00.000Z', contract,
+      updater: feedUpdater({ version: '2.0.0', sourceCommit: '2222222' }) }] });
+    const buildInfo = { version: '1.0.0', commit: '1111111', packaged: true, dirty: false,
+      distribution: 'native', target: 'linux-x64', contract } as BuildInfo;
+    const host = openUpdateManagementHost({ home: f.home, buildInfo,
+      manifestUrl: FEED_MANIFEST_URL, fetch: feed.fetch, trustedKeys: FEED_TRUSTED_KEYS,
+      handoff: async (_job, mayLaunch) => {
+        const authority = mayLaunch();
+        return { accepted: authority.allowed, detailCode: authority.allowed ? 'handoff-accepted' : authority.detailCode };
+      } });
+    const caller = { kind: 'remote-owner', id: 'owner', updateGranted: true } as const;
+    await updateCheck(host.dependencies);
+    const plan = await createUpdatePlan(host.dependencies, caller, { releaseId: 'rel-2.0.0+2222222',
+      components: ['broker'], expected: { version: '1.0.0', buildId: '1111111' },
+      acknowledgements: ['server-will-disconnect', 'compatibility-unconfirmed', 'interruption-during-work'] });
+    if (!plan.ok) throw new Error(JSON.stringify(plan));
+    const job = await createUpdateJob(host.dependencies, caller, { planId: plan.value.planId, idempotencyKey: randomUUID() });
+    if (!job.ok) throw new Error(JSON.stringify(job));
+    expect(job.value.phase).toBe('ready');
+    const applied = await applyUpdateJob(host.dependencies, caller, job.value.jobId, { idempotencyKey: randomUUID() });
+    expect(applied.ok).toBe(true);
+    // Damage bytes after signed preparation. The real installer must reject
+    // them and the shared CLI must persist that failure before its deadline.
+    atomicWriteOwnerOnly(join(f.home, 'updates/staging', job.value.jobId, 'cosyncing-linux-x64'), 'damaged');
+    const driver = join(f.home, 'fixture-cli.ts');
+    const cli = join(import.meta.dir, '../../packages/typescript/broker/src/cli/cli.ts');
+    const upgrade = join(import.meta.dir, '../../packages/typescript/broker/src/updates/release-upgrade.ts');
+    atomicWriteOwnerOnly(driver, `import { runCli } from ${JSON.stringify(cli)};
+import { runUpgrade } from ${JSON.stringify(upgrade)};
+process.exitCode = await runCli(process.argv.slice(2), { buildInfo: ${JSON.stringify(buildInfo)},
+  upgradeTransaction: (deps) => runUpgrade({ ...deps, executablePath: ${JSON.stringify(f.deps.applicationPath)},
+    trustedKeys: ${JSON.stringify(FEED_TRUSTED_KEYS)} }) });`);
+    const env = isolatedBrokerFixtureEnvironment(f.home, { overrides: { COSYNCING_HOME: f.home } });
+    const child = Bun.spawn([process.execPath, driver, 'upgrade', '--yes', '--json', '--components', 'broker',
+      '--release', 'rel-2.0.0+2222222', '--prepared-job', job.value.jobId, '--manifest', FEED_MANIFEST_URL],
+    { env, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
+    const capture = captureProcessOutput(child);
+    const timer = setTimeout(() => child.kill(), 15_000);
+    try {
+      const code = await child.exited; await capture.done;
+      expect(code, capture.read()).toBe(1);
+      expect(JSON.parse(capture.read())).toMatchObject({ status: 'failed', detailCode: 'release-download-unavailable' });
+      const settled = host.store.readJob(job.value.jobId);
+      expect(settled.ok && settled.value.phase).toBe('failed');
+      expect(settled.ok && settled.value.events.at(-1)?.detailCode).toBe('release-download-unavailable');
+      expect(readFileSync(f.deps.applicationPath, 'utf8')).toBe('signed fixture bundle');
+    } finally { clearTimeout(timer); child.kill(); await child.exited; }
+  });
+
   test('prepares while the app runs, installs only after exit, and requires observed startup', async () => {
     const f = fixture();
     const doubleClick = await Promise.all([f.prepare(), f.prepare()]);

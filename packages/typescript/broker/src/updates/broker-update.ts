@@ -1,3 +1,4 @@
+import { WINDOWS_TASK_SCHEDULER_TIMEOUT_MS } from '../installation/windows-task-scheduler-powershell.ts';
 import { isAbsolute } from 'node:path';
 import type { BuildInfo } from '../runtime/build-info.ts';
 import { PRODUCT_IDENTITY } from '@cosyncing/protocol';
@@ -91,6 +92,8 @@ export interface BrokerUpdateTriggerDependencies {
   systemdRunPath?: string;
   launchdPlistPath?: string;
   windowsPowerShellPath?: string;
+  /** Owner-only runner payload staged outside the installation being replaced. */
+  windowsPayloadPath?: string;
   manifestUrl?: string;
   /**
    * The immutable release the caller reviewed, spelled into the handoff.
@@ -182,18 +185,18 @@ export function isBrokerUpdateManifestUrl(value: string): boolean {
   }
 }
 
-async function defaultRun(argv: readonly string[]): Promise<{ ok: boolean; detail?: string }> {
+async function defaultRun(argv: readonly string[], provider: string): Promise<{ ok: boolean; detail?: string }> {
   let child: ReturnType<typeof Bun.spawn>;
   try {
-    child = Bun.spawn([...argv], { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
+    child = Bun.spawn([...argv], { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', windowsHide: true });
   } catch (error) {
     return { ok: false, detail: error instanceof Error ? error.message : String(error) };
   }
-  // Same held-timer hazard as the service command runner: the deadline must be cleared on settle, or the
-  // handoff would keep this process alive for the full 5s after systemd-run already returned.
+  // Cold Windows PowerShell imports and task registration use the same budget
+  // as other scheduler operations. Clear the deadline when handoff settles.
   const completed = await settleWithDeadline(
     child.exited.then((exitCode) => ({ timedOut: false as const, exitCode })),
-    5_000,
+    provider === 'task-scheduler' ? WINDOWS_TASK_SCHEDULER_TIMEOUT_MS : 5_000,
     { timedOut: true as const, exitCode: -1 },
   );
   if (completed.timedOut) child.kill('SIGKILL');
@@ -203,7 +206,7 @@ async function defaultRun(argv: readonly string[]): Promise<{ ok: boolean; detai
   if (completed.timedOut) await child.exited.catch(() => undefined);
   return completed.exitCode === 0
     ? { ok: true }
-    : { ok: false, detail: stderr || (completed.timedOut ? 'systemd handoff timed out' : `systemd-run exited ${completed.exitCode}`) };
+    : { ok: false, detail: stderr || (completed.timedOut ? `${provider} update handoff timed out` : `${provider} update handoff exited ${completed.exitCode}`) };
 }
 
 /** Queue the existing BPC8 CLI upgrader outside the broker service cgroup, after the HTTP 202 is flushed. */
@@ -270,7 +273,7 @@ export async function triggerBrokerUpdate(
           : 'This launch authorization has already been used.',
     };
   }
-  const launched = await (dependencies.run ?? defaultRun)(command);
+  const launched = await (dependencies.run ? dependencies.run(command) : defaultRun(command, dependencies.service.provider));
   if (!launched.ok) {
     return { ...base, status: 'failed', detailCode: 'broker-update-handoff-failed', message: launched.detail || 'Could not queue the broker update.' };
   }
