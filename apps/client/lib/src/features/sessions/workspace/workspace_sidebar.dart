@@ -353,9 +353,7 @@ class _SidebarRoster extends ConsumerWidget {
         SessionRef.cachedIdentity(
           tool: identity.tool,
           id: identity.sessionId,
-          title: identity.title.isNotEmpty
-              ? identity.title
-              : identity.sessionId,
+          title: identity.title,
         ),
       ),
       onNewProject: canCreateSession

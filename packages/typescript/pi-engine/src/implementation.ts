@@ -17,6 +17,8 @@
  * its own readiness gate, doctor diagnostics, and embedded bridge asset. `PiAdapter` itself lives
  * in the pi adapter package; only `PiEngineAdapter` and the dialect helpers live here.
  */
+import { SessionTitleCache, sessionPromptPreview, isSessionInstruction } from '@cosyncing/adapter-api';
+
 import { homedir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -388,21 +390,23 @@ export class PiEngineAdapter implements AgentBackend {
     );
     const st = statSafe(file);
     const actualCwd = readSessionCwd(file) ?? cwd;
-    const name = title ?? readSessionName(this.rt, file);
+    const naming = await readSessionNaming(this.rt, file);
+    const name = title ?? naming.title;
     const sessionId = String(state.sessionId ?? '').trim();
     const currentModel = piCurrentModelFromNative(state.model, state.thinkingLevel);
     return {
       id: sessionIdForFile(file),
       ...(sessionId ? { nativeId: sessionId } : {}),
       tool: this.id,
-      title: name ?? `${baseName(actualCwd)} · ${(sessionId || baseName(file)).slice(0, 8)}`,
+      title: name ?? '',
+      titlePending: title ? undefined : naming.titlePending || undefined,
       cwd: actualCwd,
       status: 'idle',
       attachMode: 'observe',
       currentModel,
       model: state.model?.name ? String(state.model.name) : state.model?.id ? String(state.model.id) : undefined,
       createdAt: st?.birthtimeMs || st?.ctimeMs,
-      updatedAt: st?.mtimeMs,
+      updatedAt: naming.activityAt ?? st?.mtimeMs,
       control: piControlState(this.rt.dialect, {
         canDrive: true,
         driveState: 'observing',
@@ -443,13 +447,14 @@ export class PiEngineAdapter implements AgentBackend {
       const parentThreadId = discovered.parentFile
         ? readSessionNativeId(discovered.parentFile)
         : undefined;
-      const uuid = baseName(full).replace(/\.jsonl$/, '').split('_').pop() ?? baseName(full);
+      const naming = await readSessionNaming(this.rt, full, options?.signal);
       out.push({
         id: sessionIdForFile(full),
         ...(nativeId ? { nativeId } : {}),
         ...(parentThreadId ? { origin: 'subagent' as const, parentThreadId } : {}),
         tool: this.id,
-        title: readSessionName(this.rt, full) ?? `${cwd ? baseName(cwd) : baseDir(full)} · ${uuid.slice(0, 8)}`,
+        title: naming.title,
+        titlePending: naming.titlePending || undefined,
         cwd,
         // Pi has no live process to observe yet (resume-under-broker), so we can't know
         // working/needs-input from discovery — everything is 'idle' (available). Real-time
@@ -468,7 +473,7 @@ export class PiEngineAdapter implements AgentBackend {
           mutableRuntimeReady: readiness.ready,
           runtimeUnavailableReason: readiness.message,
         }),
-        updatedAt: st.mtimeMs,
+        updatedAt: naming.activityAt ?? st.mtimeMs,
       });
     }
     return out;
@@ -493,17 +498,20 @@ export class PiEngineAdapter implements AgentBackend {
     if (mode === 'live') {
       throw new Error(`${this.rt.dialect.displayName} true sync is not active for this session. Start the ${this.rt.dialect.displayName} bridge extension in the terminal session, then refresh.`);
     }
+    const naming = await readSessionNaming(this.rt, path);
     const info: SessionInfo = {
       id: sessionId,
       ...(nativeId ? { nativeId } : {}),
       ...(isSubagent ? { origin: 'subagent' as const, ...(parentThreadId ? { parentThreadId } : {}) } : {}),
       tool: this.id,
-      title: readSessionName(this.rt, path) ?? baseName(path),
+      title: naming.title,
+      titlePending: naming.titlePending || undefined,
       cwd,
       status: 'idle',
       attachMode: mode === 'resume' ? 'resume' : 'observe',
       model: surface.model,
       currentModel: surface.currentModel,
+      updatedAt: naming.activityAt ?? statSafe(path)?.mtimeMs,
       control: piControlState(this.rt.dialect, {
         canDrive,
         driveState: mode === 'resume' ? 'driving' : 'observing',
@@ -551,6 +559,11 @@ export class PiEngineAdapter implements AgentBackend {
     return registry;
   }
 
+  async resolveSessionTitle(sessionId: string): Promise<string | undefined> {
+    this.assertSessionAccess();
+    return readSessionTitle(this.rt, sessionFileOf(this.rt, sessionId));
+  }
+
   async renameSession(sessionId: string, title: string | null): Promise<SessionInfo> {
     this.assertSessionAccess();
     const readiness = this.rt.hooks.readiness();
@@ -560,28 +573,29 @@ export class PiEngineAdapter implements AgentBackend {
       throw new Error(`${this.rt.dialect.displayName} subagent sessions are owned by their parent and cannot be renamed independently.`);
     }
     const cwd = readSessionCwd(path) ?? decodeCwdDir(baseDir(path));
-    const requested = title == null ? '' : title.trim().slice(0, 160);
+    const requested = title == null ? '' : Array.from(title.trim()).slice(0, 160).join('');
     const state = await renamePiSessionViaRpc(this.rt, path, requested);
     const st = statSafe(path);
     const nativeId = readSessionNativeId(path);
     const currentModel = piCurrentModelFromNative(state.model, state.thinkingLevel);
+    const naming = await readSessionNaming(this.rt, path);
     const nativeTitle =
       (typeof state.sessionName === 'string' && state.sessionName.trim()) ||
       (requested || undefined) ||
-      readSessionName(this.rt, path) ||
-      baseName(path);
+      naming.title;
     return {
       id: sessionIdForFile(path),
       ...(nativeId ? { nativeId } : {}),
       tool: this.id,
       title: nativeTitle,
+      titlePending: requested ? undefined : naming.titlePending || undefined,
       cwd,
       status: 'idle',
       attachMode: 'observe',
       currentModel,
       model: state.model?.name ? String(state.model.name) : state.model?.id ? String(state.model.id) : undefined,
       createdAt: st?.birthtimeMs || st?.ctimeMs,
-      updatedAt: st?.mtimeMs,
+      updatedAt: naming.activityAt ?? st?.mtimeMs,
       control: piControlState(this.rt.dialect, {
         canDrive: resolveBin(this.rt) !== null,
         driveState: 'observing',
@@ -1151,7 +1165,7 @@ function piLifecycleFailure(dialect: PiDialect, action: 'fork' | 'clone', resp: 
   return `${dialect.displayName} ${action} failed`;
 }
 
-function piSessionInfoFromState(
+async function piSessionInfoFromState(
   rt: PiDialectRuntime,
   state: PiRpcSessionState,
   fallbackSessionFile: string,
@@ -1160,27 +1174,28 @@ function piSessionInfoFromState(
   brokerUrl: string,
   bridgeUsesIntegrationFile: boolean,
   action: 'fork' | 'clone',
-): SessionInfo {
+): Promise<SessionInfo> {
   const file = canonicalSessionFile(typeof state.sessionFile === 'string' && state.sessionFile ? state.sessionFile : fallbackSessionFile);
   const cwd = readSessionCwd(file) ?? fallbackCwd ?? decodeCwdDir(baseDir(file));
   const st = statSafe(file);
   const sessionId = String(state.sessionId ?? '').trim();
   const currentModel = piCurrentModelFromNative(state.model, state.thinkingLevel);
+  const naming = await readSessionNaming(rt, file);
   const title =
     (typeof state.sessionName === 'string' && state.sessionName.trim()) ||
-    readSessionName(rt, file) ||
-    `${action === 'fork' ? 'Fork' : 'Clone'} · ${(sessionId || baseName(file)).slice(0, 8)}`;
+    naming.title;
   return {
     id: sessionIdForFile(file),
     tool,
     title,
+    titlePending: naming.titlePending || undefined,
     cwd,
     status: 'idle',
     attachMode: 'observe',
     currentModel,
     model: state.model?.name ? String(state.model.name) : state.model?.id ? String(state.model.id) : undefined,
     createdAt: st?.birthtimeMs || st?.ctimeMs,
-    updatedAt: st?.mtimeMs,
+    updatedAt: naming.activityAt ?? st?.mtimeMs,
     control: piControlState(rt.dialect, {
       canDrive: resolveBin(rt) !== null,
       driveState: 'observing',
@@ -2538,7 +2553,9 @@ class PiConnection implements SessionConnection {
           }), 'utf8').toString('base64url')}`,
         }
       : { type: 'prompt', message: text, ...(images.length ? { images } : {}) };
-    const streamingAtDelivery = this.streaming;
+    // Pi acknowledges prompt before publishing agent_start. A prior admitted
+    // prompt still waiting for message_start already owns that native run.
+    const streamingAtDelivery = this.streaming || this.pendingUserTurns.length > 1;
     if (streamingAtDelivery) cmd.streamingBehavior = 'steer';
     const nativeAck = durableRpcCorrelation
       ? this.awaitNativePromptAck(userKey, ompNativePromptAckDeadlineMs(streamingAtDelivery))
@@ -4253,6 +4270,73 @@ function scanSessionSurface(lines: string[], dialect: PiDialect): PiSessionSurfa
   return { model: modelLabel, currentModel, thinkingLevel };
 }
 
+interface PiTitleFacts {
+  headerName?: string;
+  native?: string; nativeOffset?: number;
+  legacy?: string; legacyOffset?: number;
+  firstPrompt?: string; firstPromptOffset?: number;
+  createdAt?: number; messageAt?: number; messageOffset?: number;
+}
+const piTitleCaches = new WeakMap<PiDialectRuntime, SessionTitleCache<PiTitleFacts>>();
+async function readSessionTitle(rt: PiDialectRuntime, file: string, signal?: AbortSignal): Promise<string | undefined> {
+  const naming = await readSessionNaming(rt, file, signal);
+  return naming.titlePending ? undefined : naming.title;
+}
+async function readSessionNaming(rt: PiDialectRuntime, file: string, signal?: AbortSignal): Promise<{ title: string; titlePending: boolean; activityPending: boolean; activityAt?: number }> {
+  let cache = piTitleCaches.get(rt);
+  if (!cache) {
+    cache = new SessionTitleCache<PiTitleFacts>(() => ({}), (row, facts, offset) => {
+      if (row.type === 'session') facts.createdAt = nativeTimeMs(row.timestamp);
+      // Native renames append metadata without advancing conversation activity.
+      if (row.type === 'message' && (row.message?.role === 'user' || row.message?.role === 'assistant')) {
+        const at = nativeTimeMs(row.message.timestamp) ?? nativeTimeMs(row.timestamp);
+        if (at !== undefined && offset >= (facts.messageOffset ?? -1)) {
+          facts.messageAt = at;
+          facts.messageOffset = offset;
+        }
+      }
+      // The formats belong to their dialect. An explicit empty value is a clear.
+      if (row.type === 'session_info' && rt.dialect.titleEntryTypes.includes('session_info') && typeof row.name === 'string') {
+        if (offset >= (facts.legacyOffset ?? -1)) { facts.legacy = row.name; facts.legacyOffset = offset; }
+      } else if (rt.dialect.toolId !== 'pi' && rt.dialect.titleEntryTypes.includes(String(row.type)) && typeof row.title === 'string') {
+        if (offset >= (facts.nativeOffset ?? -1)) { facts.native = row.title; facts.nativeOffset = offset; }
+      }
+      else if (row.type === 'session') {
+        const name = row.name ?? row.sessionName;
+        if (typeof name === 'string') facts.headerName = name;
+      }
+      if (offset < (facts.firstPromptOffset ?? Infinity) && row.type === 'message') {
+        const prompt = mapPiMessage(row.message).find((message) => message.type === 'user-message');
+        if (prompt?.type === 'user-message') {
+          const content = row.message?.content;
+          const text = row.message?.role === 'user' && Array.isArray(content)
+            ? content.filter((part: any) => part?.type === 'text' && typeof part.text === 'string')
+              .map((part: any) => part.text).filter((text: string) => !isSessionInstruction(text)).join('\n')
+            : prompt.text;
+          if (!isSessionInstruction(text)) {
+            const preview = sessionPromptPreview(text);
+            if (preview) { facts.firstPrompt = preview; facts.firstPromptOffset = offset; }
+          }
+        }
+      }
+    }, undefined, {
+      tail: true,
+
+    });
+    piTitleCaches.set(rt, cache);
+  }
+  const { facts, complete, coverage } = await cache.readResult(file, signal);
+  const activityKnown = coverage.complete || coverage.previouslyComplete
+    || (facts.messageOffset !== undefined && facts.messageOffset >= coverage.tailFrom);
+  const firstPrompt = (facts.firstPromptOffset ?? Infinity) < coverage.headThrough ? facts.firstPrompt : undefined;
+  return {
+    title: (facts.native ?? (rt.dialect.toolId === 'pi' || complete ? facts.legacy : undefined) ?? facts.headerName) || firstPrompt || '',
+    titlePending: !complete,
+    activityPending: !activityKnown,
+    activityAt: activityKnown ? facts.messageAt ?? facts.createdAt : undefined,
+  };
+}
+
 function readSessionName(rt: PiDialectRuntime, file: string): string | undefined {
   try {
     const st = statSafe(file);
@@ -4260,6 +4344,8 @@ function readSessionName(rt: PiDialectRuntime, file: string): string | undefined
     const maxTail = rt.nameScanBytes;
     const tail = readTextTail(file, st.size, maxTail);
     let latest: string | undefined;
+    let sawLatest = false;
+    let legacy: string | undefined;
     let fallback: string | undefined;
     for (const line of tail.split('\n')) {
       if (!line.trim()) continue;
@@ -4273,25 +4359,26 @@ function readSessionName(rt: PiDialectRuntime, file: string): string | undefined
       // omp owns the durable `title` slot plus `title_change` events. Both are last-write-wins.
       let titleEntry: string | undefined;
       let sawTitleEntry = false;
-      if (obj?.type === 'session_info' && typeof obj.name === 'string') {
-        titleEntry = obj.name;
-        sawTitleEntry = true;
+      if (rt.dialect.titleEntryTypes.includes('session_info') && obj?.type === 'session_info' && typeof obj.name === 'string') {
+        legacy = obj.name;
       } else if (rt.dialect.titleEntryTypes.includes(String(obj?.type)) && typeof obj?.title === 'string') {
         titleEntry = obj.title;
         sawTitleEntry = true;
       }
-      if (sawTitleEntry) latest = titleEntry || undefined;
-      else if (!fallback && (typeof obj?.name === 'string' || typeof obj?.sessionName === 'string')) {
+      if (sawTitleEntry) { latest = titleEntry; sawLatest = true; }
+      else if (obj?.type === 'session' && !fallback && (typeof obj?.name === 'string' || typeof obj?.sessionName === 'string')) {
         fallback = obj.name || obj.sessionName || undefined;
       }
     }
-    if (latest || fallback || st.size <= maxTail) return latest ?? fallback;
+    if (sawLatest) return latest || undefined;
+    if (legacy !== undefined) return legacy || undefined;
+    if (fallback || st.size <= maxTail) return fallback;
     const head = readTextHead(file, Math.min(st.size, 64 * 1024));
     for (const line of head.split('\n')) {
       if (!line.trim()) continue;
       try {
         const obj = JSON.parse(line);
-        if (typeof obj?.name === 'string' || typeof obj?.sessionName === 'string') return obj.name || obj.sessionName || undefined;
+        if (obj?.type === 'session' && (typeof obj?.name === 'string' || typeof obj?.sessionName === 'string')) return obj.name || obj.sessionName || undefined;
         // omp's leading `title` slot sits before the session header, so a file with no name-ish
         // field at all still surfaces its durable title.
         if (rt.dialect.titleEntryTypes.includes(String(obj?.type)) && typeof obj?.title === 'string' && obj.title) return obj.title;

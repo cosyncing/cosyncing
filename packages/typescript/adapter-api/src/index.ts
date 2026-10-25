@@ -11,6 +11,8 @@ export * from './terminal-summary-registry.ts';
 export * from './session-identity.ts';
 export * from './store-file.ts';
 export * from './directory-watch.ts';
+export * from './session-title.ts';
+export * from './title-record-projection.ts';
 import { decodeSessionInfo, PRODUCT_IDENTITY, type AgentCapabilities, type AttachMode, type DriveAttachReason, type FileChange, type FileOperation, type ModeOption, type ModelOption, type PromptInput, type SessionConnection, type SessionInfo, type Unsubscribe } from '@cosyncing/protocol';
 import type { AgentSetupDiagnosis, SetupDiagnosisContext } from './diagnosis.ts';
 
@@ -373,6 +375,9 @@ export interface AgentBackend {
   /** Dynamic readiness for native title persistence. Hook presence describes the static
    * capability; this probe prevents clients from offering it while the runtime is gated. */
   canRenameNative?(): Promise<boolean> | boolean;
+  /** Read the same native title used by discovery without opening a connection.
+   * Undefined means recovery is incomplete or unavailable; preserve any known title. */
+  resolveSessionTitle?(sessionId: string): Promise<string | undefined>;
   /** Revoke ADAPTER-OWNED automatic Drive eligibility for one session.
    *
    *  Only for adapters that keep their own record of which sessions they may drive — the broker's
@@ -429,8 +434,10 @@ export interface AgentBackend {
   anySessionBusy?(): boolean;
   /** Optional low-latency session metadata/control watcher. Adapters use this for externally-owned
    *  state changes that are visible without opening a second driver, such as a terminal-sync bridge
-   *  socket appearing/disappearing. The broker pushes the returned SessionInfo to attached clients. */
-  watchSessionInfo?(onChange: (info: SessionInfo) => void): Unsubscribe;
+   *  socket appearing/disappearing. The broker pushes the returned SessionInfo to attached clients.
+   *  Supply performance.now() captured before reading native metadata so an
+   *  in-flight observation can be fenced against a subsequent app rename. */
+  watchSessionInfo?(onChange: (info: SessionInfo, observationStartedAt?: number) => void): Unsubscribe;
   /** Native model, permission, agent or command catalog invalidation for an attached session.
    * The broker rereads catalogs; this watcher grants no mutation authority. */
   watchSessionCatalog?(sessionId: string, onChange: () => void): Unsubscribe;

@@ -316,7 +316,9 @@ class _CachedSessionRow extends StatelessWidget {
     final parent = row.parent;
     final lineageLabel = row.depth > 0 && parent != null
         ? l10n.sessionRosterChildOf(
-            parent.title.isEmpty ? parent.sessionId : parent.title,
+            parent.title.isEmpty
+                ? l10n.sessionDetailTitleUntitled
+                : parent.title,
           )
         : null;
 

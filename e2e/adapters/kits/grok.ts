@@ -25,6 +25,7 @@ import {
 } from './fakes/acp-agent.ts';
 import {
   type ConformanceExtra,
+  stableUnnamedTitle,
   installFakeExecutable,
   Ledger,
   makeFifo,
@@ -191,6 +192,20 @@ function plantGrokSession(
 }
 
 const grokExtras: ConformanceExtra[] = [
+  stableUnnamedTitle('grok'),
+  {
+    title: 'an unnamed session stays pending until its first prompt beyond a large prefix is recovered',
+    async run({ fake, client }) {
+      const session = fake.seedSession({ title: '', turns: 0 });
+      const updates = join(grokSessionDir(fake.storeRoot, session), 'updates.jsonl');
+      const padding = `${JSON.stringify({ type: 'progress', text: 'x'.repeat(256 * 1024) })}\n`;
+      writeFileSync(updates, padding.repeat(80));
+      appendFileSync(updates, `${JSON.stringify(grokUserUpdate(session.id, 'first-late-prompt', 'Late first prompt'))}\n`);
+      const pending = (await client.sessions({ refresh: true })).find((row) => row.id === session.id)!;
+      expect(pending.titlePending).toBe(true);
+      await client.waitForSession((row) => row.id === session.id && !row.titlePending && row.title === 'Late first prompt');
+    },
+  },
   replacedLogResetsObserve('grok'),
   {
     title: 'Create fails closed when the reusable cached-token login is gone',

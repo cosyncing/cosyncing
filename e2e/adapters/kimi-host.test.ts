@@ -48,6 +48,14 @@ async function createdDrive(title = 'host rules') {
   await eventually(() => fake.ledger.wsFrames().some((frame) => frame.type === 'subscribe' && frame.payload?.session_ids?.includes(id)), {
     what: 'the attach handshake to reach the host',
   });
+  await eventually(() => fake.ledger.wsFrames().some((frame) => frame.type === 'subscribe_v2' && frame.payload?.session_id === id), {
+    what: 'the second subscription to reach the host',
+  });
+  const nonce = `attached-${id}`;
+  fake.host.ping(nonce);
+  await eventually(() => fake.ledger.wsFrames().some((frame) => frame.type === 'pong' && frame.payload?.nonce === nonce), {
+    what: 'the client to process both subscription acknowledgements',
+  });
   return { id, cwd, stream };
 }
 

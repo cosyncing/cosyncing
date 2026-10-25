@@ -10,6 +10,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import {
+  appendFileSync,
   closeSync,
   constants,
   fstatSync,
@@ -18,6 +19,7 @@ import {
   openSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -36,6 +38,8 @@ import {
   readRegularFileSync,
   STORE_READ_FLAGS,
 } from '../src/index.ts';
+import { SessionTitleCache } from '../src/session-title.ts';
+import { TitleRecordProjection } from '../src/title-record-projection.ts';
 
 const posix = process.platform !== 'win32';
 const base = realpathSync(mkdtempSync(join(tmpdir(), 'store-file-')));
@@ -47,6 +51,110 @@ writeFileSync(file, bytes);
 const directory = join(base, 'directory.jsonl');
 mkdirSync(directory);
 const missing = join(base, 'missing.jsonl');
+
+// Exact appends/replacements between a yielded chunk and its validation cannot
+// be staged through HTTP. These store faults complement large-file conformance.
+describe('metadata while the native store keeps changing', () => {
+  // A real writer cannot portably be paused inside an escape or UTF-8 scalar.
+  // These recorded-data faults exercise that boundary beside the Pi/OMP flows.
+  test('large prompt records preserve text after binary data and validate the original string end', () => {
+    const text = '项目 😀 "quoted" \\ path';
+    const raw = Buffer.from(JSON.stringify({ type: 'prompt', image: { data: 'A'.repeat(2 * 1024 * 1024) }, text }));
+    const split = raw.indexOf(Buffer.from('😀')) + 1;
+    const record = new TitleRecordProjection();
+    record.append(raw.subarray(0, split));
+    expect(record.finish().kind).toBe('malformed');
+    const completed = record.clone();
+    completed.append(raw.subarray(split));
+    const projected = completed.finish();
+    expect(projected.kind).toBe('record');
+    if (projected.kind === 'record') expect(projected.value.text).toBe(text);
+    expect(record.finish().kind).toBe('malformed');
+    const escaped = new TitleRecordProjection();
+    escaped.append('{"type":"prompt","data":"' + 'A'.repeat(2 * 1024 * 1024) + '\\');
+    escaped.append('uD83D\\uDE00","text":"\\u9879\\u76ee"}');
+    expect(escaped.finish()).toMatchObject({ kind: 'record', value: { text: '项目' } });
+    const malformed = new TitleRecordProjection();
+    malformed.append('{"type":"prompt","data":"' + 'A'.repeat(2 * 1024 * 1024) + '\\q","text":"not valid"}');
+    expect(malformed.finish().kind).toBe('malformed');
+    const invalidUtf8 = new TitleRecordProjection();
+    invalidUtf8.append(Buffer.concat([
+      Buffer.from('{"data":"' + 'A'.repeat(2 * 1024 * 1024)), Buffer.from([0xc3, 0x28]), Buffer.from('"}'),
+    ]));
+    expect(invalidUtf8.finish().kind).toBe('malformed');
+  });
+
+  test('an unfinished large first record resumes after cold EOF; an opaque row cannot certify a later prompt', async () => {
+    const path = join(base, 'large-first-record.jsonl');
+    const prefix = '{"type":"prompt","data":"' + 'A'.repeat(2 * 1024 * 1024);
+    writeFileSync(path, prefix);
+    const cache = new SessionTitleCache<{ prompt?: string; at?: number }>(() => ({}), (row, facts, offset) => {
+      if (row.type === 'prompt' && offset < (facts.at ?? Infinity)) { facts.prompt = row.text; facts.at = offset; }
+    }, undefined, { tail: true, now: () => 0 });
+    expect((await cache.readResult(path)).complete).toBe(false);
+    appendFileSync(path, '","text":"first with image"}\n{"type":"prompt","text":"later"}\n');
+    const finished = await cache.readResult(path);
+    expect(finished.complete).toBe(true);
+    expect(finished.facts.prompt).toBe('first with image');
+    writeFileSync(`${path}.new`, JSON.stringify({ type: 'prompt', text: ' '.repeat(2 * 1024 * 1024) + 'hidden first text' }) + '\n'
+      + '{"type":"prompt","text":"later must remain unproved"}\n');
+    renameSync(`${path}.new`, path);
+    const opaque = await cache.readResult(path);
+    expect(opaque.complete).toBe(false);
+    expect(opaque.facts.prompt).toBeUndefined();
+  });
+
+  test('a cold backlog finishes despite appends during every chunk, with native precedence and clears intact', async () => {
+    const path = join(base, 'growing-titles.jsonl');
+    const line = (row: object) => `${JSON.stringify(row)}\n`;
+    writeFileSync(path, line({ type: 'prompt', text: 'first prompt' }));
+    const padding = line({ type: 'output', text: 'x'.repeat(256 * 1024) });
+    for (let index = 0; index < 192; index++) {
+      appendFileSync(path, padding);
+      if (index === 120) appendFileSync(path, line({ type: 'native', name: 'OMP title in the middle' }));
+    }
+    appendFileSync(path, line({ type: 'legacy', name: 'Pi name near the end' }));
+    type Facts = { prompt?: string; own?: string; ownAt?: number; legacy?: string; legacyAt?: number };
+    const cache = new SessionTitleCache<Facts>(() => ({}), (row, facts, offset) => {
+      if (row.type === 'prompt' && !facts.prompt) facts.prompt = row.text;
+      if (row.type === 'native' && offset >= (facts.ownAt ?? -1)) { facts.own = row.name; facts.ownAt = offset; }
+      if (row.type === 'legacy' && offset >= (facts.legacyAt ?? -1)) { facts.legacy = row.name; facts.legacyAt = offset; }
+    }, undefined, { tail: true, now: () => 0,
+      afterChunk: () => appendFileSync(path, line({ type: 'output', text: 'new activity' })),
+    });
+    const first = await cache.readResult(path);
+    expect(first.complete).toBe(false);
+    let result = first;
+    for (let read = 0; read < 4 && !result.complete; read++) result = await cache.readResult(path);
+    expect(result.complete).toBe(true);
+    expect(result.facts.own).toBe('OMP title in the middle');
+    appendFileSync(path, line({ type: 'native', name: '' }));
+    const cleared = await cache.readResult(path);
+    expect(cleared.complete).toBe(true);
+    expect((cleared.facts.own ?? cleared.facts.legacy) || cleared.facts.prompt).toBe('first prompt');
+  });
+
+  test('append validation retains a first prompt; replacement never reuses a final title', async () => {
+    const path = join(base, 'racing-titles.jsonl');
+    writeFileSync(path, '{"text":"first"}\n');
+    const prompt = new SessionTitleCache<{ text?: string }>(() => ({}), (row, facts) => { facts.text ??= row.text; }, undefined,
+      { stopWhen: (facts) => !!facts.text, afterChunk: () => appendFileSync(path, '{"text":"later"}\n') });
+    expect(await prompt.read(path)).toEqual({ text: 'first' });
+    let replace = false;
+    const cache = new SessionTitleCache<{ text?: string }>(() => ({}), (row, facts) => { if (row.text) facts.text = row.text; }, undefined,
+      { afterChunk: () => {
+        if (!replace) return;
+        replace = false;
+        writeFileSync(`${path}.new`, '{"text":"replacement"}\n');
+        renameSync(`${path}.new`, path);
+      } });
+    expect((await cache.readResult(path)).complete).toBe(true);
+    appendFileSync(path, '{"text":"old generation"}\n');
+    replace = true;
+    expect((await cache.readResult(path)).complete).toBe(false);
+    expect(await cache.read(path)).toEqual({ text: 'replacement' });
+  });
+});
 
 function fifo(name: string): string {
   const path = join(base, name);

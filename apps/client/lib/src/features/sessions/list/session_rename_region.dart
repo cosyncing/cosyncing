@@ -80,19 +80,24 @@ class SessionRenameRegion extends StatelessWidget {
         if (!current()) return;
         if (result.ok) {
           final accepted = result.session?.title ?? result.title ?? next.trim();
+          final pending = result.session?.titlePending ?? false;
           ref
               .read(sessionListControllerProvider.notifier)
-              .renameSessionTitle(tool, sessionId, accepted);
-          await ref.read(openSessionsControllerProvider.future);
+              .renameSessionTitle(tool, sessionId, accepted, pending: pending);
+          if (!pending) await ref.read(openSessionsControllerProvider.future);
           if (!current()) return;
-          ref
-              .read(openSessionsControllerProvider.notifier)
-              .renameSessionTitle(tool, sessionId, accepted);
+          if (!pending) {
+            ref
+                .read(openSessionsControllerProvider.notifier)
+                .renameSessionTitle(tool, sessionId, accepted);
+          }
           final provider = sessionDetailControllerProvider(
             SessionDetailKey(tool: tool, sessionId: sessionId),
           );
           if (ref.exists(provider)) {
-            ref.read(provider.notifier).acceptRenamedTitle(source, accepted);
+            ref
+                .read(provider.notifier)
+                .acceptRenamedTitle(source, accepted, pending: pending);
           }
           message = l10n.sessionRenameSucceeded;
         }

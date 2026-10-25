@@ -1678,8 +1678,7 @@ try {
   //
   // The broker's rename endpoint passes a title, or null when the user clears
   // a display-title override. Null has no native expression (the profile schema
-  // requires a non-empty string), so it resolves to the session's cwd basename
-  // — the same name codex uses for a cleared title.
+  // requires a non-empty string), so clearing leaves the native title alone.
   //
   // The rename block runs LAST among the server-consuming checks: it is the one
   // path here allowed to POST, and the GET-only audit below is taken over the
@@ -1696,14 +1695,10 @@ try {
         && renamed.tool === 'kimi' && renamed.cwd === '/fixture/workspace',
       JSON.stringify(renamed));
 
-    // The fixture row's cwd is `/fixture/workspace`, so a cleared override is
-    // written back as its basename rather than sent as an empty title the
-    // upstream schema would refuse.
+    const beforeClear = profilePosts.length;
     const cleared = await adapter.renameSession(FIXTURE.sessionId, null);
-    check('a cleared override renames to the cwd basename, codex-style',
-      profilePosts.at(-1)?.title === 'workspace'
-        && !!cleared && cleared.title === 'workspace',
-      JSON.stringify(profilePosts.at(-1)));
+    check('clearing an alias does not assign a project name to the native session',
+      cleared === undefined && profilePosts.length === beforeClear);
 
     // An unknown session has no cwd on record: nothing honest to write, so the
     // call is a no-op rather than a guess at a title.
@@ -1758,7 +1753,7 @@ try {
     requests.slice(getOnlyRequestCount).filter((entry) => entry.method !== 'GET')
       .every((entry) => entry.method === 'POST'
         && (entry.path.endsWith('/profile') || entry.path === '/api/v1/files'))
-      && profilePosts.length === 2 && uploadPosts.length === 1,
+      && profilePosts.length === 1 && uploadPosts.length === 1,
     requests.slice(getOnlyRequestCount).filter((entry) => entry.method !== 'GET')
       .map((entry) => `${entry.method} ${entry.path}`).join(','));
 } catch (error) {

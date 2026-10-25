@@ -19,12 +19,11 @@ class SessionRef {
     required this.status,
   });
 
-  /// Derives a reference from a full [SessionInfo], falling back to the id when
-  /// the session has no title.
+  /// Derives a reference from the broker title, including an unnamed value.
   factory SessionRef.fromSession(SessionInfo session) => SessionRef(
     tool: session.tool,
     id: session.id,
-    title: session.title.isNotEmpty ? session.title : session.id,
+    title: session.title,
     status: session.status,
   );
 
@@ -46,7 +45,9 @@ class SessionRef {
   factory SessionRef.fromJson(Map<String, dynamic> json) => SessionRef(
     tool: json['tool'] as String,
     id: json['id'] as String,
-    title: json['title'] as String? ?? json['id'] as String,
+    title: json['titleVersion'] != 2 && json['title'] == json['id']
+        ? ''
+        : json['title'] as String? ?? '',
     status: _statusFromToken(json['status'] as String?),
   );
 
@@ -56,7 +57,7 @@ class SessionRef {
   /// Stable session id within the tool.
   final String id;
 
-  /// Display title (never empty — falls back to [id]).
+  /// Broker display title; empty means unnamed.
   final String title;
 
   /// Current session status, or null while it is genuinely unknown.
@@ -90,6 +91,7 @@ class SessionRef {
     'tool': tool,
     'id': id,
     'title': title,
+    'titleVersion': 2,
     if (status != null) 'status': status!.name,
   };
 

@@ -1160,12 +1160,21 @@ class StubSessionListController extends SessionListController {
   }
 
   @override
-  void renameSessionTitle(String tool, String id, String title) {
+  void renameSessionTitle(
+    String tool,
+    String id,
+    String title, {
+    bool pending = false,
+  }) {
     state = state.copyWith(
       sessions: [
         for (final session in state.sessions)
           if (session.tool == tool && session.id == id)
-            SessionInfo.fromJson({...session.toJson(), 'title': title})
+            SessionInfo.fromJson({
+              ...session.toJson(),
+              'title': pending ? session.title : title,
+              'titlePending': pending ? true : null,
+            })
           else
             session,
       ],

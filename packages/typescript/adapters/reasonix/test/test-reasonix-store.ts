@@ -199,7 +199,7 @@ try {
   });
   const boundedScalars = (await discoverReasonixStore({ root: scalarRoot }))[0];
   check('discovery drops raw metadata and refuses oversized published scalars',
-    boundedScalars?.title === 'bounded-scalars'
+    boundedScalars?.title === ''
       && boundedScalars.model === undefined
       && boundedScalars.cwd === undefined
       && !('meta' in boundedScalars),

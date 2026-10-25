@@ -189,7 +189,7 @@ export class RosterSweepCache<T> {
   private readonly snapshots = new Map<string, RosterSweepSnapshot<T>>();
   private readonly inflight = new Map<string, Promise<RosterSweepAnswer<T>>>();
   /** Views for which each sweep's `onServedAheadOfSweep` already fired. */
-  private readonly servedAhead = new WeakMap<Promise<RosterSweepAnswer<T>>, Set<string>>();
+  private servedAhead = new WeakMap<Promise<RosterSweepAnswer<T>>, Set<string>>();
   /** Wider reads queued behind narrower sweeps; see `expand`. */
   private readonly expansions = new Map<string, Promise<RosterSweepAnswer<T>>>();
   private readonly now: () => number;
@@ -207,6 +207,12 @@ export class RosterSweepCache<T> {
 
   snapshot(key: string): RosterSweepSnapshot<T> | undefined {
     return this.snapshots.get(key);
+  }
+
+  /** Mutations discard served snapshots; existing sweeps still settle for their callers. */
+  invalidate(): void {
+    this.snapshots.clear();
+    this.servedAhead = new WeakMap();
   }
 
   /**

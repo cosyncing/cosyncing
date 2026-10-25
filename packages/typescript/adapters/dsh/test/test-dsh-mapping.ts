@@ -688,6 +688,9 @@ function typesOf(messages: Array<{ type: string }>): string {
 {
   const summary = FIXTURE.sessionList.body.result.value.items[0]!;
   const session = mapDshSession(summary)!;
+  const unnamed = mapDshSession({ ...summary, projections: undefined }, { workspaceTitle: 'Project name' })!;
+  check('a workspace is project metadata, never an invented conversation title',
+    unnamed.title === '' && unnamed.projectName === 'Project name');
   const selected = mapDshSession({ ...summary, projections: { asOfSeq: 10, values: {
     modelSelection: { lastUsed: { provider: 'old', model: 'previous' },
       next: { provider: 'deepseek', model: 'deepseek-flash', reasoningEffort: 'high' } },

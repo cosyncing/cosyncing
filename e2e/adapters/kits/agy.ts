@@ -237,6 +237,23 @@ const summariesAfter = (stream: SessionStream, from: number): string[] =>
 const agyExtras: ConformanceExtra[] = [
   replacedLogResetsObserve('agy'),
   {
+    title: 'session naming keeps a bounded Unicode first prompt instead of a project or id',
+    async run(context) {
+      const session = context.fake.seedSession({ title: '', turns: 0 });
+      await context.client.waitForSession((row) => row.id === session.id && row.title === '');
+      const prompt = `路径 / 😀.md\n第二行 ${'😀'.repeat(170)}`;
+      const expected = Array.from(prompt.replace(/\s+/g, ' ')).slice(0, 160).join('');
+      context.fake.appendForeignUser(session, prompt);
+      await context.client.waitForSession((row) => row.id === session.id && row.title === expected);
+      const stream = await context.client.attach('agy', session.id, { mode: 'observe' });
+      await stream.waitForFrame((frame) => frame.kind === 'session' && frame.info?.title === expected);
+      context.fake.appendTurn(session, 'A later prompt', 'A later answer');
+      const listed = await context.client.waitForSession((row) => row.id === session.id && row.title === expected);
+      expect(listed.title).toBe(expected);
+      stream.close();
+    },
+  },
+  {
     title: 'the child argv: never --print or --effort, the effort variant is the sibling id, and a mode rides --mode',
     async run(context) {
       const session = await context.drivableSession('argv contract');

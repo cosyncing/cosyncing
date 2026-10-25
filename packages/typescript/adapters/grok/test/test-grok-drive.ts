@@ -606,11 +606,21 @@ try {
     const durableFirstSession = (await discoverGrokStore({ root: durableFirstTree.root }))[0]!;
     const durableFirstTransport = new FakeTransport();
     const durableFirstCorrelations = new GrokReplayCorrelationRegistry();
+    // Hold Drive's filesystem notification until Observe has published the
+    // native row. Real watcher scheduling cannot establish this ordering.
+    let notifyDurableFirstDrive: (() => void) | undefined;
     const durableFirstConnection = await GrokDriveConnection.fromTransport(
       durableFirstSession,
       driveInfo(durableFirstSession.id, durableFirstSession.cwd),
       durableFirstTransport,
-      { replayCorrelations: durableFirstCorrelations },
+      {
+        replayCorrelations: durableFirstCorrelations,
+        watchFactory: ((...args: unknown[]) => {
+          const listener = args[2] as (event: string, filename: string) => void;
+          notifyDurableFirstDrive = () => listener('change', 'updates.jsonl');
+          return Object.assign(new EventEmitter(), { close() {} }) as unknown as FSWatcher;
+        }) as typeof watch,
+      },
     );
     const durableFirstObserverInfo = driveInfo(durableFirstSession.id, durableFirstSession.cwd);
     durableFirstObserverInfo.attachMode = 'observe';
@@ -624,7 +634,15 @@ try {
       replayCorrelations: durableFirstCorrelations,
     });
     const durableFirstObserverLive: AgentMessage[] = [];
-    durableFirstObserver.subscribe((message) => durableFirstObserverLive.push(message));
+    let markNativeObserved: (() => void) | undefined;
+    const nativeObserved = new Promise<void>((resolve) => { markNativeObserved = resolve; });
+    durableFirstObserver.subscribe((message) => {
+      durableFirstObserverLive.push(message);
+      if (message.type === 'user-message'
+        && message.text === 'durable wins before ACP'
+        && message.clientKey === undefined
+        && message.key?.startsWith('grok:') === true) markNativeObserved?.();
+    });
     await durableFirstObserver.getHistory();
     const durableFirstInternal = durableFirstConnection as unknown as InternalDrive;
     const durableFirstLive: AgentMessage[] = [];
@@ -702,12 +720,15 @@ try {
           && message.clientKey === undefined
           && message.key?.startsWith('grok:') === true));
     await (durableFirstObserver as unknown as { drain(): Promise<void> }).drain();
+    const nativeRead = await within(nativeObserved);
     check('a distinct Observe can physically drain the durable-first row before Drive correlation exists',
-      durableFirstObserverLive.some((message) => message.type === 'user-message'
+      nativeRead !== 'timed out'
+        && durableFirstObserverLive.some((message) => message.type === 'user-message'
         && message.text === 'durable wins before ACP'
         && message.clientKey === undefined
         && message.key?.startsWith('grok:') === true),
       JSON.stringify(durableFirstObserverLive));
+    notifyDurableFirstDrive?.();
     const durableFirstPhysical = await Promise.race([
       durableFirstObserved,
       new Promise<never>((_, reject) => setTimeout(

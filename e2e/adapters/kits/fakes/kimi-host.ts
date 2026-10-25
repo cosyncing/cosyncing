@@ -769,7 +769,10 @@ export class FakeKimiHost {
       this.emit(session.id, 'turn.ended', outcome === 'failed'
         ? { turnId, reason: 'failed', error: { message: 'the provider refused the request' } }
         : { turnId, reason: 'completed' });
-      this.emit(session.id, 'prompt.completed', { promptId: prompt.id, finishedAt: new Date().toISOString(), reason: outcome });
+      const completed = () => this.emit(session.id, 'prompt.completed', { promptId: prompt.id, finishedAt: new Date().toISOString(), reason: outcome });
+      const heldCompletion = /\[\[hold-completion:([^\]]+)\]\]/.exec(prompt.text)?.[1];
+      if (heldCompletion) void this.#hold(heldCompletion, abort.signal).then(completed);
+      else completed();
     }
     if (session.queue.length > 0) {
       void this.#runNext(session);

@@ -234,6 +234,7 @@ SessionInfo _$SessionInfoFromJson(Map<String, dynamic> json) => SessionInfo(
     json['attachMode'],
     unknownValue: AttachMode.unknown,
   ),
+  titlePending: json['titlePending'] as bool?,
   launchSurface: $enumDecodeNullable(
     _$SessionLaunchSurfaceEnumMap,
     json['launchSurface'],
@@ -289,6 +290,7 @@ Map<String, dynamic> _$SessionInfoToJson(SessionInfo instance) =>
       'launchSurface': _$SessionLaunchSurfaceEnumMap[instance.launchSurface],
       'machine': instance.machine,
       'title': instance.title,
+      if (instance.titlePending case final value?) 'titlePending': value,
       'slug': instance.slug,
       'cwd': instance.cwd,
       'projectName': instance.projectName,

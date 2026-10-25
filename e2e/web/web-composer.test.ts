@@ -3,8 +3,8 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import type { Browser, Locator, Page } from 'playwright-core';
-import { type Broker, eventually } from '../harness/index.ts';
-import { launchBrowser, waitForFlutter } from '../harness/browser.ts';
+import { type Broker, eventually, scaled } from '../harness/index.ts';
+import { launchBrowser, waitForFlutter, SHELL_GONE } from '../harness/browser.ts';
 import { PiBridgeSession } from '../harness/fakes/pi-bridge-driver.ts';
 import { startWebBroker } from '../harness/web-scenario.ts';
 
@@ -76,8 +76,8 @@ describe('phone composer', () => {
           if (frame.kind === 'draft') drafts.push(frame);
         }));
         await page.goto(`${broker.url}/cosy/#/sessions/pi/${encodeURIComponent(pi.id)}`, { waitUntil: 'domcontentloaded' });
+        await page.waitForFunction(SHELL_GONE, undefined, { timeout: scaled(90_000) });
         await eventually(() => historyReceived, { what: 'the session history to arrive' });
-        await page.waitForFunction(() => !document.getElementById('cosyncing-startup-shell'));
         // Exercise ordinary canvas touch input before enabling screen-reader
         // semantics, whose DOM buttons intentionally take accessibility focus.
         // These are the centers of the one-line editor and the 40 dp Send

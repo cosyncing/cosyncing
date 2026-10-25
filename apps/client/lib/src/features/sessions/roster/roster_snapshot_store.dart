@@ -58,6 +58,8 @@ final class DriftRosterSnapshotRepository implements RosterSnapshotRepository {
   /// Shared cache-write admission boundary.
   final SessionCacheWriteFence writeFence;
 
+  final _acceptedTitles = <String, Map<String, String>>{};
+
   @override
   Future<SessionRosterSnapshot?> load(
     String brokerProfileId, {
@@ -133,35 +135,72 @@ final class DriftRosterSnapshotRepository implements RosterSnapshotRepository {
     required String endpoint,
     required List<SessionInfo> sessions,
     DateTime? now,
-  }) => writeFence.write(() async {
-    final capturedAt = now ?? DateTime.now();
-    final bounded = boundRosterSnapshotPayload(sessions);
-    await database.transaction(() async {
-      await database
-          .into(database.rosterSnapshotRows)
-          .insertOnConflictUpdate(
-            RosterSnapshotRowsCompanion.insert(
-              brokerProfileId: brokerProfileId,
-              endpoint: endpoint,
-              payloadVersion: rosterSnapshotPayloadVersion,
-              rowsJson: bounded.rowsJson,
-              rowCount: Value(bounded.rows.length + bounded.omittedRowCount),
-              newestSessionUpdatedAt: Value(bounded.newestSessionUpdatedAt),
-              capturedAt: capturedAt,
-            ),
-          );
-      await _evictBeyondProfileCap(brokerProfileId);
-      await _evictBeyondAggregateBytes(brokerProfileId);
-      await _pruneExpired(brokerProfileId, capturedAt);
+  }) {
+    final sourceKey = '$brokerProfileId\u0000$endpoint';
+    final known = _acceptedTitles.remove(sourceKey) ?? <String, String>{};
+    final accepted = <String, String>{};
+    for (final session in sessions.take(maxRosterSnapshotRows)) {
+      final key = '${session.tool}/${session.id}';
+      if (!(session.titlePending ?? false)) {
+        accepted[key] = session.title;
+      } else if (known.containsKey(key)) {
+        accepted[key] = known[key]!;
+      }
+    }
+    _acceptedTitles[sourceKey] = accepted;
+    while (_acceptedTitles.length > maxRetainedRosterSnapshotProfiles) {
+      _acceptedTitles.remove(_acceptedTitles.keys.first);
+    }
+    return writeFence.write(() async {
+      final capturedAt = now ?? DateTime.now();
+      var resolvedSessions = sessions;
+      if (sessions.any((session) => session.titlePending ?? false)) {
+        final previous = await load(brokerProfileId, endpoint: endpoint);
+        final titles = {
+          for (final row in previous?.rows ?? <SessionRosterIdentity>[])
+            '${row.tool}/${row.sessionId}': row.title,
+          ...?_acceptedTitles[sourceKey],
+        };
+        resolvedSessions = [
+          for (final session in sessions)
+            if ((session.titlePending ?? false) &&
+                titles.containsKey('${session.tool}/${session.id}'))
+              SessionInfo.fromJson({
+                ...session.toJson(),
+                'title': titles['${session.tool}/${session.id}'],
+              })
+            else
+              session,
+        ];
+      }
+      final bounded = boundRosterSnapshotPayload(resolvedSessions);
+      await database.transaction(() async {
+        await database
+            .into(database.rosterSnapshotRows)
+            .insertOnConflictUpdate(
+              RosterSnapshotRowsCompanion.insert(
+                brokerProfileId: brokerProfileId,
+                endpoint: endpoint,
+                payloadVersion: rosterSnapshotPayloadVersion,
+                rowsJson: bounded.rowsJson,
+                rowCount: Value(bounded.rows.length + bounded.omittedRowCount),
+                newestSessionUpdatedAt: Value(bounded.newestSessionUpdatedAt),
+                capturedAt: capturedAt,
+              ),
+            );
+        await _evictBeyondProfileCap(brokerProfileId);
+        await _evictBeyondAggregateBytes(brokerProfileId);
+        await _pruneExpired(brokerProfileId, capturedAt);
+      });
+      return SessionRosterSnapshot(
+        brokerProfileId: brokerProfileId,
+        rows: bounded.rows,
+        capturedAt: capturedAt,
+        omittedRowCount: bounded.omittedRowCount,
+        newestSessionUpdatedAt: bounded.newestSessionUpdatedAt,
+      );
     });
-    return SessionRosterSnapshot(
-      brokerProfileId: brokerProfileId,
-      rows: bounded.rows,
-      capturedAt: capturedAt,
-      omittedRowCount: bounded.omittedRowCount,
-      newestSessionUpdatedAt: bounded.newestSessionUpdatedAt,
-    );
-  });
+  }
 
   @override
   Future<void> deleteForProfile(String brokerProfileId) async {

@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { BROKER_CONTRACT_REVISION, CLIENT_REVISION_WITH_OMP_ROSTER_IDENTITY } from '../../packages/typescript/protocol/src/index.ts';
 import { type Broker, type BrokerClient, eventually, startBroker } from '../harness/index.ts';
 import { PiBridgeSession } from '../harness/fakes/pi-bridge-driver.ts';
-import { appendLines, piHeader, piSessionFilePath } from './kits/fakes/pi-agent.ts';
+import { appendLines, piHeader, piTitleEntry, piSessionFilePath } from './kits/fakes/pi-agent.ts';
 import { installPiFamily, OMP_DIALECT_FACTS, PI_DIALECT_FACTS, piRowId, type PiFake, type PiFamilyDialect } from './kits/pi-family.ts';
 
 const GRACE_MS = 3000;
@@ -41,12 +41,12 @@ describe.each([PI_DIALECT_FACTS, OMP_DIALECT_FACTS] as PiFamilyDialect[])('$disp
     await broker?.stop();
   });
 
-  /** A session file in the dialect's store (header only), as a native session writes it. */
+  /** A named native session in the dialect's store. */
   function storedSession(name: string): { file: string; cwd: string; uuid: string } {
     const cwd = fake.workspace(name);
     const uuid = crypto.randomUUID();
     const file = piSessionFilePath(fake.sessionsRoot, cwd, uuid, Date.now());
-    appendLines(file, piHeader(dialect.name, uuid, cwd, Date.now(), name));
+    appendLines(file, [...piHeader(dialect.name, uuid, cwd, Date.now(), name), piTitleEntry(dialect.name, null, name, Date.now())]);
     return { file: realpathSync(file), cwd, uuid };
   }
 
@@ -75,7 +75,7 @@ describe.each([PI_DIALECT_FACTS, OMP_DIALECT_FACTS] as PiFamilyDialect[])('$disp
     const pi = await PiBridgeSession.open(owner, {
       cwd: stored.cwd,
       sessionFile: stored.file,
-      title: 'identity',
+      title: 'stale-transcript-filename.jsonl',
       route,
       hello: { nativeId: stored.uuid, ...nativeVersion },
     });
@@ -86,10 +86,11 @@ describe.each([PI_DIALECT_FACTS, OMP_DIALECT_FACTS] as PiFamilyDialect[])('$disp
     const info = (await stream.waitForKind('session')).info;
     expect(info.tool).toBe(dialect.name);
     expect(info.nativeId).toBe(stored.uuid);
+    expect(info.title).toBe('identity');
     expect(info.control.terminalSync).toMatchObject({ active: true, label: `Synced with ${dialect.displayName} terminal` });
     expect(info.control.drive).toMatchObject({ supported: false, state: 'unavailable' });
     const row = await owner.waitForSession((candidate) => candidate.id === pi.id && candidate.control?.terminalSync?.active === true);
-    expect(row).toMatchObject({ tool: dialect.name, nativeId: stored.uuid });
+    expect(row).toMatchObject({ tool: dialect.name, nativeId: stored.uuid, title: 'identity' });
     expect(row.control.terminalSync.label).toBe(`Synced with ${dialect.displayName} terminal`);
     await pi.bye('quit');
   });

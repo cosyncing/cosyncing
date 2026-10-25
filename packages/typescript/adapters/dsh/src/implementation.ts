@@ -1269,7 +1269,7 @@ export class DshAdapter implements AgentBackend {
     }
   }
 
-  /** sessionId → its workspace's display title, for sessions with no title projection yet. */
+  /** sessionId → its workspace's display name, separate from the conversation title. */
   private async workspaceTitles(cancel?: AbortSignal): Promise<Map<string, string>> {
     const titles = new Map<string, string>();
     const outcome = await this.rpc().call<{ items?: unknown }>(
@@ -1341,7 +1341,7 @@ export class DshAdapter implements AgentBackend {
       // Same parent half of the roster link the mapped rows carry. The
       // synthesized fallback is still a real session that can own children.
       nativeId: sessionId,
-      title: sessionId,
+      title: '',
       status: 'idle',
       attachMode: 'live',
       launchSurface: 'unknown',
@@ -1540,7 +1540,7 @@ export class DshAdapter implements AgentBackend {
       // a failed rename must NOT surface as a create failure: the caller (and
       // especially a scheduled send, which records the session id only after
       // this method returns) would retry and create a duplicate. The rename is
-      // cosmetic, so it degrades to the workspace/default title.
+      // cosmetic, so a failed rename leaves the conversation unnamed.
       try {
         await this.requireVerifiedHost();
         title = remoteHost
@@ -1591,7 +1591,7 @@ export class DshAdapter implements AgentBackend {
     // next discovery sweep fills them, and neither is worth reporting a creation
     // failure over for a session that now exists.
     let landing: { title?: string; cwd?: string } = registered
-      ? { title: registered.title, cwd: registered.path }
+      ? { cwd: registered.path }
       : {};
     if (!registered) {
       try {
@@ -1615,6 +1615,7 @@ export class DshAdapter implements AgentBackend {
       // to carry it too or those children render flat until the next discovery.
       nativeId: created.sessionId,
       title: title || landing.title || '',
+      ...(registered ? { projectName: registered.title } : {}),
       ...(landing.cwd === undefined ? {} : { cwd: landing.cwd }),
       status: 'idle',
       attachMode: 'live',

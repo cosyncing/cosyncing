@@ -1041,7 +1041,7 @@ class FakeBroker {
     if (request.method == 'PATCH' && rename != null) {
       final id = Uri.decodeComponent(rename.group(2)!);
       final title = ((request.body as Map?)?['title'] as String?) ?? '';
-      updateSession(id, {'title': title});
+      updateSession(id, {'title': title, 'titlePending': null});
       return FakeBrokerResponse(200, {
         'ok': true,
         'title': title,

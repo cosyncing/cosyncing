@@ -630,7 +630,7 @@ export class ClineAdapter implements AgentBackend {
     try {
       await client.connect();
       const nativeMode = mode === 'plan' ? 'plan' : 'act';
-      const title = options.title?.trim() || 'New Cline session';
+      const title = options.title?.trim() || '';
       const created = await client.command('session.create', {
         workspaceRoot: cwd,
         cwd,
@@ -653,7 +653,7 @@ export class ClineAdapter implements AgentBackend {
           enableSpawn: true,
           enableTeams: false,
           interactive: true,
-          title,
+          ...(title ? { title } : {}),
         },
         runtimeOptions: {
           mode: nativeMode,

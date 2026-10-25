@@ -80,7 +80,8 @@ const watcherIdle = (id: string, over: Partial<SessionInfo> = {}): SessionInfo =
   codexInfo(id, { status: 'idle', attachMode: 'observe', control: observing, ...over });
 
 /** The production pieces, wired as `runtime.ts` wires them, around a scripted adapter. */
-function world() {
+function world(qualifyMetadata?: (info: SessionInfo) => SessionInfo,
+  beginSessionInfoRead?: () => (info: SessionInfo) => SessionInfo) {
   const journal = new RosterRevisionStore(512);
   const decorate = (info: SessionInfo): SessionInfo => structuredClone({ ...info, machine: MACHINE });
   const plans = new Map<string, { next: () => Emitter; gate?: Promise<void>; entered?: () => void }>();
@@ -103,12 +104,15 @@ function world() {
   } as any);
   const authority = new NativeIncarnationPublicationAuthority();
   let boundary!: ReturnType<typeof createRosterPublicationBoundary>;
-  const hub = new Hub(registry, 15_000, undefined, { onSessionInfo: (info) => boundary.publishOwnerFrame(info) });
+  const hub = new Hub(registry, 15_000, undefined, {
+    ...(beginSessionInfoRead ? { beginSessionInfoRead } : {}),
+    onSessionInfo: (info) => boundary.publishOwnerFrame(info),
+  });
   boundary = createRosterPublicationBoundary({
     liveOwners: () => hub.liveSnapshot(),
     publish: (info: SessionInfo) => journal.observe(decorate(info), MACHINE),
     acceptWatcher: (info: SessionInfo) => authority.acceptsWatcher(info),
-    reconcile: (info: SessionInfo) => hub.refreshExternalSession(decorate(info)),
+    reconcile: (info: SessionInfo) => hub.refreshExternalSession(decorate(info), qualifyMetadata),
     onReconcileError: () => {},
   });
   /** Hold the next attach for `id` until released; resolves `entered` once it is waiting. */
@@ -133,6 +137,68 @@ function world() {
 }
 
 describe('a watcher reconcile held in flight', () => {
+  test('an initial attach admits a rename accepted while no owner existed', async () => {
+    let epoch = 0;
+    const { hub, holdAttach } = world(undefined, () => {
+      const observedEpoch = epoch;
+      return (info) => observedEpoch < epoch ? { ...info, title: 'Accepted during attach' } : info;
+    });
+    const id = 'title-during-initial-attach';
+    const owner = fakeConn(watcherIdle(id, { title: 'Old name' }));
+    const held = holdAttach(id, () => owner);
+    const opening = hub.ensure('codex', id);
+    try {
+      await held.reached;
+      epoch++;
+      expect(hub.getConn('codex', id)).toBeUndefined();
+      held.release();
+      const admitted = await opening;
+      expect(admitted.conn.info.title).toBe('Accepted during attach');
+    } finally {
+      held.release();
+      await opening.catch(() => undefined);
+      await hub.dispose();
+    }
+  });
+
+  test('a rename is rechecked after a held reattach, while a fresh terminal title can still arrive', async () => {
+    let accepted = false;
+    const { plans, hub, boundary, holdAttach } = world((info) =>
+      accepted ? { ...info, title: 'Accepted app name' } : info);
+    const id = 'title-during-reattach';
+    const owner = fakeConn(codexInfo(id, { title: 'Old name', attachMode: 'observe', control: observing }));
+    plans.set(id, { next: () => owner });
+    await hub.ensure('codex', id);
+    const held = holdAttach(id, () => fakeConn(codexInfo(id, { title: 'Old name', control: syncActive })));
+    boundary.submitWatcherSnapshot(watcherIdle(id, { title: 'Old name', control: syncActive }));
+    await held.reached;
+    accepted = true;
+    hub.patchSessionInfoWhere((info) => info.id === id, { title: 'Accepted app name' });
+    held.release();
+    await boundary.settle();
+    expect(hub.getConn('codex', id)?.conn.info.title).toBe('Accepted app name');
+    accepted = false;
+    boundary.submitWatcherSnapshot(codexInfo(id, { title: 'New terminal name', control: syncActive }));
+    await boundary.settle();
+    expect(hub.getConn('codex', id)?.conn.info.title).toBe('New terminal name');
+    await hub.dispose();
+  });
+
+  test('pending metadata preserves a title and a completed observation retires the pending state', async () => {
+    const { plans, hub } = world();
+    const id = 'pending-title';
+    const owner = fakeConn(codexInfo(id, { title: 'Known title', titlePending: true }));
+    plans.set(id, { next: () => owner });
+    await hub.ensure('codex', id);
+    hub.adoptDiscoveredTitles(() => codexInfo(id, { title: '', titlePending: true }));
+    expect(owner.info.title).toBe('Known title');
+    hub.adoptDiscoveredTitles(() => codexInfo(id, { title: 'Known title' }));
+    expect(owner.info.titlePending).toBeUndefined();
+    hub.adoptDiscoveredTitles(() => codexInfo(id, { title: '' }));
+    expect(owner.info.title).toBe('');
+    await hub.dispose();
+  });
+
   test('cannot overwrite the owner frames that land while it waits, and queued snapshots coalesce', async () => {
     const { journal, plans, attaches, hub, boundary, holdAttach, statusTrail } = world();
     const id = 's-held';

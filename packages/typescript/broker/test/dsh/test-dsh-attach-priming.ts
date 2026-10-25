@@ -46,6 +46,7 @@ import { DSH_RECONNECT_NOTICE } from '../../../adapters/dsh/src/observe.ts';
 import { AttentionPolicy } from '../../src/attention/attention-policy.ts';
 import { AttentionStore } from '../../src/attention/attention-store.ts';
 import { Hub, type ManagedConn, type WireEvent } from '../../src/sessions/hub.ts';
+import { SessionMetadataStore } from '../../src/sessions/session-metadata-store.ts';
 
 const FIXTURE = await Bun.file(
   new URL('../../../adapters/dsh/test/fixtures/dsh-0.1.0-rc.6.json', import.meta.url),
@@ -262,6 +263,20 @@ const FINISHED_TURN_KEY = `dsh:${SESSION_ID}:turn1`;
 let hub: Hub | undefined;
 
 try {
+  const metadata = new SessionMetadataStore(join(attentionRoot, 'metadata'));
+  const nativeRow = (await adapter.discoverSessions()).find((row) => row.id === SESSION_ID)!;
+  check('native workspace names survive broker decoration',
+    !!nativeRow.projectName && metadata.apply(nativeRow).projectName === nativeRow.projectName);
+  metadata.renameProject(nativeRow.cwd!, 'App project alias');
+  const aliased = metadata.apply(nativeRow);
+  check('an app project alias overrides native workspace metadata', aliased.projectName === 'App project alias');
+  metadata.observeNative({ ...nativeRow, projectName: 'Updated native workspace' });
+  const copied = JSON.parse(JSON.stringify(aliased));
+  check('native updates stay behind an active alias', metadata.apply(copied).projectName === 'App project alias');
+  metadata.renameProject(nativeRow.cwd!, null);
+  check('clearing a project alias restores its native workspace name',
+    metadata.apply(copied).projectName === 'Updated native workspace');
+
   hub = new Hub(registry, 15_000, undefined, {
     onMessage: (info, message) => {
       if (info.tool === 'dsh' && info.id === SESSION_ID) attentionFeed.push(message);

@@ -549,6 +549,78 @@ function taskNotification(fake: ClaudeFake, session: SeededSession, spawn: { age
 
 const claudeExtras: ConformanceExtra[] = [
   {
+    title: 'session naming uses the first real headless prompt and retains native names beyond the tail',
+    async run({ fake: controller, client, broker }) {
+      const fake = controller as ClaudeFake;
+      const session = fake.seedSession({ title: '', turns: 0 });
+      const path = fake.transcriptOf(session);
+      const context = { ...fake.contextOf(session), entrypoint: 'sdk-cli' as const };
+      fake.appendRaw(session, [
+        claudeUserRow(context, null, 'This session is being continued from a previous conversation summary', { extra: { isCompactSummary: true } }),
+        claudeUserRow(context, null, '# AGENTS.md instructions for fixture'),
+        claudeUserRow(context, null, '  First 🧪 prompt\nwith whitespace  '),
+        { type: 'last-prompt', lastPrompt: 'The latest prompt' },
+      ]);
+      await client.waitForSession((row) => row.id === session.id && row.title === 'First 🧪 prompt with whitespace');
+      const stream = await client.attach('claude', session.id, { mode: 'observe' });
+      await stream.waitForFrame((frame) => frame.kind === 'session' && frame.info?.title === 'First 🧪 prompt with whitespace');
+      await stream.waitForFrame((frame) => frame.kind === 'history');
+      fake.appendTurn(session, 'A later headless prompt', 'naming follow-up observed');
+      await stream.waitForFrame((frame) => frame.kind === 'message'
+        && String(frame.message?.text ?? frame.message?.delta ?? '').includes('naming follow-up observed'));
+      expect((await client.sessions({ refresh: true })).find((candidate) => candidate.id === session.id)?.title)
+        .toBe('First 🧪 prompt with whitespace');
+      fake.appendRaw(session, [{ type: 'ai-title', aiTitle: 'Native AI / 名称.md' }]);
+      await client.waitForSession((row) => row.id === session.id && row.title === 'Native AI / 名称.md');
+      fake.appendRaw(session, [
+        ...Array.from({ length: 65 }, () => ({ type: 'progress', data: 'x'.repeat(320 * 1024) })),
+        { type: 'last-prompt', lastPrompt: 'Another follow-up' },
+        { type: 'ai-title', aiTitle: 'Native AI / 名称.md' },
+      ]);
+      await client.waitForSession((row) => row.id === session.id && row.title === 'Native AI / 名称.md');
+      await stream.waitForFrame((frame) => frame.kind === 'session' && frame.info?.title === 'Native AI / 名称.md');
+      stream.close();
+      const custom = '😀'.repeat(180);
+      fake.appendRaw(session, [{ type: 'custom-title', customTitle: custom }]);
+      await broker.restart();
+      const cold = (await client.sessions({ refresh: true, window: 'all' })).find((candidate) => candidate.id === session.id)!;
+      expect(cold.title).toBe('😀'.repeat(160));
+      await client.waitForSession((row) => row.id === session.id && !row.titlePending && row.title === '😀'.repeat(160));
+      // Replacing the transcript invalidates retained title facts, including an old native name.
+      writeFileSync(`${path}.replacement`, readFileSync(path, 'utf8').split('\n')
+        .filter((line) => !line.includes('ai-title') && !line.includes('custom-title')).join('\n'));
+      renameSync(`${path}.replacement`, path);
+      await client.waitForSession((row) => row.id === session.id && row.title === 'First 🧪 prompt with whitespace');
+      stream.close();
+      const growing = fake.seedSession({ title: '', turns: 1 });
+      fake.appendRaw(growing, Array.from({ length: 230 }, () => ({ type: 'progress', data: 'x'.repeat(320 * 1024) })));
+      await broker.restart();
+      const pending = (await client.sessions({ refresh: true, window: 'all' })).find((row) => row.id === growing.id)!;
+      expect(pending.titlePending).toBe(true);
+      const settled = await eventually(async () => {
+        fake.appendRaw(growing, [{ type: 'progress', data: 'keeps growing' }]);
+        const row = (await client.sessions({ refresh: true, window: 'all' })).find((candidate) => candidate.id === growing.id);
+        return row && !row.titlePending ? row : undefined;
+      }, { what: 'a growing Claude transcript to finish its forward title backlog' });
+      expect(settled.title).toBe('seeded prompt 1');
+      for (const largeText of [false, true]) {
+        const imageSession = fake.seedSession({ title: '', turns: 0 });
+        const imageContext = fake.contextOf(imageSession);
+        const text = largeText ? '🧪'.repeat(180) : 'First image 🧪 prompt';
+        const prompt = claudeUserRow(imageContext, null, text);
+        prompt.message.content = largeText ? `${text}${'x'.repeat(2 * 1024 * 1024)}` : [
+          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'A'.repeat(2 * 1024 * 1024) } },
+          { type: 'text', text },
+        ];
+        fake.appendRaw(imageSession, [prompt,
+          claudeUserRow(imageContext, prompt.uuid, 'A later prompt must not become the title'),
+        ]);
+        const expected = largeText ? '🧪'.repeat(160) : text;
+        await client.waitForSession((row) => row.id === imageSession.id && !row.titlePending && row.title === expected);
+      }
+    },
+  },
+  {
     title: 'a stray API credential in the broker environment never reaches a Drive child',
     async run(context) {
       const fake = context.fake as ClaudeFake;

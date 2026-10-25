@@ -23,6 +23,8 @@
  * response items are a second channel. The resume mapper ignores raw response items and maps v2
  * items directly to the existing canonical message union.
  */
+import { SessionTitleCache, sessionPromptPreview, isSessionInstruction } from '@cosyncing/adapter-api';
+
 import { createHash, randomBytes } from 'node:crypto';
 import { CodexBackgroundCommands } from './background-commands.ts';
 import { type CodexRuntimeSocketListener, inspectCodexRuntimeSocket, probeCodexRuntimeSocketListener } from './runtime-socket.ts';
@@ -255,6 +257,9 @@ function codexRolloutPathOf(sessionId: string): string {
   return path;
 }
 
+type CodexTitle = { title: string; titlePending?: boolean };
+type CodexTitleIndex = Map<string, string> & { complete?: boolean };
+
 export class CodexAdapter implements AgentBackend {
   readonly id = 'codex';
   readonly displayName = 'Codex';
@@ -284,7 +289,112 @@ export class CodexAdapter implements AgentBackend {
    *  Bounded by the number of live owners; every connection removes itself on close. */
   private readonly openOwners = new Set<CodexRepairableOwner>();
 
+  private readonly automaticNames = new Map<string, string>();
+  private readonly namingInFlight = new Map<string, Promise<CodexTitle>>();
+  private readonly namingLocks = new Map<string, Promise<unknown>>();
+  private readonly namingFailures = new Map<string, { failures: number; retryAt: number }>();
+  private namingCompletion?: Promise<void>;
+
+  private async serializeName<T>(nativeId: string, action: () => Promise<T>): Promise<T> {
+    const previous = this.namingLocks.get(nativeId) ?? Promise.resolve();
+    const work = previous.catch(() => undefined).then(action);
+    this.namingLocks.set(nativeId, work);
+    try { return await work; } finally {
+      if (this.namingLocks.get(nativeId) === work) this.namingLocks.delete(nativeId);
+    }
+  }
+
+
+  private automaticName(info: { tool: string; id: string; nativeId?: string }): string | undefined {
+    return this.options.resolveProvisionalName?.(info) ?? this.automaticNames.get(info.nativeId ?? info.id);
+  }
+
+  private recordName(info: { tool: string; id: string; nativeId?: string }, value: string | undefined, origin: 'automatic' | 'explicit'): void {
+    // The broker persists this before name/set. Failure must prevent assigning an untracked name.
+    this.options.recordNativeName?.(info, value, origin);
+    if (value === undefined) this.automaticNames.delete(info.nativeId ?? info.id);
+    else this.automaticNames.set(info.nativeId ?? info.id, value);
+  }
+
+  private async resolvedTitle(path: string, nativeId: string, names?: CodexTitleIndex, signal?: AbortSignal): Promise<CodexTitle> {
+    const held = this.namingInFlight.get(nativeId);
+    if (held) {
+      try { return await held; } catch {
+        signal?.throwIfAborted();
+        return this.resolvedTitle(path, nativeId, names, signal);
+      }
+    }
+    const work = this.serializeName(nativeId, async () => this.resolveAutomaticTitle(path, nativeId, names ?? await readSessionIndexTitles(signal), signal));
+    this.namingInFlight.set(nativeId, work);
+    try { return await work; } finally { this.namingInFlight.delete(nativeId); }
+  }
+
+  private async resolveAutomaticTitle(path: string, nativeId: string, names: CodexTitleIndex, signal?: AbortSignal): Promise<CodexTitle> {
+    const info = { tool: this.id, id: enc(path), nativeId };
+    const provisional = this.automaticName(info);
+    if (provisional === undefined) return readCodexTitle(path, nativeId, names, signal);
+    const prompt = await codexTitleCache.readResult(path, signal);
+    const firstPrompt = prompt.facts.firstPrompt;
+    // Discovery may have captured its index before waiting for a requested
+    // rename's lock. Re-read an apparent replacement inside that lock before
+    // allowing it to settle the newly written provisional provenance.
+    if (names.complete !== false && names.has(nativeId) && names.get(nativeId) !== provisional) {
+      names = await readSessionIndexTitles(signal);
+    }
+    const display: CodexTitle = { title: firstPrompt ?? '', titlePending: !prompt.complete || names.complete === false || undefined };
+    const indexed = names.get(nativeId);
+    if (names.complete !== false && indexed !== undefined && indexed !== provisional) {
+      this.recordName(info, undefined, 'explicit');
+      return { title: indexed || firstPrompt || '', titlePending: !indexed && !prompt.complete || undefined };
+    }
+    if (!firstPrompt || names.complete === false) return display;
+    const now = this.options.namingNow?.() ?? Date.now();
+    if (this.namingCompletion || now < (this.namingFailures.get(nativeId)?.retryAt ?? 0)) return display;
+    // Metadata reads never start a private native process or wait on a naming RPC.
+    const job = this.serializeName(nativeId, async () => {
+      if (this.automaticName(info) !== provisional) return;
+      const fail = (): void => {
+        const failures = (this.namingFailures.get(nativeId)?.failures ?? 0) + 1;
+        this.namingFailures.delete(nativeId);
+        this.namingFailures.set(nativeId, { failures, retryAt: (this.options.namingNow?.() ?? Date.now())
+          + Math.min(15 * 60_000, 60_000 * 2 ** Math.min(failures - 1, 4)) });
+        if (this.namingFailures.size > 2048) this.namingFailures.delete(this.namingFailures.keys().next().value!);
+      };
+      const socket = codexAppServerSock();
+      if (!socket || inspectCodexRuntimeSocket(socket).state !== 'socket') { fail(); return; }
+      try {
+        await withCodexDaemonRpc(socket, async (rpc) => {
+          const response = await rpc<any>('thread/read', { threadId: nativeId }, 2000);
+          const current = response?.thread?.name;
+          if (response?.thread?.id !== nativeId || typeof current !== 'string') {
+            throw new Error('Codex did not identify the current native thread name.');
+          }
+          if (current === provisional) await rpc('thread/name/set', { threadId: nativeId, name: firstPrompt }, 2000);
+          this.recordName(info, undefined, current === provisional ? 'automatic' : 'explicit');
+          this.namingFailures.delete(nativeId);
+        });
+      } catch { fail(); }
+    });
+    this.namingCompletion = job;
+    void job.finally(() => { if (this.namingCompletion === job) this.namingCompletion = undefined; }).catch(() => {});
+    return display;
+  }
+
+  private async resumeTitle(path: string, nativeId: string, nativeName: unknown): Promise<CodexTitle> {
+    const identity = { tool: this.id, id: enc(path), nativeId };
+    const provisional = this.automaticName(identity);
+    // Null is an unidentified/absent name, not evidence of an explicit replacement.
+    if (typeof nativeName !== 'string') return this.resolvedTitle(path, nativeId);
+    if (provisional !== undefined && nativeName !== provisional) this.recordName(identity, undefined, 'explicit');
+    if (nativeName && nativeName !== provisional) return { title: nativeName };
+    const prompt = await codexTitleCache.readResult(path);
+    return { title: prompt.facts.firstPrompt ?? '', titlePending: !prompt.complete || undefined };
+  }
+
   constructor(private readonly options: {
+    namingNow?: () => number;
+    resolveProvisionalName?: (info: { tool: string; id: string; nativeId?: string }) => string | undefined;
+    recordNativeName?: (info: { tool: string; id: string; nativeId?: string }, value: string | undefined, origin: 'automatic' | 'explicit') => void;
     queryLoadedThreadIds?: () => Promise<Set<string>>;
     queryLoadedThreadActivities?: () => Promise<CodexLoadedThreadActivity[]>;
     /** `sockPath` is undefined when no daemon control socket exists; terminals are scanned regardless. */
@@ -375,7 +485,9 @@ export class CodexAdapter implements AgentBackend {
     this.createEpoch += 1;
     let started: any;
     try {
-      started = await createCodexThread(cwd, opts.title, opts.model, this.capabilities.supportsLiveAttach);
+      started = await createCodexThread(cwd, opts.title, opts.model, this.capabilities.supportsLiveAttach, (path, nativeId, value) => {
+        this.recordName({ tool: this.id, id: enc(path), nativeId }, value, opts.title?.trim() ? 'explicit' : 'automatic');
+      });
     } finally {
       this.createsInFlight -= 1;
       this.createEpoch += 1;
@@ -404,11 +516,14 @@ export class CodexAdapter implements AgentBackend {
     ), started.cosyncingSyncUnavailableReason);
     // A newly created thread has no terminal yet, even when daemon-hosted.
     const terminalPresence = 'absent' as const;
-    const title = opts.title?.trim() || String(thread.name ?? '') || (actualCwd ? basename(actualCwd) : threadId.slice(0, 8) || 'Codex session');
+    const explicit = !started.cosyncingNameWriteFailed && opts.title?.trim();
+    const native = String(thread.name ?? '');
+    const naming: CodexTitle = explicit ? { title: explicit } : started.cosyncingProvisionalName
+      ? { title: '' } : native ? { title: native } : await this.resolvedTitle(path, threadId);
     return {
       id: enc(path),
       tool: this.id,
-      title,
+      ...naming,
       cwd: actualCwd,
       nativeId: threadId || undefined,
       launchSurface: 'app',
@@ -453,7 +568,7 @@ export class CodexAdapter implements AgentBackend {
 
   async discoverSessions(options?: SessionDiscoveryOptions): Promise<SessionInfo[]> {
     if (!existsSync(SESSIONS_ROOT)) return [];
-    const titles = readSessionIndexTitles(); // id → thread_name (best-effort)
+    const titles = await readSessionIndexTitles(options?.signal); // id → thread_name (best-effort)
     const canResume = resolveBin('codex') !== null;
     ensureCodexDaemon(
       canResume ? resolveBin('codex') : null,
@@ -503,7 +618,7 @@ export class CodexAdapter implements AgentBackend {
       const surface = facts.surface;
       const launchSurface = facts.launchSurface;
       const terminalPresence = classifyCodexTerminalPresence(presenceScan, id, cwd, timestampToMs(meta?.timestamp), meta?.thread_source);
-      const name = (id && titles.get(id)) || (cwd ? `${basename(cwd)} · ${id.slice(0, 8)}` : basename(full));
+      const name = await this.resolvedTitle(full, id, titles, options?.signal);
       const liveLoaded = liveThreadIds.has(id);
       const agentOwned = codexAgentOwned(originTag.origin);
       const parentThreadId = originTag.parentThreadId;
@@ -530,7 +645,7 @@ export class CodexAdapter implements AgentBackend {
       out.push({
         id: enc(full), // base64url of the rollout path — attach re-opens the exact file (like Pi)
         tool: this.id,
-        title: name,
+        ...name,
         cwd,
         ...originTag,
         nativeId: id,
@@ -563,7 +678,7 @@ export class CodexAdapter implements AgentBackend {
     return this.preserveOpenOwners(out, liveThreadIds);
   }
 
-  watchSessionInfo(onChange: (info: SessionInfo) => void): Unsubscribe {
+  watchSessionInfo(onChange: (info: SessionInfo, observationStartedAt?: number) => void): Unsubscribe {
     if (!this.capabilities.supportsLiveAttach) return () => {};
     let stopped = false;
     let initialized = false;
@@ -582,6 +697,7 @@ export class CodexAdapter implements AgentBackend {
     const poll = async () => {
       if (pollInFlight || stopped || !existsSync(SESSIONS_ROOT)) return;
       pollInFlight = true;
+      const observationStartedAt = performance.now();
       try {
         let observedLive: Set<string>;
         let activities: Map<string, CodexThreadActivityStatus>;
@@ -630,7 +746,7 @@ export class CodexAdapter implements AgentBackend {
           // to. The rest of the disk roster is discovery's to publish and is derived identically
           // there, so republishing it here would only duplicate a startup burst.
           for (const info of firstInfos) {
-            if (confirmedLive.has(sessionInfoThreadId(info))) onChange(info);
+            if (confirmedLive.has(sessionInfoThreadId(info))) onChange(info, observationStartedAt);
           }
           return;
         }
@@ -684,7 +800,7 @@ export class CodexAdapter implements AgentBackend {
           // explicit guard so a future renderer-only change cannot accidentally suppress the
           // required affected-row notification.
           if (derivedChanged || changedLoadedIds.has(threadId)) {
-            onChange(info);
+            onChange(info, observationStartedAt);
             if (nextKey !== undefined) published.set(threadId, nextKey);
           } else if (nextKey !== undefined) {
             published.set(threadId, nextKey);
@@ -710,7 +826,7 @@ export class CodexAdapter implements AgentBackend {
     activities: Map<string, CodexThreadActivityStatus> = new Map(),
   ): Promise<SessionInfo[]> {
     if (!existsSync(SESSIONS_ROOT)) return [];
-    const titles = readSessionIndexTitles();
+    const titles = await readSessionIndexTitles();
     const canResume = resolveBin('codex') !== null;
     const out: SessionInfo[] = [];
     for (const full of findRollouts(SESSIONS_ROOT)) {
@@ -749,7 +865,7 @@ export class CodexAdapter implements AgentBackend {
       out.push({
         id: enc(full),
         tool: this.id,
-        title: (id && titles.get(id)) || (cwd ? `${basename(cwd)} · ${id.slice(0, 8)}` : basename(full)),
+        ...await this.resolvedTitle(full, id, titles),
         cwd,
         ...originTag,
         nativeId: id,
@@ -799,14 +915,26 @@ export class CodexAdapter implements AgentBackend {
    *  roster alias (issues-part2 rename check). Short-lived app-server RPC; the rollout stays put. */
   async renameSession(sessionId: string, title: string | null): Promise<SessionInfo> {
     const path = codexRolloutPathOf(sessionId);
+    const threadId = String(readSessionMeta(path)?.id ?? rolloutUuid(path));
+    return this.serializeName(threadId, () => this.renameSessionUnlocked(sessionId, title));
+  }
+
+  private async renameSessionUnlocked(sessionId: string, title: string | null): Promise<SessionInfo> {
+    const path = codexRolloutPathOf(sessionId);
     const meta = readSessionMeta(path);
     const threadId = meta?.id ? String(meta.id) : rolloutUuid(path);
     const cwd = meta?.cwd ? String(meta.cwd) : process.cwd();
     if (!threadId) throw new Error('Codex rename: could not resolve the thread id from the rollout.');
-    const name = (title ?? '').trim() || basename(cwd);
+    const requested = title?.trim();
+    const prompt = requested ? undefined : await codexTitleCache.readResult(path);
+    const preview = prompt?.facts.firstPrompt;
+    const name = requested || preview || 'Untitled session';
+    const identity = { tool: this.id, id: sessionId, nativeId: threadId };
+    if (!title?.trim() && !preview) this.recordName(identity, name, 'automatic');
     await withCodexAppServerRpc(cwd, async (rpc) => {
       await rpc('thread/name/set', { threadId, name }, 10000);
     });
+    if (title?.trim() || preview) this.recordName(identity, undefined, title?.trim() ? 'explicit' : 'automatic');
     const st = statSafe(path);
     const originTag = codexSessionOrigin(meta);
     const agentOwned = codexAgentOwned(originTag.origin);
@@ -819,7 +947,8 @@ export class CodexAdapter implements AgentBackend {
     return {
       id: sessionId,
       tool: this.id,
-      title: name,
+      title: requested || preview || '',
+      titlePending: prompt?.complete === false || undefined,
       cwd,
       ...originTag,
       nativeId: threadId,
@@ -878,8 +1007,7 @@ export class CodexAdapter implements AgentBackend {
     const newPath = typeof thread.path === 'string' && thread.path ? thread.path : undefined;
     if (!newPath) throw new Error('Codex thread/fork did not return a durable rollout path.');
     const actualCwd = String(forked?.cwd ?? thread.cwd ?? cwd);
-    const baseTitle = meta?.name ? String(meta.name) : basename(actualCwd) || threadId.slice(0, 8);
-    const title = (typeof thread.name === 'string' && thread.name) ? thread.name : `${baseTitle} (fork)`;
+    const naming: CodexTitle = (typeof thread.name === 'string' && thread.name) ? { title: thread.name } : await this.resolvedTitle(newPath, String(thread.id ?? ''));
     // DEFENCE IN DEPTH, now that an agent-owned SOURCE is refused above. What is left to cover is the
     // fork whose OWN meta comes back agent-owned from a source that was not: the app-server decides what
     // the new rollout's `session_meta` says, so a future codex could mark an app-requested fork of a
@@ -901,7 +1029,7 @@ export class CodexAdapter implements AgentBackend {
     return {
       id: enc(newPath),
       tool: this.id,
-      title,
+      ...naming,
       // Lineage = the PARENT thread this was forked from (`forkedFromId`), not the fork's own
       // `sessionId` (which the app-server sets to the fork's new uuid, not a shared tree id — verified
       // against codex 0.142.5; Fable review 2026-07-08 #2). Omitted if the runtime didn't report it.
@@ -1059,7 +1187,7 @@ export class CodexAdapter implements AgentBackend {
     const info: SessionInfo = {
       id: sessionId,
       tool: this.id,
-      title: cwd ? `${basename(cwd)}` : basename(path),
+      ...await this.resolvedTitle(path, threadId),
       cwd,
       ...originTag, // an OPEN subagent/exec session keeps its tag on pushed frames
       nativeId: threadId,
@@ -1130,6 +1258,7 @@ export class CodexAdapter implements AgentBackend {
         this.liveActivityCache = undefined;
       },
       this.options.goalPauseTurnWaitMs,
+      (name) => this.resumeTitle(path, threadId, name),
     );
     await conn.start();
     return this.trackOwner(conn);
@@ -2937,6 +3066,7 @@ async function createCodexThread(
   name?: string,
   model?: PromptInput['model'],
   syncEnabled = codexLiveSyncEnabled(),
+  recordName?: (path: string, nativeId: string, value: string | undefined) => void,
 ): Promise<any> {
   // A provider defined only in a `$CODEX_HOME/<profile>.config.toml` overlay does not exist for a
   // broker-spawned app-server, which loads the base config alone: `thread/start` refuses it with
@@ -3012,14 +3142,46 @@ async function createCodexThread(
         sandboxPolicy: mode.sandboxPolicy,
         ...(model?.reasoningEffort ? { model: model.modelID, effort: model.reasoningEffort } : {}),
       }, 5000);
-      try {
-        await rpc('thread/name/set', { threadId, name: name?.trim() || basename(cwd) || `${PRODUCT_IDENTITY.productName} session` }, 10000);
-      } catch {
-        /* older app-server without name/set → fall through to the existence guard below */
+      const explicit = name?.trim();
+      if (path && !existsSync(path)) {
+        // 0.164 materializes a legacy rollout on a supported metadata update. Replay one exact
+        // native field (including null outside Git) so persistence assigns no conversation name.
+        try {
+          await rpc('thread/metadata/update', {
+            threadId, gitInfo: { branch: started?.thread?.gitInfo?.branch ?? null },
+          }, 10000);
+          // The acknowledgement can precede the writer flush. Match the native probe's barrier
+          // and await the actual file before deciding this runtime needs a compatibility name.
+          await rpc('thread/read', { threadId }, 2000).catch(() => undefined);
+          await waitForCodexRollout(path, 2000);
+        } catch { /* older runtimes need the tracked provisional-name fallback below */ }
+      }
+      // On legacy history a neutral name is needed only for a file-less zero-turn thread.
+      if (explicit || (path && !existsSync(path))) {
+        const value = explicit || 'Untitled session';
+        if (path && !explicit) recordName?.(path, String(threadId), value);
+        try {
+          await rpc('thread/name/set', { threadId, name: value }, 10000);
+          if (path && explicit) recordName?.(path, String(threadId), undefined);
+          started.cosyncingProvisionalName = explicit ? undefined : value;
+          started.thread.name = value;
+        } catch {
+          started.cosyncingNameWriteFailed = true;
+          const current = await rpc('thread/read', { threadId }, 2000).catch(() => undefined);
+          const identified = current?.thread?.id === threadId
+            && (current.thread.name === null || typeof current.thread.name === 'string');
+          if (identified) {
+            started.thread.name = current.thread.name;
+            if (path && !explicit && current.thread.name !== value) recordName?.(path, String(threadId), undefined);
+          }
+          // A timeout is ambiguous. Keep exact automatic provenance only until native metadata
+          // can prove whether the write landed; a rejected write with a known name is settled.
+          if (!explicit && (!identified || current.thread.name === value)) started.cosyncingProvisionalName = value;
+        }
       }
     }
     if (path) {
-      for (let i = 0; i < 20 && !existsSync(path); i++) await new Promise((r) => setTimeout(r, 200));
+      await waitForCodexRollout(path, 4000);
       if (!existsSync(path)) throw new Error('Codex did not persist the new session rollout after requesting legacy history.');
     }
     return {
@@ -3029,6 +3191,38 @@ async function createCodexThread(
       sandbox: mode.sandboxPolicy,
       cosyncingSyncUnavailableReason: shared ? undefined : providerReason ?? CODEX_DAEMON_UNAVAILABLE_REASON,
     };
+  });
+}
+
+export async function waitForCodexRollout(path: string, timeoutMs: number,
+  deadline: (callback: () => void, ms: number) => () => void = (callback, ms) => {
+    const timer = setTimeout(callback, ms);
+    return () => clearTimeout(timer);
+  }): Promise<boolean> {
+  if (existsSync(path)) return true;
+  return new Promise((resolve) => {
+    let watcher: ReturnType<typeof watch> | undefined;
+    let done = false;
+    let cancelDeadline = (): void => {};
+    const finish = (): void => {
+      if (done) return;
+      done = true;
+      cancelDeadline();
+      watcher?.close();
+      resolve(existsSync(path));
+    };
+    const arm = (): void => {
+      if (done) return;
+      if (existsSync(path)) return finish();
+      let directory = dirname(path);
+      while (!existsSync(directory) && dirname(directory) !== directory) directory = dirname(directory);
+      watcher?.close();
+      try { watcher = watch(directory, arm); watcher.on('error', finish); }
+      catch { finish(); return; }
+      if (existsSync(path)) finish();
+    };
+    cancelDeadline = deadline(finish, timeoutMs);
+    arm();
   });
 }
 
@@ -3157,14 +3351,6 @@ async function forkCodexThread(cwd: string, threadId: string, sourcePath: string
     const answered = { threadId: newThreadId, forkedFromId: forked?.thread?.forkedFromId };
     if (path && codexForkAnsweredStoredRollout(path, requestedAt, answered, { path: sourcePath, threadId })) {
       throw new Error('Codex answered the fork with a session that already exists in its session store, so it was not forked.');
-    }
-    if (newThreadId != null) {
-      try {
-        const name = typeof forked?.thread?.name === 'string' && forked.thread.name ? forked.thread.name : `${basename(cwd) || 'Codex session'} (fork)`;
-        await rpc('thread/name/set', { threadId: newThreadId, name }, 10000);
-      } catch {
-        /* older app-server without name/set → rely on the existence guard below */
-      }
     }
     if (path) {
       for (let i = 0; i < 20 && !existsSync(path); i++) await new Promise((r) => setTimeout(r, 200));
@@ -4399,6 +4585,7 @@ class CodexResumeConnection implements SessionConnection {
     private readonly processStopTimeoutMs = CODEX_RESUME_PROCESS_STOP_TIMEOUT_MS,
     private readonly onDaemonLost?: () => void,
     private readonly goalPauseTurnWaitMs = 3000,
+    private readonly resolveTitle?: (nativeName: unknown) => Promise<CodexTitle>,
   ) {}
 
   private diagnostic(diagnostic: Omit<CodexAttachDiagnostic, 'threadId'>): void {
@@ -4687,7 +4874,8 @@ class CodexResumeConnection implements SessionConnection {
     }
     this.baselineSandboxPolicy = safeCodexSandboxPolicy(sandboxPolicy, this.cwd);
     this.info.currentMode = codexModeFromSettings(approvalPolicy, approvalsReviewer, sandboxPolicy);
-    if (resumed?.thread?.name) this.info.title = String(resumed.thread.name);
+    if (this.resolveTitle) Object.assign(this.info, { titlePending: undefined, ...await this.resolveTitle(resumed?.thread?.name) });
+    else if (resumed?.thread?.name) this.info.title = String(resumed.thread.name);
     const reconnected = this.transport === 'daemon-proxy' && this.daemonDisconnected;
     if (reconnected) this.daemonDisconnected = false;
     this.refreshSyncHint();
@@ -9147,19 +9335,40 @@ function codexAgentOwned(origin: ReturnType<typeof codexSessionOrigin>['origin']
 }
 
 /** id → thread_name from ~/.codex/session_index.jsonl (best-effort; the index lacks cwd). */
-function readSessionIndexTitles(): Map<string, string> {
-  const m = new Map<string, string>();
-  if (!existsSync(SESSION_INDEX)) return m;
-  try {
-    for (const line of readFileText(SESSION_INDEX).split('\n')) {
-      if (!line) continue;
-      const o = JSON.parse(line);
-      if (o?.id && o?.thread_name) m.set(String(o.id), String(o.thread_name));
-    }
-  } catch {
-    /* index unreadable */
+const codexIndexTitles = new SessionTitleCache<{ names: Map<string, string> }>(
+  () => ({ names: new Map() }), (row, facts) => {
+    // Empty names are authoritative clears. Malformed/partial rows are isolated by the reader.
+    if (typeof row?.id === 'string' && typeof row.thread_name === 'string') facts.names.set(row.id, row.thread_name);
+  },
+);
+async function readSessionIndexTitles(signal?: AbortSignal): Promise<CodexTitleIndex> {
+  const result = await codexIndexTitles.readResult(SESSION_INDEX, signal);
+  return Object.assign(new Map(result.facts.names), { complete: result.complete || !existsSync(SESSION_INDEX) });
+}
+
+const codexTitleCache = new SessionTitleCache<{ firstPrompt?: string }>(() => ({}), (row, facts) => {
+  if (facts.firstPrompt) return;
+  let text: string | undefined;
+  const payload = row.payload;
+  if (row.type === 'event_msg' && payload?.type === 'user_message' && typeof payload.message === 'string') text = payload.message;
+  if (row.type === 'event_msg' && payload?.type === 'item_completed' && payload.item?.type === 'UserMessage') {
+    text = payload.item.content?.filter((part: any) => part?.type === 'text' && typeof part.text === 'string').map((part: any) => part.text).filter((text: string) => !isSessionInstruction(text)).join('\n');
   }
-  return m;
+  if (row.type === 'response_item' && payload?.type === 'message' && payload.role === 'user') {
+    text = payload.content?.filter((part: any) => (part?.type === 'input_text' || part?.type === 'text') && typeof part.text === 'string').map((part: any) => part.text).filter((text: string) => !isSessionInstruction(text)).join('\n');
+  }
+  if (text && !isSessionInstruction(text)) facts.firstPrompt = sessionPromptPreview(text);
+}, undefined, { stopWhen: (facts) => !!facts.firstPrompt });
+async function readCodexTitle(path: string, id: string, names?: CodexTitleIndex, signal?: AbortSignal): Promise<CodexTitle> {
+  names ??= await readSessionIndexTitles(signal);
+  const indexed = names.get(id);
+  if (indexed) return { title: indexed, titlePending: names.complete === false || undefined };
+  const meta = readSessionMeta(path);
+  const nativeLabel = codexAgentOwned(codexSessionOrigin(meta).origin)
+    ? firstMetadataString([meta], ['agent_nickname', 'agentNickname']) : undefined;
+  if (nativeLabel) return { title: nativeLabel, titlePending: names.complete === false || undefined };
+  const prompt = await codexTitleCache.readResult(path, signal);
+  return { title: prompt.facts.firstPrompt ?? '', titlePending: !prompt.complete || names.complete === false || undefined };
 }
 
 const rolloutUuid = (path: string): string => basename(path).replace(/^rollout-.*?-([0-9a-f-]+)\.jsonl$/i, '$1');

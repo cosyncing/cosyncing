@@ -1,5 +1,8 @@
 /** Read-only, bounded Cline session-snapshot discovery, across the schema
  *  versions listed in `CLINE_OBSERVE_VERSIONS`. */
+import { sessionPromptPreview, isSessionInstruction } from '@cosyncing/adapter-api';
+import { mapClineMessage } from './mapping.ts';
+
 import { createHash } from 'node:crypto';
 import { lstat, open, opendir, realpath, type FileHandle } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -890,7 +893,7 @@ export async function discoverClineStore(options: ClineDiscoveryOptions = {}): P
     const provisional: ClineStoredSession = {
       id,
       nativeId: id,
-      title: boundedString(metadataRecord?.title, MAX_TITLE_CHARS, true) ?? id,
+      title: boundedString(metadataRecord?.title, MAX_TITLE_CHARS, true) ?? '',
       cwd: resolve(cwd),
       ...(model ? { model } : {}),
       ...(currentModel ? { currentModel } : {}),
@@ -923,6 +926,16 @@ export async function discoverClineStore(options: ClineDiscoveryOptions = {}): P
       if (snapshot.issues.length > 0 || !snapshot.identity) {
         options.trace?.({ op: 'schema-refused', path: messagesPath, detail: snapshot.issues.join('; ') });
         return undefined;
+      }
+      if (!provisional.title) {
+        for (const message of snapshot.messages) {
+          const text = mapClineMessage(message, { sessionId: id })
+            .filter((row): row is Extract<import('@cosyncing/adapter-api').AgentMessage, { type: 'user-message' }> => row.type === 'user-message')
+            .map((row) => row.text).filter((text) => !isSessionInstruction(text)).join('\n');
+          if (isSessionInstruction(text)) continue;
+          const preview = sessionPromptPreview(text);
+          if (preview) { provisional.title = preview; break; }
+        }
       }
       provisional.updatedAt = maxTimestamp(snapshot.updatedAt, endedAt, createdAt);
       mainSnapshot = snapshot;

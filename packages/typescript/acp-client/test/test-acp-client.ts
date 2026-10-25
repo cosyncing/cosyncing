@@ -69,6 +69,7 @@ import { spawn } from 'node:child_process';
 const config = JSON.parse(readFileSync(process.env.FAKE_ACP_CONFIG, 'utf8'));
 const log = (entry) => appendFileSync(config.log, JSON.stringify(entry) + '\\n');
 const send = (frame) => process.stdout.write(JSON.stringify(frame) + '\\n');
+if (config.keepAliveAfterStdinEnd) setInterval(() => {}, 1_000);
 if (Number.isSafeInteger(config.emitStderrBytes) && config.emitStderrBytes > 0) {
   process.stderr.write('e'.repeat(config.emitStderrBytes));
 }
@@ -104,11 +105,6 @@ function handle(frame) {
     };
     if (config.initializeExtra) Object.assign(result, config.initializeExtra);
     send({ jsonrpc: '2.0', id: frame.id, result: result });
-    if (config.closeStdinAfterInitialize) {
-      setInterval(() => {}, 1_000);
-      process.stdin.pause();
-      process.stdin._handle.close();
-    }
     if (config.emitMalformed) process.stdout.write('{ not json\\n');
     if (config.emitUnterminatedBytes) process.stdout.write('x'.repeat(config.emitUnterminatedBytes));
     return;
@@ -146,6 +142,7 @@ function handle(frame) {
     return;
   }
   if (frame.method === 'session/list') {
+    if (config.blockList) return;
     if (config.listError) { send({ jsonrpc: '2.0', id: frame.id, error: config.listError }); return; }
     setTimeout(() => {
       send({ jsonrpc: '2.0', id: config.stringifyListResponseId ? String(frame.id) : frame.id, result: { sessions: [{ sessionId: config.sessionId || 'fake-session-1', title: 'fake' }] } });
@@ -198,7 +195,7 @@ process.stdin.on('data', (chunk) => {
     handle(frame);
   }
 });
-process.stdin.on('end', () => { log({ stdinEnded: true }); process.exit(0); });
+process.stdin.on('end', () => { log({ stdinEnded: true }); if (!config.keepAliveAfterStdinEnd) process.exit(0); });
 `,
   );
   return binPath;
@@ -800,14 +797,22 @@ try {
       run.traces.map((event) => `${event.kind}:${event.message}`).join(' | '));
   }
 
-  // ── Scenario L: established child closes its stdin read end ─────────────
+  // ── Scenario L: an established child suffers an asynchronous stdin fault ──
   {
-    const run = await startFake({ closeStdinAfterInitialize: true });
-    check('closed child stdin: setup connects before the pipe closes', run.client !== null, String(run.error));
+    const run = await startFake({ blockList: true, keepAliveAfterStdinEnd: true });
+    check('stdin fault: setup connects before the pipe fails', run.client !== null, String(run.error));
     if (run.client) {
-      await sleep(50);
       let caught: unknown;
-      try { await run.client.sessionList(); } catch (error) { caught = error; }
+      const pending = run.client.sessionList().catch((error) => { caught = error; });
+      const received = await waitFor(() => run.readLog().some((row: any) => row.received?.method === 'session/list'));
+      check('the request is pending when stdin fails', received);
+      // A child-side Readable close is runtime-dependent (Bun retains another
+      // descriptor). Inject the OS error on the real parent Writable instead.
+      // This narrow transport fault cannot be arranged through an agent RPC;
+      // rejection and actual child reaping still use the public client surface.
+      const child = (run.client as unknown as { child: { child: { stdin: { destroy(error: Error): void } } } }).child.child;
+      child.stdin.destroy(Object.assign(new Error('fixture EPIPE'), { code: 'EPIPE' }));
+      await pending;
       const stopped = await waitFor(() => !run.client!.alive);
       check('an asynchronous stdin EPIPE is handled, rejects pending work, and reaps the child',
         caught instanceof Error && /stdio|not running/.test(caught.message) && stopped,

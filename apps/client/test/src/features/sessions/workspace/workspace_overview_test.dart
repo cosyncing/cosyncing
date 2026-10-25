@@ -113,7 +113,7 @@ void main() {
     expect(count('running', '1'), findsOneWidget);
     expect(count('waiting', '1'), findsOneWidget);
     expect(count('completions', '0'), findsOneWidget);
-    expect(find.text('Untitled session'), findsOneWidget);
+    expect(find.text('child'), findsOneWidget);
     await tester.tap(find.text('Running').first);
     await tester.pumpAndSettle();
     expect(find.text('Working'), findsOneWidget);

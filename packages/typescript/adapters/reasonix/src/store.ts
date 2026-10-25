@@ -1,4 +1,6 @@
 /** Read-only Reasonix v1.25.2 store discovery and bounded transcript reads. */
+import { sessionPromptPreview } from '@cosyncing/adapter-api';
+
 import {
   lstat,
   open,
@@ -733,8 +735,8 @@ export async function discoverReasonixStore(
       const model = boundedString(acp?.model, REASONIX_MAX_MODEL_CHARS)
         ?? boundedString(meta.model, REASONIX_MAX_MODEL_CHARS);
       const title = boundedString(acp?.title, REASONIX_MAX_TITLE_CHARS, true)
-        ?? boundedString(meta.preview, REASONIX_MAX_TITLE_CHARS, true)
-        ?? id;
+        ?? sessionPromptPreview(boundedString(meta.preview, REASONIX_MAX_TITLE_CHARS, true))
+        ?? '';
       const cwd = boundedString(acp?.cwd, REASONIX_MAX_CWD_CHARS);
       const driveEligible = acp?.sessionId === id && posture.driveEligible;
       const currentModel = reasonixModelSelection(model);

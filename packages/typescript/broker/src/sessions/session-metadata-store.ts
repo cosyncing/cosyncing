@@ -45,6 +45,9 @@ export interface StoredTerminalSummary {
 }
 
 interface SessionProvenanceRecord {
+  /** Exact automatic native name still awaiting the first real prompt. Never evict this fact. */
+  provisionalName?: { value: string; origin: 'automatic' };
+  nameOrigin?: 'automatic' | 'explicit';
   launchSurface?: SessionLaunchSurface;
   appCreatedAt?: number;
   appMutatedPrivateAt?: number;
@@ -81,9 +84,8 @@ type MetadataIndex = MetadataIndexV1 | MetadataIndexV2;
 
 const MAX_TITLE_CHARS = 160;
 const MAX_PROJECT_CHARS = 120;
-/** Retention cap for provenance records (~100 bytes each). Far above any realistic live session
- *  count; under pressure the least-recently-touched records are evicted, which only degrades
- *  toward the adapter's own rollout-derived launchSurface and drops stale behind-evidence. */
+/** Retention cap for settled provenance. Unsettled automatic names are exempt: losing that
+ * origin would expose a provisional native name as explicit. They settle on metadata refresh. */
 const MAX_PROVENANCE_RECORDS = 1000;
 const MAX_PROMPT_CORRELATIONS_PER_SESSION = 64;
 const MAX_TERMINAL_SUMMARIES_PER_SESSION = 64;
@@ -138,7 +140,7 @@ function readIndex(path: string): MetadataIndex {
 function cleanLabel(raw: string | null | undefined, maxChars: number): string | null {
   if (raw == null) return null;
   const label = String(raw).replace(/\s+/g, ' ').trim();
-  return label ? label.slice(0, maxChars) : null;
+  return label ? Array.from(label).slice(0, maxChars).join('') : null;
 }
 
 function sessionKey(tool: string, id: string): string {
@@ -154,6 +156,16 @@ function isMetadataIndexV2(index: MetadataIndex): index is MetadataIndexV2 {
 }
 
 export class SessionMetadataStore {
+  private readonly nativeProjects = new Map<string, string | undefined>();
+
+  /** Call at native input boundaries, before applying display aliases. Copies
+   * and Hub refreshes need not retain any hidden property for alias clearing. */
+  observeNative(info: SessionInfo): void {
+    const key = sessionKey(info.tool, info.id);
+    this.nativeProjects.delete(key);
+    this.nativeProjects.set(key, info.projectName);
+    if (this.nativeProjects.size > 8192) this.nativeProjects.delete(this.nativeProjects.keys().next().value!);
+  }
   private readonly file: string;
   private index: MetadataIndex;
 
@@ -184,6 +196,19 @@ export class SessionMetadataStore {
 
   private getProvenance(info: { tool: string; id: string; nativeId?: string }): SessionProvenanceRecord | undefined {
     return isMetadataIndexV2(this.index) ? this.index.provenance[this.keyFor(info)] : undefined;
+  }
+
+  provisionalName(info: { tool: string; id: string; nativeId?: string }): string | undefined {
+    const record = this.getProvenance(info)?.provisionalName;
+    return record?.origin === 'automatic' ? cleanOpaqueString(record.value, 160) : undefined;
+  }
+
+  recordNativeName(info: { tool: string; id: string; nativeId?: string }, value: string | undefined, origin: 'automatic' | 'explicit'): void {
+    this.writeAppProvenance(info, (record) => ({
+      ...record,
+      provisionalName: value === undefined ? undefined : { value, origin: 'automatic' },
+      nameOrigin: origin,
+    }));
   }
 
   /** Exact app-selected model to restore when an adapter's durable session has
@@ -308,11 +333,15 @@ export class SessionMetadataStore {
   apply(info: SessionInfo): SessionInfo {
     const out: SessionInfo = { ...info };
     const title = this.index.sessions[sessionKey(info.tool, info.id)];
-    if (title?.title) out.title = title.title;
+    if (title?.title) { out.title = title.title; delete out.titlePending; }
     if (info.cwd) {
+      const key = sessionKey(info.tool, info.id);
+      if (!this.nativeProjects.has(key)) this.observeNative(info);
+      const native = this.nativeProjects.get(key);
       const project = this.index.projects[info.cwd];
       if (project?.name) out.projectName = project.name;
-      else if ('projectName' in out) delete out.projectName;
+      else if (native !== undefined) out.projectName = native;
+      else delete out.projectName;
     }
     const provenance = this.getProvenance({ tool: info.tool, id: info.id, nativeId: info.nativeId });
     if (provenance?.launchSurface !== undefined) out.launchSurface = provenance.launchSurface;
@@ -345,6 +374,7 @@ export class SessionMetadataStore {
     const currentModel = cleanCurrentModel(info.currentModel);
     const currentMode = cleanLabel(info.currentMode, 120) ?? undefined;
     this.writeAppProvenance(info, (record) => ({
+      ...record,
       launchSurface: 'app',
       appCreatedAt: record.appCreatedAt ?? now,
       appMutatedPrivateAt: record.appMutatedPrivateAt,
@@ -371,6 +401,7 @@ export class SessionMetadataStore {
     if (!privateMutation && !currentModel && !currentMode) return false;
     const now = Date.now();
     return this.writeAppProvenance(info, (record) => ({
+      ...record,
       launchSurface: record.launchSurface,
       appCreatedAt: record.appCreatedAt,
       appMutatedPrivateAt: privateMutation ? record.appMutatedPrivateAt || now : record.appMutatedPrivateAt,
@@ -389,6 +420,7 @@ export class SessionMetadataStore {
   clearPrivateMutationEvidenceOnSharedRejoin(info: { tool: string; id: string; nativeId?: string; control?: SessionInfo['control'] }): boolean {
     if (info.control?.terminalSync?.presence !== 'shared') return false;
     return this.writeAppProvenance(info, (record) => ({
+      ...record,
       launchSurface: record.launchSurface,
       appCreatedAt: record.appCreatedAt,
       appMutatedPrivateAt: undefined,
@@ -449,7 +481,7 @@ function pruneProvenance(provenance: Record<string, SessionProvenanceRecord>, ke
   const keys = Object.keys(provenance);
   if (keys.length <= MAX_PROVENANCE_RECORDS) return;
   keys
-    .filter((key) => key !== keep)
+    .filter((key) => key !== keep && !provenance[key]?.provisionalName)
     .sort((a, b) => provenanceRecency(provenance[a]!) - provenanceRecency(provenance[b]!))
     .slice(0, keys.length - MAX_PROVENANCE_RECORDS)
     .forEach((key) => delete provenance[key]);
@@ -515,6 +547,9 @@ function pruneTerminalSummaries(
 
 function provenanceEquals(a: SessionProvenanceRecord, b: SessionProvenanceRecord): boolean {
   return (
+    a.provisionalName?.value === b.provisionalName?.value &&
+    a.provisionalName?.origin === b.provisionalName?.origin &&
+    a.nameOrigin === b.nameOrigin &&
     a.launchSurface === b.launchSurface &&
     a.appCreatedAt === b.appCreatedAt &&
     a.appMutatedPrivateAt === b.appMutatedPrivateAt &&

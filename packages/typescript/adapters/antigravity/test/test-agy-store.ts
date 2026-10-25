@@ -206,6 +206,24 @@ const IDS = FIXTURE.conversationIds;
       history.map((message) => message.type).join(','),
     );
     await connection.close();
+    const nativeTitle = 'Native / 名称.md';
+    const databasePath = join(tree.roots.appData, 'conversation_summaries.db');
+    const names = new Database(databasePath);
+    names.run('update conversation_summaries set title = ? where conversation_id = ?', [nativeTitle, IDS.withoutTranscript]);
+    names.run('pragma wal_checkpoint(TRUNCATE)');
+    names.close();
+    const named = (await adapter.discoverSessions()).find((session) => session.id === IDS.withoutTranscript);
+    const reopened = await adapter.attach(IDS.withoutTranscript, 'observe');
+    check('a native title takes precedence over preview in both discovery and attach',
+      named?.title === nativeTitle && reopened.info.title === nativeTitle,
+      JSON.stringify({ discovered: named?.title, attached: reopened.info.title }));
+    await reopened.close();
+    const cleared = new Database(databasePath);
+    cleared.run('update conversation_summaries set title = ? where conversation_id = ?', ['', IDS.withoutTranscript]);
+    cleared.run('pragma wal_checkpoint(TRUNCATE)');
+    cleared.close();
+    check('clearing the native slot restores its stable preview without resurrecting the name',
+      (await adapter.discoverSessions()).find((session) => session.id === IDS.withoutTranscript)?.title === row?.title);
   } finally {
     tree.cleanup();
   }

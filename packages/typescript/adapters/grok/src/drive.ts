@@ -612,6 +612,7 @@ export class GrokDriveConnection extends GrokObserveConnection {
       session,
       info,
       ...(options.trace ? { trace: options.trace } : {}),
+      ...(options.watchFactory ? { watchFactory: options.watchFactory } : {}),
       ...(options.replayCorrelations ? { replayCorrelations: options.replayCorrelations } : {}),
       ...(options.terminalSummaries ? { terminalSummaries: options.terminalSummaries } : {}),
       ...(options.terminalSummaryRegistry

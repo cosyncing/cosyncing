@@ -489,7 +489,7 @@ void _openSessionTab(
     ref = SessionRef.cachedIdentity(
       tool: tool,
       id: id,
-      title: knownTitle ?? id,
+      title: knownTitle ?? '',
     );
   }
   WidgetsBinding.instance.addPostFrameCallback((_) {

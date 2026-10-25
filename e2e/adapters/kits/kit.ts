@@ -338,6 +338,28 @@ export interface ConformanceExtra {
   run(context: ConformanceContext): Promise<void>;
 }
 
+/** Stable title fallback, through the same roster and Observe stream a client uses. */
+export function stableUnnamedTitle(agent: string): ConformanceExtra {
+  return {
+    title: 'session naming keeps the first prompt when native metadata has no name',
+    async run({ fake, client }) {
+      const session = fake.seedSession({ title: '' });
+      await client.waitForSession((row) => row.id === session.id && row.title === 'seeded prompt 1');
+      const stream = await client.attach(agent, session.id, { mode: 'observe' });
+      await stream.waitForFrame((frame) => frame.kind === 'session' && frame.info?.title === 'seeded prompt 1');
+      await stream.waitForKind('history');
+      fake.appendTurn(session, 'Later title activity', 'naming follow-up sentinel');
+      await stream.waitForFrame((frame) => {
+        const messages = frame.kind === 'message' ? [frame.message] : frame.messages ?? [];
+        return messages.some((message: any) => message.type === 'model-output'
+          && String(message.text ?? message.delta).includes('naming follow-up sentinel'));
+      });
+      await client.waitForSession((row) => row.id === session.id && row.title === 'seeded prompt 1');
+      stream.close();
+    },
+  };
+}
+
 /**
  * An extra for a kit whose `replaceLog` writes the session log aside and renames it over the
  * original: an open Observe reader is reset to the same conversation, without waiting for another

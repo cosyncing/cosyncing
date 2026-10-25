@@ -146,10 +146,7 @@ class OpenSessionsController extends AsyncNotifier<OpenSessionsState> {
     await _membershipSubscription?.cancel();
     final store = _store;
     final snapshot = store is LosslessOpenSessionsStore
-        ? await store.loadLossless(
-            sourceKey,
-            legacyProfileId: _legacyProfileId,
-          )
+        ? await store.loadLossless(sourceKey, legacyProfileId: _legacyProfileId)
         : await store.load(_legacyProfileId!);
     if (generation != _membershipGeneration) {
       return const OpenSessionsState();
@@ -567,10 +564,7 @@ class OpenSessionsController extends AsyncNotifier<OpenSessionsState> {
     final refs = [...current.refs];
     final moved = refs.removeAt(oldIndex);
     refs.insert(newIndex.clamp(0, refs.length), moved);
-    final next = OpenSessionsState(
-      refs: refs,
-      activeKey: current.activeKey,
-    );
+    final next = OpenSessionsState(refs: refs, activeKey: current.activeKey);
     if (_store case final LosslessOpenSessionsStore _) {
       _setLocal(next);
       _runLosslessOperation(
@@ -600,7 +594,14 @@ class OpenSessionsController extends AsyncNotifier<OpenSessionsState> {
         refs.add(ref);
         continue;
       }
-      final updated = SessionRef.fromSession(session);
+      final updated = (session.titlePending ?? false)
+          ? SessionRef(
+              tool: session.tool,
+              id: session.id,
+              title: ref.title,
+              status: session.status,
+            )
+          : SessionRef.fromSession(session);
       if (updated != ref) {
         changed = true;
       }
@@ -609,10 +610,7 @@ class OpenSessionsController extends AsyncNotifier<OpenSessionsState> {
     if (!changed) {
       return;
     }
-    final next = OpenSessionsState(
-      refs: refs,
-      activeKey: current.activeKey,
-    );
+    final next = OpenSessionsState(refs: refs, activeKey: current.activeKey);
     if (_store case final LosslessOpenSessionsStore _) {
       _setLocal(next);
       _runLosslessOperation(
@@ -630,7 +628,7 @@ class OpenSessionsController extends AsyncNotifier<OpenSessionsState> {
     final index = current.refs.indexWhere((ref) => ref.key == key);
     if (index < 0) return;
     final existing = current.refs[index];
-    final acceptedTitle = title.isEmpty ? id : title;
+    final acceptedTitle = title;
     if (existing.title == acceptedTitle) return;
     final refs = [...current.refs];
     refs[index] = SessionRef(

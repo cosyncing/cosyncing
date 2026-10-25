@@ -394,7 +394,7 @@ export class ReasonixAdapter implements AgentBackend {
         const sessionsRoot = join(this.root, 'sessions');
         const session: ReasonixStoredSession = {
           id: sessionId,
-          title: options.title?.trim() || sessionId,
+          title: options.title?.trim() || '',
           cwd,
           ...(effectiveModel ? { model: effectiveModel, currentModel: reasonixModelSelection(effectiveModel) } : {}),
           ...(createdMode ? { currentMode: createdMode } : {}),

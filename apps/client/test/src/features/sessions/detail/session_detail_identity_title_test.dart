@@ -544,26 +544,29 @@ void main() {
       expect(find.text('ses_deep_link_01'), findsNothing);
     });
 
-    testWidgets('the working set persists the id, never the localized label', (
-      tester,
-    ) async {
-      // Storage keeps stable identity. Freezing one locale's words into the
-      // persisted tab would read like a title the broker had supplied.
-      final store = InMemoryOpenSessionsStore();
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(
-          events: const [],
-          autoConnect: false,
-          sessionId: 'ses_deep_link_01',
-          openSessionsStore: store,
-          locale: const Locale('en'),
-        ),
-      );
-      await tester.pumpAndSettle();
+    testWidgets(
+      'the working set persists an unnamed title, never the localized label',
+      (
+        tester,
+      ) async {
+        // Storage keeps identity separate from the title. Freezing one locale's
+        // words into the persisted tab would read like a broker-supplied title.
+        final store = InMemoryOpenSessionsStore();
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(
+            events: const [],
+            autoConnect: false,
+            sessionId: 'ses_deep_link_01',
+            openSessionsStore: store,
+            locale: const Locale('en'),
+          ),
+        );
+        await tester.pumpAndSettle();
 
-      expect(store.snapshot.refs.single.title, 'ses_deep_link_01');
-      expect(stripTitle('Opening session'), findsOneWidget);
-    });
+        expect(store.snapshot.refs.single.title, '');
+        expect(stripTitle('Opening session'), findsOneWidget);
+      },
+    );
   });
 
   group('U3 title is presentation, never identity', () {

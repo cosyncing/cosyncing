@@ -440,6 +440,8 @@ function runFakePi(): void {
   const run = async (first: Input): Promise<void> => {
     running = true;
     aborted = false;
+    const heldStart = /\[\[hold-start:([\w-]+)\]\]/.exec(first.text)?.[1];
+    if (heldStart) await released(heldStart);
     emit({ type: 'agent_start' });
     let input: Input | undefined = first;
     while (input) {
