@@ -721,6 +721,10 @@ try {
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith('/pi/bridge/hello')) {
+        const body = JSON.parse(String(init?.body ?? '{}'));
+        // Admission and its full snapshot address the same registration. A prepare
+        // must not manufacture a second id before the extension begins polling.
+        if (body.prepare) return Response.json({ id: `bridge-approve-session-${helloCount + 1}` });
         helloCount += 1;
         return Response.json({ id: `bridge-approve-session-${helloCount}` });
       }

@@ -262,6 +262,8 @@ process.exit(73);
       const url = new URL(req.url);
       if (url.pathname === '/omp/bridge/hello') {
         const body: any = await req.json();
+        // Admission carries no transcript. Only a committed snapshot is a backfill.
+        if (body.prepare) return Response.json({ ok: true, id: bridgeId });
         helloBodies.push(body);
         // The broker's hello route in miniature: a re-hello reclaims the same connection, then the
         // backfill lands.

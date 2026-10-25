@@ -305,14 +305,20 @@ export class PiBridgeConnection implements SessionConnection {
    *  unchanged (`history-page-cache.ts:142-146`), so a replacement that kept it let the cache go on
    *  serving rows the replacement had dropped. */
   private historySourceGeneration = randomUUID();
-  /** A hello has backfilled this connection: every later one is a re-hello, whatever the cache holds. */
-  private helloIngested = false;
   /** Outbound commands awaiting the extension's long-poll. */
   private queue: BridgeCommand[] = [];
-  private waiter?: (cmds: BridgeCommand[]) => void;
-  private waiterTimer?: ReturnType<typeof setTimeout>;
+  private waiter?: { signal?: AbortSignal; send(commands: BridgeCommand[]): void };
   private cmdSeq = 0;
   private streaming = false;
+  epoch?: string;
+
+  matchesEpoch(epoch: unknown): boolean { return this.epoch === epoch; }
+
+  /** Live start evidence already stored by the authoritative backfill: never append a poorer copy. */
+  publishActiveRun(event: any): void {
+    const stored = this.history.findLast((row) => row.type === 'run-summary' && row.key === event?.key);
+    if (stored?.type === 'run-summary' && stored.status === 'running') this.emit(stored);
+  }
   /** The user's skills/templates, relayed by the extension (hello body or a 'commands' event) — so
    *  the bridged palette offers more than /stop. Empty until the extension reports them. */
   private relayedCommands: SlashCommand[] = [];
@@ -331,12 +337,14 @@ export class PiBridgeConnection implements SessionConnection {
   private readonly openRequests = new Map<string, 'permission' | 'question'>();
   constructor(info: SessionInfo, private readonly dialect: PiDialect = PI_DIALECT) {
     this.info = info;
+    this.streaming = info.status !== 'idle';
     this.lastSeen = 0;
   }
 
   replaceInfo(info: SessionInfo): void {
     for (const key of Object.keys(this.info)) delete (this.info as unknown as Record<string, unknown>)[key];
     Object.assign(this.info, info);
+    this.streaming = info.status !== 'idle';
   }
 
   subscribe(handler: AgentMessageHandler): Unsubscribe {
@@ -361,9 +369,23 @@ export class PiBridgeConnection implements SessionConnection {
     }
   }
 
-  private appendHistory(message: AgentMessage): void {
+  private appendHistory(message: AgentMessage): AgentMessage | undefined {
+    if (message.type === 'run-summary') {
+      const key = message.key;
+      const prior = this.history.findLast((row) => row.type === 'run-summary' && row.key === key);
+      if (prior?.type === 'run-summary') {
+        // A lost response can leave an already delivered lifecycle frame in shutdown's fallback.
+        if (prior.status !== 'running' && message.status === 'running') return;
+        const merged = { ...prior, ...Object.fromEntries(Object.entries(message).filter(([, value]) => value !== undefined)) } as AgentMessage;
+        if (JSON.stringify(merged) === JSON.stringify(prior)) return;
+        message = merged;
+      }
+    }
+    // Paging retains older snapshots while appendPosition grows. Preserve their rows and append
+    // each changed version so a client resuming at the old end can receive the terminal update.
     this.history.push(message);
     this.historyRevision += 1;
+    return message;
   }
 
   /** Map one extension event to canonical messages, emit them, and keep finals for history. */
@@ -397,9 +419,8 @@ export class PiBridgeConnection implements SessionConnection {
       }
       case 'run-summary':
       case 'run': {
-        const m = bridgeRunSummary(ev, this.dialect);
-        this.appendHistory(m);
-        this.emit(m);
+        const m = this.appendHistory(bridgeRunSummary(ev, this.dialect));
+        if (m) this.emit(m);
         return;
       }
       case 'runtime-totals': {
@@ -482,16 +503,11 @@ export class PiBridgeConnection implements SessionConnection {
 
   /** Backfill the conversation-so-far on hello: map relayed wire events to history.
    *
-   *  The FIRST hello emits nothing — no client is attached yet, and live clients pick the rows up via
-   *  getHistory on attach/resync. A re-hello is different, and the comment here used to claim it was
-   *  not: an extension reload delivers an authoritative whole-session snapshot, so when it differs
-   *  from the cache this REPLACES the rows, rotates `historySourceGeneration`, and emits
-   *  `history-reset` to make attached clients replay. Duplication is prevented by comparing the
-   *  mapped snapshot to the current history, NOT by the cache merely being non-empty: a re-hello
-   *  that recovers rows into a session announced empty reaches the clients already attached too. */
+   *  Admission can publish this connection before the first full snapshot arrives. Every changed
+   *  authoritative snapshot therefore replaces the rows, rotates the source generation and asks
+   *  attached clients to replay, including clients that joined during the initial upload. History
+   *  rows are never emitted as live events: replaying an old completion must not raise attention. */
   ingestHistory(events: unknown): void {
-    const firstHello = !this.helloIngested;
-    this.helloIngested = true;
     if (!Array.isArray(events)) return;
     const next = events
       .map((ev) => this.historyMessage(ev))
@@ -500,10 +516,6 @@ export class PiBridgeConnection implements SessionConnection {
     for (const m of next) {
       if (m.type === 'permission-request') this.openRequests.set(m.requestId, 'permission');
       else if (m.type === 'question-request') this.openRequests.set(m.requestId, 'question');
-    }
-    if (firstHello) {
-      for (const m of next) this.appendHistory(m);
-      return;
     }
     // A re-hello is an authoritative whole-session snapshot. The previous extension may have
     // persisted a prompt and crashed before POSTing its event; keeping the old non-empty cache
@@ -594,30 +606,40 @@ export class PiBridgeConnection implements SessionConnection {
   // ── outbound: queued for the extension's long-poll ──
   private enqueue(cmd: Omit<BridgeCommand, 'id'>): void {
     const full: BridgeCommand = { id: ++this.cmdSeq, ...cmd };
-    if (this.waiter) {
-      const w = this.waiter;
-      this.waiter = undefined;
-      if (this.waiterTimer) clearTimeout(this.waiterTimer);
-      w([full]);
+    if (this.waiter && !this.waiter.signal?.aborted) {
+      this.waiter.send([full]);
     } else {
+      this.waiter?.send([]);
       this.queue.push(full);
     }
   }
 
-  /** The extension long-polls this: resolve immediately with any queued commands, else wait (≤25s). */
-  takeCommands(): Promise<BridgeCommand[]> {
+  /** Release a disconnected/reloading poll without consuming the next app command. */
+  releaseCommandsPoll(): void { this.waiter?.send([]); }
+
+  /** Long-polls own their abort cleanup; a dead waiter never receives an app prompt. */
+  takeCommands(signal?: AbortSignal): Promise<BridgeCommand[]> {
+    if (signal?.aborted) return Promise.resolve([]);
     this.lastSeen = Date.now();
+    this.releaseCommandsPoll();
     if (this.queue.length) {
       const out = this.queue;
       this.queue = [];
       return Promise.resolve(out);
     }
     return new Promise((resolve) => {
-      this.waiter = resolve;
-      this.waiterTimer = setTimeout(() => {
-        if (this.waiter === resolve) this.waiter = undefined;
-        resolve([]); // long-poll timeout → extension re-polls
-      }, 25000);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const onAbort = () => waiter.send([]);
+      const waiter = { signal, send: (commands: BridgeCommand[]) => {
+        if (this.waiter === waiter) this.waiter = undefined;
+        if (timer) clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        resolve(commands);
+      } };
+      this.waiter = waiter;
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) return onAbort();
+      timer = setTimeout(() => waiter.send([]), 25_000);
     });
   }
 
@@ -753,11 +775,7 @@ export class PiBridgeConnection implements SessionConnection {
   }
 
   async close(): Promise<void> {
-    if (this.waiterTimer) clearTimeout(this.waiterTimer);
-    if (this.waiter) {
-      this.waiter([]);
-      this.waiter = undefined;
-    }
+    this.releaseCommandsPoll();
     this.handlers.clear();
     this.pendingFrames.clear();
     this.openRequests.clear();
@@ -784,6 +802,15 @@ export class PiBridgeRegistry {
   private readonly conns = new Map<string, PiBridgeConnection>();
   /** Deferred byes (reload/unknown): id → timer. A same-id hello() cancels its entry. */
   private readonly pendingBye = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly closedEpochs = new Map<string, number>();
+
+  closeEpoch(epoch: unknown): void {
+    if (typeof epoch !== 'string' || !epoch || epoch.length > 80) return;
+    this.closedEpochs.set(epoch, Date.now());
+    for (const [key, at] of this.closedEpochs) if (Date.now() - at > 30 * 60_000 || this.closedEpochs.size > 4096) this.closedEpochs.delete(key);
+  }
+
+  isClosed(epoch: unknown): boolean { return typeof epoch === 'string' && this.closedEpochs.has(epoch); }
 
   /**
    * @param onTeardown remove this bridge from the Hub (which fans a clean `ended` frame to clients,
@@ -826,16 +853,32 @@ export class PiBridgeRegistry {
     return conn;
   }
 
+  /** The active terminal owns the session until it releases it or liveness expires. */
+  canHello(id: string, epoch?: string): boolean {
+    if (this.isClosed(epoch)) return false;
+    const current = this.conns.get(id);
+    return !current || current.matchesEpoch(epoch) || this.pendingBye.has(id) || this.isClosed(current.epoch);
+  }
+
+  /** Upload progress keeps a prepared owner alive while its full snapshot is in flight. */
+  touchEpoch(epoch: unknown): void {
+    if (typeof epoch !== 'string') return;
+    for (const conn of this.conns.values()) if (conn.matchesEpoch(epoch)) conn.lastSeen = Date.now();
+  }
+
   /** Register (or reclaim) a bridge for a session. A re-hello reuses the live connection AND cancels
    *  any pending (deferred) bye for it — this is what makes a reload transparent to the phone. */
-  hello(id: string, info: SessionInfo): PiBridgeConnection {
+  hello(id: string, info: SessionInfo, epoch?: string): PiBridgeConnection {
+    if (!this.canHello(id, epoch)) throw new Error('session already bridged by another terminal');
     this.clearPendingBye(id); // a reload's re-hello reclaims the connection before its bye fires
     const existing = this.conns.get(id);
     if (existing) {
       existing.replaceInfo(info);
+      existing.epoch = epoch;
       return existing;
     }
     const conn = new PiBridgeConnection(info, this.dialect);
+    conn.epoch = epoch;
     this.conns.set(id, conn);
     return conn;
   }
@@ -847,6 +890,7 @@ export class PiBridgeRegistry {
       this.clearPendingBye(id);
       return;
     }
+    this.conns.get(id)!.releaseCommandsPoll();
     const deferrable = !reason || reason === 'reload';
     if (deferrable) {
       this.clearPendingBye(id);

@@ -34,6 +34,16 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   title scan, pending clears keep the displayed name, and terminal renames remain
   visible after app renames.
 
+- Completion notifications preserve full session identities and run keys for
+  long native session paths, keeping outcomes associated with the correct session.
+- Pi and OMP terminal bridges reconnect with large session histories and deliver
+  large tool results without losing activity or completion updates. Rejected
+  connections now show an actionable terminal status and broker diagnostic.
+- Pi and OMP sessions retain their running state, original turn identity and
+  runtime when the bridge rejoins during a long tool call. Session switches
+  move the bridge to the new session without mixing their events.
+  Restart or `/reload` open Pi/OMP terminals after upgrading to load the updated
+  bridge extension.
 - A network change no longer rebuilds every open session on a server with one
   address. Stalled requests retry at once, sessions reconnect from where they
   left off, and live roster updates resume after a connection is replaced. A

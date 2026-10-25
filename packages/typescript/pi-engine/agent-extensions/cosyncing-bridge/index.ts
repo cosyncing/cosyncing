@@ -23,6 +23,7 @@
  */
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { existsSync, readFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 /*__COSYNCING_NATIVE_VERSION_IMPORT__*/
@@ -89,7 +90,6 @@ const COLLAB_PROMPT_TYPE = 'collab-prompt';
 const SKILL_PROMPT_TYPE = 'skill-prompt';
 const REMOTE_USER_KEY_PREFIX = 'u:remote:';
 const RPC_PROMPT_COMMAND = '__cosyncing_rpc_prompt';
-
 function boundedString(value: unknown, max = 256): string | undefined {
   if (typeof value !== 'string') return undefined;
   const text = value.trim();
@@ -275,6 +275,23 @@ export default function (pi: ExtensionAPI) {
   // reload (module restarts at 0) can't collide a new bubble onto a pre-reload one (mirrors `turn`).
   let userKeySeq = 0;
   let lastCtx: any; // most recent handler ctx — used to abort from the (ctx-less) poll loop
+  let registrationEvents: { epoch: string; events: any[] } | undefined;
+  let epoch = randomUUID();
+  let generationAbort = new AbortController();
+  let commandPollAbort = new AbortController();
+  let generationFile: string | undefined;
+  let pendingLifecycle = new Map<string, any>();
+  let lastPostError: string | undefined;
+  let helloRejected = false;
+  const setBridgeStatus = (value: string, ctx = lastCtx): void => {
+    try { ctx?.ui?.setStatus?.('cosyncing', value); } catch { /* UI cannot change delivery success */ }
+  };
+  const adoptContext = (ctx: any): boolean => {
+    const file = ctx?.sessionManager?.getSessionFile?.();
+    if (file && file !== generationFile) return false;
+    lastCtx = ctx;
+    return true;
+  };
   const buf: any[] = []; // outbound event batch
   let flushTimer: ReturnType<typeof setTimeout> | undefined;
   /** Preserve native event order across batches. Without a chain, a timer flush
@@ -483,7 +500,9 @@ export default function (pi: ExtensionAPI) {
       emit({ t: 'error', message: `Model not found: ${providerID}/${modelID}` });
       return;
     }
+    const modelEpoch = epoch;
     const ok = await pi.setModel(model);
+    if (epoch !== modelEpoch) return;
     if (!ok) {
       emit({ t: 'error', message: `Model switch failed: no API key for ${providerID}/${modelID}` });
       return;
@@ -493,23 +512,62 @@ export default function (pi: ExtensionAPI) {
     relayModelState(ctx ? { ...ctx, model } : { model });
   };
 
-  /** `timeoutMs` aborts the request itself. Only the shutdown path sets it: every
-   *  other caller is free to wait, and capping them would turn a slow broker
-   *  into dropped transcript. An AbortController rather than
-   *  `AbortSignal.timeout` because this runs inside a foreign extension host. */
-  const post = async (path: string, body: unknown, timeoutMs?: number): Promise<any> => {
-    const controller = timeoutMs !== undefined && timeoutMs > 0 ? new AbortController() : undefined;
-    const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : undefined;
+  /** Each generation owns its requests; shutdown cancels uploads before sending its fence. */
+  const post = async (path: string, body: any, timeoutMs?: number, signal?: AbortSignal): Promise<any> => {
+    const requestEpoch = body?.epoch;
+    let responseStatus: number | undefined;
+    let rejectedOwner = false;
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    if (signal?.aborted) abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    const timer = timeoutMs !== undefined && timeoutMs > 0 ? setTimeout(abort, timeoutMs) : undefined;
     try {
-      const r = await fetch(`${BROKER}${path}`, {
-        method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders() }, body: JSON.stringify(body),
-        ...(controller ? { signal: controller.signal } : {}),
-      });
-      return r.ok ? await r.json().catch(() => ({})) : undefined;
-    } catch {
-      return undefined; // broker down → drop (the session keeps working locally)
+      const serialized = JSON.stringify(body);
+      const bytes = Buffer.from(serialized, 'utf8');
+      if (bytes.length > 32 * 1024 * 1024) throw new Error('bridge payload exceeds 32 MiB');
+      const fragmented = bytes.length > 512 * 1024 && /\/(hello|events)$/.test(path);
+      const transferId = randomUUID();
+      const count = fragmented ? Math.ceil(bytes.length / (128 * 1024)) : 1;
+      let value: any;
+      for (let index = 0; index < count; index++) {
+        const payload = fragmented ? JSON.stringify({ bridgeChunk: {
+          transferId, epoch: requestEpoch, index, count, totalBytes: bytes.length,
+          data: bytes.subarray(index * 128 * 1024, (index + 1) * 128 * 1024).toString('base64'),
+        } }) : serialized;
+        const r = await fetch(`${BROKER}${path}`, {
+          method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders(),
+            ...(fragmented ? { 'x-cosyncing-bridge-transfer': '1' } : {}) }, body: payload, signal: controller.signal,
+        });
+        if (!r.ok) {
+          responseStatus = r.status;
+          if (r.status === 409 && path.endsWith('/hello')) {
+            const rejection: any = await r.json().catch(() => ({}));
+            rejectedOwner = typeof rejection?.error === 'string' && rejection.error.startsWith('session already bridged by another terminal');
+          }
+          throw new Error(`HTTP ${r.status}`);
+        }
+        value = await r.json().catch(() => ({}));
+        if (fragmented && index < count - 1 && value?.pending !== true) throw new Error('broker does not support bridge transfers');
+      }
+      if (requestEpoch === epoch && !ended) {
+        if (lastPostError && alive) setBridgeStatus('📱 bridged');
+        lastPostError = undefined;
+      }
+      return value;
+    } catch (error) {
+      if (requestEpoch === epoch && !ended && !signal?.aborted) {
+        const detail = rejectedOwner ? 'another terminal is bridged; close it or /reload after it exits' : error instanceof Error && /^(HTTP \d+|bridge payload exceeds 32 MiB|broker does not support bridge transfers)$/.test(error.message)
+          ? error.message : 'network request failed';
+        lastPostError = `${path}: ${detail}`;
+        setBridgeStatus(`📱 disconnected: ${detail}`);
+        if (path.endsWith('/hello') && body?.prepare !== true
+          && (detail === 'bridge payload exceeds 32 MiB' || [400, 401, 403, 405, 410, 413, 415, 422].includes(responseStatus ?? 0))) helloRejected = true;
+      }
+      return undefined;
     } finally {
       if (timer) clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
     }
   };
 
@@ -530,44 +588,67 @@ export default function (pi: ExtensionAPI) {
     }
   };
 
-  const emit = (ev: any): void => {
-    if (!id) return;
+  const lifecycleKey = (ev: any): string | undefined => ev?.t === 'status' ? 'status'
+    : ev?.t === 'run-summary' ? `${ev.key}:${ev.status === 'running' ? 'start' : 'end'}` : undefined;
+  const emit = (ev: any, expected = epoch): void => {
+    if (expected !== epoch) return;
+    const key = lifecycleKey(ev);
+    if (key) {
+      pendingLifecycle.set(key, ev);
+      // Older turns remain in the native transcript; bye only carries a bounded recovery tail.
+      while (pendingLifecycle.size > 65 || Buffer.byteLength(JSON.stringify([...pendingLifecycle.values()])) > 64 * 1024) {
+        pendingLifecycle.delete(pendingLifecycle.keys().next().value!);
+      }
+    }
+    if (!id) { if (registrationEvents?.epoch === epoch) registrationEvents.events.push(ev); return; }
     buf.push(ev);
     if (buf.length >= 32) return void flush();
-    if (!flushTimer) flushTimer = setTimeout(flush, 60); // coalesce token deltas into ~60ms batches
+    if (!flushTimer) flushTimer = setTimeout(flush, 60);
   };
 
   const flush = async (): Promise<void> => {
     if (flushTimer) { clearTimeout(flushTimer); flushTimer = undefined; }
-    if (!id || !buf.length) return;
-    const flushId = id;
+    if (!id || !buf.length) return flushChain;
+    const flushId = id, flushEpoch = epoch, signal = generationAbort.signal, lifecycle = pendingLifecycle;
     const events = buf.splice(0, buf.length);
     flushChain = flushChain.then(async () => {
-      await post('/pi/bridge/events', { id: flushId, events });
+      if (signal.aborted) return;
+      const result = await post('/pi/bridge/events', { id: flushId, epoch: flushEpoch, events }, undefined, signal);
+      if (result) for (const ev of events) {
+        const key = lifecycleKey(ev);
+        if (key && lifecycle.get(key) === ev) lifecycle.delete(key);
+      }
     });
     await flushChain;
   };
 
-  // ── inbound: long-poll the broker for commands and act on them ──
-  const pollLoop = async (): Promise<void> => {
-    while (alive && id) {
+  const pause = (ms: number, signal: AbortSignal): Promise<void> => new Promise((resolve) => {
+    if (signal.aborted) return resolve();
+    const done = () => { clearTimeout(timer); signal.removeEventListener('abort', done); resolve(); };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener('abort', done, { once: true });
+  });
+
+  const pollLoop = async (expected: string, signal: AbortSignal): Promise<void> => {
+    while (!signal.aborted && epoch === expected && alive && id) {
       let commands: any[] = [];
       try {
-        const r = await fetch(`${BROKER}/pi/bridge/commands?id=${encodeURIComponent(id)}`, { headers: authHeaders() });
-        if (r.status === 404) {
-          // Unknown id = the broker restarted and forgot this registration (a transient outage is a
-          // fetch ERROR, not a 404). Drop out so bridgeLoop re-hellos with a fresh history backfill.
+        const r = await fetch(`${BROKER}/pi/bridge/commands?id=${encodeURIComponent(id)}&epoch=${encodeURIComponent(expected)}`, { headers: authHeaders(), signal });
+        if (ended || signal.aborted || epoch !== expected) return;
+        if (r.status === 404 || r.status === 410) {
           alive = false;
           id = undefined;
-          lastCtx?.ui?.setStatus?.('cosyncing', '📱 re-linking…');
+          setBridgeStatus('📱 re-linking…');
           return;
         }
         if (r.ok) commands = (await r.json())?.commands ?? [];
       } catch {
-        await sleep(1500); // broker hiccup → back off, keep trying
+        await pause(1500, signal);
         continue;
       }
+      if (signal.aborted || epoch !== expected) return;
       for (const c of commands) {
+        if (signal.aborted || epoch !== expected) return;
         try {
           if (c.kind === 'prompt' && c.text) {
             await injectUserMessage(c.text, c.messageKey, c.clientKey, c.sentAt, c.deliverAs);
@@ -681,6 +762,8 @@ export default function (pi: ExtensionAPI) {
   };
 
   const askUser = (params: any, ctx: any, mirrorToApp: boolean): Promise<string[][] | null> => {
+    const requestEpoch = epoch;
+    const emitQuestion = (event: any) => emit(event, requestEpoch);
     const requestId = `ca-q-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const options = Array.isArray(params?.options) ? params.options : [];
     return new Promise((resolve) => {
@@ -700,7 +783,7 @@ export default function (pi: ExtensionAPI) {
           settledQuestions.add(requestId);
         }
         cleanup();
-        if (mirrorToApp) emit({ t: 'question-resolved', requestId });
+        if (mirrorToApp) emitQuestion({ t: 'question-resolved', requestId });
         resolve(answers);
       };
       const onAbort = () => finish(null);
@@ -708,7 +791,7 @@ export default function (pi: ExtensionAPI) {
       ctx?.signal?.addEventListener?.('abort', onAbort, { once: true });
       if (mirrorToApp) {
         pendingQuestions.set(requestId, { resolve: (answers) => finish(answers), cleanup });
-        emit({
+        emitQuestion({
           t: 'question-request',
           requestId,
           questions: [{
@@ -732,6 +815,8 @@ export default function (pi: ExtensionAPI) {
   // `expired` is kept distinct from `reject` so the blocked tool can say the
   // approval was never answered rather than claim someone denied it.
   const requestPermission = (event: any, ctx: any, scope: string): Promise<'approve' | 'reject' | 'expired'> => {
+    const requestEpoch = epoch;
+    const emitPermission = (event: any) => emit(event, requestEpoch);
     const requestId = `ca-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     return new Promise<'approve' | 'reject' | 'expired'>((resolve) => {
       let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -749,7 +834,7 @@ export default function (pi: ExtensionAPI) {
         // five-minute one. `external` is the existing wire value for "settled,
         // but not by you, and no user choice is being reported" -- which is
         // exactly what a timeout is. The tool result carries the specifics.
-        emit({
+        emitPermission({
           t: 'permission-resolved',
           requestId,
           decision: verdict === 'approve' ? 'approve' : verdict === 'expired' ? 'external' : 'reject',
@@ -766,7 +851,7 @@ export default function (pi: ExtensionAPI) {
         cleanup,
         scope,
       });
-      emit({
+      emitPermission({
         t: 'permission-request',
         requestId,
         toolName: String(event?.toolName ?? 'tool'),
@@ -777,40 +862,75 @@ export default function (pi: ExtensionAPI) {
   };
 
   // ── lifecycle: announce on start, tear down on shutdown ──
-  const sayHello = async (): Promise<boolean> => {
+  const sayHello = async (expected: string, signal: AbortSignal): Promise<boolean> => {
     const ctx = lastCtx;
-    const sessionFile = ctx?.sessionManager?.getSessionFile?.();
-    if (!ctx || !sessionFile) return false;
-    // Seed the per-turn key namespace ABOVE any turn already in this session. On a RELOAD this module
-    // is re-instantiated with turn=0, but the broker keeps the connection alive (grace) so the phone
-    // stays attached with its pre-reload bubbles keyed t1,t2,…; restarting at t1 would collide a new
-    // turn's deltas onto an old bubble. Entries grow ≥2/turn, so the count strictly exceeds the
-    // highest prior turn number. A fresh session has 0 entries → turn=0 (unchanged behavior).
+    const sessionFile = generationFile;
+    if (!ctx || !sessionFile || ctx.sessionManager?.getSessionFile?.() !== sessionFile
+      || ended || epoch !== expected || signal.aborted || helloRejected) return false;
     turn = entryCount(ctx);
-    userKeySeq = countUserMessages(ctx); // continue user keys above the backfilled history's u0..u(k-1)
+    userKeySeq = countUserMessages(ctx);
     const thinkingLevel = currentThinkingLevel();
-    const model = (ctx as any).model;
+    const model = ctx.model;
     const nativeId = ctx.sessionManager.getSessionId?.();
-    const res = await post('/pi/bridge/hello', {
-      sessionFile,
+    const metadata = {
+      epoch: expected, sessionFile,
       ...(nativeId ? { nativeId } : {}),
       /*__COSYNCING_NATIVE_VERSION_PAYLOAD__*/
-      cwd: ctx.cwd,
-      title: sessionFile.split('/').pop(),
-      model: modelPayload(model, thinkingLevel),
-      thinkingLevel,
+      cwd: ctx.cwd, title: sessionFile.split('/').pop(),
+      model: modelPayload(model, thinkingLevel), thinkingLevel,
+    };
+    const prepared = await post('/pi/bridge/hello', { ...metadata, prepare: true, running: isBusyNow() }, undefined, signal);
+    if (!prepared?.id || ended || epoch !== expected || signal.aborted
+      || ctx.sessionManager?.getSessionFile?.() !== sessionFile) return false;
+    const history = [...buildHistory(ctx), ...([contextUsageEvent(ctx)].filter(Boolean))];
+    const running = isBusyNow();
+    const restored = history.findLast((event: any) => event.t === 'run-summary' && event.status === 'running');
+    // Reconstruct the OPEN turn, not just its replay row. A fresh extension may join while a
+    // tool is outstanding; its next final/end must close this user's original key and clock.
+    if (running && !currentRun && restored) {
+      const branch = currentBranchEntries(ctx);
+      const userIndex = branch.findLastIndex((entry: any) =>
+        entry?.type === 'message' && entry.message?.role === 'user'
+        || entry?.type === 'custom_message' && !!(collabPromptCorrelation(entry) || skillPromptInvocation(entry)));
+      const last = branch.slice(userIndex + 1).findLast((entry: any) => entry?.message?.role === 'assistant'
+        && !assistantRetryIsSuperseded(entry.message));
+      currentRun = {
+        key: restored.key, turnId: restored.turnId, userMessageKey: restored.userMessageKey,
+        startedAt: restored.startedAt, sawAssistantActivity: !!last,
+        ...(last ? { lastAssistant: {
+          stopReason: last.message.stopReason, errored: !!last.message.error, completedAt: timeMs(last.timestamp),
+        } } : {}),
+      };
+      currentRunTokens = restored.tokens ? { ...restored.tokens } : undefined;
+      lastUserMessageKey = restored.userMessageKey;
+    }
+    const activeRun = running && currentRun ? {
+      t: 'run-summary', key: currentRun.key, turnId: currentRun.turnId,
+      userMessageKey: currentRun.userMessageKey, startedAt: currentRun.startedAt,
+      status: 'running', source: 'pi-bridge',
+    } : undefined;
+    const duringHello: any[] = [];
+    registrationEvents = { epoch: expected, events: duringHello };
+    const res = await post('/pi/bridge/hello', {
+      ...metadata,
+      running,
+      ...(activeRun ? { activeRun } : {}),
       models: modelCatalog(ctx),
       // Backfill the conversation so far — without this the app shows only events relayed AFTER
       // attach (a freshly-opened phone saw a blank session). Mapped to the same wire shapes as live.
-      history: [...buildHistory(ctx), ...([contextUsageEvent(ctx)].filter(Boolean))],
+      history,
       // The user's skills/templates so the palette isn't just /stop (best-effort; see buildCommands).
       commands: buildCommands(ctx),
-    });
+    }, undefined, signal);
+    if (registrationEvents?.epoch === expected) registrationEvents = undefined;
+    if (ended || epoch !== expected || signal.aborted) return false;
     if (!res?.id) return false;
     id = res.id;
     alive = true;
     approvedScopes.clear();
-    ctx.ui?.setStatus?.('cosyncing', '📱 bridged');
+    setBridgeStatus('📱 bridged', ctx);
+    // Events that happened during a large snapshot upload follow it in native order.
+    for (const event of duringHello ?? []) emit(event);
     return true;
   };
 
@@ -818,28 +938,78 @@ export default function (pi: ExtensionAPI) {
   // restart forgets every live bridge. A TUI that helloed the old broker must re-hello the new one or
   // it silently runs unbridged while the app diverges onto the resume adapter (issues-part2 item 3).
   // Hello failure = broker down → retry; pollLoop returning = registration lost (404) → re-hello.
-  let bridgeLoopRunning = false;
-  const bridgeLoop = async (): Promise<void> => {
-    if (bridgeLoopRunning) return;
-    bridgeLoopRunning = true;
+  const bridgeLoops = new Set<string>();
+  const bridgeLoop = async (expected: string, signal: AbortSignal): Promise<void> => {
+    if (bridgeLoops.has(expected)) return;
+    bridgeLoops.add(expected);
     try {
-      while (!ended) {
-        if (!(await sayHello())) {
-          await sleep(5000);
-          continue;
-        }
-        await pollLoop();
-        if (!ended) await sleep(1000);
+      while (!ended && epoch === expected && !signal.aborted && !helloRejected) {
+        if (!(await sayHello(expected, signal))) { if (!helloRejected) await pause(5000, signal); continue; }
+        await pollLoop(expected, AbortSignal.any([signal, commandPollAbort.signal]));
+        if (!ended && epoch === expected) await pause(1000, signal);
       }
-    } finally {
-      bridgeLoopRunning = false;
-    }
+    } finally { bridgeLoops.delete(expected); }
+  };
+
+  const retire = async (reason: string | undefined): Promise<void> => {
+    ended = true;
+    alive = false;
+    const closingEpoch = epoch, closingFile = generationFile, closingId = id;
+    const closingAbort = generationAbort, closingLifecycle = pendingLifecycle;
+    commandPollAbort.abort();
+    for (const requestId of [...pendingPermissions.keys()]) resolvePermission(requestId, 'reject');
+    for (const requestId of [...pendingQuestions.keys()]) resolveQuestion(requestId, null);
+    const endBy = Date.now() + Math.max(SHUTDOWN_BUDGET_MS - SHUTDOWN_SAFETY_MS, 0);
+    const closingFlush = flush(); // capture the old buffer/chain before a switch installs its state
+    await waitAtMost(closingFlush, endBy - Date.now() - SHUTDOWN_BYE_RESERVE_MS);
+    closingAbort.abort();
+    const byeBudget = Math.max(endBy - Date.now(), SHUTDOWN_BYE_RESERVE_MS);
+    if (closingFile) await waitAtMost(post('/pi/bridge/bye', {
+      id: closingId, sessionFile: closingFile, epoch: closingEpoch, reason,
+      finalEvents: [...closingLifecycle.values()],
+    }, byeBudget), byeBudget);
+    if (epoch === closingEpoch) id = undefined;
   };
 
   pi.on('session_start', async (_event: any, ctx: any) => {
     lastCtx = ctx;
-    if (!ctx.sessionManager.getSessionFile?.()) return; // ephemeral (no file) → not discoverable/attachable; skip bridging
-    void bridgeLoop();
+    generationFile = ctx.sessionManager.getSessionFile?.();
+    if (generationFile) void bridgeLoop(epoch, generationAbort.signal);
+  });
+
+  // OMP changes contexts in this instance. Detach A synchronously before awaiting its bye.
+  pi.on('session_switch' as any, async (event: any, ctx: any) => {
+    const retirement = retire(event?.reason);
+    epoch = randomUUID();
+    generationAbort = new AbortController();
+    commandPollAbort = new AbortController();
+    generationFile = ctx.sessionManager.getSessionFile?.();
+    lastCtx = ctx;
+    id = undefined;
+    ended = false;
+    alive = false;
+    currentRun = undefined;
+    currentRunTokens = undefined;
+    agentStartAt = undefined;
+    retryActive = false;
+    lastUserMessageKey = undefined;
+    userKeySeq = countUserMessages(ctx);
+    turn = entryCount(ctx);
+    toolArgs.clear();
+    approvedScopes.clear();
+    settledQuestions.clear();
+    commandsSent = false;
+    registrationEvents = undefined;
+    lastPostError = undefined;
+    helloRejected = false;
+    buf.length = 0;
+    if (flushTimer) clearTimeout(flushTimer);
+    flushTimer = undefined;
+    flushChain = Promise.resolve();
+    pendingLifecycle = new Map();
+    const nextEpoch = epoch, nextSignal = generationAbort.signal;
+    await retirement;
+    if (generationFile && epoch === nextEpoch && !ended) void bridgeLoop(nextEpoch, nextSignal);
   });
 
   // Command/skill relay: make the bridged palette more than just /stop. Skills aren't loaded into the
@@ -860,11 +1030,11 @@ export default function (pi: ExtensionAPI) {
   // to an absent event is a silent no-op there, and pi behavior is byte-for-byte what it was.
   try {
     pi.on('model_select', (_event: any, ctx: any) => {
-      lastCtx = ctx;
+      if (!adoptContext(ctx)) return;
       relayModelState(ctx);
     });
     pi.on('thinking_level_select', (_event: any, ctx: any) => {
-      lastCtx = ctx;
+      if (!adoptContext(ctx)) return;
       relayModelState(ctx);
     });
   } catch {
@@ -877,7 +1047,7 @@ export default function (pi: ExtensionAPI) {
   //   COSYNCING_BRIDGE_APPROVALS=all       # every tool call
   //   COSYNCING_BRIDGE_APPROVALS=off       # disable
   pi.on('tool_call', async (event: any, ctx: any) => {
-    lastCtx = ctx;
+    if (!adoptContext(ctx)) return;
     const scope = approvalScope(event);
     if (!shouldRequestApproval(event) || !id || approvedScopes.has(scope)) return undefined;
     const verdict = await requestPermission(event, ctx, scope);
@@ -895,36 +1065,7 @@ export default function (pi: ExtensionAPI) {
     return undefined;
   });
 
-  pi.on('session_shutdown', async (event: any) => {
-    ended = true; // stop the re-hello loop — a reload re-instantiates this module fresh
-    alive = false;
-    for (const requestId of [...pendingPermissions.keys()]) resolvePermission(requestId, 'reject');
-    for (const requestId of [...pendingQuestions.keys()]) resolveQuestion(requestId, null);
-    // Budgeted from here on. The flush gets whatever is left after `bye`'s
-    // reserve, and losing the race abandons the wait rather than the events --
-    // they stay queued and the native transcript still holds them.
-    const endBy = Date.now() + Math.max(SHUTDOWN_BUDGET_MS - SHUTDOWN_SAFETY_MS, 0);
-    await waitAtMost(flush(), endBy - Date.now() - SHUTDOWN_BYE_RESERVE_MS);
-    // Relay Pi's shutdown reason ('quit'|'reload'|'new'|'resume'|'fork') so the broker can tell a
-    // reload (the SAME session re-hellos in a moment → keep the attached phone) apart from a genuine
-    // quit / session replacement (tear down + send the phone a clean `ended` frame). See
-    // packages/typescript/pi-engine/src/bridge.ts (PiBridgeRegistry.bye) and SessionShutdownEvent in Pi's types.
-    //
-    // Sent even when the flush ran out of time, and with the whole remaining
-    // budget, because this is the call whose loss actually changes broker
-    // behaviour. `Math.max` keeps it a real attempt if the flush overran. The
-    // payload is unchanged: the broker reads `id` and `reason` and ignores the
-    // rest, so reporting a partial flush here would be a field nobody acts on.
-    if (id) {
-      const byeBudget = Math.max(endBy - Date.now(), SHUTDOWN_BYE_RESERVE_MS);
-      // Belt and braces. The abort releases the socket, but this handler's own
-      // deadline must not DEPEND on the host's fetch honouring a signal: an
-      // implementation that ignores it would put us straight back to overrunning
-      // the budget, which is the failure being fixed.
-      await waitAtMost(post('/pi/bridge/bye', { id, reason: event?.reason }, byeBudget), byeBudget);
-    }
-    id = undefined;
-  });
+  pi.on('session_shutdown', async (event: any) => { await retire(event?.reason); });
 
   // ── outbound relays ──
   // agent_start = once per RUN (status only). turn_start = once per LLM turn → advance the key
@@ -953,10 +1094,16 @@ export default function (pi: ExtensionAPI) {
         : last.stopReason === 'error'
           ? 'error'
           : undefined;
-    const completedAt = last.completedAt ?? fallbackCompletedAt;
+    const completedAt = terminal ? last.completedAt ?? fallbackCompletedAt : fallbackCompletedAt ?? last.completedAt;
     const duration = run.startedAt != null && completedAt != null && completedAt >= run.startedAt
       ? completedAt - run.startedAt
       : undefined;
+    if (!terminal && fallbackCompletedAt != null && run.userMessageKey) {
+      try { pi.appendEntry('cosyncing-run-end', {
+        key: run.key, userMessageKey: run.userMessageKey,
+        completedAt, status: last.errored ? 'error' : 'done',
+      }); } catch { /* unsupported older host; existing message evidence remains available */ }
+    }
     emit({
       t: 'run-summary',
       key: run.key,
@@ -996,14 +1143,14 @@ export default function (pi: ExtensionAPI) {
   };
 
   pi.on('agent_start', (event: any, ctx: any) => {
-    lastCtx = ctx;
+    if (!adoptContext(ctx)) return;
     // The run's start clock — consumed only by the FALLBACK turn anchor; the authoritative
     // anchor is the opening user message itself (message_start below).
     agentStartAt = timeMs(event?.timestamp) ?? Date.now();
     emit({ t: 'status', running: true });
   });
   pi.on('agent_end', (event: any, ctx: any) => {
-    lastCtx = ctx;
+    if (!adoptContext(ctx)) return;
     toolArgs.clear(); // drop args of any uncompleted tool call
     if (event?.willContinue === true || event?.isTerminal === false || retryActive) {
       // OMP's ExtensionAPI declares `willContinue`; the RPC dialect declares
@@ -1022,14 +1169,14 @@ export default function (pi: ExtensionAPI) {
     emit({ t: 'status', running: false });
   });
   pi.on('turn_start', (event: any, ctx: any) => {
-    lastCtx = ctx;
+    if (!adoptContext(ctx)) return;
     turn++;
     // Do not open summary state here: Pi emits turn_start before the user message_start. A runtime
     // that omits the user event falls back lazily at its first assistant event (ensureLiveTurn).
   });
 
   pi.on('message_start', (event: any, ctx: any) => {
-    lastCtx = ctx;
+    if (!adoptContext(ctx)) return;
     // Every user message — typed in the terminal, queued while busy, or injected by us — is the source
     // for one user bubble. before_agent_start fires only ONCE per run, so queued prompts produced no
     // bubble; message_start fires per user message (the broker dedupes our optimistic echo by text).
@@ -1069,7 +1216,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on('message_update', (event: any, ctx: any) => {
-    lastCtx = ctx;
+    if (!adoptContext(ctx)) return;
     const e = event?.assistantMessageEvent;
     if (!e) return;
     ensureLiveTurn();
@@ -1081,7 +1228,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on('message_end', (event: any, ctx: any) => {
-    lastCtx = ctx;
+    if (!adoptContext(ctx)) return;
     const m = event?.message;
     if (m?.role !== 'assistant') return;
     ensureLiveTurn();
@@ -1127,7 +1274,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on('auto_retry_start', (event: any, ctx: any) => {
-    lastCtx = ctx;
+    if (!adoptContext(ctx)) return;
     ensureLiveTurn();
     retryActive = true;
     if (currentRun) {
@@ -1150,7 +1297,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on('auto_retry_end', (event: any, ctx: any) => {
-    lastCtx = ctx;
+    if (!adoptContext(ctx)) return;
     const wasRetryActive = retryActive;
     retryActive = false;
     if (event?.success === false) {
@@ -1171,12 +1318,12 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on('tool_execution_start', (event: any, ctx: any) => {
-    lastCtx = ctx;
+    if (!adoptContext(ctx)) return;
     if (event?.toolCallId != null && event?.args !== undefined) toolArgs.set(String(event.toolCallId), event.args);
     emit({ t: 'tool-call', callId: event?.toolCallId, name: event?.toolName, args: event?.args });
   });
   pi.on('tool_execution_end', (event: any, ctx: any) => {
-    lastCtx = ctx;
+    if (!adoptContext(ctx)) return;
     const callId = event?.toolCallId != null ? String(event.toolCallId) : '';
     // Relay the rich `details` (diff/patch/truncation/exitCode) + originating args so the broker can
     // map them to the canonical diffstat/exit-code/path chips (shared tool-result enrichment).
@@ -1486,6 +1633,7 @@ function buildHistory(ctx: any): any[] {
     | {
         userKey?: string;
         startedAt?: number;
+        nativeEnd?: { completedAt: number; status: 'done' | 'error' | 'cancelled' };
         last?: { key: string; stopReason?: string; errored: boolean; completedAt?: number; anchor?: string };
         tokens?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: number };
       }
@@ -1506,9 +1654,9 @@ function buildHistory(ctx: any): any[] {
         : last?.stopReason === 'error'
           ? 'error'
           : undefined;
-    const status = !closed ? 'running' : last?.errored ? 'error' : (terminal ?? 'done');
+    const status = !closed ? 'running' : turnState.nativeEnd?.status ?? (last?.errored ? 'error' : (terminal ?? 'done'));
     const startedAt = turnState.startedAt;
-    const completedAt = closed ? last?.completedAt : undefined;
+    const completedAt = closed ? turnState.nativeEnd?.completedAt ?? last?.completedAt : undefined;
     const duration = closed && startedAt != null && completedAt != null && completedAt >= startedAt
       ? completedAt - startedAt
       : undefined;
@@ -1534,6 +1682,16 @@ function buildHistory(ctx: any): any[] {
   };
   for (const e of entries) {
     const key = String(e.id ?? `h${i++}`);
+    if (e?.type === 'custom' && e.customType === 'cosyncing-run-end') {
+      const end = e.data;
+      if (openTurn?.userKey && end?.key === `pi:run:${openTurn.userKey}`
+        && end.userMessageKey === openTurn.userKey && Number.isFinite(end.completedAt)
+        && end.completedAt >= (openTurn.startedAt ?? 0) && ['done', 'error', 'cancelled'].includes(end.status)) {
+        openTurn.nativeEnd = end;
+        closeTurn(true);
+      }
+      continue;
+    }
     if (e?.type === 'custom_message') {
       const correlation = collabPromptCorrelation(e);
       const skill = skillPromptInvocation(e);

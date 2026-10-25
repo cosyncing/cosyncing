@@ -19,7 +19,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { type Broker, type BrokerClient, type Frame, type SessionStream, startBroker } from '../harness/index.ts';
+import { type Broker, type BrokerClient, type Frame, type SessionStream, eventually, startBroker } from '../harness/index.ts';
 import { ask } from '../harness/history.ts';
 import { openPiBridgeSession, piUserRows, type PiBridgeSession, type PiEvent } from '../harness/fakes/pi-bridge.ts';
 import { writeRollout, type Rollout } from '../harness/fakes/codex-rollout.ts';
@@ -452,7 +452,8 @@ describe('sessions on native stores', () => {
       await stream.waitForKind('history');
       // The fake announces the user row on its event bus before it answers the POST.
       expect((await stream.sendAndAwait({ kind: 'prompt', text: 'serve me', clientMessageId: 'ca.oc.1' })).kind).toBe('ack');
-      const prompt = opencode.prompts.find((candidate) => candidate.text === 'serve me');
+      // Queue acknowledgement precedes native HTTP dispatch; wait for the actual request.
+      const prompt = await eventually(() => opencode.prompts.find((candidate) => candidate.text === 'serve me'), { what: 'the acknowledged prompt to reach native OpenCode' });
       expect(prompt?.messageID).toMatch(/^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
       const echo = await stream.waitForMessage((message) => message.type === 'user-message' && message.key === prompt!.messageID);
       expect(echo.clientKey).toBe('ca.oc.1');
