@@ -146,7 +146,8 @@ describe.each([PI_DIALECT_FACTS, OMP_DIALECT_FACTS] as PiFamilyDialect[])('$disp
   test('a phone joining during the first history upload receives its snapshot without reattaching', async () => {
     const stored = storedSession('prepared-history'), id = enc(stored.file), epoch = crypto.randomUUID();
     const metadata = { sessionFile: stored.file, cwd: stored.cwd, ...nativeVersion, epoch };
-    const prior = `${dialect.name}:run:prior`, current = `${dialect.name}:run:current`;
+    const prior = `${dialect.name}:run:prior`, current = `${dialect.name}:run:${'native-turn-'.repeat(60)}current`;
+    expect(id.length).toBeGreaterThan(240);
     const activeRun = { t: 'run-summary', key: current, turnId: 'current', userMessageKey: 'current', status: 'running', startedAt: 3000 };
     expect((await owner.post(`${route}/hello`, { ...metadata, prepare: true, running: true })).status).toBe(200);
     const stream = await owner.attach(dialect.name, id);
@@ -181,6 +182,7 @@ describe.each([PI_DIALECT_FACTS, OMP_DIALECT_FACTS] as PiFamilyDialect[])('$disp
         return rows.some((event: any) => event.kind === 'run-finished' && event.turnId === 'current') ? rows : undefined;
       }, { what: 'the recovered live turn outcome after initial snapshot publication' });
       expect(events.filter((event: any) => event.kind === 'run-finished').map((event: any) => event.turnId)).toEqual(['current']);
+      expect(events.find((event: any) => event.kind === 'run-finished').dedupeKey.endsWith(current)).toBe(true);
       expect(stream.isOpen).toBe(true);
     } catch (error) {
       const feed = await owner.get(`/api/attention-events?clientId=prepared-${dialect.name}&limit=200`);

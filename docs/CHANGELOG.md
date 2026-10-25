@@ -19,6 +19,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Completion notifications preserve full session identities and run keys for
+  long native session paths, keeping outcomes associated with the correct session.
 - Pi and OMP terminal bridges reconnect with large session histories and deliver
   large tool results without losing activity or completion updates. Rejected
   connections now show an actionable terminal status and broker diagnostic.

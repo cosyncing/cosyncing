@@ -159,12 +159,17 @@ function cleanText(value: unknown, max: number): string | undefined {
   return cleaned ? cleaned.slice(0, max) : undefined;
 }
 
+/** Protocol identities are lookup keys, not display text. Never shorten or rewrite them. */
+function identityText(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
 function normalizeEvent(raw: unknown): AttentionEvent | undefined {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
   const value = raw as Record<string, unknown>;
   const id = cleanText(value.id, 240);
   const kind = cleanText(value.kind, 120);
-  const dedupeKey = cleanText(value.dedupeKey, 600);
+  const dedupeKey = identityText(value.dedupeKey);
   const title = cleanText(value.title, 160);
   const cursor = finiteInteger(value.cursor, -1);
   const revision = finiteInteger(value.revision, -1);
@@ -182,11 +187,14 @@ function normalizeEvent(raw: unknown): AttentionEvent | undefined {
   if (!id || !kind || !dedupeKey || !title || cursor < 0 || revision < 0 || presentationRevision < 0
       || createdAt < 0 || updatedAt < 0 || !state || !severity || !action) return undefined;
   const optionalText = (
-    key: 'presentationStage' | 'agent' | 'sessionId' | 'sessionTitle'
-      | 'requestId' | 'turnId' | 'goalKey' | 'summary',
+    key: 'presentationStage' | 'agent' | 'sessionTitle' | 'summary',
     max: number,
   ) => {
     const result = cleanText(value[key], max);
+    return result ? { [key]: result } : {};
+  };
+  const optionalIdentity = (key: 'sessionId' | 'requestId' | 'turnId' | 'goalKey') => {
+    const result = identityText(value[key]);
     return result ? { [key]: result } : {};
   };
   const resolvedAt = finiteInteger(value.resolvedAt, -1);
@@ -219,11 +227,11 @@ function normalizeEvent(raw: unknown): AttentionEvent | undefined {
     updatedAt,
     ...(resolvedAt >= 0 ? { resolvedAt } : {}),
     ...optionalText('agent', 120),
-    ...optionalText('sessionId', 240),
+    ...optionalIdentity('sessionId'),
     ...optionalText('sessionTitle', 200),
-    ...optionalText('requestId', 240),
-    ...optionalText('turnId', 240),
-    ...optionalText('goalKey', 240),
+    ...optionalIdentity('requestId'),
+    ...optionalIdentity('turnId'),
+    ...optionalIdentity('goalKey'),
     title,
     ...optionalText('summary', 320),
     action,
@@ -234,7 +242,7 @@ function normalizeEvent(raw: unknown): AttentionEvent | undefined {
 function normalizeObservation(raw: unknown): AttentionObservation | undefined {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
   const value = raw as Record<string, unknown>;
-  const key = cleanText(value.key, 600);
+  const key = identityText(value.key);
   const kind = cleanText(value.kind, 120);
   const observedAt = finiteInteger(value.observedAt, -1);
   const updatedAt = finiteInteger(value.updatedAt, -1);
