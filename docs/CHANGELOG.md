@@ -19,6 +19,14 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Pi and OMP terminal bridges reconnect with large session histories and deliver
+  large tool results without losing activity or completion updates. Rejected
+  connections now show an actionable terminal status and broker diagnostic.
+- Pi and OMP sessions retain their running state, original turn identity and
+  runtime when the bridge rejoins during a long tool call. Session switches
+  move the bridge to the new session without mixing their events.
+  Restart or `/reload` open Pi/OMP terminals after upgrading to load the updated
+  bridge extension.
 - Transcript navigation buttons preserve the composer's focus and draft.
   Hidden scroll controls no longer remain in keyboard focus traversal.
 - Installer-owned Windows servers can apply updates from Settings → Updates.

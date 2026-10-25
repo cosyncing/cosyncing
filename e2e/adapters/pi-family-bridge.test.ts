@@ -6,8 +6,8 @@
  * needs a ready omp, so the fake runtime is installed).
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { mkdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { BROKER_CONTRACT_REVISION, CLIENT_REVISION_WITH_OMP_ROSTER_IDENTITY } from '../../packages/typescript/protocol/src/index.ts';
 import { type Broker, type BrokerClient, eventually, startBroker } from '../harness/index.ts';
 import { PiBridgeSession } from '../harness/fakes/pi-bridge-driver.ts';
@@ -29,6 +29,7 @@ describe.each([PI_DIALECT_FACTS, OMP_DIALECT_FACTS] as PiFamilyDialect[])('$disp
   beforeAll(async () => {
     broker = await startBroker({
       name: `${dialect.name}-bridge`,
+      token: true,
       env: { COSYNCING_BRIDGE_GRACE_MS: String(GRACE_MS) },
       setup: (paths) => {
         fake = installPiFamily(dialect, paths);
@@ -68,6 +69,165 @@ describe.each([PI_DIALECT_FACTS, OMP_DIALECT_FACTS] as PiFamilyDialect[])('$disp
   const attach = (pi: PiBridgeSession) => owner.attach(dialect.name, pi.id);
   const delta = (text: string) => (message: any) =>
     message?.type === 'model-output' && new RegExp(text).test(message.delta ?? message.text ?? '');
+
+  /** Integration wire fragments, without importing the product's reassembler into the scenario. */
+  async function transfer(path: string, body: unknown, beforeFinal?: () => Promise<void>) {
+    const bytes = Buffer.from(JSON.stringify(body));
+    const count = Math.ceil(bytes.length / (128 * 1024));
+    const transferId = crypto.randomUUID();
+    let response;
+    for (let index = 0; index < count; index++) {
+      if (index === count - 1) await beforeFinal?.();
+      response = await owner.post(path, { bridgeChunk: {
+        transferId, index, count, totalBytes: bytes.length,
+        data: bytes.subarray(index * 128 * 1024, (index + 1) * 128 * 1024).toString('base64'),
+      } }, { 'x-cosyncing-bridge-transfer': '1' });
+      expect(response.status).toBe(200);
+      if (index < count - 1) expect(response.body.pending).toBe(true);
+    }
+    return response!;
+  }
+
+  test('large history and a large terminal event batch transfer intact, with exact busy state', async () => {
+    const stored = storedSession('large-recovery');
+    const id = enc(stored.file);
+    const key = `${dialect.name}:run:u0`;
+    const history = [
+      { t: 'user', key: 'u0', text: 'original large turn', sentAt: 1000 },
+      { t: 'final', key: 'large-history', text: 'history '.repeat(160_000) },
+      { t: 'user', key: 'history-tail', text: 'preserved history tail' },
+      { t: 'run-summary', key, turnId: 'u0', userMessageKey: 'u0', startedAt: 1000, status: 'running' },
+    ];
+    const hello = await transfer(`${route}/hello`, {
+      sessionFile: stored.file, cwd: stored.cwd, nativeId: stored.uuid, ...nativeVersion,
+      running: true, history, activeRun: history.at(-1),
+    }, async () => {
+      expect((await owner.get(`${route}/status?id=${encodeURIComponent(id)}`)).body.bridged).toBe(false);
+    });
+    expect(hello.body.id).toBe(id);
+    const stream = await owner.attach(dialect.name, id);
+    expect((await stream.waitForKind('session')).info.status).toBe('working');
+    await stream.waitForMessage((m) => m.type === 'user-message' && m.text === 'preserved history tail');
+    const row = await owner.waitForSession((s) => s.id === id && s.status === 'working');
+    expect(row.control.terminalSync.active).toBe(true);
+    stream.send({ kind: 'prompt', text: 'steer recovered turn' });
+    const commands = await owner.get(`${route}/commands?id=${encodeURIComponent(id)}`);
+    expect(commands.body.commands.some((c: any) => c.text === 'steer recovered turn' && c.deliverAs === 'steer')).toBe(true);
+    await transfer(`${route}/events`, { id, events: [
+      { t: 'tool-result', callId: 'large-result', name: 'bash', result: 'result '.repeat(170_000) },
+      { t: 'run-summary', key, turnId: 'u0', status: 'done', startedAt: 1000, completedAt: 501000, totalRuntimeMs: 500000 },
+      { t: 'status', running: false },
+    ] }, async () => {
+      expect((await owner.sessions()).find((s) => s.id === id)?.status).toBe('working');
+    });
+    const done = await stream.waitForMessage((m) => m.type === 'run-summary' && m.key === key && m.status === 'done');
+    expect(done.totalRuntimeMs).toBe(500000);
+    await owner.waitForSession((s) => s.id === id && s.status === 'idle');
+    await owner.post(`${route}/bye`, { id, reason: 'quit' });
+  });
+
+  test('oversized ordinary requests and invalid transfer fragments are visible refusals, never partial registrations', async () => {
+    const stored = storedSession('refused-transfer');
+    const oversized = await owner.post(`${route}/hello`, { ...nativeVersion, sessionFile: stored.file, history: ['x'.repeat(1024 * 1024)] });
+    expect(oversized.status).toBe(413);
+    const data = Buffer.alloc(128 * 1024).toString('base64');
+    const refused = await owner.post(`${route}/hello`, { bridgeChunk: {
+      transferId: crypto.randomUUID(), index: 1, count: 2, totalBytes: 256 * 1024, data,
+    } }, { 'x-cosyncing-bridge-transfer': '1' });
+    expect(refused.status).toBe(409);
+    const capped = await owner.post(`${route}/hello`, { bridgeChunk: {
+      transferId: crypto.randomUUID(), index: 0, count: 257, totalBytes: 257 * 128 * 1024, data,
+    } }, { 'x-cosyncing-bridge-transfer': '1' });
+    expect(capped.status).toBe(413);
+    expect((await owner.get(`${route}/status?id=${encodeURIComponent(enc(stored.file))}`)).body.bridged).toBe(false);
+    await eventually(() => broker.output().includes(`${route}/hello rejected: HTTP 413`), { what: 'content-free rejection diagnostic' });
+  });
+
+  test('one terminal owns the bridge until explicit reload, and stale owners cannot displace it', async () => {
+    const stored = storedSession('single-owner');
+    const id = enc(stored.file), first = crypto.randomUUID(), second = crypto.randomUUID();
+    const body = { sessionFile: stored.file, cwd: stored.cwd, ...nativeVersion };
+    expect((await owner.post(`${route}/hello`, { ...body, epoch: first, running: true, history: [] })).status).toBe(200);
+    const stream = await owner.attach(dialect.name, id);
+    expect((await stream.waitForKind('session')).info.status).toBe('working');
+    for (let i = 0; i < 3; i++) {
+      expect((await owner.post(`${route}/hello`, { ...body, epoch: second, running: false, history: [{ t: 'user', text: 'wrong terminal' }] })).status).toBe(409);
+    }
+    await owner.post(`${route}/bye`, { sessionFile: stored.file, epoch: second, reason: 'quit' });
+    expect((await owner.sessions()).find((row) => row.id === id)?.status).toBe('working');
+    expect((await owner.post(`${route}/hello`, { ...body, epoch: first, running: true, history: [] })).status).toBe(200);
+    await owner.post(`${route}/bye`, { id, epoch: first, reason: 'reload' });
+    const next = crypto.randomUUID();
+    expect((await owner.post(`${route}/hello`, { ...body, epoch: next, running: false, history: [] })).status).toBe(200);
+    expect((await owner.post(`${route}/hello`, { ...body, epoch: first, running: true })).status).toBe(410);
+    await owner.post(`${route}/bye`, { id, epoch: first, reason: 'quit' });
+    expect((await owner.get(`${route}/status?id=${id}`)).body.bridged).toBe(true);
+    await owner.post(`${route}/bye`, { id, epoch: next, reason: 'quit' });
+  });
+
+  test('a modern generation cannot end or replace a legacy bridge before it releases ownership', async () => {
+    const stored = storedSession('legacy-owner');
+    const body = { sessionFile: stored.file, cwd: stored.cwd, ...nativeVersion };
+    const id = (await owner.post(`${route}/hello`, { ...body, history: [] })).body.id;
+    const refused = crypto.randomUUID();
+    expect((await owner.post(`${route}/hello`, { ...body, epoch: refused, prepare: true })).status).toBe(409);
+    await owner.post(`${route}/bye`, { sessionFile: stored.file, epoch: refused, reason: 'quit' });
+    expect((await owner.get(`${route}/status?id=${id}`)).body.bridged).toBe(true);
+    expect((await owner.post(`${route}/events`, { id, events: [{ t: 'status', running: true }] })).status).toBe(200);
+    await owner.post(`${route}/bye`, { id, reason: 'reload' });
+    const next = crypto.randomUUID();
+    expect((await owner.post(`${route}/hello`, { ...body, epoch: next, history: [] })).status).toBe(200);
+    await owner.post(`${route}/bye`, { id, reason: 'quit' });
+    expect((await owner.get(`${route}/status?id=${id}`)).body.bridged).toBe(true);
+    expect((await owner.post(`${route}/events`, { id, events: [{ t: 'status', running: true }] })).status).toBe(410);
+    await owner.post(`${route}/bye`, { id, epoch: next, reason: 'quit' });
+  });
+
+  test('an aborted poll and reload preserve an app prompt for the new terminal poll', async () => {
+    const stored = storedSession('reload-prompt');
+    const id = enc(stored.file), first = crypto.randomUUID(), next = crypto.randomUUID();
+    const body = { sessionFile: stored.file, cwd: stored.cwd, ...nativeVersion, history: [] };
+    await owner.post(`${route}/hello`, { ...body, epoch: first });
+    const stream = await owner.attach(dialect.name, id);
+    await stream.waitForKind('history');
+    const abort = new AbortController();
+    const pending = fetch(`${owner.url}${route}/commands?id=${id}&epoch=${first}`, {
+      headers: owner.credentialHeaders(), signal: abort.signal,
+    }).then((response) => response.json(), () => undefined);
+    await owner.get(`${route}/status?id=${id}`);
+    abort.abort();
+    await pending;
+    await owner.post(`${route}/bye`, { id, epoch: first, reason: 'reload' });
+    expect((await stream.sendAndAwait({ kind: 'prompt', text: 'during reload gap' })).kind).toBe('ack');
+    await owner.post(`${route}/hello`, { ...body, epoch: next });
+    const response = await fetch(`${owner.url}${route}/commands?id=${id}&epoch=${next}`, {
+      headers: owner.credentialHeaders(), signal: AbortSignal.timeout(20_000),
+    });
+    const received: any = await response.json();
+    expect(received.commands.some((command: any) => command.text === 'during reload gap')).toBe(true);
+    await owner.post(`${route}/bye`, { id, epoch: next, reason: 'quit' });
+  });
+
+  test('shutdown fences pending hellos and old generations cannot end the replacement', async () => {
+    const stored = storedSession('generation-fence');
+    const id = enc(stored.file), epoch = crypto.randomUUID();
+    const bytes = Buffer.from(JSON.stringify({ sessionFile: stored.file, cwd: stored.cwd, ...nativeVersion, epoch, history: ['x'.repeat(140_000)] }));
+    const count = Math.ceil(bytes.length / (128 * 1024)), transferId = crypto.randomUUID();
+    const part = (index: number) => owner.post(`${route}/hello`, { bridgeChunk: {
+      transferId, epoch, index, count, totalBytes: bytes.length,
+      data: bytes.subarray(index * 128 * 1024, (index + 1) * 128 * 1024).toString('base64'),
+    } }, { 'x-cosyncing-bridge-transfer': '1' });
+    expect((await part(0)).body.pending).toBe(true);
+    await owner.post(`${route}/bye`, { sessionFile: stored.file, epoch, reason: 'quit' });
+    expect((await part(1)).status).toBe(410);
+    expect((await owner.get(`${route}/status?id=${id}`)).body.bridged).toBe(false);
+    const next = crypto.randomUUID();
+    expect((await owner.post(`${route}/hello`, { sessionFile: stored.file, cwd: stored.cwd, ...nativeVersion, epoch: next })).status).toBe(200);
+    await owner.post(`${route}/bye`, { id, epoch, reason: 'quit' });
+    expect((await owner.get(`${route}/status?id=${id}`)).body.bridged).toBe(true);
+    expect((await owner.post(`${route}/events`, { id, epoch, events: [{ t: 'status', running: true }] })).status).toBe(410);
+    await owner.post(`${route}/bye`, { id, epoch: next, reason: 'quit' });
+  });
 
   test('the hello id is the discovered row, and the row says synced with a terminal and has no Drive', async () => {
     const stored = storedSession('identity');

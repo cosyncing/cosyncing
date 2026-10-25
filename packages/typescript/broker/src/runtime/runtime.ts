@@ -96,7 +96,7 @@ import {
 import { searchSessionFiles } from '../artifacts/fs-search.ts';
 import { attachmentContentDisposition } from '../artifacts/download-headers.ts';
 import { DownloadRangeError, ifRangeMatches, parseDownloadRange } from '../artifacts/fs-browse.ts';
-import { PiBridgeRegistry } from '@cosyncing/adapter-pi';
+import { PiBridgeRegistry, PiBridgePayloads, PiBridgePayloadError } from '@cosyncing/adapter-pi';
 import { ClaudeHooksRegistry } from '@cosyncing/adapter-claude';
 import { HISTORY_WEBSOCKET_OPTIONS } from '../transport/http-contracts.ts';
 import { sendJson, withJsonCompression } from '../transport/json-egress.ts';
@@ -944,6 +944,7 @@ const TRANSPORT_PRINCIPAL_BYTES_MAX = Math.max(1, envNumber('COSYNCING_TRANSPORT
 const TRANSPORT_PAIRING_TTL_MS = Math.max(1, Number(process.env.COSYNCING_TRANSPORT_PAIRING_TTL_MS ?? 5 * 60 * 1000) || 5 * 60 * 1000);
 const WS_TICKET_JSON_MAX_BYTES = 64 * 1024;
 const ORDINARY_JSON_MAX_BYTES = 1024 * 1024;
+const piBridgePayloads = new PiBridgePayloads();
 
 interface StoredTransportEnvelope {
   id: string;
@@ -6165,9 +6166,27 @@ server = Bun.serve<WsData>({
         req = await withBoundedRequestBody(req, jsonBodyLimit);
       } catch (error) {
         if (error instanceof HttpStatusError) {
+          if (/^\/(pi|omp)\/bridge\//.test(path)) console.warn(`${LOG_PREFIX} ${path} rejected: HTTP ${error.status} (request body limit)`);
           return json({ ok: false, code: 'BAD_PARAM', error: error.message }, error.status);
         }
         throw error;
+      }
+    }
+
+    let decodedBridgeBody: any;
+    if (req.method === 'POST' && /^\/(pi|omp)\/bridge\/(hello|events)$/.test(path) && req.headers.get('x-cosyncing-bridge-transfer') === '1') {
+      try {
+        const part: any = await req.json().catch(() => ({}));
+        const registry = path.startsWith('/omp/') ? ompBridge : piBridge;
+        if (registry.isClosed(part?.bridgeChunk?.epoch)) return json({ error: 'closed bridge generation' }, 410);
+        const assembled = piBridgePayloads.accept(path, part);
+        registry.touchEpoch(part?.bridgeChunk?.epoch);
+        if (assembled.pending) return json({ ok: true, pending: true });
+        decodedBridgeBody = assembled.body;
+      } catch (error) {
+        if (!(error instanceof PiBridgePayloadError)) throw error;
+        console.warn(`${LOG_PREFIX} ${path} rejected: HTTP ${error.status} (${error.message})`);
+        return json({ ok: false, code: 'BAD_PARAM', error: error.message }, error.status);
       }
     }
 
@@ -7594,10 +7613,14 @@ server = Bun.serve<WsData>({
     // hello: a live Pi session announced itself → adopt a bridged connection into the Hub (pinned),
     // so a phone attach reuses it instead of spawning a second `pi --mode rpc` on the same JSONL.
     if (path === '/pi/bridge/hello' && req.method === 'POST') {
-      const b: any = await req.json().catch(() => ({}));
+      const b: any = decodedBridgeBody ?? await req.json().catch(() => ({}));
+      if (b?.epoch !== undefined && (typeof b.epoch !== 'string' || !/^[A-Za-z0-9-]{1,80}$/.test(b.epoch))) return json({ error: 'invalid bridge generation' }, 400);
+      if (piBridge.isClosed(b?.epoch)) return json({ error: 'closed bridge generation' }, 410);
       const sessionFile = String(b?.sessionFile ?? '');
       if (!sessionFile) return new Response('missing sessionFile', { status: 400 });
       const id = bridgeId(sessionFile);
+      const incomingEpoch = typeof b?.epoch === 'string' ? b.epoch : undefined;
+      if (!piBridge.canHello(id, incomingEpoch)) return json({ error: 'session already bridged by another terminal; close it or reload after it exits' }, 409);
       piBridgeIds.remember(id, sessionFile);
       const bridgeThinkingLevel =
         typeof b?.thinkingLevel === 'string' && ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(b.thinkingLevel)
@@ -7630,7 +7653,8 @@ server = Bun.serve<WsData>({
         // time so the default recent-session roster does not hide an otherwise
         // undated terminal session; it is never used as artifact ownership.
         updatedAt: Date.now(),
-        status: 'idle', attachMode: 'live',
+        status: b?.running === true ? 'working' : 'idle',
+        attachMode: 'live',
         model: b?.model?.label || b?.model?.name || b?.model?.modelID ? String(b.model.label ?? b.model.name ?? b.model.modelID) : undefined,
         currentModel: bridgeCurrentModel,
         control: {
@@ -7649,11 +7673,13 @@ server = Bun.serve<WsData>({
           },
         },
       };
-      const conn = piBridge.hello(id, info);
-      conn.ingestHistory(b?.history); // backfill the conversation-so-far (idempotent on re-hello)
+      const conn = piBridge.hello(id, info, typeof b?.epoch === 'string' ? b.epoch : undefined);
+      if (b?.prepare !== true) conn.ingestHistory(b?.history); // backfill the conversation-so-far (idempotent on re-hello)
       conn.setCommands(b?.commands); // the user's skills/templates → richer palette than /stop
       conn.setModelOptions(b?.models, bridgeCurrentModel?.reasoningEffort);
       const adopted = hub.adopt('pi', id, conn); // pinned: lives as long as the terminal session, not the clients
+      if (typeof b?.running === 'boolean') conn.ingest({ t: 'status', running: b.running });
+      if (b?.running === true && b?.activeRun?.status === 'running') conn.publishActiveRun(b.activeRun);
       // Journal the row now: the extension sends no frame until the user acts, so a delta or ETag
       // poller would otherwise learn of this live session only at its first frame.
       rosterPublication.publishOwnerFrame(adopted.conn.info);
@@ -7661,9 +7687,10 @@ server = Bun.serve<WsData>({
     }
     // events: the extension pushes a batch of session events → fan out to attached clients.
     if (path === '/pi/bridge/events' && req.method === 'POST') {
-      const b: any = await req.json().catch(() => ({}));
+      const b: any = decodedBridgeBody ?? await req.json().catch(() => ({}));
       const conn = piBridge.get(piBridgeIds.canonicalize(String(b?.id ?? '')));
       if (!conn) return new Response('unknown bridge', { status: 404 });
+      if (piBridge.isClosed(b?.epoch) || !conn.matchesEpoch(b?.epoch)) return new Response('closed bridge generation', { status: 410 });
       for (const ev of Array.isArray(b?.events) ? b.events : []) conn.ingest(ev);
       return json({ ok: true });
     }
@@ -7683,7 +7710,8 @@ server = Bun.serve<WsData>({
     if (path === '/pi/bridge/commands' && req.method === 'GET') {
       const conn = piBridge.get(piBridgeIds.canonicalize(url.searchParams.get('id') ?? ''));
       if (!conn) return new Response('unknown bridge', { status: 404 });
-      const commands = await conn.takeCommands();
+      if (piBridge.isClosed(url.searchParams.get('epoch')) || !conn.matchesEpoch(url.searchParams.get('epoch') ?? undefined)) return new Response('closed bridge generation', { status: 410 });
+      const commands = await conn.takeCommands(req.signal);
       return json({ commands });
     }
     // status: is a session currently live-bridged? (used to gate attach + mark the roster live)
@@ -7695,9 +7723,15 @@ server = Bun.serve<WsData>({
     // quit/new/resume/fork tear down now and notify the phone. See PiBridgeRegistry.bye.
     if (path === '/pi/bridge/bye' && req.method === 'POST') {
       const b: any = await req.json().catch(() => ({}));
-      const id = piBridgeIds.canonicalize(String(b?.id ?? ''));
+      const id = piBridgeIds.canonicalize(String(b?.id || (b?.sessionFile ? bridgeId(String(b.sessionFile)) : '')));
+      const closing = piBridge.get(id);
+      if (closing?.matchesEpoch(b?.epoch)) for (const event of Array.isArray(b?.finalEvents) ? b.finalEvents : []) {
+        if (event?.t === 'run-summary' || event?.t === 'status') closing.ingest(event);
+      }
+      piBridge.closeEpoch(b?.epoch);
+      if (typeof b?.epoch === 'string') piBridgePayloads.cancelEpoch(b.epoch);
       const reason = b?.reason ? String(b.reason) : undefined;
-      if (id) piBridge.bye(id, reason);
+      if (id && closing?.matchesEpoch(b?.epoch)) piBridge.bye(id, reason);
       return json({ ok: true });
     }
 
@@ -7711,7 +7745,9 @@ server = Bun.serve<WsData>({
       }
     }
     if (path === '/omp/bridge/hello' && req.method === 'POST') {
-      const b: any = await req.json().catch(() => ({}));
+      const b: any = decodedBridgeBody ?? await req.json().catch(() => ({}));
+      if (b?.epoch !== undefined && (typeof b.epoch !== 'string' || !/^[A-Za-z0-9-]{1,80}$/.test(b.epoch))) return json({ error: 'invalid bridge generation' }, 400);
+      if (ompBridge.isClosed(b?.epoch)) return json({ error: 'closed bridge generation' }, 410);
       if (b?.nativeVersion !== OMP_VERIFIED_VERSION) {
         return json({
           ok: false,
@@ -7730,6 +7766,8 @@ server = Bun.serve<WsData>({
         }, 409);
       }
       const id = bridgeId(sessionFile);
+      const incomingEpoch = typeof b?.epoch === 'string' ? b.epoch : undefined;
+      if (!ompBridge.canHello(id, incomingEpoch)) return json({ error: 'session already bridged by another terminal; close it or reload after it exits' }, 409);
       ompBridgeIds.remember(id, sessionFile);
       const bridgeThinkingLevel =
         typeof b?.thinkingLevel === 'string' && ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(b.thinkingLevel)
@@ -7761,7 +7799,8 @@ server = Bun.serve<WsData>({
         // Same rule as pi: a bridge hello is exact live-source activity, published so the default
         // recent-session roster does not hide an undated terminal session; never artifact ownership.
         updatedAt: Date.now(),
-        status: 'idle', attachMode: 'live',
+        status: b?.running === true ? 'working' : 'idle',
+        attachMode: 'live',
         model: b?.model?.label || b?.model?.name || b?.model?.modelID ? String(b.model.label ?? b.model.name ?? b.model.modelID) : undefined,
         currentModel: bridgeCurrentModel,
         control: {
@@ -7780,11 +7819,13 @@ server = Bun.serve<WsData>({
           },
         },
       };
-      const conn = ompBridge.hello(id, info);
-      conn.ingestHistory(b?.history); // backfill the conversation-so-far (idempotent on re-hello)
+      const conn = ompBridge.hello(id, info, typeof b?.epoch === 'string' ? b.epoch : undefined);
+      if (b?.prepare !== true) conn.ingestHistory(b?.history); // backfill the conversation-so-far (idempotent on re-hello)
       conn.setCommands(b?.commands); // the user's skills/templates → richer palette than /stop
       conn.setModelOptions(b?.models, bridgeCurrentModel?.reasoningEffort);
       const adopted = hub.adopt('omp', id, conn); // pinned: lives as long as the terminal session, not the clients
+      if (typeof b?.running === 'boolean') conn.ingest({ t: 'status', running: b.running });
+      if (b?.running === true && b?.activeRun?.status === 'running') conn.publishActiveRun(b.activeRun);
       // Journal the row now: the extension sends no frame until the user acts, so a delta or ETag
       // poller would otherwise learn of this live session only at its first frame.
       rosterPublication.publishOwnerFrame(adopted.conn.info);
@@ -7792,9 +7833,10 @@ server = Bun.serve<WsData>({
     }
     // events: the extension pushes a batch of session events → fan out to attached clients.
     if (path === '/omp/bridge/events' && req.method === 'POST') {
-      const b: any = await req.json().catch(() => ({}));
+      const b: any = decodedBridgeBody ?? await req.json().catch(() => ({}));
       const conn = ompBridge.get(ompBridgeIds.canonicalize(String(b?.id ?? '')));
       if (!conn) return new Response('unknown bridge', { status: 404 });
+      if (ompBridge.isClosed(b?.epoch) || !conn.matchesEpoch(b?.epoch)) return new Response('closed bridge generation', { status: 410 });
       for (const ev of Array.isArray(b?.events) ? b.events : []) conn.ingest(ev);
       return json({ ok: true });
     }
@@ -7814,7 +7856,8 @@ server = Bun.serve<WsData>({
     if (path === '/omp/bridge/commands' && req.method === 'GET') {
       const conn = ompBridge.get(ompBridgeIds.canonicalize(url.searchParams.get('id') ?? ''));
       if (!conn) return new Response('unknown bridge', { status: 404 });
-      const commands = await conn.takeCommands();
+      if (ompBridge.isClosed(url.searchParams.get('epoch')) || !conn.matchesEpoch(url.searchParams.get('epoch') ?? undefined)) return new Response('closed bridge generation', { status: 410 });
+      const commands = await conn.takeCommands(req.signal);
       return json({ commands });
     }
     // status: is a session currently live-bridged? (used to gate attach + mark the roster live)
@@ -7825,9 +7868,15 @@ server = Bun.serve<WsData>({
     // quit/new/resume tear down now. See PiBridgeRegistry.bye.
     if (path === '/omp/bridge/bye' && req.method === 'POST') {
       const b: any = await req.json().catch(() => ({}));
-      const id = ompBridgeIds.canonicalize(String(b?.id ?? ''));
+      const id = ompBridgeIds.canonicalize(String(b?.id || (b?.sessionFile ? bridgeId(String(b.sessionFile)) : '')));
+      const closing = ompBridge.get(id);
+      if (closing?.matchesEpoch(b?.epoch)) for (const event of Array.isArray(b?.finalEvents) ? b.finalEvents : []) {
+        if (event?.t === 'run-summary' || event?.t === 'status') closing.ingest(event);
+      }
+      ompBridge.closeEpoch(b?.epoch);
+      if (typeof b?.epoch === 'string') piBridgePayloads.cancelEpoch(b.epoch);
       const reason = b?.reason ? String(b.reason) : undefined;
-      if (id) ompBridge.bye(id, reason);
+      if (id && closing?.matchesEpoch(b?.epoch)) ompBridge.bye(id, reason);
       return json({ ok: true });
     }
 

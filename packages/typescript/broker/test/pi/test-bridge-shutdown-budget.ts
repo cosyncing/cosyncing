@@ -68,7 +68,8 @@ async function runShutdown(stall: 'events' | 'bye', emitFirst: boolean): Promise
   try {
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       const url = String(input);
-      init?.signal?.addEventListener('abort', () => { aborted = true; }, { once: true });
+      // Cancelling the long poll is expected on shutdown; track only delivery deadlines.
+      if (!url.includes('/pi/bridge/commands')) init?.signal?.addEventListener('abort', () => { aborted = true; }, { once: true });
       if (url.endsWith('/pi/bridge/hello')) return Response.json({ id: 'bridge-shutdown-1' });
       if (url.endsWith('/pi/bridge/events')) {
         if (stall === 'events') return await hangUntilAborted(init?.signal);

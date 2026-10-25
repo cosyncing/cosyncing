@@ -3378,6 +3378,7 @@ interface ParsedPiJsonlRow {
 
 function piJsonlRowMessage(obj: any): any | undefined {
   if (obj?.type === 'message') return obj.message;
+  if (obj?.type === 'custom' && obj.customType === 'cosyncing-run-end') return { ...obj.data, role: 'cosyncingRunEnd' };
   if (obj?.type !== 'custom_message') return undefined;
   return {
     role: 'custom',
@@ -3464,6 +3465,7 @@ export interface PiJsonlTurnCarry {
 const PI_PENDING_TOOL_ARGS_MAX = 256;
 
 type PiOpenTurn = {
+  nativeEnd?: { completedAt: number; status: 'done' | 'error' | 'cancelled' };
   /** Reload-stable summary identity. Pi's live user events expose no JSONL entry id, so all three
    *  paths use the user's durable transcript ordinal instead (`u0`, `u1`, ...). */
   summaryAnchor?: string;
@@ -3626,9 +3628,9 @@ function mapPiMessages(
       ? 'running'
       : last?.errored
         ? 'error'
-        : (terminal ?? 'done');
+        : (turn.nativeEnd?.status ?? terminal ?? 'done');
     const startedAt = turn.startedAt;
-    const completedAt = closed ? last?.completedAt : undefined;
+    const completedAt = closed ? turn.nativeEnd?.completedAt ?? last?.completedAt : undefined;
     const totalRuntimeMs = closed
       && startedAt != null
       && completedAt != null
@@ -3659,6 +3661,18 @@ function mapPiMessages(
   };
 
   for (const e of entries) {
+    if (e.message?.role === 'cosyncingRunEnd') {
+      const end = e.message;
+      const anchor = open?.summaryAnchor;
+      if (anchor && end.key === `${dialect.eventKeyNamespace}${anchor}` && end.userMessageKey === anchor
+        && Number.isFinite(end.completedAt) && end.completedAt >= (open?.startedAt ?? 0)
+        && ['done', 'error', 'cancelled'].includes(end.status)) {
+        open!.nativeEnd = end;
+        close(open, true);
+        open = undefined;
+      }
+      continue;
+    }
     const correlation = piCollabPromptCorrelation(e.message);
     const skill = piSkillPromptInvocation(e.message);
     const allowCorrelation = !correlation || correlationIsUnique(correlation);
