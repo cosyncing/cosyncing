@@ -139,7 +139,9 @@ const broker = Bun.spawn(['bun', 'run', 'packages/typescript/broker/src/main.ts'
 const brokerOutput = captureProcessOutput(broker);
 // Readiness is not one of this suite's assertions, so it gets no wall-clock
 // budget: a broker booting beside other suites is slow, not broken.
-const waitHealth = () => waitForBrokerHealth(broker, `${BROKER}/api/health`);
+const waitHealth = () => waitForBrokerHealth(broker, `${BROKER}/api/health`, {
+  childReady: () => brokerOutput.read().includes(`broker on http://127.0.0.1:${PORT} `),
+});
 
 // ── bridge wire helpers (stand in for the in-session extension) ──────────────
 const post = (path: string, body: unknown) =>
@@ -262,7 +264,10 @@ process.exit(73);
   });
   const futureOutput = captureProcessOutput(futureBroker);
   try {
-    await waitForBrokerHealth(futureBroker, `${futureOrigin}/api/health`);
+    await waitForBrokerHealth(futureBroker, `${futureOrigin}/api/health`, {
+      // Public health can answer from a fixture that won the released port.
+      childReady: () => futureOutput.read().includes(`broker on ${futureOrigin} `),
+    });
     await test('future omp version rejects every bridge route and native rename advertisement', async () => {
       const helloResponse = await fetch(`${futureOrigin}/omp/bridge/hello`, {
         method: 'POST',
