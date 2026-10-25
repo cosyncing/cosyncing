@@ -5,12 +5,16 @@ web sidecar. The short installer URLs on `cosyncing.com` serve copies of the
 accepted stable release's scripts.
 
 1. After matching Flutter clients have been released and physically accepted,
-   a new `broker-vX.Y.Z` tag on accepted public `main` creates a draft release.
+   a new `broker-vX.Y.Z` tag on accepted public `main` starts verification and
+   packaging in parallel.
 2. The JavaScript job builds `cosyncing-app.js` with `bun build --target=bun`,
    without `--compile`, stamped `distribution=bootstrap-js`. It executes that
    exact bundle through Bun to collect version, source, schema and contract
-   evidence. The web job builds and stages the matching web sidecar and evidence.
-3. Candidate assembly downloads exactly those four staging files. It parses the
+   evidence. The web job builds the matching web sidecar and evidence. Both jobs
+   stage workflow artifacts with read-only repository access and no protected
+   environment. JavaScript packaging reads the committed public key and key ID.
+3. After the contract gate and both package jobs succeed, protected candidate
+   assembly downloads exactly those four staging files. It parses the
    broker payload as JavaScript, verifies its evidence, and executes that bundle
    through an explicitly resolved Bun to verify broker/web browser parity in an
    isolated fixture with managed agent runtimes disabled.
@@ -32,10 +36,34 @@ accepted stable release's scripts.
    procedure below. Verify the short URLs after the website deploys.
 
 The `broker-release-candidate` environment stores signing material and the key
-identifier. `broker-production` stores only trusted public keys. Secrets never
+identifier. Only candidate assembly uses that environment and its approval; it
+requires the protected key ID to match `docs/release/release-key-id.txt` and the
+protected public key to match the committed key. `broker-production` stores
+only trusted public keys. Secrets never
 enter PR jobs. Private keys use restrictive permissions in runner temporary
 storage and are never cached or uploaded. The PR gate may still compile native
 brokers for ephemeral testing; it does not upload them.
+
+The broker contract gate can reuse the successful client release check at the
+same frozen public commit. It verifies the producing tag workflow, run and
+attempt, immutable artifact identity, clean source, complete task coverage and
+pinned runtime profile before accepting the report. Missing, expired, oversized
+or different-Bun evidence runs a fresh complete check; a failed producer, wrong identity or inconsistent
+report stops the gate. The broker retains either executed evidence or the source
+report and reuse receipt, including flaky-task diagnostics, for 30 days.
+
+Staging packages last 30 days. The protected signing job acquires a fresh pinned
+browser, with no shared Actions browser cache restored into that job.
+
+A manual branch dispatch is a no-publish rehearsal. After the client rehearsal
+passes at the same commit, run `gh workflow run broker-release.yml --repo
+cosyncing/cosyncing --ref <review-branch> -f client_run_id=<client-run-id>`.
+The gate validates and reuses that specific rehearsal report. Omitting the input
+exercises the fresh-check fallback. Read-only jobs then validate package handoff
+and broker/web parity; production signing and every release write are skipped.
+The rehearsal retains a cold-browser rendering image and system-font coverage
+for Latin, Chinese, Japanese, Korean, Arabic and emoji. Inspect these alongside
+the normal web scenarios before accepting a browser-setup change.
 
 ## Website installer publication
 

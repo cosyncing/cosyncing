@@ -3,6 +3,8 @@ name: Stage Client Release
 on:
   push:
     tags: ['client-v*.*.*']
+  # Manual branch runs are always rehearsals; production jobs require tag push.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -14,12 +16,15 @@ concurrency:
 env:
   BUN_VERSION: 1.4.3
   FLUTTER_VERSION: 3.44.3
+  RELEASE_REHEARSAL: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
+  CLIENT_BUILD_ARTIFACT_PREFIX: ${{ github.event_name == 'workflow_dispatch' && 'client-rehearsal-build' || 'client-build' }}
+  CLIENT_VERIFIED_ARTIFACT_PREFIX: ${{ github.event_name == 'workflow_dispatch' && 'client-rehearsal-verified' || 'client-verified' }}
 
 jobs:
-  gate:
-    name: client release contract gate
+  source:
+    name: validate client release source
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -28,43 +33,176 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
-      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
-        with:
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          channel: stable
-          cache: true
-      - name: Install hosted verification dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ripgrep
-          npx --yes playwright@1.61.1 install --with-deps chromium-headless-shell
-      - run: bun install --frozen-lockfile
       - name: Require an exact clean client version tag on main
         shell: bash
         run: |
           set -euo pipefail
+          test "$GITHUB_REPOSITORY" = cosyncing/cosyncing
           version="$(bun -e 'console.log((await Bun.file("package.json").json()).version)')"
           client_version="$(sed -n 's/^version: \([0-9][0-9.]*\)+[0-9][0-9]*$/\1/p' apps/client/pubspec.yaml)"
           test -n "$client_version"
           test "$client_version" = "$version"
-          test "$GITHUB_REF_NAME" = "client-v$version"
-          git fetch --no-tags origin main
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          if test "$GITHUB_EVENT_NAME" = push; then
+            test "$GITHUB_REF_NAME" = "client-v$version"
+            git fetch --no-tags origin main
+            git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          else
+            test "$RELEASE_REHEARSAL" = true
+            test "$GITHUB_REF_TYPE" = branch
+            echo 'NO-PUBLISH REHEARSAL: production signing and release writes are disabled.' >> "$GITHUB_STEP_SUMMARY"
+          fi
           test -z "$(git status --porcelain --untracked-files=normal)"
-      - run: bun run check
+
+  verify:
+    name: verify ${{ matrix.suite }}${{ matrix.shard && format(' {0}', matrix.shard) || '' }}
+    needs: source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: policy
+            part: policy
+          - suite: broker
+            part: broker
+          - suite: adapters
+            part: adapters
+          - suite: packaging
+            part: packaging
+          - suite: client
+            part: client-1-3
+            shard: 1/3
+            flutter: true
+          - suite: client
+            part: client-2-3
+            shard: 2/3
+            flutter: true
+          - suite: client
+            part: client-3-3
+            shard: 3/3
+            flutter: true
+          - suite: android
+            part: android
+            flutter: true
+          - suite: web
+            part: web
+            flutter: true
+            browser: true
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        if: ${{ matrix.suite == 'android' }}
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        if: ${{ matrix.flutter }}
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Install policy dependencies
+        if: ${{ matrix.suite == 'policy' }}
+        run: command -v rg >/dev/null || { sudo apt-get update && sudo apt-get install -y ripgrep; }
+      - run: bun install --frozen-lockfile
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        if: ${{ matrix.browser }}
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-1.61.1
+      - name: Install the browser
+        if: ${{ matrix.browser }}
+        run: bash scripts/ci/install-browser.sh
+      - run: bun run check ${{ matrix.suite }}${{ matrix.shard && format(' --shard {0}', matrix.shard) || '' }}
+        id: check
+      - name: Record verification provenance
+        if: ${{ always() && (steps.check.outcome == 'success' || steps.check.outcome == 'failure') }}
+        run: bun run scripts/release/client-check-evidence.ts record
+      - name: Preserve isolated check evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: client-check-part-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.part }}
+          path: output/check
+          if-no-files-found: error
+          retention-days: 30
+
+  gate:
+    name: client release contract gate
+    needs: [source, verify]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: client-check-part-${{ github.run_id }}-*
+          path: output/client-check-parts
+      - name: Require complete verification at this commit
+        id: check
+        run: bun run scripts/ci/aggregate-checks.ts
+      - name: Record complete-check provenance
+        if: ${{ always() && (steps.check.outcome == 'success' || steps.check.outcome == 'failure') }}
+        run: bun run scripts/release/client-check-evidence.ts record
       - name: Preserve client-release verification evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
         with:
-          name: client-release-check-${{ github.run_id }}
-          path: |
-            output/check
-            output/artifact-session-isolation
-          if-no-files-found: warn
-          retention-days: 7
+          name: client-${{ github.event_name == 'workflow_dispatch' && 'rehearsal' || 'release' }}-check-${{ github.run_id }}-${{ github.run_attempt }}
+          path: output/check
+          if-no-files-found: error
+          retention-days: 30
+
+  stage-verified:
+    needs: [gate, linux, macos, windows, android, android-rehearsal]
+    if: >-
+      ${{ !cancelled() && needs.gate.result == 'success'
+          && needs.linux.result == 'success' && needs.macos.result == 'success'
+          && needs.windows.result == 'success'
+          && ((github.event_name == 'push' && needs.android.result == 'success')
+              || (github.event_name == 'workflow_dispatch' && needs.android-rehearsal.result == 'success')) }}
+    name: retain verified client staging inputs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: ${{ env.CLIENT_BUILD_ARTIFACT_PREFIX }}-${{ github.run_id }}-*
+          path: output/client-build-inputs
+      - name: Collect complete passing build inputs
+        run: bun run scripts/release/collect-build-artifacts.ts client output/client-build-inputs output/client-verified
+      - uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: ${{ env.CLIENT_VERIFIED_ARTIFACT_PREFIX }}-${{ github.run_id }}-${{ github.run_attempt }}-complete
+          path: output/client-verified
+          if-no-files-found: error
+          retention-days: 30
 
   prepare-draft:
-    needs: gate
+    needs: stage-verified
+    if: ${{ github.event_name == 'push' }}
     name: prepare empty client draft
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -94,12 +232,12 @@ jobs:
           fi
 
   linux:
-    needs: prepare-draft
+    needs: source
     name: build Linux x64 client
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -117,12 +255,10 @@ jobs:
       - run: flutter pub get
         working-directory: apps/client
       - name: Build and package Linux x64
-        env:
-          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#client-v}"
+          version="$(bun -e 'console.log((await Bun.file("package.json").json()).version)')"
           bun run client:build:desktop -- --target linux --mode release
           bundle="$(find apps/client/build/linux -type d -path '*/release/bundle' -print -quit)"
           test -n "$bundle"
@@ -135,16 +271,21 @@ jobs:
           mkdir -p output/client-release
           asset="output/client-release/cosyncing-client-$version-linux-x64.tar.gz"
           tar -czf "$asset" -C "$RUNNER_TEMP" "$(basename "$stage")"
-          gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft' | grep -qx true
-          gh release upload "$GITHUB_REF_NAME" "$asset" --clobber
+      - name: Keep packaged linux staging inputs
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: ${{ env.CLIENT_BUILD_ARTIFACT_PREFIX }}-${{ github.run_id }}-${{ github.run_attempt }}-linux
+          path: output/client-release
+          if-no-files-found: error
+          retention-days: 30
 
   macos:
-    needs: prepare-draft
+    needs: source
     name: build unsigned macOS arm64 client
     runs-on: macos-15
     timeout-minutes: 45
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -160,12 +301,10 @@ jobs:
       - run: flutter pub get
         working-directory: apps/client
       - name: Build and package unsigned macOS arm64 app
-        env:
-          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#client-v}"
+          version="$(bun -e 'console.log((await Bun.file("package.json").json()).version)')"
           test "$(uname -m)" = arm64
           bun run client:build:desktop -- --target macos --mode release
           app="$(find apps/client/build/macos/Build/Products/Release -maxdepth 1 -type d -name '*.app' -print -quit)"
@@ -190,16 +329,21 @@ jobs:
           # so the archive's one top-level entry is Cosyncing.app.
           zip_asset="output/client-release/cosyncing-client-$version-macos-arm64-unsigned.zip"
           ditto -c -k --sequesterRsrc --keepParent "$stage/Cosyncing.app" "$zip_asset"
-          gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft' | grep -qx true
-          gh release upload "$GITHUB_REF_NAME" "$asset" "$zip_asset" --clobber
+      - name: Keep packaged macos staging inputs
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: ${{ env.CLIENT_BUILD_ARTIFACT_PREFIX }}-${{ github.run_id }}-${{ github.run_attempt }}-macos
+          path: output/client-release
+          if-no-files-found: error
+          retention-days: 30
 
   windows:
-    needs: prepare-draft
+    needs: source
     name: build unsigned Windows x64 client
     runs-on: windows-2025
     timeout-minutes: 45
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -215,12 +359,10 @@ jobs:
       - run: flutter pub get
         working-directory: apps/client
       - name: Build and package unsigned Windows x64 app
-        env:
-          GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $version = $env:GITHUB_REF_NAME -replace '^client-v', ''
+          $version = (bun -e 'console.log((await Bun.file("package.json").json()).version)').Trim()
           bun run client:build:desktop -- --target windows --mode release
           if ($LASTEXITCODE -ne 0) { throw 'Windows release build failed.' }
           $bundle = 'apps/client/build/windows/x64/runner/Release'
@@ -238,19 +380,73 @@ jobs:
           New-Item -ItemType Directory -Path output/client-release -Force | Out-Null
           $asset = "output/client-release/cosyncing-client-$version-windows-x64-unsigned.zip"
           Compress-Archive -Path $stage -DestinationPath $asset -CompressionLevel Optimal
-          gh release view $env:GITHUB_REF_NAME --json isDraft --jq '.isDraft' | Select-String -Pattern '^true$'
-          if ($LASTEXITCODE -ne 0) { throw 'Matching draft release is unavailable.' }
-          gh release upload $env:GITHUB_REF_NAME $asset --clobber
           if ($LASTEXITCODE -ne 0) { throw "Failed to upload $asset" }
+      - name: Keep packaged windows staging inputs
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: ${{ env.CLIENT_BUILD_ARTIFACT_PREFIX }}-${{ github.run_id }}-${{ github.run_attempt }}-windows
+          path: output/client-release
+          if-no-files-found: error
+          retention-days: 30
+
+  android-rehearsal:
+    needs: source
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    name: rehearse Android release build with debug signing
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get
+        working-directory: apps/client
+      - name: Build and inspect the rehearsal APK without release keys
+        env:
+          COSYNCING_REQUIRE_ANDROID_RELEASE_SIGNING: 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(bun -e 'console.log((await Bun.file("package.json").json()).version)')"
+          bun run client:build:android -- --mode release
+          apk=apps/client/build/app/outputs/flutter-apk/app-release.apk
+          test -f "$apk"
+          apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner -print | sort -V | tail -1)"
+          test -x "$apksigner"
+          "$apksigner" verify --verbose --print-certs "$apk"
+          mkdir -p output/client-release
+          cp "$apk" "output/client-release/cosyncing-client-$version-android.apk"
+          echo 'NO-PUBLISH REHEARSAL: this APK uses debug signing, never production keys.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: ${{ env.CLIENT_BUILD_ARTIFACT_PREFIX }}-${{ github.run_id }}-${{ github.run_attempt }}-android
+          path: output/client-release
+          if-no-files-found: error
+          retention-days: 1
 
   android:
-    needs: prepare-draft
+    needs: source
+    if: ${{ github.event_name == 'push' }}
     name: build signed Android APK
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     environment: client-release-candidate
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -278,7 +474,7 @@ jobs:
           test -n "$ANDROID_KEYSTORE_B64"
           printf '%s' "$ANDROID_KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/cosyncing-android-release.jks"
           chmod 600 "$RUNNER_TEMP/cosyncing-android-release.jks"
-      - name: Build, verify, and upload signed Android APK
+      - name: Build and verify signed Android APK
         env:
           GH_TOKEN: ${{ github.token }}
           COSYNCING_REQUIRE_ANDROID_RELEASE_SIGNING: 'true'
@@ -333,11 +529,20 @@ jobs:
           mkdir -p output/client-release
           asset="output/client-release/cosyncing-client-$version-android.apk"
           cp "$source_apk" "$asset"
-          gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft' | grep -qx true
-          gh release upload "$GITHUB_REF_NAME" "$asset" --clobber
+      - name: Keep packaged android staging inputs
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: ${{ env.CLIENT_BUILD_ARTIFACT_PREFIX }}-${{ github.run_id }}-${{ github.run_attempt }}-android
+          path: output/client-release
+          if-no-files-found: error
+          retention-days: 1
+      - name: Remove temporary signing material
+        if: ${{ always() }}
+        run: rm -f "$RUNNER_TEMP/cosyncing-android-release.jks"
 
   publish-candidate:
-    needs: [linux, macos, windows, android]
+    needs: prepare-draft
+    if: ${{ github.event_name == 'push' }}
     name: publish checksummed client prerelease
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -347,6 +552,19 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: ${{ env.CLIENT_VERIFIED_ARTIFACT_PREFIX }}-${{ github.run_id }}-*
+          path: output/client-verified-inputs
+      - name: Collect the exact successful build inputs
+        run: bun run scripts/release/collect-build-artifacts.ts client-verified output/client-verified-inputs dist
       - name: Download and verify the exact draft asset set
         env:
           GH_TOKEN: ${{ github.token }}
@@ -355,8 +573,6 @@ jobs:
           set -euo pipefail
           version="${GITHUB_REF_NAME#client-v}"
           gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft' | grep -qx true
-          mkdir dist
-          gh release download "$GITHUB_REF_NAME" --dir dist
           expected="$(cat <<EOF
           cosyncing-client-$version-android.apk
           cosyncing-client-$version-linux-x64.tar.gz
@@ -367,6 +583,7 @@ jobs:
           )"
           actual="$(find dist -maxdepth 1 -type f -printf '%f\n' | sort)"
           test "$actual" = "$expected"
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber
           (cd dist && sha256sum * > SHA256SUMS)
           gh release upload "$GITHUB_REF_NAME" dist/SHA256SUMS --clobber
           mkdir verified

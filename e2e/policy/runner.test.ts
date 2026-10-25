@@ -6,7 +6,7 @@ import { runSupervised, signalSupervisedGroups } from '../../scripts/ci/lib/proc
 
 const roots: string[] = [];
 // Intentional failures in nested fixture runs must not annotate the real CI job.
-const fixtureEnv = { ...process.env, GITHUB_ACTIONS: 'false', GITHUB_STEP_SUMMARY: '' };
+const fixtureEnv = { ...process.env, GITHUB_ACTIONS: 'false', GITHUB_STEP_SUMMARY: '', COSYNCING_CHECK_OUTPUT: '' };
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const root = () => { const path = mkdtempSync(join(tmpdir(), 'check-runner-')); roots.push(path); return path; };
 async function until(ready: () => boolean): Promise<void> {
@@ -16,14 +16,15 @@ async function until(ready: () => boolean): Promise<void> {
     await Bun.sleep(10);
   }
 }
-function runner(directory: string, tasks: unknown[]): string {
+function runner(directory: string, tasks: unknown[], suiteId = 'policy', platforms?: string[]): string {
   const ci = join(directory, 'scripts/ci');
   mkdirSync(ci, { recursive: true });
   cpSync(resolve(import.meta.dir, '../../scripts/ci/run.ts'), join(ci, 'run.ts'));
+  cpSync(resolve(import.meta.dir, '../../scripts/ci/check-plan.ts'), join(ci, 'check-plan.ts'));
   cpSync(resolve(import.meta.dir, '../../scripts/ci/lib'), join(ci, 'lib'), { recursive: true });
   writeFileSync(join(ci, 'suites.ts'), `export const DEFAULT_TIMEOUT_MS = 10000;
-export const suiteRunsOn = () => true;
-export const suites = [{id:'policy',tasks:${JSON.stringify(tasks)}}];`);
+export const suiteRunsOn = (suite, host) => !suite.platforms || suite.platforms.includes(host);
+export const suites = [{id:${JSON.stringify(suiteId)},platforms:${JSON.stringify(platforms)},tasks:${JSON.stringify(tasks)}}];`);
   return join(ci, 'run.ts');
 }
 
@@ -51,6 +52,10 @@ process.on('SIGTERM', () => process.exit(1)); setInterval(() => {},1000);`);
     child.kill('SIGTERM');
     expect(await child.exited).toBe(130);
     expect(readFileSync(marker, 'utf8')).toBe('start\n');
+    const report = JSON.parse(readFileSync(join(directory, 'output/check/report.json'), 'utf8'));
+    expect(report.cancelled).toBe(true);
+    expect(report.status).toBe('fail');
+    expect(report.tasks.find((task: {id: string}) => task.id === 'queued').status).toBe('blocked');
   } finally { if (child.exitCode === null) child.kill('SIGKILL'); }
 }, 20_000);
 
@@ -65,4 +70,45 @@ test('cancellation also tracks tasks without an isolated process group', async (
   const result = await task;
   expect(result.timedOut).toBe(false);
   expect(result.success).toBe(false);
+});
+
+test('unsupported suites and empty selections are usage errors without a stack trace', async () => {
+  for (const scenario of ['unsupported', 'empty'] as const) {
+    const directory = root();
+    const suiteId = scenario === 'unsupported' ? 'windows' : 'policy';
+    const unsupported = process.platform === 'win32' ? 'linux' : 'win32';
+    const entry = runner(directory, [{id: 'present', run: [process.execPath, '-e', 'process.exit(0)']}], suiteId,
+      scenario === 'unsupported' ? [unsupported] : undefined);
+    const child = Bun.spawn([process.execPath, entry, suiteId, '--list', ...(scenario === 'empty' ? ['--only', 'missing'] : [])],
+      {env: {...fixtureEnv, COSYNCING_CHECK_OUTPUT: ''}, stdout: 'pipe', stderr: 'pipe'});
+    const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+    expect(code).toBe(2);
+    expect(stderr).toContain(scenario === 'empty' ? 'no tasks match' : 'does not run on');
+    expect(stderr).not.toContain('at planChecks');
+    expect(existsSync(join(directory, 'output/check/report.json'))).toBe(false);
+  }
+});
+
+test('the former Flutter shard filter still selects and runs exactly that shard', async () => {
+  const directory = root();
+  const marker = join(directory, 'selected');
+  const entry = runner(directory, [1,2,3].map(index => ({id: `flutter-test-${index}-of-3`,
+    run: [process.execPath, '-e', `require('fs').appendFileSync(${JSON.stringify(marker)}, '${index}')`]})), 'client');
+  const child = Bun.spawn([process.execPath, entry, 'client', '--only', 'flutter-test-2-of-3'],
+    {env: {...fixtureEnv, COSYNCING_CHECK_OUTPUT: ''}, stdout: 'pipe', stderr: 'pipe'});
+  expect(await child.exited).toBe(0);
+  expect(readFileSync(marker, 'utf8')).toBe('2');
+  const report = JSON.parse(readFileSync(join(directory, 'output/check/report.json'), 'utf8'));
+  expect(report.counts.pass).toBe(1);
+  expect(report.selection.complete).toBe(false);
+});
+
+test('an output override cannot remove the fixture source tree', async () => {
+  const directory = root();
+  const entry = runner(directory, [{id: 'safe', run: [process.execPath, '-e', 'process.exit(0)']}]);
+  const child = Bun.spawn([process.execPath, entry], {
+    env: {...fixtureEnv, COSYNCING_CHECK_OUTPUT: directory}, stdout: 'ignore', stderr: 'pipe',
+  });
+  expect(await child.exited).toBe(2);
+  expect(existsSync(entry)).toBe(true);
 });

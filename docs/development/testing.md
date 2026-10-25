@@ -10,13 +10,34 @@ bun run check client --shard 2/3     # one CI shard
 bun run check adapters --only kimi-host --repeat 10 # focused stability run, no retry
 bun run check broker --no-retry      # expose every first-attempt failure
 bun run check --list                 # print the plan
+bun run check --list --json          # machine-readable discovered plan
+bun run check client --only flutter-test --flutter-layout combined # compare one compiler invocation
 ```
 
 ## Suites
 
 Each suite owns a feature area. CI runs the suites as jobs, with the client
-split across three jobs. The manifest is `scripts/ci/suites.ts`; the shared
+split across three jobs. Client release verification uses the same suites and
+three isolated client shards, then validates their combined coverage. The manifest is `scripts/ci/suites.ts`; the shared
 runner is `scripts/ci/run.ts`.
+
+Unsharded checks retain the three ordinary Flutter test invocations. The
+`--flutter-layout combined` option runs their explicit file union in one call;
+its isolated benchmark gains did not establish a reliable mixed-load default.
+Hosted `--shard I/N` checks use three balanced file lists in isolated build trees.
+Nightly stress files keep their separate task. For a controlled cold/warm
+comparison, run `bash scripts/ci/benchmark-flutter-checks.sh`; it uses isolated
+temporary worktrees and writes measurements under `output/`.
+
+Browser e2e files run at most two scenarios concurrently. Each scenario owns
+real renderers and fixture brokers; the outer check pool separately limits
+concurrent files. This keeps nested browser fanout within the execution budget
+without extending test deadlines or removing assertions.
+
+Run concurrent checks in separate worktrees. Every client selection runs its
+shared preparation, including rebuilding `build/unit_test_assets`, even when
+`--only` selects a policy task. Each running Flutter test needs that bundle to
+stay intact for its entire invocation.
 
 | Suite | Covers |
 |---|---|
@@ -165,10 +186,26 @@ open defect is fixed.
 
 ## Releases
 
-`bun run release:checkpoint` requires a passing **complete** `bun run check`
-(every suite this host can run, unsharded and unfiltered) for exactly the
-current commit. A dirty tree can be rehearsed but is never publication
-eligible.
+`bun run release:checkpoint` requires passing **complete** check evidence for
+exactly the current commit. A local `bun run check` covers every suite this host
+can run, unsharded and unfiltered. A release aggregate is a distinct report that
+retains the authenticated contributor identities and proves that its isolated
+suite/shard reports cover the discovered release plan exactly once. Task counts
+alone do not prove completeness. Ordinary Flutter file identities make combined
+and sharded invocations comparable without a second coverage registry.
+
+A dirty local tree can be rehearsed but is never publication eligible. The
+checkpoint still needs the canonical web build in the candidate checkout;
+downloading JSON does not provide that build or replace candidate-pair checks.
+An imported release aggregate needs the matching web output restored with its
+provenance or rebuilt in that checkout before running the checkpoint.
+
+The broker release first tries the matching client release check at the same
+clean public commit. It validates the source workflow, run, attempt, artifact
+identity, toolchain profile and discovered coverage. Missing, expired or legacy
+evidence executes a fresh full check; contradictory or failed evidence stops the
+gate. Both paths retain reports and diagnostics for 30 days. Flaky results remain
+visible and keep their reliability follow-up under the existing retry policy.
 
 Native Android JVM scenarios run through `bun run check android`; unfiltered
 local checks include them when an Android SDK is configured. The existing

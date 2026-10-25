@@ -6,6 +6,7 @@ require 'json'
 require 'open3'
 require 'pathname'
 require 'tmpdir'
+require 'yaml'
 require_relative '../classify-docs-only'
 
 ROOT = Pathname.new(__dir__).join('../../..').cleanpath
@@ -302,6 +303,92 @@ record(
   'CI required refuses a Windows lane that was skipped for any other reason',
   ci.include?('test "$windows_broker" = skipped') && ci.include?('test "$WINDOWS_RELEVANT" != true')
 )
+
+# Browser acquisition is tested at its command boundary without changing host
+# packages. Only a diagnosed missing-library failure may install dependencies.
+Dir.mktmpdir('cosyncing-browser-bootstrap-') do |fixture|
+  bin = File.join(fixture, 'bin')
+  FileUtils.mkdir_p(bin)
+  FileUtils.mkdir_p(File.join(fixture, 'node_modules/playwright-core'))
+  File.write(File.join(fixture, 'node_modules/playwright-core/cli.js'), '')
+  File.write(File.join(bin, 'bun'), <<~'SH')
+    #!/usr/bin/env bash
+    set -euo pipefail
+    printf '%s\n' "$*" >> "$BROWSER_FIXTURE_LOG"
+    if [ "$1" = run ]; then
+      count=0
+      if [ -f "$BROWSER_FIXTURE_COUNT" ]; then count="$(cat "$BROWSER_FIXTURE_COUNT")"; fi
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$BROWSER_FIXTURE_COUNT"
+      case "$BROWSER_FIXTURE_CASE" in
+        missing) if [ "$count" = 1 ]; then exit 78; fi ;;
+        broken) exit 1 ;;
+        still-broken) if [ "$count" = 1 ]; then exit 78; else exit 1; fi ;;
+      esac
+    fi
+  SH
+  FileUtils.chmod(0o755, File.join(bin, 'bun'))
+  %w[ready missing broken still-broken].each do |scenario|
+    log = File.join(fixture, "#{scenario}.log")
+    output, status = Open3.capture2e(
+      { 'PATH' => "#{bin}:#{ENV.fetch('PATH')}", 'BROWSER_FIXTURE_CASE' => scenario,
+        'BROWSER_FIXTURE_LOG' => log, 'BROWSER_FIXTURE_COUNT' => File.join(fixture, "#{scenario}.count") },
+      'bash', ROOT.join('scripts/ci/install-browser.sh').to_s, chdir: fixture
+    )
+    calls = File.readlines(log, chomp: true)
+    expected_success = %w[ready missing].include?(scenario)
+    expected_dependency_setup = %w[missing still-broken].include?(scenario)
+    record("#{scenario} browser bootstrap has the expected outcome", status.success? == expected_success, output)
+    record("#{scenario} browser bootstrap installs dependencies only for missing libraries",
+      calls.count { |call| call.include?('install-deps') } == (expected_dependency_setup ? 1 : 0), calls.inspect)
+    record("#{scenario} browser bootstrap does not retry other rendering failures",
+      calls.count { |call| call.start_with?('run ') } == (expected_dependency_setup ? 2 : 1), calls.inspect)
+  end
+end
+
+# Tag-time aggregation is too late to discover an incomplete release matrix.
+# Exercise the policy CLI with edited workflow fixtures before a tag exists.
+Dir.mktmpdir('cosyncing-release-matrix-') do |fixture|
+  original = YAML.load_file(ROOT.join('.github/workflows/client-release.yml'))
+  %w[valid missing-suite missing-shard overlap wrong-part wrong-name unguarded-signing unguarded-draft
+     missing-gate short-staging long-early-apk rehearsal-secrets write-rehearsal bun-literal missing-dispatch
+     broker-cache broker-unguarded-signing flutter-drift].each do |scenario|
+    workflow = Marshal.load(Marshal.dump(original))
+    jobs = workflow.fetch('jobs')
+    verify = jobs.fetch('verify')
+    rows = verify.fetch('strategy').fetch('matrix').fetch('include')
+    broker = YAML.load_file(ROOT.join('.github/workflows/broker-release.yml'))
+    case scenario
+    when 'missing-suite' then rows.reject! { |row| row['suite'] == 'android' }
+    when 'missing-shard' then rows.reject! { |row| row['part'] == 'client-2-3' }
+    when 'overlap' then rows << rows.find { |row| row['suite'] == 'packaging' }.dup
+    when 'wrong-part' then rows.find { |row| row['part'] == 'client-2-3' }['part'] = 'client'
+    when 'wrong-name' then verify['name'] = 'verify ${{ matrix.suite }}'
+    when 'unguarded-signing' then jobs.fetch('android').delete('if')
+    when 'unguarded-draft' then jobs.fetch('prepare-draft').delete('if')
+    when 'missing-gate' then jobs.fetch('stage-verified').fetch('needs').delete('gate')
+    when 'short-staging'
+      jobs.fetch('stage-verified').fetch('steps').find { |step| step['uses'].to_s.start_with?('actions/upload-artifact@') }.fetch('with')['retention-days'] = 1
+    when 'long-early-apk'
+      jobs.fetch('android').fetch('steps').find { |step| step['uses'].to_s.start_with?('actions/upload-artifact@') }.fetch('with')['retention-days'] = 30
+    when 'rehearsal-secrets' then jobs.fetch('android-rehearsal')['env'] = { 'KEY' => '${{ secrets.RELEASE_KEY }}' }
+    when 'write-rehearsal' then jobs.fetch('android-rehearsal')['permissions'] = { 'contents' => 'write' }
+    when 'bun-literal'
+      jobs.fetch('source').fetch('steps').find { |step| step['uses'].to_s.start_with?('oven-sh/setup-bun@') }.fetch('with')['bun-version'] = '1.4.3'
+    when 'missing-dispatch' then (workflow['on'] || workflow[true]).delete('workflow_dispatch')
+    when 'broker-cache' then broker.fetch('jobs').fetch('candidate').fetch('steps') << { 'uses' => 'actions/cache@fixture' }
+    when 'broker-unguarded-signing' then broker.fetch('jobs').fetch('candidate').delete('if')
+    when 'flutter-drift' then workflow.fetch('env')['FLUTTER_VERSION'] = 'different'
+    end
+    path = File.join(fixture, "#{scenario}.yml")
+    broker_path = File.join(fixture, "#{scenario}-broker.yml")
+    File.write(path, YAML.dump(workflow))
+    File.write(broker_path, YAML.dump(broker))
+    output, status = Open3.capture2e('bun', ROOT.join('scripts/ci/audit-release-matrix.ts').to_s, path, broker_path, chdir: ROOT)
+    record("#{scenario} release policy is #{scenario == 'valid' ? 'accepted' : 'rejected'} before tagging",
+      status.success? == (scenario == 'valid'), output)
+  end
+end
 
 if FAILURES.empty?
   puts 'PASS: docs-only workflow policy regressions hold.'

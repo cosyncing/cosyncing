@@ -3,12 +3,22 @@ name: Stage Broker Release Candidate
 on:
   push:
     tags: ['broker-v*.*.*']
+  workflow_dispatch:
+    inputs:
+      client_run_id:
+        description: Successful client rehearsal run at this same commit; empty runs the full-check fallback
+        type: string
+        required: false
 
 permissions:
   contents: read
 
 env:
   GH_REPO: ${{ github.repository }}
+  BUN_VERSION: 1.4.3
+  FLUTTER_VERSION: 3.44.3
+  RELEASE_REHEARSAL: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
+  BROKER_PACKAGE_ARTIFACT_PREFIX: ${{ github.event_name == 'workflow_dispatch' && 'broker-rehearsal-package' || 'broker-package' }}
 
 concurrency:
   group: broker-release-${{ github.ref }}
@@ -19,6 +29,9 @@ jobs:
     name: release contract gate
     runs-on: ubuntu-24.04
     timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -26,57 +39,70 @@ jobs:
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: 1.4.3
-      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
-        with:
-          flutter-version: 3.44.3
-          channel: stable
-          cache: true
-      - name: Install hosted verification dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ripgrep
-          npx --yes playwright@1.61.1 install --with-deps chromium-headless-shell
-      - run: bun install --frozen-lockfile
+          bun-version: ${{ env.BUN_VERSION }}
       - name: Require an exact clean broker version tag
         shell: bash
         run: |
           VERSION="$(bun -e 'console.log((await Bun.file("package.json").json()).version)')"
-          test "$GITHUB_REF_NAME" = "broker-v$VERSION"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test -z "$(git status --porcelain --untracked-files=normal)"
           test "$GITHUB_REPOSITORY" = cosyncing/cosyncing
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
-      - run: bun run check
-
-  prepare-draft:
-    needs: gate
-    name: prepare empty draft release
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - name: Create or reset the matching draft
+          if test "$GITHUB_EVENT_NAME" = push; then
+            test "$GITHUB_REF_NAME" = "broker-v$VERSION"
+            git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          else
+            test "$RELEASE_REHEARSAL" = true
+            test "$GITHUB_REF_TYPE" = branch
+            echo 'NO-PUBLISH REHEARSAL: production signing and release writes are disabled.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Reuse the matching complete client verification
+        id: evidence
         env:
           GH_TOKEN: ${{ github.token }}
-        shell: bash
+          REHEARSAL_CLIENT_RUN_ID: ${{ inputs.client_run_id }}
+        run: bun run scripts/release/client-check-evidence.ts resolve
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        if: ${{ steps.evidence.outputs.reused != 'true' }}
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        if: ${{ steps.evidence.outputs.reused != 'true' }}
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        if: ${{ steps.evidence.outputs.reused != 'true' }}
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-1.61.1
+      - name: Install hosted verification dependencies
+        if: ${{ steps.evidence.outputs.reused != 'true' }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" --json isDraft,tagName >/tmp/release.json 2>/dev/null; then
-            test "$(jq -r .isDraft /tmp/release.json)" = true
-            test "$(jq -r .tagName /tmp/release.json)" = "$GITHUB_REF_NAME"
-            gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' |
-              while IFS= read -r asset; do gh release delete-asset "$GITHUB_REF_NAME" "$asset" --yes; done
-          else
-            gh release create "$GITHUB_REF_NAME" --verify-tag --draft --latest=false \
-              --title "cosyncing $GITHUB_REF_NAME release candidate (staging)" \
-              --notes "Unpublished staging release. Only the verified candidate is published."
-          fi
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+          bun install --frozen-lockfile
+          bash scripts/ci/install-browser.sh
+      - run: bun run check
+        id: check
+        if: ${{ steps.evidence.outputs.reused != 'true' }}
+      - name: Record executed verification provenance
+        if: ${{ always() && (steps.check.outcome == 'success' || steps.check.outcome == 'failure') }}
+        run: bun run scripts/release/client-check-evidence.ts record
+      - name: Preserve broker verification evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: broker-${{ github.event_name == 'workflow_dispatch' && 'rehearsal' || 'release' }}-check-${{ github.run_id }}-${{ github.run_attempt }}
+          path: output/check
+          if-no-files-found: warn
+          retention-days: 30
 
   javascript-package:
-    needs: prepare-draft
     name: universal JavaScript application
-    environment: broker-release-candidate
     permissions:
-      contents: write
+      contents: read
     # One bundle serves every host, so this job has no matrix and no runner/target correspondence to keep.
     # The builder stamps `bootstrap-js`, recording installer ownership for signed updates.
     runs-on: ubuntu-24.04
@@ -88,23 +114,12 @@ jobs:
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: 1.4.3
+          bun-version: ${{ env.BUN_VERSION }}
       - run: bun install --frozen-lockfile
-      - name: Load public release trust material
-        env:
-          RELEASE_PUBLIC_KEY_B64: ${{ secrets.COSYNCING_RELEASE_PUBLIC_KEY_PEM_B64 }}
-          RELEASE_KEY_ID: ${{ vars.COSYNCING_RELEASE_KEY_ID }}
-        shell: bash
-        run: |
-          test -n "$RELEASE_PUBLIC_KEY_B64"
-          test -n "$RELEASE_KEY_ID"
-          printf '%s' "$RELEASE_PUBLIC_KEY_B64" | base64 --decode > "$RUNNER_TEMP/cosyncing-release.pub.pem"
       - name: Build, prove, and stage the JavaScript application
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_KEY_ID: ${{ vars.COSYNCING_RELEASE_KEY_ID }}
         shell: bash
         run: |
+          RELEASE_KEY_ID="$(cat docs/release/release-key-id.txt)"
           COMMIT="$(git rev-parse HEAD)"
           BUILD_DATE="$(date -u -d "@$(git show -s --format=%ct HEAD)" +%Y-%m-%dT%H:%M:%S.000Z)"
           VERSION="$(bun -e 'console.log((await Bun.file("package.json").json()).version)')"
@@ -118,22 +133,25 @@ jobs:
             --release-manifest-url "$BASE_URL/release-manifest.json" \
             --release-channel-manifest-url "$CHANNEL_URL" \
             --release-key-id "$RELEASE_KEY_ID" \
-            --release-public-key "$RUNNER_TEMP/cosyncing-release.pub.pem" \
+            --release-public-key docs/release/release-public-key.txt \
             --require-clean --minify
           bun run scripts/broker/release/package-evidence.ts \
             --artifact output/js/cosyncing-app.js \
             --output output/js/cosyncing-app.js.evidence.json \
             --target universal --version "$VERSION" \
             --commit "$COMMIT" --build-date "$BUILD_DATE"
-          gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft' | grep -qx true
-          gh release upload "$GITHUB_REF_NAME" output/js/cosyncing-app.js output/js/cosyncing-app.js.evidence.json --clobber
+      - name: Keep javascript staging inputs
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: ${{ env.BROKER_PACKAGE_ARTIFACT_PREFIX }}-${{ github.run_id }}-${{ github.run_attempt }}-javascript
+          path: output/js
+          if-no-files-found: error
+          retention-days: 30
 
   web-package:
-    needs: prepare-draft
     name: canonical /cosy/ web sidecar
-    environment: broker-release-candidate
     permissions:
-      contents: write
+      contents: read
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
@@ -143,18 +161,16 @@ jobs:
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: 1.4.3
+          bun-version: ${{ env.BUN_VERSION }}
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
-          flutter-version: 3.44.3
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
       - run: bun install --frozen-lockfile
       - run: flutter pub get
         working-directory: apps/client
       - name: Build, prove, and stage the web half of the release
-        env:
-          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           COMMIT="$(git rev-parse HEAD)"
@@ -167,11 +183,69 @@ jobs:
             --artifact output/web/cosyncing-web-app.tar.gz \
             --evidence output/web/cosyncing-web-app.tar.gz.evidence.json \
             --version "$VERSION" --commit "$COMMIT" --build-date "$BUILD_DATE"
-          gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft' | grep -qx true
-          gh release upload "$GITHUB_REF_NAME" output/web/cosyncing-web-app.tar.gz output/web/cosyncing-web-app.tar.gz.evidence.json --clobber
+      - name: Keep web staging inputs
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: ${{ env.BROKER_PACKAGE_ARTIFACT_PREFIX }}-${{ github.run_id }}-${{ github.run_attempt }}-web
+          path: output/web
+          if-no-files-found: error
+          retention-days: 30
+
+  rehearse-candidate:
+    needs: [gate, javascript-package, web-package]
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    name: rehearse candidate handoff and browser parity without signing
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: ${{ env.BROKER_PACKAGE_ARTIFACT_PREFIX }}-${{ github.run_id }}-*
+          path: output/broker-package-inputs
+      - name: Rehearse the exact package inventory and evidence checks
+        run: |
+          bun run scripts/release/collect-build-artifacts.ts broker output/broker-package-inputs output/staging
+          bun run scripts/broker/release/verify-staging-assets.ts output/staging
+      - name: Probe the cold hosted browser and fonts
+        env:
+          BROWSER_PROBE_OUTPUT: output/rehearsal-browser
+        run: bash scripts/ci/install-browser.sh
+      - name: Rehearse broker and web parity
+        shell: bash
+        run: |
+          set -euo pipefail
+          COMMIT="$(git rev-parse HEAD)"
+          VERSION="$(bun -e 'console.log((await Bun.file("package.json").json()).version)')"
+          mkdir -p output/web-pair
+          tar -xzf output/staging/cosyncing-web-app.tar.gz -C output/web-pair
+          bun run release:verify-pair -- \
+            --broker output/staging/cosyncing-app.js --bun "$(command -v bun)" \
+            --web-dir output/web-pair/app --commit "$COMMIT" --version "$VERSION"
+          echo 'NO-PUBLISH REHEARSAL passed: package handoff and parity; no production keys or release writes.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain rehearsal diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: broker-rehearsal-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            output/rehearsal-browser
+            output/web-pair
+          if-no-files-found: warn
+          retention-days: 30
 
   candidate:
-    needs: [javascript-package, web-package]
+    needs: [gate, javascript-package, web-package]
+    if: ${{ github.event_name == 'push' }}
     name: assemble, verify, and publish prerelease
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -185,19 +259,18 @@ jobs:
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: 1.4.3
+          bun-version: ${{ env.BUN_VERSION }}
       - run: bun install --frozen-lockfile
-      - name: Download exact draft staging inputs
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: broker-package-${{ github.run_id }}-*
+          path: output/broker-package-inputs
+      - name: Collect and verify exact staging inputs
         run: |
-          gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft' | grep -qx true
-          mkdir -p output/staging
-          gh release download "$GITHUB_REF_NAME" --dir output/staging
+          bun run scripts/release/collect-build-artifacts.ts broker output/broker-package-inputs output/staging
           bun run scripts/broker/release/verify-staging-assets.ts output/staging
       - name: Install canonical parity browser
-        run: npx --yes playwright@1.61.1 install --with-deps chromium-headless-shell
+        run: bash scripts/ci/install-browser.sh
       - name: Prove the downloaded broker/web candidate pair
         shell: bash
         run: |
@@ -215,6 +288,21 @@ jobs:
       # so these are the exact bytes a user downloading the client by hand would get, carried into the
       # broker release so one command can install both. Android is carried as a signed update-channel asset
       # but is never placed by the shell/PowerShell installers.
+      - name: Create or reset the matching draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --json isDraft,tagName >/tmp/release.json 2>/dev/null; then
+            test "$(jq -r .isDraft /tmp/release.json)" = true
+            test "$(jq -r .tagName /tmp/release.json)" = "$GITHUB_REF_NAME"
+            gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' |
+              while IFS= read -r asset; do gh release delete-asset "$GITHUB_REF_NAME" "$asset" --yes; done
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --draft --latest=false \
+              --title "cosyncing $GITHUB_REF_NAME release candidate (staging)" \
+              --notes "Unpublished staging release. Only the verified candidate is published."
+          fi
       - name: Collect the matching clients
         env:
           GH_TOKEN: ${{ github.token }}
@@ -274,6 +362,7 @@ jobs:
           chmod 600 "$RUNNER_TEMP/cosyncing-release.key.pem"
           chmod 600 "$RUNNER_TEMP/cosyncing-release-p256.key.pem"
           cmp docs/release/release-public-key.txt "$RUNNER_TEMP/cosyncing-release.pub.pem"
+          test "$RELEASE_KEY_ID" = "$(cat docs/release/release-key-id.txt)"
           COMMIT="$(git rev-parse HEAD)"
           BUILD_DATE="$(date -u -d "@$(git show -s --format=%ct HEAD)" +%Y-%m-%dT%H:%M:%S.000Z)"
           VERSION="$(bun -e 'console.log((await Bun.file("package.json").json()).version)')"

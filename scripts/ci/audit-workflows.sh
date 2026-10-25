@@ -87,6 +87,21 @@ for workflow in "$workflow_dir"/*.yml; do
   rg -q '^permissions:' "$workflow"
 done
 
+# A folded YAML scalar can append the browser command to bun install's args.
+# Check the parsed shell program so every acquisition call is actually executed.
+ruby -r yaml -e '
+  ARGV.each do |path|
+    YAML.load_file(path).fetch("jobs").each_value do |job|
+      job.fetch("steps", []).each do |step|
+        command = step["run"].to_s
+        next unless command.include?("bash scripts/ci/install-browser.sh")
+        abort("ERROR: browser installer is not a shell command in #{path}") unless
+          command.lines.any? { |line| line.strip == "bash scripts/ci/install-browser.sh" }
+      end
+    end
+  end
+' "$workflow_dir"/*.yml
+
 # GitHub's Ubuntu image declares ANDROID_HOME but no longer guarantees that
 # command-line tools are on PATH. Keep the runtime workflow rooted in the SDK
 # installation so an image PATH change cannot skip the Android integration run.
@@ -113,7 +128,7 @@ for workflow in broker-release.yml broker-release-promote.yml; do
   rg -q 'git merge-base --is-ancestor' "$workflow_dir/$workflow"
   rg -q 'test "\$GITHUB_REPOSITORY" = cosyncing/cosyncing' "$workflow_dir/$workflow"
 done
-rg -q 'needs: \[javascript-package, web-package\]' "$workflow_dir/broker-release.yml"
+rg -q 'needs: \[gate, javascript-package, web-package\]' "$workflow_dir/broker-release.yml"
 rg -q 'verify-staging-assets\.ts output/staging' "$workflow_dir/broker-release.yml"
 rg -Fq -- '--broker output/staging/cosyncing-app.js --bun "$(command -v bun)"' "$workflow_dir/broker-release.yml"
 rg -Fq 'test "$(git rev-parse "client-v$VERSION^{commit}")" = "$(git rev-parse HEAD)"' "$workflow_dir/broker-release.yml"
@@ -153,7 +168,7 @@ fi
 client_workflow="$workflow_dir/client-release.yml"
 client_promote="$workflow_dir/client-release-promote.yml"
 rg -q "tags: \['client-v\*\.\*\.\*'\]" "$client_workflow"
-rg -q '^      - run: bun run check$' "$client_workflow"
+rg -q 'bun run scripts/ci/aggregate-checks\.ts' "$client_workflow"
 rg -q 'git merge-base --is-ancestor "\$GITHUB_SHA" origin/main' "$client_workflow"
 rg -q 'environment: client-release-candidate' "$client_workflow"
 for secret in \
@@ -194,22 +209,67 @@ fi
 rg -q -- '--prerelease=true --latest=false' "$client_workflow"
 rg -q -- '--prerelease=false --latest' "$client_promote"
 test "$(rg -c 'GH_REPO: \$\{\{ github\.repository \}\}' "$client_workflow")" = 1 || {
-  echo 'ERROR: checkout-free candidate publication must bind GitHub CLI to this repository.' >&2
+  echo 'ERROR: candidate publication must bind GitHub CLI to this repository.' >&2
   exit 1
 }
 
-# A release gates on the complete check, exactly once.
-for workflow in broker-release.yml client-release.yml; do
-  test "$(rg -c 'bun run check$' "$workflow_dir/$workflow")" = 1 || {
-    echo "ERROR: $workflow must consume exactly one complete repository check." >&2
-    exit 1
-  }
-done
+# Broker reuse still has one full-check fallback. Clients prove complete coverage
+# by combining isolated suite reports before any release writes.
+test "$(rg -c 'bun run check$' "$workflow_dir/broker-release.yml")" = 1
+rg -q 'client-check-evidence\.ts resolve' "$workflow_dir/broker-release.yml"
+ruby -r yaml -e '
+  jobs = YAML.load_file(ARGV[0]).fetch("jobs")
+  require_control = ->(ok, message) { abort("ERROR: #{message}") unless ok }
+  require_control.call(jobs.fetch("verify").fetch("needs") == "source", "release verification must follow source validation")
+  require_control.call(jobs.fetch("gate").fetch("needs").sort == %w[source verify], "client gate must require every verification job")
+  require_control.call(jobs.fetch("stage-verified").fetch("needs").sort == %w[android android-rehearsal gate linux macos windows], "verified retention must wait for verification and all builds")
+  require_control.call(jobs.fetch("stage-verified").fetch("permissions").fetch("contents") == "read", "verified handoff must not write releases")
+  require_control.call(jobs.fetch("prepare-draft").fetch("needs") == "stage-verified", "client draft writes must follow verified staging")
+  require_control.call(jobs.fetch("publish-candidate").fetch("needs") == "prepare-draft", "client publication must follow guarded draft creation")
+  %w[linux macos windows android].each do |target|
+    build = jobs.fetch(target)
+    require_control.call(build.fetch("permissions").fetch("contents") == "read", "build jobs must not write releases")
+    require_control.call(build.fetch("needs") == "source", "builds must overlap verification after source validation")
+    commands = build.fetch("steps").map { |step| step["run"].to_s }.join("\n")
+    require_control.call(!commands.match?(/gh release (upload|create|edit|delete)/), "build jobs must only stage workflow artifacts")
+  end
+  require_control.call(jobs.fetch("android").fetch("environment") == "client-release-candidate", "Android signing must remain protected")
+  require_control.call(jobs.fetch("verify").fetch("strategy").fetch("fail-fast") == false, "verification failures must preserve other suite diagnostics")
+' "$client_workflow"
+
+ruby -r yaml -e '
+  jobs = YAML.load_file(ARGV[0]).fetch("jobs")
+  control = ->(ok, message) { abort("ERROR: #{message}") unless ok }
+  candidate = jobs.fetch("candidate")
+  control.call(candidate.fetch("needs").sort == %w[gate javascript-package web-package], "broker assembly must wait for verification and both packages")
+  control.call(candidate.fetch("environment") == "broker-release-candidate", "broker signing must remain protected")
+  %w[javascript-package web-package].each do |name|
+    build = jobs.fetch(name)
+    control.call(!build.key?("environment") && !build.key?("needs"), "broker packaging must run during verification without a protected environment")
+    control.call(build.fetch("permissions").fetch("contents") == "read", "broker packaging must have read-only repository access")
+    text = build.to_yaml
+    control.call(!text.include?("secrets.") && !text.match?(/gh release (upload|create|edit|delete)/), "broker packaging must only stage public workflow inputs")
+    control.call(text.include?("actions/upload-artifact@"), "broker package outputs must be retained for guarded assembly")
+  end
+  control.call(jobs.values.count { |job| job["environment"] == "broker-release-candidate" } == 1, "only broker assembly may request candidate approval")
+  commands = candidate.fetch("steps").map { |step| step["run"].to_s }.join("\n")
+  control.call(commands.include?(%q[test "$RELEASE_KEY_ID" = "$(cat docs/release/release-key-id.txt)"]), "protected key ID must match committed package trust material")
+' "$workflow_dir/broker-release.yml"
 # CI runs every suite the manifest defines, each as its own job: a suite no job runs is a suite
 # nothing tests.
 for suite in $(bun run scripts/ci/run.ts --suites); do
   rg -q "^      - run: bun run check $suite\$|^          - suite: $suite\$" "$workflow_dir/ci.yml" || {
     echo "ERROR: ci.yml has no job that runs the $suite suite." >&2
+    exit 1
+  }
+done
+
+bun run scripts/ci/audit-release-matrix.ts
+
+for workflow in ci.yml broker-release-gate.yml; do
+  rg -Fq "format('{0}-{1}', github.event_name, github.sha)" "$workflow_dir/$workflow"
+  rg -Fq "cancel-in-progress: \${{ github.event_name == 'pull_request' }}" "$workflow_dir/$workflow" || {
+    echo 'ERROR: cancellation must preserve distinct main commits while superseding old PR revisions.' >&2
     exit 1
   }
 done
@@ -244,8 +304,8 @@ for workflow in ci.yml broker-release.yml client-release.yml; do
     echo "ERROR: $hosted must install ripgrep for the policy suite." >&2
     exit 1
   }
-  rg -q 'npx --yes playwright@1\.61\.1 install --with-deps chromium-headless-shell' "$hosted" || {
-    echo "ERROR: $hosted must install the pinned Playwright browser for the web suite." >&2
+  rg -q 'bash scripts/ci/install-browser\.sh' "$hosted" || {
+    echo "ERROR: $hosted must use the pinned browser installer for the web suite." >&2
     exit 1
   }
 done
