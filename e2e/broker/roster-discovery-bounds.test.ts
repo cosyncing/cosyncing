@@ -109,6 +109,7 @@ describe('roster discovery with a wedged external host', () => {
   let broker: Broker;
   let client: BrokerClient;
   let kilo: FakeKiloHost;
+  let clock: TestClock;
   let kiloDatabase = '';
   let piId = '';
   let claudeId = '';
@@ -123,6 +124,7 @@ describe('roster discovery with a wedged external host', () => {
     broker = await startBroker({
       name: 'roster-bounds',
       setup: (paths) => {
+        clock = new TestClock(paths.root);
         piId = writePiSession(paths, 'before-kilo', HOUR).id;
         kiloDatabase = join(paths.root, 'kilo-data', 'kilo.db');
         createKiloDatabase(kiloDatabase, { id: 'ses_kilo_a', title: 'Kilo recent', updatedAt: Date.now() - HOUR });
@@ -136,14 +138,15 @@ describe('roster discovery with a wedged external host', () => {
         })}\n`);
         claudeId = fileSessionId(transcript);
       },
-      env: {
+      env: () => ({
+        ...clock.env,
         COSYNCING_MACHINE: 'roster-bounds-e2e',
         KILO_URL: kilo.url,
         COSYNCING_TEST_DISCOVERY_BUDGET_MS: String(BUDGET_MS),
         COSYNCING_ROSTER_COLD_PARTIAL_MS: '250',
         COSYNCING_ROSTER_SAFETY_RECONCILE_MS: String(HOUR),
         COSYNCING_CODEX_SYNC_SERVER: '0',
-      },
+      }),
     });
     client = broker.client();
   });
@@ -208,6 +211,9 @@ describe('roster discovery with a wedged external host', () => {
   });
 
   test('a cold client is answered from the agents that have landed, then corrected when the sweep settles', async () => {
+    // Broader readings can now seed this view. Move beyond stale serving too,
+    // so this scenario still exercises a genuinely cold, partial answer.
+    clock.advance(60_001);
     const window = '1m';
     const from = kilo.requests.length;
     const starter = rosterSnapshot(client, { window });
@@ -218,6 +224,15 @@ describe('roster discovery with a wedged external host', () => {
     expect(early.body.complete).toBe(false);
     expect(ids(early.body.sessions)).toContain(piId);
     expect(ids(early.body.sessions)).not.toContain(claudeId);
+    const narrow = await rosterSnapshot(client, { window: '2d' });
+    expect(narrow.body.complete).toBe(false);
+    expect(ids(narrow.body.sessions)).toContain(piId);
+    const broader = await rosterSnapshot(client, { window: '2m' });
+    expect(broader.body.complete).toBe(false);
+    expect(ids(broader.body.sessions)).toContain(piId);
+    expect(kilo.requests.slice(from).filter((r) =>
+      r.path === '/session' && r.search === '' && !r.answered && !r.abandoned,
+    ).length).toBeLessThanOrEqual(1);
 
     // A client from before roster completeness cannot read `complete`, so it is
     // never handed a sweep in progress: it waits for the settled one.
@@ -233,6 +248,19 @@ describe('roster discovery with a wedged external host', () => {
     }, { what: 'the early answer to be corrected' });
     expect(corrected.revision).toBeGreaterThan(early.body.revision);
     expect(corrected.complete).toBe(false);
+    const narrowCorrection = await eventually(async () => {
+      const poll = await rosterSnapshot(client, {
+        window: '2d', headers: { 'if-none-match': narrow.headers.get('etag')! },
+      });
+      return poll.status === 200 && ids(poll.body.sessions).includes(claudeId) ? poll.body : undefined;
+    }, { what: 'the narrower early answer to receive its own correction' });
+    expect(narrowCorrection.revision).toBeGreaterThan(narrow.body.revision);
+    await eventually(async () => {
+      const poll = await rosterSnapshot(client, {
+        window: '2m', headers: { 'if-none-match': broader.headers.get('etag')! },
+      });
+      return poll.status === 200 && ids(poll.body.sessions).includes(claudeId);
+    }, { what: 'the serialized wider reading to correct its partial answer' });
   });
 
   test('a carry lasts five sweeps; its end retracts nothing, and the next good read removes what is really gone', async () => {
@@ -267,6 +295,36 @@ describe('roster discovery with a wedged external host', () => {
     const removed = await feed.waitFor((delta) => delta.sessionId === 'ses_kilo_b' && delta.removed === true, { from });
     expect(removed.session).toBeUndefined();
     expect(feed.of('ses_kilo_live', from).map((delta) => delta.removed)).toEqual([true]);
+  });
+
+  test('settled rows answer older and wider clients while a sweep revalidates them', async () => {
+    kilo.mode = 'wedged';
+    const archive = writePiSession(broker.paths, 'archive-before-kilo', 10 * DAY).id;
+    const all = await rosterSnapshot(client, { refresh: true });
+    expect(ids(all.body.sessions)).toContain(archive);
+
+    // Past the TTL, inside the stale-serving bound. A client from before roster
+    // completeness takes the settled rows at once rather than waiting out the
+    // revalidating sweep, which cannot settle before the wedged host's budget.
+    clock.advance(20_000);
+    let from = kilo.requests.length;
+    const older = await client.get('/api/sessions');
+    expect(ids(older.body.sessions)).toContain(archive);
+    expect(kilo.requests.slice(from).some((request) => request.abandoned)).toBe(false);
+    // A forced read joins that sweep, so the next step starts from its settled rows.
+    expect(ids((await rosterSnapshot(client, { refresh: true })).body.sessions)).toContain(archive);
+
+    // A wider client keeps its own settled rows while a narrower sweep runs,
+    // instead of that sweep's partial answer, which cannot hold the archive.
+    clock.advance(20_000);
+    from = kilo.requests.length;
+    const week = rosterSnapshot(client, { window: '7d', refresh: true });
+    await eventually(() => kilo.requests.slice(from).some((request) => request.path === '/session' && !request.answered), {
+      what: 'the seven-day sweep to reach the wedged host',
+    });
+    const wider = await rosterSnapshot(client);
+    expect(ids(wider.body.sessions)).toContain(archive);
+    expect((await week).body.complete).toBe(false);
   });
 });
 
@@ -315,6 +373,16 @@ describe('deliberate roster freshness without an attached session', () => {
   test('7d and all share one bounded cadence, preserve archives, and stop on cancellation', async () => {
     const client = broker.client();
     const week = await rosterSnapshot(client, { window: '7d', refresh: true });
+    const afterWeek = reads();
+    const [day, twoDays] = await Promise.all([
+      rosterSnapshot(client, { window: '1d' }),
+      rosterSnapshot(client, { window: '2d' }),
+    ]);
+    expect(reads()).toBe(afterWeek);
+    for (const snapshot of [day, twoDays]) {
+      expect(ids(snapshot.body.sessions)).toContain('ses_unwatched');
+      expect(ids(snapshot.body.sessions)).not.toContain('ses_midweek');
+    }
     const all = await rosterSnapshot(client, { refresh: true });
     for (const snapshot of [week, all]) {
       expect(snapshot.body.sessions.find((row: any) => row.id === 'ses_unwatched')?.status).toBe('working');
@@ -359,7 +427,7 @@ describe('deliberate roster freshness without an attached session', () => {
     expect(reads()).toBe(initial + 2);
   });
 
-  test('all alone still uses seven days, while a one-day poller narrows the shared discovery', async () => {
+  test('all and a one-day poller share seven-day discovery without hiding wider updates', async () => {
     const client = broker.client();
     const abort = new AbortController();
     let initial = reads();
@@ -388,7 +456,9 @@ describe('deliberate roster freshness without an attached session', () => {
     const [dayChange, widerChange] = await Promise.all([dayPoll, widerPoll]);
     expect(statusChange(dayChange, 'idle')).toBe(true);
     expect(statusChange(widerChange, 'idle')).toBe(true);
-    expect(widerChange.deltas.some((d: any) => ['ses_archive', 'ses_midweek'].includes(d.sessionId) || d.removed)).toBe(false);
+    expect(widerChange.deltas.some((d: any) => d.session?.title === 'Only wider reconciliation sees this')).toBe(true);
+    expect(widerChange.deltas.some((d: any) => d.sessionId === 'ses_archive' || d.removed)).toBe(false);
+    expect(dayChange.deltas.some((d: any) => d.sessionId === 'ses_midweek')).toBe(false);
     expect(reads() - initial).toBe(1);
     allAfter = widerChange.revision;
     abort.abort();
@@ -400,6 +470,7 @@ describe('deliberate roster freshness without an attached session', () => {
     const feed = new RosterFeed(broker.client());
     feed.cursor = allAfter;
     await feed.waitFor((delta) => delta.sessionId === 'ses_archive' && delta.removed === true);
-    expect(feed.seen.some((d) => d.session?.title === 'Only wider reconciliation sees this')).toBe(true);
+    const snapshot = await rosterSnapshot(broker.client());
+    expect(snapshot.body.sessions.some((s: any) => s.title === 'Only wider reconciliation sees this')).toBe(true);
   });
 });

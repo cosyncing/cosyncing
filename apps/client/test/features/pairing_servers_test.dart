@@ -14,6 +14,7 @@ import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/provider/broker_profile_providers.dart';
+import 'package:cosyncing_client/src/features/connection/controller/broker_route_coordinator.dart';
 import 'package:cosyncing_client/src/features/connection/data/active_broker_profile_store.dart';
 import 'package:cosyncing_client/src/features/connection/data/broker_route_store.dart';
 import 'package:cosyncing_client/src/features/connection/model/broker_route_context.dart';
@@ -413,13 +414,39 @@ void main() {
   );
 
   featureTest(
-    'legacy sessions reconnect after network changes without identity probes '
-    'or losing their draft',
+    'legacy sessions keep their route across network notifications and '
+    'reconnect dropped sockets without losing their draft',
     (f) async {
       final studio = f.network.add('http://studio.test:7734')
         ..addSession('s1', 'Legacy notes');
       final desk = AttentionDesk(studio);
       final saved = await f.storage.seedServer(studio);
+      // An extra address an old broker can never use leaves one usable route.
+      final server = BrokerRouteServer(
+        profileId: saved.id,
+        incarnation: saved.incarnationId!,
+        legacyOrigin: studio.baseUri,
+        credentialReference: saved.credentialKey,
+        addresses: [
+          BrokerAddress(
+            id: 'studio',
+            origin: studio.baseUri,
+            label: 'LAN',
+            order: 0,
+            legacyTrusted: true,
+          ),
+          BrokerAddress(
+            id: 'tunnel',
+            origin: Uri.parse('http://tunnel.test:7734'),
+            label: 'Tunnel',
+            order: 1,
+          ),
+        ],
+      );
+      await f.storage.database.customStatement(
+        'INSERT OR REPLACE INTO broker_route_servers VALUES (?,?,?)',
+        [saved.id, saved.incarnationId, jsonEncode(server.toJson())],
+      );
       final app = await f.launch();
       await app.openFromRoster('s1', cwd: '/work/studio');
       final input = find.byKey(const Key('session-detail-prompt-input'));
@@ -440,21 +467,36 @@ void main() {
         );
       }
 
-      await reconnect(coordinator.networkChanged);
+      final connected = studio.socketsFor('s1').last;
+      final revision = app.container.read(brokerRouteRevisionProvider);
+      final reads = app.rosterReads(studio).length;
+      // The old path is gone. The notification drops what it carried, so the
+      // session reconnects from its own cursor and nothing is rebuilt.
+      await reconnect(() {
+        f.network.loseInFlightPaths();
+        coordinator.networkChanged();
+      });
+      expect(connected.isConnected, isFalse);
       coordinator
         ..foreground(value: false)
         ..networkChanged();
-      // A completion while the app is away brings the feed back on a fresh
-      // binding of the address before the open session hears of it.
+      // A network notification in the background leaves the feed usable too.
       final arrival = desk.publish(sessionId: 's1', sessionTitle: 'Notes');
       await app.pumpUntil(
         () => desk.pollCursors.contains(arrival['cursor']),
         reason: 'The feed catches up while the app is away',
       );
-      await reconnect(() => coordinator.foreground(value: true));
+      coordinator.foreground(value: true);
+      await app.pumpUntil(
+        () => studio.socketsFor('s1').last.isConnected,
+        reason: 'The session reconnects after the background notification',
+      );
+      await reconnect(studio.socketsFor('s1').last.drop);
       await f.tester.pump(const Duration(minutes: 2));
       expect(studio.requestsTo('/api/connection/identity-proof'), isEmpty);
-      expect(coordinator.status(saved)!.activeRouteId, isNotNull);
+      expect(coordinator.status(saved)!.activeRouteId, 'studio');
+      expect(app.container.read(brokerRouteRevisionProvider), revision);
+      expect(app.rosterReads(studio), hasLength(reads));
       expect(f.tester.takeException(), isNull);
     },
   );
@@ -463,9 +505,11 @@ void main() {
       in <(String, void Function(AppDriver, FakeBroker))>[
         (
           'a network change',
-          (app, _) => app.container
-              .read(brokerRouteCoordinatorProvider)
-              .networkChanged(),
+          (app, studio) {
+            // The old path is gone: what it carried is never answered.
+            studio.network.loseInFlightPaths();
+            app.container.read(brokerRouteCoordinatorProvider).networkChanged();
+          },
         ),
         (
           'a dropped session socket',
@@ -473,8 +517,7 @@ void main() {
         ),
       ]) {
     featureTest(
-      'a verified session and the notification feed both recover from '
-      '$trigger while the feed waits for the new route',
+      'a verified session and both live feeds survive $trigger',
       (f) async {
         final studio = f.network.add(
           'http://studio.test:7734',
@@ -482,7 +525,7 @@ void main() {
         )..addSession('s1', 'Route notes');
         final desk = AttentionDesk(studio);
         final identity = await PairingCrypto.generateIdentityKeyPair();
-        final wire = RoutesDesk(identity, f.now)..add(studio);
+        RoutesDesk(identity, f.now).add(studio);
         final saved = await f.storage.seedServer(
           studio,
           displayName: 'Studio',
@@ -521,20 +564,74 @@ void main() {
           reason: 'The session connects and the feed is long-polling',
         );
         final sockets = studio.socketsFor('s1').length;
-        // A slow readiness check keeps the recovery round running while the
-        // feed, refused on the retired route, asks for the new one.
-        wire.latency[studio.baseUri.origin] = const Duration(seconds: 2);
+        final reads = app.rosterReads(studio).length;
+        final revision = app.container.read(brokerRouteRevisionProvider);
+        final coordinator = app.container.read(brokerRouteCoordinatorProvider);
         retire(app, studio);
         final arrival = desk.publish(
           sessionId: 's1',
           sessionTitle: 'Route notes',
         );
+        // The session reconnects from its own cursor on the same route, and
+        // the route is checked in place instead of rebuilding its consumers.
         await app.pumpUntil(
-          () => reconnected(sockets),
-          reason: 'The open session rebuilds on the new route',
+          () =>
+              reconnected(sockets) &&
+              coordinator.status(saved)!.phase == BrokerRoutePhase.connected,
+          reason: 'The session reconnects and the route answers its check',
         );
+        expect(app.container.read(brokerRouteRevisionProvider), revision);
+        studio.updateSession('s1', {
+          'title': 'Live roster after network change',
+        });
+        await app.pumpUntil(
+          () => app.container
+              .read(sessionListControllerProvider)
+              .sessions
+              .any(
+                (session) =>
+                    session.title == 'Live roster after network change',
+              ),
+          reason: 'The roster feed continues without a snapshot reload',
+        );
+        expect(app.rosterReads(studio), hasLength(reads));
         await app.openInbox();
         await app.waitFor(app.inboxRow(arrival['id']!));
+        if (trigger == 'a dropped session socket') {
+          // A server that stops answering reads offline while its only route
+          // stays bound, then recovers it in place.
+          studio.reachable = false;
+          final down = studio.socketsFor('s1').length;
+          studio.socketsFor('s1').last.drop(code: 1006);
+          await app.pumpUntil(
+            () => coordinator.status(saved)!.phase == BrokerRoutePhase.offline,
+            reason: 'The failed check reports the server offline',
+          );
+          expect(coordinator.status(saved)!.activeRouteId, 'studio');
+          studio.reachable = true;
+          await app.pumpUntil(
+            () =>
+                reconnected(down) &&
+                coordinator.status(saved)!.phase == BrokerRoutePhase.connected,
+            reason: 'The retried check restores the bound route',
+          );
+          expect(app.container.read(brokerRouteRevisionProvider), revision);
+          expect(app.rosterReads(studio), hasLength(reads));
+        }
+        // Configuration retirement still replaces this exact single path.
+        // Its cancelled long poll must re-admit on the replacement client.
+        await coordinator.configurationChanged(saved);
+        studio.updateSession('s1', {'title': 'Live roster after retirement'});
+        await app.pumpUntil(
+          () => app.container
+              .read(sessionListControllerProvider)
+              .sessions
+              .any(
+                (session) => session.title == 'Live roster after retirement',
+              ),
+          reason: 'A retired roster transport resumes from its live cursor',
+        );
+        expect(app.rosterReads(studio), hasLength(reads));
         expect(f.tester.takeException(), isNull);
       },
     );
@@ -874,8 +971,12 @@ void main() {
       await app.waitFor(find.text('Tunnel'));
       await app.tapKey('address-menu-Tunnel');
       await app.tap(find.text(en.routesFixed).last);
+      tunnel.updateSession('s1', {'title': 'Fixed address roster update'});
       await app.pumpUntil(
-        () => tunnel.requestsTo('/api/sessions').isNotEmpty,
+        () => app.container
+            .read(sessionListControllerProvider)
+            .sessions
+            .any((session) => session.title == 'Fixed address roster update'),
         reason: 'Fixed address routes the active server through Tunnel',
       );
       expect(app.activeServer!.sourceIdentity, boundSource);

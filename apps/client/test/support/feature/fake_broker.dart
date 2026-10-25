@@ -213,6 +213,7 @@ class FakeBrokerNetwork {
 
   var _clientsOpened = 0;
   var _clientsClosed = 0;
+  final _inFlight = <_FakeInFlight>{};
 
   /// Upper bound on requests per test: a client that re-requests in a tight
   /// loop fails loudly here instead of hanging the test.
@@ -255,6 +256,19 @@ class FakeBrokerNetwork {
 
   /// HTTP clients (Dio instances) the app built and has not closed.
   int get openHttpClients => _clientsOpened - _clientsClosed;
+
+  /// The network path under every request now in flight is gone, as after a
+  /// switch from Wi-Fi to cellular: none of them is ever answered, and each
+  /// fails only when the app force-closes the pool that sent it.
+  void loseInFlightPaths() {
+    for (final flight in _inFlight) {
+      flight.stranded = true;
+    }
+    // Open sockets go silent the same way, until the app closes them.
+    for (final socket in sockets) {
+      socket._stranded = true;
+    }
+  }
 
   static String _authority(Uri uri) {
     final scheme = switch (uri.scheme) {
@@ -1191,6 +1205,7 @@ class FakeBrokerSocket implements WebSocketAdapter, WebSocketCloseDetails {
   final _inbound = StreamController<Object?>.broadcast();
   var _connected = false;
   var _closed = false;
+  var _stranded = false;
   @override
   int? closeCode;
 
@@ -1281,7 +1296,7 @@ class FakeBrokerSocket implements WebSocketAdapter, WebSocketCloseDetails {
 
   /// Sends one broker frame to the app.
   void emit(Map<String, Object?> frame) {
-    if (!_inbound.isClosed) _inbound.add(frame);
+    if (!_stranded && !_inbound.isClosed) _inbound.add(frame);
   }
 
   /// Drops the connection from the broker side.
@@ -1322,6 +1337,7 @@ class _FakeBrokerHttpAdapter implements HttpClientAdapter {
   }
 
   final FakeBrokerNetwork network;
+  final _inFlight = <_FakeInFlight>{};
   var _closed = false;
 
   @override
@@ -1376,7 +1392,23 @@ class _FakeBrokerHttpAdapter implements HttpClientAdapter {
       cancelFuture?.then((_) => request.cancelled = true) ??
           Future<void>.value(),
     );
-    final response = await broker._handle(request);
+    final flight = _FakeInFlight(options);
+    _inFlight.add(flight);
+    network._inFlight.add(flight);
+    final FakeBrokerResponse response;
+    try {
+      response = await Future.any([
+        broker
+            ._handle(request)
+            .then(
+              (response) => flight.stranded ? flight.aborted.future : response,
+            ),
+        flight.aborted.future,
+      ]);
+    } finally {
+      _inFlight.remove(flight);
+      network._inFlight.remove(flight);
+    }
     request.answered = response.status;
     if (broker._takeLostAnswer(request)) {
       throw DioException.connectionError(
@@ -1405,5 +1437,28 @@ class _FakeBrokerHttpAdapter implements HttpClientAdapter {
     if (_closed) return;
     _closed = true;
     network._clientsClosed += 1;
+    if (!force) return;
+    // Like a real pool closed by force: requests still in flight fail.
+    for (final flight in [..._inFlight]) {
+      flight.abort();
+    }
+  }
+}
+
+class _FakeInFlight {
+  _FakeInFlight(this.options);
+
+  final RequestOptions options;
+  final aborted = Completer<FakeBrokerResponse>();
+  bool stranded = false;
+
+  void abort() {
+    if (aborted.isCompleted) return;
+    aborted.completeError(
+      DioException.connectionError(
+        requestOptions: options,
+        reason: 'Connection closed by the client ($rawLeakSentinel)',
+      ),
+    );
   }
 }
