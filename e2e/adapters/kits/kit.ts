@@ -325,7 +325,7 @@ export interface ConformanceContext {
   /** ACP child starts the fake recorded in a session's workspace. */
   childStarts(session: { cwd: string }, from?: number): LedgerEntry[];
   /** Restart the broker on the same state and port. */
-  restart(): Promise<void>;
+  restart(options?: { env?: NodeJS.ProcessEnv }): Promise<void>;
 }
 
 /**

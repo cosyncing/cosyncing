@@ -94,11 +94,20 @@ function bunTestTask(file: string, id: string, concurrency?: number): Task {
 function e2eTasks(suite: SuiteId): Task[] {
   return findTestFiles(`e2e/${suite}`).flatMap((file) => {
     const id = file.slice(`e2e/${suite}/`.length).replace(/\.test\.ts$/, '');
-    // The two service generations share one conformance file but exceed a minute together.
+    // Generations share a file; service/doctor scenarios exceeded a minute with live flows.
     if (suite === 'adapters' && id === 'conformance/opencode') {
-      return ['OpenCode', 'OpenCode V2'].map((profile, index) => ({
-        ...bunTestTask(file, `${id}-v${index + 1}`),
-        run: [...bunTestTask(file, id).run, '--test-name-pattern', `^${profile} adapter conformance`],
+      const serviceCases = [
+        'the shared service stays usable', 'registration binds', 'registration discovery',
+        'an explicit URL', 'doctor checks', 'startup and failed', 'stream retries',
+      ].join('|');
+      const profiles = [
+        ['v1', '^OpenCode adapter conformance'],
+        ['v2-live', `^OpenCode V2 adapter conformance(?!.*extra: (${serviceCases}))`],
+        ['v2-service', `^OpenCode V2 adapter conformance.*extra: (${serviceCases})`],
+      ];
+      return profiles.map(([profile, pattern]) => ({
+        ...bunTestTask(file, `${id}-${profile}`),
+        run: [...bunTestTask(file, id).run, '--test-name-pattern', pattern!],
       }));
     }
     // Browser scenarios each own real renderers and brokers. Bound their inner

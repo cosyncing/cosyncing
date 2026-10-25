@@ -49,7 +49,6 @@ import {
   readRegularFileSync,
   resolveInvocation,
 } from '@cosyncing/adapter-api';
-import { randomBytes } from 'node:crypto';
 import { mkdirSync, writeFileSync, existsSync, readdirSync, statSync, watch, type FSWatcher } from 'node:fs';
 import { join, basename, extname, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -58,6 +57,8 @@ import { attachedTuiSessions, tuiPresenceSupported } from './tui-presence.ts';
 import { diagnoseOpenCodeSetup } from './diagnostics.ts';
 import { normalizeOpencodeVersion, opencodeAllowsV1, opencodeChildEnv, opencodeGeneration, opencodeGenerationForLaunch, OPENCODE_V1_READ_ONLY_REASON } from './generation.ts';
 import { mapOpenCodePart as mapSharedOpenCodePart } from '@cosyncing/opencode-wire';
+import { nativeMessageId } from './native-id.ts';
+export { nativeMessageId } from './native-id.ts';
 import { BindingResolver, type OpenCodeBinding } from './binding.ts';
 import { hasManagedOpencodeServe } from './managed-server.ts';
 import { OpenCodeV2Backend } from './v2/backend.ts';
@@ -370,6 +371,7 @@ export class OpenCodeAdapter implements AgentBackend {
   private modelCatalogCache: ModelOption[] = [];
   /** Present only when the source authoritatively names the connected providers. */
   private modelCatalogProviders?: Set<string>;
+  private readonly v1LiveConnections = new Set<WeakRef<OpenCodeConnection | OpenCodeRunConnection>>();
   private readonly bindingResolver: BindingResolver;
   private readonly v2: OpenCodeV2Backend;
 
@@ -381,7 +383,11 @@ export class OpenCodeAdapter implements AgentBackend {
 
   private async resolveBinding(): Promise<OpenCodeBinding> {
     const binding = await this.bindingResolver.resolve();
-    if (binding.generation === 2) this.v2.useBinding(binding);
+    if (binding.generation === 2) {
+      for (const reference of this.v1LiveConnections) reference.deref()?.retireForV2();
+      this.v1LiveConnections.clear();
+      this.v2.useBinding(binding);
+    }
     return binding;
   }
 
@@ -861,7 +867,7 @@ export class OpenCodeAdapter implements AgentBackend {
         throw new NativeSessionUnresumableError(OPENCODE_V1_READ_ONLY_REASON);
       }
       if (!this.opencodeBin) throw new Error(`OpenCode CLI is not available on PATH, so ${PRODUCT_IDENTITY.productName} cannot Drive this session.`);
-      return new OpenCodeRunConnection(this.storageRoot, this.opencodeBin, {
+      const connection = new OpenCodeRunConnection(this.storageRoot, this.opencodeBin, {
         ...info,
         attachMode: 'resume',
         control: {
@@ -869,6 +875,8 @@ export class OpenCodeAdapter implements AgentBackend {
           drive: { supported: true, state: 'driving' },
         },
       });
+      this.v1LiveConnections.add(new WeakRef(connection));
+      return connection;
     }
     if (mode !== 'live' && info.attachMode !== 'live') {
       return new OpenCodeObserveConnection(this.storageRoot, {
@@ -890,6 +898,7 @@ export class OpenCodeAdapter implements AgentBackend {
       (current) => this.loadModelCatalog(current),
       modelHint,
     );
+    this.v1LiveConnections.add(new WeakRef(conn));
     conn.start();
     // Wait until the /event SSE reader is actually connected before returning, so the
     // very first prompt sent on attach isn't fired into a not-yet-listening stream and
@@ -1483,6 +1492,7 @@ class OpenCodeObserveConnection implements SessionConnection {
 }
 
 class OpenCodeRunConnection extends OpenCodeObserveConnection {
+  private retiredForV2 = false;
   private running?: Bun.Subprocess<'ignore', 'pipe', 'pipe'>;
   /** The user stopped the running turn: the child's signal exit is that outcome, not a failure. */
   private stopRequested = false;
@@ -1495,7 +1505,15 @@ class OpenCodeRunConnection extends OpenCodeObserveConnection {
     super(storageRoot, info);
   }
 
+  retireForV2(): void {
+    this.retiredForV2 = true;
+    this.info.attachMode = 'observe';
+    this.info.control = opencodeDisconnectedControlState('This V1 seat was replaced by the shared OpenCode service. Reopen the session to continue.');
+    this.emit({ type: 'metadata-update', key: 'sessionInfo', value: { attachMode: this.info.attachMode, control: this.info.control } });
+  }
+
   override async sendPrompt(input: PromptInput): Promise<void> {
+    if (this.retiredForV2) throw new NativeSessionUnresumableError('This V1 seat was replaced by the shared OpenCode service. Reopen the session to continue.');
     if (this.running) throw new Error('OpenCode Drive is already running a turn for this session.');
     if (!opencodeAllowsV1(opencodeGeneration(process.env, process.platform, this.bin))) {
       throw new NativeSessionUnresumableError(OPENCODE_V1_READ_ONLY_REASON);
@@ -1630,32 +1648,6 @@ class OpenCodeRunConnection extends OpenCodeObserveConnection {
   }
 }
 
-/**
- * Generate a message id in OpenCode's own ascending format (`Identifier.ascending('message')`):
- * `msg_` + 12 hex chars of the 48-bit big-endian value `Date.now()*4096 + counter` + 14 random
- * base62 chars. `prompt_async` accepts a caller-supplied `messageID` (the TUI uses this for its own
- * sends) — supplying one is the NATIVE app-send correlation handle, so the SSE user echo can be
- * attributed to the exact send by id, never by text. The timestamp encoding must match OpenCode's
- * or the message would sort out of order among native ids.
- */
-const OC_ID_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
-let ocIdLastMs = 0;
-let ocIdCounter = 0;
-function nativeMessageId(): string {
-  const now = Date.now();
-  if (now !== ocIdLastMs) {
-    ocIdLastMs = now;
-    ocIdCounter = 0;
-  }
-  ocIdCounter++;
-  const value = BigInt(now) * 4096n + BigInt(ocIdCounter);
-  const time = Buffer.alloc(6);
-  for (let i = 0; i < 6; i++) time[i] = Number((value >> BigInt(40 - 8 * i)) & 0xffn);
-  const rand = randomBytes(14);
-  let suffix = '';
-  for (let i = 0; i < 14; i++) suffix += OC_ID_ALPHABET[rand[i]! % 62];
-  return `msg_${time.toString('hex')}${suffix}`;
-}
 
 class OpenCodeConnection implements SessionConnection {
   readonly historyUsesToolSlots = true;
@@ -2346,6 +2338,11 @@ class OpenCodeConnection implements SessionConnection {
     } catch (err) {
       return classifyOpenCodeProbeError(err);
     }
+  }
+
+  retireForV2(): void {
+    this.markUnavailable('The OpenCode service changed. Reopen this session to continue through its current service.');
+    void this.close();
   }
 
   private markUnavailable(message: string, controlReason?: string): void {

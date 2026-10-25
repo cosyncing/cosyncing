@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+export { nativeMessageId as newNativeId } from '../native-id.ts';
 import { ControlRefusedError, isOpaqueSessionId, type AgentMessage, type ModelOption, type SessionInfo } from '@cosyncing/adapter-api';
 import { V2Error } from './transport.ts';
 
@@ -6,17 +6,6 @@ export type Native = Record<string, any>;
 export const object = (value: unknown): value is Native => !!value && typeof value === 'object' && !Array.isArray(value);
 export const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
 export const nativeId = (value: unknown, prefix: string): value is string => typeof value === 'string' && value.startsWith(prefix) && isOpaqueSessionId(value);
-
-let lastMs = 0;
-let counter = 0;
-export function newNativeId(prefix: 'msg' | 'ses'): string {
-  const now = Date.now();
-  counter = now === lastMs ? counter + 1 : 1;
-  lastMs = now;
-  const time = (BigInt(now) * 4096n + BigInt(counter)).toString(16).padStart(12, '0');
-  const alphabet = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
-  return `${prefix}_${time}${[...randomBytes(14)].map((byte) => alphabet[byte % alphabet.length]).join('')}`;
-}
 
 export function arrayData(value: unknown): Native[] {
   if (!object(value) || !Array.isArray(value.data) || !value.data.every(object)) throw new V2Error('invalid-response');
@@ -179,4 +168,11 @@ export function historyRows(messages: Native[], clientKeys: ReadonlyMap<string, 
     }
   }
   return result;
+}
+
+/** Only these native projections are mutable through the broker's sessionInfo patch surface. */
+export function sessionPatch(info: SessionInfo): Partial<SessionInfo> {
+  return { title: info.title, status: info.status, attachMode: info.attachMode,
+    model: info.model, currentModel: info.currentModel, currentAgent: info.currentAgent,
+    updatedAt: info.updatedAt, control: info.control };
 }

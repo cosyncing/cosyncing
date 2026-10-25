@@ -1,7 +1,7 @@
 import { ControlRefusedError, type AgentMessage, type AgentMessageHandler, type CommandResult, type HistoryQuery, type HistorySourceIdentity, type PermissionDecision, type PromptInput, type SessionConnection, type SessionInfo, type Unsubscribe } from '@cosyncing/adapter-api';
 import type { V2Binding } from '../binding.ts';
 import type { OpenCodeV2Backend } from './backend.ts';
-import { arrayData, contentKey, finite, formAnswer, formCard, historyRows, messageRows, nativeId, newNativeId, object, permissionCard, runSummary, toolMessages, type Native } from './mapping.ts';
+import { arrayData, contentKey, finite, formAnswer, formCard, historyRows, messageRows, nativeId, newNativeId, object, permissionCard, runSummary, sessionPatch, toolMessages, type Native } from './mapping.ts';
 import { V2Error, type V2Event } from './transport.ts';
 
 /** A V1 history seat switches source when the shared service imports that same native ID. */
@@ -31,7 +31,7 @@ export function followV2Import(backend: OpenCodeV2Backend, legacy: SessionConnec
       Object.assign(info, replacement.info);
       unsubscribe = replacement.subscribe(emit);
       await previous.close();
-      emit({ type: 'metadata-update', key: 'sessionInfo', value: { ...info } });
+      emit({ type: 'metadata-update', key: 'sessionInfo', value: sessionPatch(info) });
       emit({ type: 'history-reset' });
     })().catch(() => { /* Retry after the next authoritative service snapshot. */ }).finally(() => { upgrading = undefined; });
   });
@@ -86,7 +86,10 @@ export class OpenCodeV2Connection implements SessionConnection {
       this.retired = false;
     }
     await this.current.resnapshot();
-    if (replaced) this.emit({ type: 'history-reset' });
+    if (replaced) {
+      this.emit({ type: 'metadata-update', key: 'sessionInfo', value: sessionPatch(this.info) });
+      this.emit({ type: 'history-reset' });
+    }
   }
   getHistory(query?: HistoryQuery) { return this.current.getHistory(query); }
   getHistorySourceIdentity() { return this.current.getHistorySourceIdentity(); }
@@ -102,7 +105,7 @@ export class OpenCodeV2Connection implements SessionConnection {
   runCommand(name: string) { return this.current.runCommand(name); }
   async close(): Promise<void> {
     this.closed = true; this.unsubscribe(); this.handlers.clear();
-    this.backend.connections.delete(this);
+    this.backend.releaseConnection(this);
     await this.current.close();
   }
 }
@@ -123,6 +126,8 @@ class BoundV2Connection implements SessionConnection {
   private reloadNeeded = false;
   private hasSnapshot = false;
   private lastEnqueued?: string;
+  private published: Partial<SessionInfo> = {};
+  private publishedStatus?: string;
   private run?: { key: string; startedAt?: number };
 
   constructor(readonly backend: OpenCodeV2Backend, readonly info: SessionInfo, private readonly binding: V2Binding, private readonly observe: boolean) {
@@ -139,15 +144,24 @@ class BoundV2Connection implements SessionConnection {
       this.info.attachMode = 'observe';
       this.info.control = { drive: native?.parentID ? { supported: false, state: 'observing', reason: 'This session is controlled by its parent agent.' } : { supported: true, state: 'observing' }, terminalSync: { supported: false, syncAvailable: false, active: false } };
     }
-    this.emit({ type: 'metadata-update', key: 'sessionInfo', value: { ...this.info } });
-    this.emit({ type: 'status', status: this.info.status === 'idle' ? 'idle' : 'running' });
+    this.publishInfo();
+  }
+
+  private publishInfo(): void {
+    const next = sessionPatch(this.info);
+    const changed = Object.fromEntries(Object.entries(next).filter(([key, value]) =>
+      JSON.stringify(value) !== JSON.stringify(this.published[key as keyof SessionInfo])));
+    this.published = structuredClone(next);
+    if (Object.keys(changed).length) this.emit({ type: 'metadata-update', key: 'sessionInfo', value: changed });
+    const status = this.info.status === 'idle' ? 'idle' : 'running';
+    if (status !== this.publishedStatus) { this.publishedStatus = status; this.emit({ type: 'status', status }); }
   }
 
   onGap(identityChanged: boolean): void {
     this.ready = false;
     if (identityChanged) {
       this.info.control = { drive: { supported: true, state: 'unavailable', reason: 'The OpenCode service changed; reconnecting.' }, terminalSync: { supported: false, syncAvailable: false, active: false } };
-      this.emit({ type: 'metadata-update', key: 'sessionInfo', value: { ...this.info } });
+      this.publishInfo();
     }
   }
 
@@ -254,18 +268,20 @@ class BoundV2Connection implements SessionConnection {
       }).catch(() => {});
     } else if (event.type === 'session.execution.started') {
       this.run = { key: this.lastEnqueued ?? `execution:${event.durable?.seq ?? event.created}`, startedAt: event.created };
+      this.lastEnqueued = undefined;
       this.emit(runSummary(this.run.key, 'running', this.run.startedAt));
     } else if (['session.execution.succeeded', 'session.execution.failed', 'session.execution.interrupted'].includes(event.type)) {
-      const run = this.run ?? { key: this.lastEnqueued ?? `execution:${event.durable?.seq ?? event.created}`, startedAt: undefined };
+      const run = this.run ?? { key: `execution:${event.durable?.seq ?? event.created}`, startedAt: undefined };
+      this.lastEnqueued = undefined;
       this.run = undefined;
       if (!this.terminalRuns.has(run.key)) {
         this.terminalRuns.add(run.key);
         if (this.terminalRuns.size > 128) this.terminalRuns.delete(this.terminalRuns.values().next().value!);
         const status = event.type.endsWith('succeeded') ? 'done' : event.type.endsWith('interrupted') ? 'cancelled' : 'error';
-        void this.backend.history(this.info.id).then((messages) => {
+        void this.backend.history(this.info.id, undefined, { messageId: run.key.startsWith('msg_') ? run.key : undefined, startedAt: run.startedAt }).then((messages) => {
           const start = messages.findIndex((message) => message.id === run.key);
-          const end = messages.findIndex((message, index) => index > start && message.type === 'idle' && (message.time?.created ?? Infinity) <= (event.created ?? Infinity));
-          const assistant = start < 0 ? undefined : messages.slice(start, end < 0 ? undefined : end).findLast((message) => message.type === 'assistant');
+          const end = messages.findIndex((message, index) => index > start && message.type === 'idle' && (run.startedAt === undefined || message.time?.created >= run.startedAt) && (message.time?.created ?? Infinity) <= (event.created ?? Infinity));
+          const assistant = messages.slice(Math.max(0, start), end < 0 ? undefined : end).findLast((message) => message.type === 'assistant' && (run.startedAt === undefined || message.time?.created >= run.startedAt) && (event.created === undefined || message.time?.created <= event.created));
           this.emit(runSummary(run.key, status, run.startedAt, event.created, assistant));
         }).catch(() => this.emit(runSummary(run.key, status, run.startedAt, event.created)));
       }

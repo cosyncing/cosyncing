@@ -221,9 +221,12 @@ export class Broker {
   }
 
   /** Stop and start again on the same state and the same port. */
-  async restart(options: { crash?: boolean } = {}): Promise<void> {
+  async restart(options: { crash?: boolean; env?: NodeJS.ProcessEnv } = {}): Promise<void> {
     if (options.crash) await this.crash();
     else await this.stop({ keepState: true });
+    for (const [key, value] of Object.entries(options.env ?? {})) {
+      if (value === undefined) delete this.#env[key]; else this.#env[key] = value;
+    }
     await this.start();
   }
 

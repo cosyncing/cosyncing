@@ -1280,8 +1280,8 @@ export function conformanceSuite(kit: ConformanceKit, suiteName = kit.profile.di
       prompt,
       prompted,
       childStarts,
-      async restart() {
-        await broker.restart();
+      async restart(options) {
+        await broker.restart(options);
         client = broker.client();
         await kit.ready?.({ broker, client, fake });
       },

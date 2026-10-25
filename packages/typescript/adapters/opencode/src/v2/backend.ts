@@ -24,13 +24,15 @@ export class OpenCodeV2Backend {
   readonly watchers = new Set<(info: SessionInfo) => void>();
   private readonly importWatchers = new Map<string, Set<() => void>>();
   private readonly revisions = new Map<string, number>();
+  private readonly pendingRevisions = new Map<string, number>();
   private readonly sequences = new Map<string, number>();
   private streamAbort?: AbortController;
   private streamReady?: Promise<void>;
   private streamEpoch = 0;
   private revision = 0;
-  private connected = false;
-  private gap = true;
+  private demandUntil = 0;
+  private attaching = 0;
+  private leaseTimer?: ReturnType<typeof setTimeout>;
   unknownEvents = 0;
   unknownMessages = 0;
 
@@ -43,8 +45,6 @@ export class OpenCodeV2Backend {
     this.streamEpoch++;
     this.binding = binding;
     this.transport = new V2Transport(binding.baseUrl, binding.auth);
-    this.connected = false;
-    this.gap = true;
     this.streamReady = undefined;
     this.sequences.clear();
     if (hadBinding) for (const connection of this.connections) connection.onGap(true);
@@ -72,6 +72,8 @@ export class OpenCodeV2Backend {
   }
 
   async ensureStarted(): Promise<void> {
+    this.demandUntil = Date.now() + this.options.sseIdleMs;
+    this.scheduleLease();
     if (!this.transport) throw new V2Error('unavailable');
     if (!this.streamReady) {
       const abort = new AbortController();
@@ -88,8 +90,28 @@ export class OpenCodeV2Backend {
     })]);
   }
 
+  releaseConnection(connection: OpenCodeV2Connection): void {
+    this.connections.delete(connection);
+    this.scheduleLease();
+  }
+
+  private scheduleLease(): void {
+    clearTimeout(this.leaseTimer);
+    if (this.connections.size || this.attaching) return;
+    this.leaseTimer = setTimeout(() => {
+      if (this.connections.size || this.attaching) return;
+      if (Date.now() < this.demandUntil) { this.scheduleLease(); return; }
+      this.streamEpoch++;
+      this.streamAbort?.abort();
+      this.streamReady = undefined;
+      this.sequences.clear();
+    }, Math.max(0, this.demandUntil - Date.now()));
+    this.leaseTimer.unref?.();
+  }
+
   private async stream(epoch: number, signal: AbortSignal, opened: () => void): Promise<void> {
     let first = true;
+    let failures = 0;
     while (!signal.aborted && epoch === this.streamEpoch) {
       try {
         if (!first) {
@@ -104,7 +126,7 @@ export class OpenCodeV2Backend {
         const transport = this.transport!;
         for await (const event of transport.events(signal, () => {
           if (epoch !== this.streamEpoch) return;
-          this.connected = true;
+          failures = 0;
           opened();
           const reconnecting = [...this.connections];
           if (!first || reconnecting.length > 0) {
@@ -122,15 +144,16 @@ export class OpenCodeV2Backend {
       }
       if (signal.aborted || epoch !== this.streamEpoch) return;
       first = false;
-      this.connected = false;
-      this.gap = true;
       this.resolver.invalidate();
       for (const connection of this.connections) connection.onGap(false);
       await new Promise<void>((resolve) => {
         const done = () => { clearTimeout(timer); signal.removeEventListener('abort', done); resolve(); };
-        const timer = setTimeout(done, Math.min(500, this.options.sseReconnectMs));
+        const base = Math.max(1, this.options.sseReconnectMs);
+        const delay = Math.min(Math.max(base, 300_000), base * 2 ** Math.min(failures++, 8));
+        const timer = setTimeout(done, delay);
         timer.unref?.();
         signal.addEventListener('abort', done, { once: true });
+        if (signal.aborted) done();
       });
     }
   }
@@ -143,33 +166,49 @@ export class OpenCodeV2Backend {
       if (before !== undefined && event.durable.seq <= before) return;
       this.sequences.set(event.durable.aggregateID, event.durable.seq);
       if (before !== undefined && event.durable.seq !== before + 1) {
-        this.gap = true;
         for (const connection of this.connections) connection.onGap(false);
         void this.reconcile().then(() => Promise.all([...this.connections].map((connection) => connection.resnapshot()))).catch(() => {});
       }
     }
     if (nativeId(id, 'ses')) {
-      if (event.type === 'session.execution.started') this.active.add(id);
-      else if (['session.execution.succeeded', 'session.execution.failed', 'session.execution.interrupted'].includes(event.type)) this.active.delete(id);
+      if (event.type === 'session.created') for (const listener of this.importWatchers.get(id) ?? []) listener();
+      let changed = false;
+      let pendingChanged = false;
+      if (event.type === 'session.execution.started') { changed = !this.active.has(id); this.active.add(id); }
+      else if (['session.execution.succeeded', 'session.execution.failed', 'session.execution.interrupted'].includes(event.type)) changed = this.active.delete(id);
       else if (event.type === 'permission.asked') {
-        try { permissionCard(data); this.permissions.set(id, [...(this.permissions.get(id) ?? []).filter((item) => item.id !== data.id), data]); } catch { return; }
-      } else if (event.type === 'permission.replied') this.permissions.set(id, (this.permissions.get(id) ?? []).filter((item) => item.id !== data.requestID));
-      else if (event.type === 'form.created') {
-        try { formCard(data.form); this.forms.set(id, [...(this.forms.get(id) ?? []).filter((item) => item.id !== data.form.id), data.form]); } catch { return; }
-      } else if (event.type === 'form.replied' || event.type === 'form.cancelled') this.forms.set(id, (this.forms.get(id) ?? []).filter((item) => item.id !== data.id));
-      else if (event.type === 'session.status' && data.status?.type === 'retry') this.active.add(id);
-      else if (event.type === 'session.step.started') {
+        try { permissionCard(data); } catch { return; }
+        this.permissions.set(id, [...(this.permissions.get(id) ?? []).filter((item) => item.id !== data.id), data]);
+        pendingChanged = true;
+      } else if (event.type === 'permission.replied') {
+        this.permissions.set(id, (this.permissions.get(id) ?? []).filter((item) => item.id !== data.requestID));
+        pendingChanged = true;
+      } else if (event.type === 'form.created') {
+        try { formCard(data.form); } catch { return; }
+        this.forms.set(id, [...(this.forms.get(id) ?? []).filter((item) => item.id !== data.form.id), data.form]);
+        pendingChanged = true;
+      } else if (event.type === 'form.replied' || event.type === 'form.cancelled') {
+        this.forms.set(id, (this.forms.get(id) ?? []).filter((item) => item.id !== data.id));
+        pendingChanged = true;
+      } else if (event.type === 'session.status' && data.status?.type === 'retry') {
+        changed = !this.active.has(id); this.active.add(id);
+      } else if (event.type === 'session.step.started') {
         const before = this.sessions.get(id);
         if (before) {
           const next = { ...before, ...(typeof data.agent === 'string' ? { agent: data.agent } : {}), ...(object(data.model) && typeof data.model.providerID === 'string' && typeof data.model.id === 'string' ? { model: data.model } : {}) };
+          changed = JSON.stringify(next) !== JSON.stringify(before);
           this.sessions.set(id, next);
         }
       }
       const session = data.session ?? (isSession(data) ? data : undefined);
-      if (isSession(session)) this.sessions.set(id, session);
-      this.changed(id);
+      if (isSession(session)) {
+        changed ||= JSON.stringify(this.sessions.get(id)) !== JSON.stringify(session);
+        this.sessions.set(id, session);
+      }
+      if (pendingChanged) this.pendingRevisions.set(id, (this.pendingRevisions.get(id) ?? 0) + 1);
+      if (changed || pendingChanged) this.changed(id);
     }
-    if (!['server.connected', 'server.heartbeat', 'session.created', 'session.updated', 'session.deleted', 'session.status', 'session.execution.started', 'session.execution.succeeded', 'session.execution.failed', 'session.execution.interrupted', 'session.inbox.enqueued', 'session.inbox.delivered', 'session.text.started', 'session.text.delta', 'session.text.ended', 'session.reasoning.started', 'session.reasoning.delta', 'session.reasoning.ended', 'session.tool.input.started', 'session.tool.called', 'session.tool.success', 'session.tool.failed', 'permission.asked', 'permission.replied', 'form.created', 'form.replied', 'form.cancelled'].includes(event.type)) this.unknownEvents++;
+    if (!['server.connected', 'server.heartbeat', 'session.created', 'session.updated', 'session.deleted', 'session.status', 'session.execution.started', 'session.execution.succeeded', 'session.execution.failed', 'session.execution.interrupted', 'session.inbox.enqueued', 'session.inbox.delivered', 'session.text.started', 'session.text.delta', 'session.text.ended', 'session.reasoning.started', 'session.reasoning.delta', 'session.reasoning.ended', 'session.step.started', 'session.step.streamed', 'session.step.ended', 'session.step.failed', 'session.usage.updated', 'session.instructions.updated', 'session.tool.input.started', 'session.tool.input.ended', 'session.tool.progress', 'session.tool.called', 'session.tool.success', 'session.tool.failed', 'permission.asked', 'permission.replied', 'form.created', 'form.replied', 'form.cancelled'].includes(event.type)) this.unknownEvents++;
     for (const connection of this.connections) connection.onEvent(event);
   }
 
@@ -180,25 +219,32 @@ export class OpenCodeV2Backend {
     const candidates = new Set([...Object.keys(response.data), ...[...this.permissions, ...this.forms].filter(([, values]) => values.length).map(([id]) => id)]);
     for (const id of new Set([...this.active, ...Object.keys(response.data)])) {
       if ((this.revisions.get(id) ?? 0) > revision) continue;
+      const wasActive = this.active.has(id);
       if (response.data[id]) this.active.add(id); else this.active.delete(id);
-      this.changed(id);
+      if (wasActive !== this.active.has(id)) this.changed(id);
     }
     await Promise.all([...candidates].map((id) => this.pending(id, signal)));
-    this.gap = false;
   }
 
   async pending(id: string, signal?: AbortSignal): Promise<void> {
-    const revision = this.revisions.get(id) ?? 0;
-    const [permissions, forms] = await Promise.all([
-      this.transport!.json(`/api/session/${encodeURIComponent(id)}/permission`, { signal }),
-      this.transport!.json(`/api/session/${encodeURIComponent(id)}/form`, { signal }),
-    ]);
-    const p = arrayData(permissions), f = arrayData(forms);
-    for (const item of p) { permissionCard(item); if (item.sessionID !== id) throw new V2Error('invalid-response'); }
-    for (const item of f) { formCard(item); if (item.sessionID !== id) throw new V2Error('invalid-response'); }
-    if ((this.revisions.get(id) ?? 0) !== revision) return;
+    const revision = this.pendingRevisions.get(id) ?? 0;
+    let p: Native[], f: Native[];
+    try {
+      const [permissions, forms] = await Promise.all([
+        this.transport!.json(`/api/session/${encodeURIComponent(id)}/permission`, { signal }),
+        this.transport!.json(`/api/session/${encodeURIComponent(id)}/form`, { signal }),
+      ]);
+      p = arrayData(permissions); f = arrayData(forms);
+      for (const item of p) { permissionCard(item); if (item.sessionID !== id) throw new V2Error('invalid-response'); }
+      for (const item of f) { formCard(item); if (item.sessionID !== id) throw new V2Error('invalid-response'); }
+    } catch (error) {
+      if (error instanceof V2Error && error.reason === 'invalid-response') return;
+      throw error;
+    }
+    if ((this.pendingRevisions.get(id) ?? 0) !== revision) return;
+    const changed = JSON.stringify(this.permissions.get(id) ?? []) !== JSON.stringify(p) || JSON.stringify(this.forms.get(id) ?? []) !== JSON.stringify(f);
     this.permissions.set(id, p); this.forms.set(id, f);
-    this.changed(id);
+    if (changed) this.changed(id);
     for (const connection of this.connections) if (connection.info.id === id) connection.syncPending();
   }
 
@@ -257,7 +303,7 @@ export class OpenCodeV2Backend {
     }
   }
 
-  async history(id: string, signal?: AbortSignal): Promise<Native[]> {
+  async history(id: string, signal?: AbortSignal, until?: { messageId?: string; startedAt?: number }): Promise<Native[]> {
     const pages: Native[][] = [];
     const cursors = new Set<string>();
     let cursor: string | undefined;
@@ -271,7 +317,10 @@ export class OpenCodeV2Backend {
       this.unknownMessages += data.filter((message) => !['user', 'assistant', 'idle'].includes(message.type)).length;
       pages.push([...data].reverse());
       cursor = value.cursor?.next;
-      if (!data.length || cursor === undefined) return pages.reverse().flat();
+      const reachedRun = until && (until.messageId
+        ? data.some((message) => message.id === until.messageId)
+        : until.startedAt === undefined || data.some((message) => message.time?.created < until.startedAt!));
+      if (!data.length || cursor === undefined || reachedRun) return pages.reverse().flat();
       if (typeof cursor !== 'string') throw new V2Error('invalid-response');
       if (cursors.has(cursor)) throw new V2Error('invalid-response');
       cursors.add(cursor);
@@ -316,11 +365,15 @@ export class OpenCodeV2Backend {
   }
 
   async attach(id: string, observe = false): Promise<OpenCodeV2Connection> {
-    await this.ensureStarted();
-    const native = await this.getSession(id);
-    const connection = new OpenCodeV2Connection(this, this.info(native), this.binding!, observe || !!native.parentID);
-    this.connections.add(connection);
-    try { await connection.resnapshot(); return connection; }
-    catch (error) { await connection.close(); throw error; }
+    this.attaching++;
+    try {
+      await this.ensureStarted();
+      await this.reconcile();
+      const native = await this.getSession(id);
+      const connection = new OpenCodeV2Connection(this, this.info(native), this.binding!, observe || !!native.parentID);
+      this.connections.add(connection);
+      try { await connection.resnapshot(); return connection; }
+      catch (error) { await connection.close(); throw error; }
+    } finally { this.attaching--; this.scheduleLease(); }
   }
 }

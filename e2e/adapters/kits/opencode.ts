@@ -429,7 +429,7 @@ export const opencodeV2Kit: ConformanceKit = {
     hostileStore: opencodeProfile.hostileStore,
   },
   env(paths) {
-    return { OPENCODE_URL: `http://127.0.0.1:${leasedPort(paths)}`, XDG_STATE_HOME: join(paths.root, 'xdg-state'), OPENCODE_DATA: join(paths.root, 'opencode-data'), COSYNCING_OPENCODE_NO_AUTOSERVE: '1' };
+    return { OPENCODE_URL: `http://127.0.0.1:${leasedPort(paths)}`, XDG_STATE_HOME: join(paths.root, 'xdg-state'), OPENCODE_DATA: join(paths.root, 'opencode-data'), COSYNCING_OPENCODE_NO_AUTOSERVE: '1', COSYNCING_OPENCODE_SSE_RECONNECT_MS: '50', COSYNCING_TEST_HUB_EVICT_GRACE_MS: '50' };
   },
   install(paths): OpencodeV2Fake {
     const root = join(paths.root, 'fakes', 'opencode-v2');
@@ -497,7 +497,7 @@ export const opencodeV2Kit: ConformanceKit = {
         const id = response.body.session.id;
         expect(fake.ledger.routed('POST', /^\/api\/session$/, mark)).toHaveLength(1);
         expect(fake.ledger.routed('GET', new RegExp(`^/api/session/${id}$`), mark).length).toBeGreaterThan(0);
-        expect(id).toMatch(/^ses_/);
+        expect(id).toMatch(/^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
         expect(fake.serve.session(id).info.location.directory).toBe(cwd);
         const request = fake.ledger.routed('POST', /^\/api\/session$/).at(-1)!;
         expect(request.body).toMatchObject({ id, location: { directory: cwd }, model: { providerID: OPENCODE_PROVIDER, id: 'model-b' } });
@@ -585,12 +585,10 @@ export const opencodeV2Kit: ConformanceKit = {
         } finally { fake.cli.setInstalled(true); }
         for (const [version, expected] of [['2.1.3', 503], ['2.2.0', 200]] as const) {
           fake.serve.setVersion(version);
-          await context.restart();
           const response = await context.client.post('/api/sessions/opencode', { directory: fake.workspace('version') });
           expect(response.status, response.text).toBe(expected);
         }
         fake.serve.setVersion('2.1.4');
-        await context.restart();
       },
     },
   ],
@@ -610,9 +608,8 @@ opencodeV2Kit.extras!.push(
       const fake = context.fake as OpencodeV2Fake;
       const explicit = context.broker.env.OPENCODE_URL;
       try {
-        delete context.broker.env.OPENCODE_URL;
         fake.cli.setInstalled(false);
-        await context.restart();
+        await context.restart({ env: { OPENCODE_URL: undefined } });
         const response = await context.client.post('/api/sessions/opencode', { directory: fake.workspace('registration') });
         expect(response.status, response.text).toBe(200);
         expect((await context.client.sessions({ refresh: true })).some((row: any) => row.id === response.body.session.id)).toBe(true);
@@ -625,7 +622,7 @@ opencodeV2Kit.extras!.push(
           expect(fake.ledger.since(mark).filter((entry) => entry.kind === 'request' && entry.method === 'POST')).toHaveLength(0);
         }
         fake.serve.publishRegistration();
-      } finally { fake.serve.publishRegistration(); context.broker.env.OPENCODE_URL = explicit; fake.cli.setInstalled(true); await context.restart(); }
+      } finally { fake.serve.publishRegistration(); fake.cli.setInstalled(true); await context.restart({ env: { OPENCODE_URL: explicit } }); }
     },
   },
   {
@@ -728,6 +725,8 @@ opencodeV2Kit.extras!.push(
       fake.legacyStore.putMessage(id, { id: 'msg_fixture_legacy_import', role: 'user', time: { created: now } });
       fake.legacyStore.putPart(id, 'msg_fixture_legacy_import', { id: 'prt_fixture_legacy_import', type: 'text', text: 'legacy history before import' });
       fake.serve.migration = 'running';
+      let releaseRoster!: () => void;
+      const rosterGate = new Promise<void>((resolve) => { releaseRoster = resolve; });
       try {
         const before = await context.client.waitForSession((row) => row.id === id);
         expect(before.attachMode).toBe('observe');
@@ -737,15 +736,17 @@ opencodeV2Kit.extras!.push(
         const legacyHistory = await legacy.waitForKind('history');
         expect(legacyHistory.messages.some((message: any) => message.type === 'user-message' && message.text === 'legacy history before import')).toBe(true);
         const from = legacy.frames.length;
+        fake.serve.beforeRosterReply = () => rosterGate;
         fake.serve.seed({ id, directory: cwd, title: 'imported', turns: 1, model: { providerID: OPENCODE_PROVIDER, modelID: 'model-b' } });
-        const imported = await context.client.waitForSession((row) => row.id === id && row.attachMode === 'live');
-        expect(imported.cwd).toBe(cwd);
-        expect(imported.currentModel).toMatchObject({ providerID: OPENCODE_PROVIDER, modelID: 'model-b' });
+        fake.serve.emit('session.created', { sessionID: id, location: { directory: cwd }, projectID: 'project-fixture', slug: 'imported', version: '2.1.4', title: 'imported' }, true);
+        const importedFrame = await legacy.waitForFrame((frame) => frame.kind === 'session' && frame.authority?.canMutate === true, { after: from });
+        expect(importedFrame.info.currentModel).toMatchObject({ providerID: OPENCODE_PROVIDER, modelID: 'model-b' });
         const history = await legacy.waitForFrame((frame) => frame.kind === 'history' && frame.reset === true, { after: from });
         expect(history.messages.some((message: any) => message.type === 'model-output' && message.text === 'seeded answer 1')).toBe(true);
         expect(history.messages.some((message: any) => message.text === 'legacy history before import')).toBe(false);
         expect((await context.prompt(legacy, 'after import')).kind).toBe('ack');
         legacy.close();
+        fake.serve.beforeRosterReply = undefined; releaseRoster();
         fake.legacyStore.putSession({ id: omittedId, directory: cwd, title: 'omitted by importer', created: now, updated: now });
         await context.client.waitForSession((row) => row.id === omittedId && row.attachMode === 'observe');
         fake.serve.migration = 'completed';
@@ -754,7 +755,7 @@ opencodeV2Kit.extras!.push(
         const rows = await context.client.sessions({ refresh: true });
         expect(rows.some((row: any) => row.id === omittedId)).toBe(false);
         expect(rows.some((row: any) => row.id === id)).toBe(true);
-      } finally { fake.serve.migration = 'completed'; }
+      } finally { fake.serve.beforeRosterReply = undefined; releaseRoster(); fake.serve.migration = 'completed'; }
     },
   },
   {
@@ -838,13 +839,19 @@ opencodeV2Kit.extras!.push(
       const fake = context.fake as OpencodeV2Fake;
       const session = await context.drivableSession('agent choice');
       const stream = await context.openDrive(session);
+      let releaseRoster!: () => void;
+      const rosterGate = new Promise<void>((resolve) => { releaseRoster = resolve; });
+      fake.serve.beforeRosterReply = () => rosterGate;
       try {
         expect((await context.prompt(stream, 'plan a change', { agent: 'plan' })).kind).toBe('ack');
         expect(fake.serve.session(session.id).info.agent).toBe('plan');
+        await stream.waitForFrame((frame) => frame.kind === 'session' && frame.info.currentAgent === 'plan');
+        expect((await context.prompt(stream, 'switch model here', { model: { providerID: OPENCODE_PROVIDER, modelID: 'model-b' } })).kind).toBe('ack');
+        await stream.waitForFrame((frame) => frame.kind === 'session' && frame.info.currentModel?.modelID === 'model-b');
         const mark = fake.ledger.mark();
         expect((await stream.sendAndAwait({ kind: 'prompt', text: 'invalid agent', agent: 'unknown-agent' })).kind).toBe('nack');
         expect(fake.ledger.routed('POST', /\/agent$/, mark)).toHaveLength(0);
-      } finally { stream.close(); }
+      } finally { fake.serve.beforeRosterReply = undefined; releaseRoster(); stream.close(); }
     },
   },
   {
@@ -859,7 +866,7 @@ opencodeV2Kit.extras!.push(
         const common = { sessionID: session.id, assistantMessageID: messageId };
         fake.serve.emit('session.reasoning.delta', { ...common, ordinal: 0, delta: 'thinking' });
         fake.serve.emit('session.reasoning.ended', { ...common, ordinal: 0, text: 'finished reasoning' }, true);
-        fake.serve.emit('session.text.delta', { ...common, ordinal: 1, delta: 'partial' });
+        for (let i = 0; i < 100; i++) fake.serve.emit('session.text.delta', { ...common, ordinal: 1, delta: 'partial' });
         fake.serve.emit('session.text.ended', { ...common, ordinal: 1, text: 'complete answer' }, true);
         fake.serve.emit('session.text.delta', { ...common, ordinal: 1, delta: 'stale delta' });
         fake.serve.emit('session.future-event', { sessionID: session.id, text: 'unknown payload' });
@@ -868,6 +875,7 @@ opencodeV2Kit.extras!.push(
         fake.serve.emit('session.tool.success', { ...common, id: 'call_fixture_shell', content: [{ type: 'text', text: 'fixture' }], metadata: { exit: 0 } }, true);
         await stream.waitForFrame((frame) => frame.kind === 'message' && frame.message.type === 'tool-result' && frame.message.callId === 'call_fixture_shell' && !frame.message.pending, { after: from });
         const messages = stream.frames.slice(from).filter((frame) => frame.kind === 'message').map((frame) => frame.message);
+        expect(stream.frames.slice(from).filter((frame) => frame.kind === 'session')).toHaveLength(0);
         expect(messages.some((message) => message.delta === 'stale delta' || message.text === 'unknown payload')).toBe(false);
         expect(messages.find((message) => message.type === 'model-output' && message.text === 'complete answer')?.key).toBe(`${messageId}:1`);
         expect(messages.find((message) => message.type === 'thinking' && message.text === 'finished reasoning')?.key).toBe(`${messageId}:0`);
@@ -901,6 +909,115 @@ opencodeV2Kit.extras!.push(
         expect((await turn).kind).toBe('ack');
         expect(fake.ledger.routed('DELETE', /\/form\/[^/]+$/, mark)).toHaveLength(1);
       } finally { stream.close(); }
+    },
+  },
+);
+
+opencodeV2Kit.extras!.push(
+  {
+    title: 'externally answered permission reconciles during continuous stream activity after a gap',
+    async run(context) {
+      const fake = context.fake as OpencodeV2Fake;
+      const session = await context.drivableSession('pending repair');
+      const stream = await context.openDrive(session);
+      let sequence = 0;
+      try {
+        const turn = context.prompt(stream, '[[permission]] [[hold:pending-repair]] keep streaming');
+        const card = await stream.waitForMessage((message) => message.type === 'permission-request');
+        fake.serve.beforePendingReply = async (id) => {
+          if (id !== session.id) return;
+          const agent = `external-${++sequence}`;
+          fake.serve.emit('session.text.delta', { sessionID: id, assistantMessageID: 'msg_fixture_repair', ordinal: 0, delta: 'still streaming' });
+          fake.serve.emit('session.step.started', { sessionID: id, assistantMessageID: 'msg_fixture_repair', agent, model: { providerID: OPENCODE_PROVIDER, id: 'model-a' } });
+          await stream.waitForFrame((frame) => frame.kind === 'session' && frame.info.currentAgent === agent);
+        };
+        fake.serve.disconnectStreams();
+        fake.serve.pending.get(card.requestId)!.settle('once');
+        await stream.waitForMessage((message) => message.type === 'permission-resolved' && message.requestId === card.requestId);
+        expect(sequence).toBeGreaterThan(0);
+        expect(fake.serve.holds.has('pending-repair')).toBe(true);
+        expect((await stream.sendAndAwait({ kind: 'approve', requestId: card.requestId, decision: 'approve' })).kind).toBe('nack');
+        fake.serve.beforePendingReply = undefined;
+        fake.serve.release('pending-repair');
+        expect((await turn).kind).toBe('ack');
+      } finally { fake.serve.beforePendingReply = undefined; fake.serve.release('pending-repair'); stream.close(); }
+    },
+  },
+  {
+    title: 'malformed pending state preserves its card without hiding another session',
+    async run(context) {
+      const fake = context.fake as OpencodeV2Fake;
+      const session = await context.drivableSession('malformed pending');
+      const stream = await context.openDrive(session);
+      try {
+        const turn = context.prompt(stream, '[[permission]] pending validation');
+        const card = await stream.waitForMessage((message) => message.type === 'permission-request');
+        fake.serve.malformedPendingFor = session.id;
+        const other = fake.seedSession({ title: 'unaffected by malformed pending' });
+        fake.serve.setBusy(other.id, true);
+        const rows = await context.client.sessions({ refresh: true });
+        expect(rows.find((row: any) => row.id === session.id)?.status).toBe('needs-input');
+        expect(rows.find((row: any) => row.id === other.id)?.status).toBe('working');
+        fake.serve.malformedPendingFor = undefined;
+        fake.serve.pending.get(card.requestId)!.settle('once');
+        fake.serve.setBusy(other.id, false);
+        expect((await turn).kind).toBe('ack');
+      } finally { fake.serve.malformedPendingFor = undefined; stream.close(); }
+    },
+  },
+  {
+    title: 'unprompted execution gets its own summary and outcome reads only the newest history pages',
+    async run(context) {
+      const fake = context.fake as OpencodeV2Fake;
+      const session = fake.seedSession({ title: 'large history outcomes', turns: 700 });
+      await context.client.waitForSession((row) => row.id === session.id);
+      const stream = await context.openDrive({ ...session, reason: 'takeover' });
+      try {
+        const mark = fake.ledger.mark();
+        const from = stream.frames.length;
+        expect((await context.prompt(stream, 'a prompted execution')).kind).toBe('ack');
+        const first = await stream.waitForFrame((frame) => frame.kind === 'message' && frame.message.type === 'run-summary' && frame.message.status === 'done', { after: from });
+        expect(fake.ledger.routed('GET', new RegExp(`^/api/session/${session.id}/message$`), mark)).toHaveLength(1);
+        const next = stream.frames.length;
+        fake.serve.unprompted(session.id);
+        const second = await stream.waitForFrame((frame) => frame.kind === 'message' && frame.message.type === 'run-summary' && frame.message.status === 'done', { after: next });
+        expect(second.message.key).not.toBe(first.message.key);
+        expect(second.message.turnId).toStartWith('execution:');
+        expect(stream.frames.slice(next).some((frame) => frame.kind === 'message' && frame.message.type === 'run-summary' && frame.message.key === first.message.key)).toBe(false);
+        await stream.waitForFrame((frame) => frame.kind === 'session' && frame.info.status === 'idle', { after: next });
+      } finally { stream.close(); }
+    },
+  },
+  {
+    title: 'stream retries respect the configured window, back off and stop after demand expires',
+    async run(context) {
+      const fake = context.fake as OpencodeV2Fake;
+      const saved = { reconnect: context.broker.env.COSYNCING_OPENCODE_SSE_RECONNECT_MS, idle: context.broker.env.COSYNCING_OPENCODE_SSE_IDLE_MS };
+      await context.restart({ env: { COSYNCING_OPENCODE_SSE_RECONNECT_MS: '700', COSYNCING_OPENCODE_SSE_IDLE_MS: '2000' } });
+      try {
+        const session = await context.drivableSession('reconnect policy');
+        const stream = await context.openDrive(session);
+        const mark = fake.ledger.mark(), from = stream.frames.length;
+        fake.serve.failNext('GET', '/api/event', 503, 1);
+        const disconnectedAt = Date.now();
+        fake.serve.disconnectStreams();
+        await stream.waitForFrame((frame) => frame.kind === 'history' && frame.reset === true, { after: from });
+        const attempts = fake.ledger.routed('GET', /^\/api\/event$/, mark);
+        expect(attempts).toHaveLength(2);
+        // These lower bounds check the configured retry policy, not execution speed.
+        expect(attempts[0]!.at - disconnectedAt).toBeGreaterThanOrEqual(700);
+        expect(attempts[1]!.at - attempts[0]!.at).toBeGreaterThanOrEqual(1400);
+        stream.close();
+        await eventually(() => fake.serve.openStreams === 0, { what: 'the unused shared stream lease to expire' });
+        fake.serve.setBusy(session.id, true);
+        const reopened = await context.openDrive(session);
+        expect((await reopened.waitForKind('session')).info.status).toBe('working');
+        fake.serve.setBusy(session.id, false);
+        reopened.close();
+      } finally {
+        fake.serve.failNext('GET', '/api/event', 503, 0);
+        await context.restart({ env: { COSYNCING_OPENCODE_SSE_RECONNECT_MS: saved.reconnect, COSYNCING_OPENCODE_SSE_IDLE_MS: saved.idle } });
+      }
     },
   },
 );
@@ -1193,6 +1310,7 @@ const opencodeExtras: ConformanceExtra[] = [
       const from = stream.frames.length;
       expect((await stream.sendAndAwait({ kind: 'command', name: 'compact' })).kind).toBe('ack');
       await stream.waitForFrame((frame) => frame.kind === 'notice' && /Compacting/.test(String(frame.message)), { after: from });
+      await eventually(() => fake.ledger.routed('POST', new RegExp(`^/session/${seeded.id}/summarize$`), mark).length > 0, { what: 'the asynchronous summarize request to arrive' });
       expect(fake.ledger.routed('POST', new RegExp(`^/session/${seeded.id}/summarize$`), mark).map((entry) => entry.body))
         .toEqual([{ providerID: OPENCODE_PROVIDER, modelID: 'model-a' }]);
       // The serve announces the compaction; the transcript is re-read once and shows the summary.
@@ -1583,3 +1701,41 @@ const opencodeExtras: ConformanceExtra[] = [
     },
   },
 ];
+
+
+opencodeKit.extras!.push({
+  title: 'V1 live and private seats lose write authority when the facade binds V2',
+  async run(context) {
+    const fake = fakeOf(context);
+    const session = await context.drivableSession('generation transition');
+    const stream = await context.openDrive(session);
+    const privateSession = fake.seedSession({ title: 'private generation transition' });
+    await context.client.waitForSession((row) => row.id === privateSession.id);
+    const privateStream = await context.client.attach('opencode', privateSession.id, { mode: 'resume', reason: 'takeover' });
+    expect((await privateStream.waitForKind('session')).info.attachMode).toBe('resume');
+    await privateStream.waitForKind('history');
+    const root = context.broker.env.XDG_STATE_HOME || join(fake.paths.home, '.local', 'state');
+    const path = join(root, 'opencode', 'service.json');
+    mkdirSync(join(root, 'opencode'), { recursive: true });
+    const native = new FakeOpenCodeV2Serve({ record: () => {}, onRegistration: (value) => {
+      if (value) { writeFileSync(path, JSON.stringify({ ...value, url: fake.serve.url }), { mode: 0o600 }); chmodSync(path, 0o600); }
+    } });
+    try {
+      native.start(0);
+      // Keep V1 routes live while the configured address identifies and routes to V2.
+      fake.serve.apiProxy = native.url;
+      const from = stream.frames.length;
+      await context.client.sessions({ refresh: true });
+      await stream.waitForFrame((frame) => frame.kind === 'session' && frame.authority?.canMutate === false, { after: from });
+      const mark = fake.ledger.mark();
+      expect((await stream.sendAndAwait({ kind: 'prompt', text: 'must not reach V1' })).kind).toBe('nack');
+      expect(fake.ledger.routed('POST', /\/prompt_async$/, mark)).toHaveLength(0);
+      await privateStream.waitForFrame((frame) => frame.kind === 'session' && frame.authority?.canMutate === false);
+      expect((await privateStream.sendAndAwait({ kind: 'prompt', text: 'must not start a private V1 run' })).kind).toBe('nack');
+      expect(fake.ledger.spawns(mark)).toHaveLength(0);
+    } finally {
+      fake.serve.apiProxy = undefined; rmSync(path, { force: true }); stream.close(); privateStream.close();
+      try { await context.restart(); } finally { native.stop(); }
+    }
+  },
+});

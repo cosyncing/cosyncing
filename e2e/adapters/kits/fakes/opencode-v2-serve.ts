@@ -35,6 +35,9 @@ export class FakeOpenCodeV2Serve {
   version = '2.1.4';
   migration: 'required' | 'running' | 'completed' | 'error' = 'completed';
   formFields?: Json[];
+  malformedPendingFor?: string;
+  beforeRosterReply?: () => Promise<void>;
+  beforePendingReply?: (id: string) => Promise<void>;
 
   constructor(options: { record: (value: Json) => void; onRegistration: (value: Json | undefined) => void }) {
     this.record = options.record;
@@ -102,6 +105,17 @@ export class FakeOpenCodeV2Serve {
     this.emit('session.execution.succeeded', { sessionID: id }, true);
   }
 
+  unprompted(id: string): void {
+    const session = this.session(id);
+    session.busy = true;
+    this.emit('session.execution.started', { sessionID: id }, true);
+    session.messages.push({ id: this.id('msg'), type: 'assistant', time: { created: this.now(), completed: this.now() }, content: [{ type: 'text', text: 'unprompted answer' }], tokens: { input: 1, output: 1 }, cost: 0 });
+    session.messages.push({ id: this.id('msg'), type: 'idle', time: { created: this.now() }, outcome: 'succeeded' });
+    session.busy = false;
+    session.info.time.updated = this.now();
+    this.emit('session.execution.succeeded', { sessionID: id }, true);
+  }
+
   appendPartial(id: string): string { return id; }
   completePartial(id: string): void { this.appendTurn(id, 'partial prompt', 'partial answer'); }
   rewriteFirstUserText(id: string, text: string): void {
@@ -130,6 +144,14 @@ export class FakeOpenCodeV2Serve {
   }
 
   private async handle(request: Request): Promise<Response> {
+    const response = await this.route(request);
+    if (request.method === 'GET' && new URL(request.url).pathname === '/api/session') await this.beforeRosterReply?.();
+    const match = /^\/api\/session\/([^/]+)\/(permission|form)$/.exec(new URL(request.url).pathname);
+    if (match && request.method === 'GET') await this.beforePendingReply?.(match[1]!);
+    return response;
+  }
+
+  private async route(request: Request): Promise<Response> {
     const url = new URL(request.url), path = url.pathname, method = request.method;
     const body = method === 'GET' || method === 'DELETE' ? undefined : await request.json().catch(() => undefined) as Json | undefined;
     const authorized = request.headers.get('authorization') === `Basic ${Buffer.from(`opencode:${this.credential}`).toString('base64')}`;
@@ -177,6 +199,7 @@ export class FakeOpenCodeV2Serve {
       return Response.json(message ? { data: message } : { _tag: 'MessageNotFoundError' }, { status: message ? 200 : 404 });
     }
     if (sub === '/inbox') return Response.json({ data: session.inbox });
+    if (sub === '/permission' && id === this.malformedPendingFor) return Response.json({ data: [{ id: 'malformed' }] });
     if (sub === '/permission' || sub === '/form') return Response.json({ data: [...this.pending.values()].filter((ask) => ask.sessionID === id && ask.kind === sub.slice(1)).map((ask) => ask.value) });
     if ((sub === '/model' || sub === '/agent') && method === 'POST') {
       session.info[sub.slice(1)] = sub === '/model' ? body?.model : body?.agent;
