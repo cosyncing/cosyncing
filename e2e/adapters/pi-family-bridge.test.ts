@@ -149,7 +149,8 @@ describe.each([PI_DIALECT_FACTS, OMP_DIALECT_FACTS] as PiFamilyDialect[])('$disp
   test('a phone joining during the first history upload receives its snapshot without reattaching', async () => {
     const stored = storedSession('prepared-history'), id = enc(stored.file), epoch = crypto.randomUUID();
     const metadata = { sessionFile: stored.file, cwd: stored.cwd, ...nativeVersion, epoch };
-    const prior = `${dialect.name}:run:prior`, current = `${dialect.name}:run:current`;
+    const prior = `${dialect.name}:run:prior`, current = `${dialect.name}:run:${'native-turn-'.repeat(60)}current`;
+    expect(id.length).toBeGreaterThan(240);
     const activeRun = { t: 'run-summary', key: current, turnId: 'current', userMessageKey: 'current', status: 'running', startedAt: 3000 };
     expect((await owner.post(`${route}/hello`, { ...metadata, prepare: true, running: true })).status).toBe(200);
     const stream = await owner.attach(dialect.name, id);
@@ -169,17 +170,29 @@ describe.each([PI_DIALECT_FACTS, OMP_DIALECT_FACTS] as PiFamilyDialect[])('$disp
       const replay = await stream.waitForFrame((frame) => frame.kind === 'history' && frame.reset === true
         && frame.messages.some((message: any) => message.type === 'user-message' && message.text === 'recovered open turn'), { after: before });
       expect(replay.messages.some((message: any) => message.type === 'run-summary' && message.key === prior && message.status === 'done')).toBe(true);
+      await stream.waitForFrame((frame) => frame.kind === 'message' && frame.message?.type === 'run-summary'
+        && frame.message.key === current && frame.message.status === 'running', { after: before, what: 'live start observation for the recovered turn' });
       // A later live outcome is the sentinel: old completion history must raise no new outcome.
-      await owner.post(`${route}/events`, { id, epoch, events: [
+      const completed = await owner.post(`${route}/events`, { id, epoch, events: [
         { ...activeRun, status: 'done', completedAt: 4000 }, { t: 'status', running: false },
       ] });
+      expect(completed.status, completed.text).toBe(200);
+      await stream.waitForFrame((frame) => frame.kind === 'message' && frame.message?.type === 'run-summary'
+        && frame.message.key === current && frame.message.status === 'done', { after: before, what: 'live completion for the recovered turn' });
       const events = await eventually(async () => {
         const rows = (await owner.get(`/api/attention-events?clientId=prepared-${dialect.name}&limit=200`)).body.events
           .filter((event: any) => event.sessionId === id);
         return rows.some((event: any) => event.kind === 'run-finished' && event.turnId === 'current') ? rows : undefined;
       }, { what: 'the recovered live turn outcome after initial snapshot publication' });
       expect(events.filter((event: any) => event.kind === 'run-finished').map((event: any) => event.turnId)).toEqual(['current']);
+      expect(events.find((event: any) => event.kind === 'run-finished').dedupeKey.endsWith(current)).toBe(true);
       expect(stream.isOpen).toBe(true);
+    } catch (error) {
+      const feed = await owner.get(`/api/attention-events?clientId=prepared-${dialect.name}&limit=200`);
+      const live = stream.frames.filter((frame) => frame.kind === 'message'
+        && (frame.message?.type === 'run-summary' || frame.message?.type === 'status')).map((frame) => frame.message);
+      const diagnostics = broker.output().split('\n').filter((line) => /attention|error/i.test(line)).slice(-8).join('\n');
+      throw new Error(`${String(error)}; live=${JSON.stringify(live)}; attention=${JSON.stringify(feed.body)}; broker=${diagnostics}`);
     } finally { stream.close(); await owner.post(`${route}/bye`, { id, epoch, reason: 'quit' }); }
   });
 
