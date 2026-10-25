@@ -9,6 +9,8 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
+import { validateCompleteEvidence } from '../ci/check-evidence.ts';
+import { hostSuiteIds } from '../ci/check-plan.ts';
 
 const ROOT = resolve(import.meta.dir, '../..');
 const OUTPUT = resolve(
@@ -81,6 +83,7 @@ if (!existsSync(CHECK_REPORT)) {
 
 const check = JSON.parse(readFileSync(CHECK_REPORT, 'utf8')) as {
   status?: unknown;
+  kind?: unknown;
   commit?: unknown;
   dirty?: unknown;
   selection?: { complete?: unknown };
@@ -96,6 +99,13 @@ if (
   || check.dirty !== sourceBefore.dirty
 ) {
   fail('the repository check is absent, partial, failed, or belongs to a different commit');
+}
+try {
+  validateCompleteEvidence(check, {commit: sourceBefore.commit, dirty: sourceBefore.dirty,
+    requiredSuites: check.kind === 'repository-check-aggregate' ? hostSuiteIds('linux', true) : hostSuiteIds(),
+    platform: process.platform});
+} catch (error) {
+  fail(`the repository check is absent, partial, failed, or belongs to a different commit: ${error instanceof Error ? error.message : error}`);
 }
 if (!existsSync(join(ROOT, 'apps', 'client', 'build', 'web', 'index.html'))) {
   fail('the canonical web build from bun run check is missing');

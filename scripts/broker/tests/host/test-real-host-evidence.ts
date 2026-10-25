@@ -140,11 +140,18 @@ check('extra unreviewed claims cannot ride through a passing record',
 const gateWorkflow = readFileSync(resolve(import.meta.dir, '../../../../.github/workflows/broker-release-gate.yml'), 'utf8');
 const releaseWorkflow = readFileSync(resolve(import.meta.dir, '../../../../.github/workflows/broker-release.yml'), 'utf8');
 const promotionWorkflow = readFileSync(resolve(import.meta.dir, '../../../../.github/workflows/broker-release-promote.yml'), 'utf8');
-check('merge and tag workflows do not consume Actions artifact storage',
+check('the PR broker gate keeps its package candidates ephemeral',
   !gateWorkflow.includes('actions/upload-artifact')
-    && !gateWorkflow.includes('actions/download-artifact')
-    && !releaseWorkflow.includes('actions/upload-artifact')
-    && !releaseWorkflow.includes('actions/download-artifact'));
+    && !gateWorkflow.includes('actions/download-artifact'));
+check('tag verification reuses validated complete evidence with a full-check fallback',
+  releaseWorkflow.includes('client-check-evidence.ts resolve')
+    && releaseWorkflow.includes('run: bun run check')
+    && releaseWorkflow.includes("steps.evidence.outputs.reused != 'true'")
+    && releaseWorkflow.includes('retention-days: 30'));
+check('stable promotion verifies published assets without consuming workflow artifacts',
+  !promotionWorkflow.includes('actions/upload-artifact')
+    && !promotionWorkflow.includes('actions/download-artifact')
+    && promotionWorkflow.includes('verify-promotion-assets.ts'));
 const remoteCandidateVerification = releaseWorkflow.indexOf('verify-promotion-assets.ts --candidate');
 const prereleasePublication = releaseWorkflow.indexOf('gh release edit');
 check('a release tag uses a draft for staging and publishes only after remote verification',
