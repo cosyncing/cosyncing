@@ -5,52 +5,29 @@ then use `cosy pair` to authorize the client.
 
 ## Update your client with this release
 
-0.8.2 keeps the app working when the device changes network: completion
-notifications, inbox entries and open sessions recover on their own instead of
-waiting for an app restart. Android downloads now use the system **Save as**
-screen, keep reporting progress, and stay saveable or shareable from the cache.
-Quotas move to liquid circles. There is no new Server feature: the broker
-contract revision stays at 35, the minimum accepted client revision stays at 17,
-and Bun stays at 1.4.3.
+0.8.3 fixes a Server problem with Codex custom profiles: when the app attached
+to a session the Server still had loaded, that session kept the model it was
+actually running instead of being reset to the base configuration's default
+model. Nothing in the app itself changes, so this client carries the version
+bump and the same behaviour as 0.8.2. The broker contract revision stays at 35,
+the minimum accepted client revision stays at 17, and Bun stays at 1.4.3, so a
+0.8.2 client keeps driving a 0.8.3 Server.
 
-Most of what's fixed here lives in this client, so install this download to get
-it. Update the Server first anyway with `cosy update`: it ships the web client,
-and 0.8.2 is where a Windows Server starts serving that web client and its
-version document correctly, which is what lets a signed update pass its web
-verification instead of rolling back. The same Server release adds OpenCode 2
-compatibility and clearer reporting for failed updates.
+Get the fix by updating the Server with `cosy update`: that is where it lives,
+and the web client ships with the Server and always matches it. A desktop client
+update still ends in a **Download**, or in `cosy update` for a desktop the
+all-in-one installer placed, once the Server is on 0.8.3.
 
-A desktop update in this release still ends in a **Download**, or in
-`cosy update` for a desktop the all-in-one installer placed. Update the Server
-first with `cosy update`; the app then offers the 0.8.2 download.
+## What's fixed in 0.8.3
 
-## What's fixed for clients in 0.8.2
+- Loaded Codex custom-profile sessions keep their live model when the app
+  attaches, instead of resetting to the base configuration's default model.
+  Sessions you start fresh keep the profile model you picked, as they did in
+  0.8.2.
 
-- Android downloads open the system **Save as** screen, and a download that
-  finishes while the app is in the background stays available to save later.
-  Cached files offer **Save** and **Share**, and the filename you chose survives
-  restarts.
-- Android workspace downloads keep reporting progress after you switch servers or
-  reconnect, instead of staying at 0 bytes.
-- Artifact **Technical details** show the underlying save or preview error.
-- Completion notifications, inbox entries, Overview counts and session dots keep
-  arriving after the device changes network or a session connection drops.
-  Previously the feed stopped until the app restarted, while Settings still
-  showed the Server as connected.
-- Open sessions reconnect after a network change even when a notification or
-  another background request needs the new connection at the same moment.
-- File-close notices dismiss automatically and have a close button. With
-  accessible navigation enabled, **Undo** stays available until you dismiss one.
-- Finished sessions move into the correct recent order within their project as
-  soon as their completion arrives, without a roster refresh.
-- Claude Code skills launched in the background appear as subagents in the
-  session roster and activity bar, including their completion state.
-- Quotas show each limit as a liquid circle, with two providers per row on phones
-  and larger screens. Waves pause for reduced motion and inactive views.
-
-For the Server side of 0.8.2 — Windows update readiness, recovery and
-diagnostics, and OpenCode 2 compatibility — see the 0.8.2 section of the
-changelog.
+Android, Linux, macOS and Windows downloads are otherwise the 0.8.2 app: install
+this release if you want every part of your setup on the same version number.
+For everything else that changed, see the 0.8.2 section of the changelog.
 
 ## Downloads
 
