@@ -34,6 +34,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   title scan, pending clears keep the displayed name, and terminal renames remain
   visible after app renames.
 
+- Updated Pi/OMP terminals prevent app actions from starting another RPC writer
+  on their session file. Ownership checks are scoped per session; inconclusive
+  checks refuse the action while preserving an existing Drive connection.
 - Completion notifications preserve full session identities and run keys for
   long native session paths, keeping outcomes associated with the correct session.
 - Pi and OMP terminal bridges reconnect with large session histories and deliver

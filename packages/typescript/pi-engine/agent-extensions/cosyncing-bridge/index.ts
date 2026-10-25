@@ -22,10 +22,11 @@
  * with its own integration record, never pi's.
  */
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, mkdirSync, realpathSync, renameSync, rmSync, rmdirSync, writeFileSync } from 'node:fs';
+import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 /*__COSYNCING_NATIVE_VERSION_IMPORT__*/
 
 const CONFIG = readBridgeConfig();
@@ -90,6 +91,34 @@ const COLLAB_PROMPT_TYPE = 'collab-prompt';
 const SKILL_PROMPT_TYPE = 'skill-prompt';
 const REMOTE_USER_KEY_PREFIX = 'u:remote:';
 const RPC_PROMPT_COMMAND = '__cosyncing_rpc_prompt';
+let ownIdentity: { start: string; boot: string } | undefined;
+let ownIdentityPromise: Promise<{ start: string; boot: string } | undefined> | undefined;
+
+/** Node-compatible lifetime evidence, matching HostProcessProvider without using comm as identity. */
+async function processIdentity(): Promise<{ start: string; boot: string } | undefined> {
+  if (ownIdentity) return ownIdentity;
+  if (!ownIdentityPromise) ownIdentityPromise = (async () => {
+    try {
+      if (process.platform === 'linux') {
+        const stat = readFileSync('/proc/self/stat', 'utf8');
+        return { start: stat.slice(stat.lastIndexOf(')') + 2).split(/\s+/)[19]!, boot: readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim() };
+      }
+      const windows = process.platform === 'win32';
+      const system = process.env.SystemRoot ?? process.env.SYSTEMROOT;
+      if (windows && !system) return undefined;
+      const command = windows ? join(system!, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe') : 'ps';
+      const script = `Import-Module Microsoft.PowerShell.Utility; Import-Module CimCmdlets; (Get-CimInstance Win32_Process -Filter 'ProcessId=${process.pid}').CreationDate.ToUniversalTime().ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)`;
+      const args = windows ? ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script] : ['-o', 'lstart=', '-p', String(process.pid)];
+      const start = await new Promise<string>((resolve, reject) => execFile(command, args, {
+        timeout: 5000, encoding: 'utf8', windowsHide: true,
+        env: windows ? { ...process.env, PSModulePath: join(system!, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules') } : { ...process.env, LC_ALL: 'C', TZ: 'UTC' },
+      }, (error, stdout) => error ? reject(error) : resolve(stdout.trim())));
+      return start ? { start, boot: '' } : undefined;
+    } catch { return undefined; }
+  })().then((value) => { ownIdentity = value; return value; }).finally(() => { ownIdentityPromise = undefined; });
+  return ownIdentityPromise;
+}
+
 function boundedString(value: unknown, max = 256): string | undefined {
   if (typeof value !== 'string') return undefined;
   const text = value.trim();
@@ -283,8 +312,13 @@ export default function (pi: ExtensionAPI) {
   let pendingLifecycle = new Map<string, any>();
   let lastPostError: string | undefined;
   let helloRejected = false;
+  let presenceFile: string | undefined;
+  let presenceWarning: string | undefined;
+  let presenceRetryAt = 0;
+  let bridgeStatusText = '';
   const setBridgeStatus = (value: string, ctx = lastCtx): void => {
-    try { ctx?.ui?.setStatus?.('cosyncing', value); } catch { /* UI cannot change delivery success */ }
+    bridgeStatusText = value;
+    try { ctx?.ui?.setStatus?.('cosyncing', presenceWarning ? `${value} · ${presenceWarning}` : value); } catch { /* UI cannot change delivery success */ }
   };
   const adoptContext = (ctx: any): boolean => {
     const file = ctx?.sessionManager?.getSessionFile?.();
@@ -631,6 +665,7 @@ export default function (pi: ExtensionAPI) {
 
   const pollLoop = async (expected: string, signal: AbortSignal): Promise<void> => {
     while (!signal.aborted && epoch === expected && alive && id) {
+      ensurePresence();
       let commands: any[] = [];
       try {
         const r = await fetch(`${BROKER}/pi/bridge/commands?id=${encodeURIComponent(id)}&epoch=${encodeURIComponent(expected)}`, { headers: authHeaders(), signal });
@@ -944,6 +979,7 @@ export default function (pi: ExtensionAPI) {
     bridgeLoops.add(expected);
     try {
       while (!ended && epoch === expected && !signal.aborted && !helloRejected) {
+        ensurePresence();
         if (!(await sayHello(expected, signal))) { if (!helloRejected) await pause(5000, signal); continue; }
         await pollLoop(expected, AbortSignal.any([signal, commandPollAbort.signal]));
         if (!ended && epoch === expected) await pause(1000, signal);
@@ -951,11 +987,69 @@ export default function (pi: ExtensionAPI) {
     } finally { bridgeLoops.delete(expected); }
   };
 
+  const releasePresence = (record: string | undefined, token: string): void => {
+    if (!record) return;
+    try {
+      if (JSON.parse(readFileSync(record, 'utf8'))?.token === token) rmSync(record);
+      try { rmdirSync(dirname(record)); rmdirSync(dirname(dirname(record))); } catch { /* other records remain */ }
+    } catch { /* already released, replaced, or inaccessible */ }
+  };
+
+  const ensurePresence = (): void => {
+    if (!generationFile || ended || Date.now() < presenceRetryAt) return;
+    const claimedEpoch = epoch;
+    presenceRetryAt = Date.now() + 5000;
+    try {
+      const canonical = existsSync(generationFile) ? realpathSync(generationFile)
+        : join(realpathSync(dirname(generationFile)), basename(generationFile));
+      const directory = join(dirname(canonical), '.cosyncing-presence', `${basename(canonical)}.owners`);
+      const record = join(directory, `${process.pid}-${claimedEpoch}.json`);
+      if (presenceFile === record) {
+        try {
+          const current = JSON.parse(readFileSync(record, 'utf8'));
+          if (current.token === claimedEpoch && current.sessionFile === canonical && current.start && typeof current.boot === 'string') return;
+        } catch { /* retry a failed or removed claim */ }
+      } else {
+        releasePresence(presenceFile, claimedEpoch);
+        presenceFile = undefined;
+      }
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      const write = (identity?: { start: string; boot: string }): void => {
+        const temporary = `${record}.tmp`;
+        writeFileSync(temporary, JSON.stringify({ schemaVersion: 3, platform: process.platform, pid: process.pid, ...identity,
+          sessionFile: canonical, token: claimedEpoch }), { mode: 0o600 });
+        renameSync(temporary, record);
+      };
+      write(ownIdentity); // unknown evidence still protects the file before asynchronous work
+      presenceFile = record;
+      presenceWarning = ownIdentity ? undefined : 'native ownership check pending';
+      void processIdentity().then((identity) => {
+        try {
+          if (JSON.parse(readFileSync(record, 'utf8'))?.token !== claimedEpoch) return;
+          if (identity) write(identity);
+          if (epoch === claimedEpoch && presenceFile === record) {
+            presenceWarning = identity ? undefined : 'native ownership could not be verified';
+            if (bridgeStatusText) setBridgeStatus(bridgeStatusText);
+          }
+        } catch {
+          if (epoch === claimedEpoch && presenceFile === record) {
+            presenceWarning = 'native ownership could not be recorded';
+            if (bridgeStatusText) setBridgeStatus(bridgeStatusText);
+          }
+        }
+      });
+    } catch {
+      presenceWarning = 'native ownership could not be recorded';
+      if (bridgeStatusText) setBridgeStatus(bridgeStatusText);
+    }
+  };
+
   const retire = async (reason: string | undefined): Promise<void> => {
     ended = true;
     alive = false;
     const closingEpoch = epoch, closingFile = generationFile, closingId = id;
     const closingAbort = generationAbort, closingLifecycle = pendingLifecycle;
+    const closingPresence = presenceFile;
     commandPollAbort.abort();
     for (const requestId of [...pendingPermissions.keys()]) resolvePermission(requestId, 'reject');
     for (const requestId of [...pendingQuestions.keys()]) resolveQuestion(requestId, null);
@@ -968,12 +1062,15 @@ export default function (pi: ExtensionAPI) {
       id: closingId, sessionFile: closingFile, epoch: closingEpoch, reason,
       finalEvents: [...closingLifecycle.values()],
     }, byeBudget), byeBudget);
+    releasePresence(closingPresence, closingEpoch);
+    if (presenceFile === closingPresence) presenceFile = undefined;
     if (epoch === closingEpoch) id = undefined;
   };
 
   pi.on('session_start', async (_event: any, ctx: any) => {
     lastCtx = ctx;
     generationFile = ctx.sessionManager.getSessionFile?.();
+    ensurePresence();
     if (generationFile) void bridgeLoop(epoch, generationAbort.signal);
   });
 
@@ -1007,6 +1104,13 @@ export default function (pi: ExtensionAPI) {
     flushTimer = undefined;
     flushChain = Promise.resolve();
     pendingLifecycle = new Map();
+    presenceFile = undefined;
+    presenceWarning = undefined;
+    presenceRetryAt = 0;
+    // An identity callback for B must not replay A's successful bridge status
+    // before B has actually completed registration.
+    setBridgeStatus('📱 re-linking…', ctx);
+    ensurePresence();
     const nextEpoch = epoch, nextSignal = generationAbort.signal;
     await retirement;
     if (generationFile && epoch === nextEpoch && !ended) void bridgeLoop(nextEpoch, nextSignal);
