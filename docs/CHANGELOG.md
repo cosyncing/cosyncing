@@ -13,8 +13,6 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
-- Loaded Codex custom-profile sessions keep their live model when the app
-  attaches, instead of resetting to the base configuration's default model.
 - Background commands and agents started in an app-driven Claude Code session
   keep running when every client disconnects, when you press Stop, and when you
   change the model, permission mode or effort. Previously the broker ended the
@@ -23,6 +21,13 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - An app-driven Claude Code session that had a prompt queued behind a running
   turn is closed normally once every client disconnects. Previously it stayed
   loaded, and its Claude process kept running, until the broker restarted.
+
+## 0.8.3 — 2026-10-25
+
+### Fixed
+
+- Loaded Codex custom-profile sessions keep their live model when the app
+  attaches, instead of resetting to the base configuration's default model.
 
 ## 0.8.2 — 2026-10-24
 
