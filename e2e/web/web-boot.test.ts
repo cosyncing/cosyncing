@@ -235,30 +235,48 @@ describe('web startup', () => {
       await neighbour.goto(`${proxy.origin}/other-app/`);
       await neighbour.evaluate(`navigator.serviceWorker.register('/other-app/sw.js', { scope: '/other-app/' })`);
       await waitUntil(neighbour, `navigator.serviceWorker.getRegistration('/other-app/').then((r) => !!r && !!r.active)`);
-      await neighbour.close();
 
+      // A failed startup has no Flutter runtime. Give it a controlled native worker and stale
+      // cache state, without a healthy app concurrently fetching and recaching runtime files.
+      proxy.replace('sw.js', () => `self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));`);
+      proxy.block('flutter_bootstrap.js');
       await page.goto(proxy.base);
-      await waitForHandover(page);
-      await waitForWorkerControl(page);
-      await page.evaluate(`caches.open('cosyncing-app:/staging/cosy/:othermount0001').then(() => true)`);
-      const scopes = () => page.evaluate(`navigator.serviceWorker.getRegistrations().then((rs) => rs.map((r) => r.scope))`) as Promise<string[]>;
+      await failedOffer(page);
+      await waitUntil(page, `navigator.serviceWorker.getRegistration().then((r) => !!r && !!r.active)`);
+      await page.evaluate(`Promise.all([
+        caches.open('cosyncing-app:/cosy/:failedbuild0001'),
+        caches.open('cosyncing-app:/staging/cosy/:othermount0001'),
+      ]).then(() => true)`);
+      const scopes = () => neighbour.evaluate(`navigator.serviceWorker.getRegistrations().then((rs) => rs.map((r) => r.scope))`) as Promise<string[]>;
       expect(await scopes()).toContain(`${proxy.origin}/other-app/`);
+      expect(await scopes()).toContain(proxy.base);
+      expect(await cacheNames(neighbour)).toContain('cosyncing-app:/cosy/:failedbuild0001');
 
-      // The shell's own recovery routine, as the last retry button runs it.
-      await page.evaluate(`(async () => {
-        const prefix = 'cosyncing-app:' + new URL('./', document.baseURI).pathname + ':';
-        const scope = new URL('./', document.baseURI).href;
-        await Promise.all((await caches.keys()).map((k) => (k.indexOf(prefix) === 0 ? caches.delete(k) : null)));
-        await Promise.all((await navigator.serviceWorker.getRegistrations()).map((r) => (r.scope === scope ? r.unregister() : null)));
-      })()`);
+      for (let attempt = 0; attempt < 6; attempt++) {
+        const { label } = await failedOffer(page);
+        if (label === 'Clear cached files and retry') break;
+        expect(label).toBe('Retry');
+        await page.evaluate(`(window.__cosyncingRetryClicked = true, setTimeout(() => document.getElementById('cosyncing-startup-shell-retry').click(), 0), true)`);
+      }
+      expect((await failedOffer(page)).label).toBe('Clear cached files and retry');
 
-      const after = await scopes();
-      expect(after).toContain(`${proxy.origin}/other-app/`);
-      expect(after.some((scope) => scope.endsWith('/cosy/'))).toBe(false);
-      const names = await cacheNames(page);
-      expect(names).toContain('neighbour-app-cache');
-      expect(names).toContain('cosyncing-app:/staging/cosy/:othermount0001');
-      expect(names.some((name) => name.startsWith('cosyncing-app:/cosy/:'))).toBe(false);
+      // Inspect after the real button finishes cleanup and starts its reload, before a fresh
+      // document can register a new worker or legitimately create this app's cache again.
+      const release = proxy.hold('index.html');
+      try {
+        const reloading = page.waitForRequest((request) => request.isNavigationRequest());
+        await page.evaluate(`(window.__cosyncingRetryClicked = true, setTimeout(() => document.getElementById('cosyncing-startup-shell-retry').click(), 0), true)`);
+        await reloading;
+        const after = await scopes();
+        expect(after).toContain(`${proxy.origin}/other-app/`);
+        expect(after.some((scope) => scope.endsWith('/cosy/'))).toBe(false);
+        const names = await cacheNames(neighbour);
+        expect(names).toContain('neighbour-app-cache');
+        expect(names).toContain('cosyncing-app:/staging/cosy/:othermount0001');
+        expect(names.some((name) => name.startsWith('cosyncing-app:/cosy/:'))).toBe(false);
+      } finally {
+        release();
+      }
     });
   });
 
