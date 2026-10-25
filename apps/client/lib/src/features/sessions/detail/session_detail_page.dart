@@ -91,7 +91,6 @@ import 'package:cosyncing_client/src/features/settings/controller/conversation_d
 import 'package:cosyncing_client/src/features/settings/controller/debug_views_controller.dart';
 import 'package:cosyncing_client/src/features/settings/controller/tool_display_controller.dart';
 import 'package:cosyncing_client/src/features/settings/controller/tool_visibility_controller.dart';
-import 'package:cosyncing_client/src/features/settings/view/settings_common.dart';
 import 'package:cosyncing_client/src/features/transfers/data/local_transfer_file_opener.dart';
 import 'package:cosyncing_client/src/features/transfers/view/cached_transfer_actions.dart';
 import 'package:cosyncing_client/src/features/voice/controller/read_aloud_controller.dart';
