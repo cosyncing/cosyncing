@@ -79,7 +79,7 @@ describe.each([PI_DIALECT_FACTS, OMP_DIALECT_FACTS] as PiFamilyDialect[])('$disp
     for (let index = 0; index < count; index++) {
       if (index === count - 1) await beforeFinal?.();
       response = await owner.post(path, { bridgeChunk: {
-        transferId, index, count, totalBytes: bytes.length,
+        transferId, epoch: body.epoch, index, count, totalBytes: bytes.length,
         data: bytes.subarray(index * 128 * 1024, (index + 1) * 128 * 1024).toString('base64'),
       } }, { 'x-cosyncing-bridge-transfer': '1' });
       expect(response.status).toBe(200);
@@ -141,6 +141,43 @@ describe.each([PI_DIALECT_FACTS, OMP_DIALECT_FACTS] as PiFamilyDialect[])('$disp
     expect(capped.status).toBe(413);
     expect((await owner.get(`${route}/status?id=${encodeURIComponent(enc(stored.file))}`)).body.bridged).toBe(false);
     await eventually(() => broker.output().includes(`${route}/hello rejected: HTTP 413`), { what: 'content-free rejection diagnostic' });
+  });
+
+  test('a phone joining during the first history upload receives its snapshot without reattaching', async () => {
+    const stored = storedSession('prepared-history'), id = enc(stored.file), epoch = crypto.randomUUID();
+    const metadata = { sessionFile: stored.file, cwd: stored.cwd, ...nativeVersion, epoch };
+    const prior = `${dialect.name}:run:prior`, current = `${dialect.name}:run:current`;
+    const activeRun = { t: 'run-summary', key: current, turnId: 'current', userMessageKey: 'current', status: 'running', startedAt: 3000 };
+    expect((await owner.post(`${route}/hello`, { ...metadata, prepare: true, running: true })).status).toBe(200);
+    const stream = await owner.attach(dialect.name, id);
+    try {
+      const empty = await stream.waitForKind('history');
+      expect(empty.messages.some((message: any) => message.type === 'user-message')).toBe(false);
+      const before = stream.frames.length;
+      await transfer(`${route}/hello`, { ...metadata, running: true, activeRun, history: [
+        { t: 'user', key: 'prior', text: 'old prompt', sentAt: 1000 },
+        { t: 'final', key: 'old-answer', text: 'history '.repeat(25_000) },
+        { t: 'run-summary', key: prior, turnId: 'prior', userMessageKey: 'prior', status: 'done', startedAt: 1000, completedAt: 2000 },
+        { t: 'user', key: 'current', text: 'recovered open turn', sentAt: 3000 },
+        activeRun,
+      ] }, async () => {
+        expect((await owner.get(`${route}/status?id=${id}`)).body.bridged).toBe(true);
+      });
+      const replay = await stream.waitForFrame((frame) => frame.kind === 'history' && frame.reset === true
+        && frame.messages.some((message: any) => message.type === 'user-message' && message.text === 'recovered open turn'), { after: before });
+      expect(replay.messages.some((message: any) => message.type === 'run-summary' && message.key === prior && message.status === 'done')).toBe(true);
+      // A later live outcome is the sentinel: old completion history must raise no new outcome.
+      await owner.post(`${route}/events`, { id, epoch, events: [
+        { ...activeRun, status: 'done', completedAt: 4000 }, { t: 'status', running: false },
+      ] });
+      const events = await eventually(async () => {
+        const rows = (await owner.get(`/api/attention-events?clientId=prepared-${dialect.name}&limit=200`)).body.events
+          .filter((event: any) => event.sessionId === id);
+        return rows.some((event: any) => event.kind === 'run-finished' && event.turnId === 'current') ? rows : undefined;
+      }, { what: 'the recovered live turn outcome after initial snapshot publication' });
+      expect(events.filter((event: any) => event.kind === 'run-finished').map((event: any) => event.turnId)).toEqual(['current']);
+      expect(stream.isOpen).toBe(true);
+    } finally { stream.close(); await owner.post(`${route}/bye`, { id, epoch, reason: 'quit' }); }
   });
 
   test('one terminal owns the bridge until explicit reload, and stale owners cannot displace it', async () => {
