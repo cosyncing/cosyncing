@@ -11,6 +11,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+## 0.8.3 — 2026-10-25
+
 ### Fixed
 
 - Loaded Codex custom-profile sessions keep their live model when the app
