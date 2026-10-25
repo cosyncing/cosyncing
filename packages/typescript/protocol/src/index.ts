@@ -3138,6 +3138,13 @@ export interface SessionConnection {
   /** Attached product clients, independent of the broker's persistent message subscription.
    * Optional adapter lifecycle hook; zero suspends client-only observation work. */
   setClientCount?(count: number): void;
+  /** True while the agent process this connection owns is running background work that ends
+   * with that process, such as Claude background shell commands and agents. The broker keeps a
+   * clientless owner open while it is true and disposes it normally once it turns false.
+   * Omitted means the connection never holds such work. */
+  hasLiveBackgroundWork?(): boolean;
+  /** Register the broker's listener for changes to {@link hasLiveBackgroundWork}. */
+  watchBackgroundWork?(listener: () => void): Unsubscribe;
   /** Replay prior conversation (history) as normalized messages. */
   getHistory(query?: HistoryQuery): Promise<AgentMessage[]>;
   /**

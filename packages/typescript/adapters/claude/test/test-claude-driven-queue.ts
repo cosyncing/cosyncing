@@ -39,6 +39,8 @@ type Harness = {
   drain: () => void;
   history: () => Promise<AgentMessage[]>;
   historyUsers: () => Promise<any[]>;
+  /** Answers the fake child gives control requests; unset leaves them unanswered. */
+  answerControl?: (request: any) => Record<string, unknown> | undefined;
 };
 
 /** A connection on its OWN transcript whose relaunch is stubbed to install a fake child (no spawn).
@@ -51,7 +53,11 @@ function newConn(installProc = true, preLines: any[] = []): Harness {
   const info: SessionInfo = { id: `sess-${seq}`, tool: 'claude', title: 'd', cwd: DIR, status: 'idle', attachMode: 'resume' };
   const conn = new ClaudeResumeConnection(store, path, info);
   const stdin: any[] = [];
-  const fakeProc = { stdin: { write: (s: string) => { for (const l of String(s).split('\n')) { const t = l.trim(); if (t) try { stdin.push(JSON.parse(t)); } catch {} } return true; }, end: () => {} }, kill: () => {}, killed: false };
+  const answer = (line: any): void => {
+    const response = line?.type === 'control_request' ? h.answerControl?.(line.request) : undefined;
+    if (response) queueMicrotask(() => (conn as any).handleEvent({ type: 'control_response', response: { ...response, request_id: line.request_id } }));
+  };
+  const fakeProc = { stdin: { write: (s: string) => { for (const l of String(s).split('\n')) { const t = l.trim(); if (t) try { const line = JSON.parse(t); stdin.push(line); answer(line); } catch {} } return true; }, end: () => {} }, kill: () => {}, killed: false };
   (conn as any).relaunch = (): boolean => {
     if (!installProc) return false; // spawn threw — killProc() already nulled `proc`
     (conn as any).proc = fakeProc;
@@ -60,13 +66,14 @@ function newConn(installProc = true, preLines: any[] = []): Harness {
   const msgs: AgentMessage[] = [];
   conn.subscribe((m) => msgs.push(m));
   const um = () => msgs.filter((m: any) => m.type === 'user-message') as any[];
-  return {
+  const h: Harness = {
     conn, stdin, msgs, path, um,
     append: (o: any) => writeFileSync(path, JSON.stringify(o) + '\n', { flag: 'a' }),
     drain: () => (conn as any).drainUserEcho(),
     history: () => conn.getHistory(),
     historyUsers: async () => (await conn.getHistory()).filter((m: any) => m.type === 'user-message') as any[],
   };
+  return h;
 }
 
 /** The transcript user line the CLI writes when it delivers a driven prompt. */
@@ -74,6 +81,15 @@ function userLine(uuid: string, text: string, timestamp = '2026-08-20T10:00:00.0
   return { type: 'user', uuid, timestamp, message: { role: 'user', content: [{ type: 'text', text }] } };
 }
 const nowIso = () => new Date().toISOString();
+/** Let every pending promise continuation run (no timer): what a send would write, it has written. */
+const settled = () => new Promise((resolve) => setImmediate(resolve));
+const wrote = (h: Harness, text: string) => h.stdin.some((line: any) => line.type === 'user' && JSON.stringify(line).includes(text));
+/** Run keys a broker would still hold as running after these messages. */
+const openRuns = (msgs: AgentMessage[]): string[] => {
+  const open = new Set<string>();
+  for (const m of msgs as any[]) if (m.type === 'run-summary') m.status === 'running' ? open.add(m.key) : open.delete(m.key);
+  return [...open];
+};
 
 async function main(): Promise<void> {
   // ── (a) idle send: one canonical row, one key, replayable, claimed by the echo ───────────────────
@@ -618,10 +634,13 @@ async function main(): Promise<void> {
     await h.conn.sendPrompt({ text: 'stop this run' });
     h.msgs.length = 0;
     await h.conn.runCommand('stop');
+    // Stop asks the child to interrupt; the child's aborted result settles the turn.
+    (h.conn as any).handleEvent({ type: 'result', subtype: 'error_during_execution', is_error: true, terminal_reason: 'aborted_tools' });
     (h.conn as any).finishLiveAbnormally('cancelled');
     const closed = h.msgs.filter((m: any) => m.type === 'run-summary' && m.status !== 'running') as any[];
     check('abnormal close: Stop emits exactly one cancelled summary before Idle',
-      closed.length === 1 && closed[0].status === 'cancelled'
+      h.stdin.some((line: any) => line.type === 'control_request' && line.request?.subtype === 'interrupt')
+        && closed.length === 1 && closed[0].status === 'cancelled'
         && h.msgs.findIndex((m: any) => m.type === 'run-summary') < h.msgs.findIndex((m: any) => m.type === 'status' && m.status === 'idle'),
       JSON.stringify(h.msgs));
     await h.conn.close();
@@ -654,6 +673,170 @@ async function main(): Promise<void> {
       (h.conn as any).demoted === true && closed.length === 1 && closed[0].status === 'cancelled'
         && h.msgs.findIndex((m: any) => m.type === 'run-summary') < h.msgs.findIndex((m: any) => m.type === 'status' && m.status === 'idle'),
       JSON.stringify(h.msgs));
+    await h.conn.close();
+  }
+
+  // ── a live model switch: the CLI's own `/model` record is not a second writer ───────────────────
+  // Recorded on Claude Code 2.1.310: `set_model` on a warm child writes a meta caveat, a `/model
+  // <model>` command row and its stdout row to the transcript. The broker-level fake writes no
+  // transcript, so the echo tail's verdict on those rows can only be checked here.
+  {
+    const h = newConn();
+    await h.history();
+    await h.conn.sendPrompt({ text: 'first turn' });
+    (h.conn as any).handleEvent({ type: 'result', subtype: 'success', is_error: false, terminal_reason: 'completed' });
+    const sending = h.conn.sendPrompt({ text: 'on sonnet now', model: { providerID: 'anthropic', modelID: 'sonnet' } } as any);
+    let request: any;
+    for (let i = 0; i < 200 && !request; i++) {
+      request = h.stdin.find((line: any) => line.type === 'control_request' && line.request?.subtype === 'set_model');
+      if (!request) await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    (h.conn as any).handleEvent({ type: 'control_response', response: { subtype: 'success', request_id: request?.request_id } });
+    await sending;
+    h.append(userLine('switch-1', 'first turn', nowIso()));
+    h.append({ type: 'user', uuid: 'switch-caveat', isMeta: true, timestamp: nowIso(), message: { role: 'user', content: '<local-command-caveat>The command below was run directly in Claude Code, not sent to you as a request, and its output goes straight to the user.</local-command-caveat>' } });
+    h.append({ type: 'user', uuid: 'switch-command', timestamp: nowIso(), message: { role: 'user', content: '<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args>sonnet</command-args>' } });
+    h.append({ type: 'user', uuid: 'switch-stdout', timestamp: nowIso(), message: { role: 'user', content: '<local-command-stdout>Set model to `sonnet (claude-sonnet-5-5)`</local-command-stdout>' } });
+    h.append(userLine('switch-2', 'on sonnet now', nowIso()));
+    h.drain();
+    const setModelAt = h.stdin.findIndex((line: any) => line.type === 'control_request' && line.request?.subtype === 'set_model');
+    const promptAt = h.stdin.findIndex((line: any) => line.type === 'user' && JSON.stringify(line).includes('on sonnet now'));
+    check('live model switch: the CLI\'s own /model record keeps the drive, and the switch precedes the prompt',
+      (h.conn as any).demoted === false && setModelAt >= 0 && setModelAt < promptAt,
+      JSON.stringify({ demoted: (h.conn as any).demoted, setModelAt, promptAt }));
+    await h.conn.close();
+  }
+
+  // ── Stop and the sends around it ────────────────────────────────────────────────────────────────
+  // A prompt sent while the child is still settling a Stop's interrupt waits for that turn's result,
+  // then starts a turn of its own: written earlier, it would be queued behind a turn whose result
+  // closes the run, and the child would then run it with nobody tracking it.
+  {
+    const h = newConn();
+    await h.history();
+    await h.conn.sendPrompt({ text: 'long work' });
+    await h.conn.runCommand('stop');
+    const sending = h.conn.sendPrompt({ text: 'do this instead' });
+    await settled();
+    const early = wrote(h, 'do this instead');
+    (h.conn as any).handleEvent({ type: 'result', subtype: 'error_during_execution', is_error: true, terminal_reason: 'aborted_tools' });
+    await sending;
+    const row = h.um().find((m: any) => m.text === 'do this instead');
+    const runs = h.msgs.filter((m: any) => m.type === 'run-summary').map((m: any) => m.status);
+    check('Stop: a prompt sent before the interrupted result is written after it, as its own turn',
+      !early && wrote(h, 'do this instead') && row && !row.queued && runs.join(',') === 'running,cancelled,running',
+      JSON.stringify({ early, row, runs }));
+    await h.conn.close();
+  }
+
+  // A prompt queued behind a running turn joins that turn's run, and the child's queue drop on Stop
+  // makes the broker re-read what is pending: a dropped prompt never reaches the transcript, so its
+  // row stays queued, and nothing else would release the session it holds. The child's answer names
+  // no dropped prompt (recorded on 2.1.310: ours carry no uuid).
+  {
+    const h = newConn();
+    await h.history();
+    await h.conn.sendPrompt({ text: 'busy' });
+    await h.conn.sendPrompt({ text: 'queued behind' });
+    await h.conn.runCommand('stop');
+    const interrupt = h.stdin.find((line: any) => line.type === 'control_request' && line.request?.subtype === 'interrupt');
+    (h.conn as any).handleEvent({ type: 'control_response', response: { subtype: 'success', request_id: interrupt?.request_id, response: { still_queued: [], cancelled: [] } } });
+    (h.conn as any).handleEvent({ type: 'result', subtype: 'error_during_execution', is_error: true, terminal_reason: 'aborted_tools' });
+    await settled();
+    check('Stop: a queued prompt opens no second run, and a queue drop resets pending state',
+      interrupt?.request?.cancel_queued === true && openRuns(h.msgs).length === 0
+        && h.msgs.filter((m: any) => m.type === 'run-summary').length === 2
+        && h.msgs.some((m: any) => m.type === 'history-reset'),
+      JSON.stringify(h.msgs.filter((m: any) => m.type === 'run-summary' || m.type === 'history-reset')));
+    await h.conn.close();
+  }
+
+  // Only an abort ends a stopped turn as cancelled. A turn that ended for another reason before the
+  // interrupt landed keeps its own outcome, error text included.
+  {
+    const h = newConn();
+    await h.history();
+    await h.conn.sendPrompt({ text: 'about to fail' });
+    await h.conn.runCommand('stop');
+    h.msgs.length = 0;
+    (h.conn as any).handleEvent({ type: 'result', subtype: 'error_during_execution', is_error: true, terminal_reason: 'model_error', result: 'API Error: overloaded' });
+    const closed = h.msgs.find((m: any) => m.type === 'run-summary') as any;
+    check('Stop: a result that is not an abort keeps its own outcome',
+      closed?.status === 'error' && h.msgs.some((m: any) => m.type === 'error'),
+      JSON.stringify(h.msgs));
+    await h.conn.close();
+  }
+
+  // Stop with no turn of ours running still reaches the child (it may be busy on its own), and arms
+  // no kill: there is no turn for a result to settle.
+  {
+    const h = newConn();
+    await h.history();
+    await h.conn.sendPrompt({ text: 'done already' });
+    (h.conn as any).handleEvent({ type: 'result', subtype: 'success', is_error: false, terminal_reason: 'completed' });
+    await h.conn.runCommand('stop');
+    check('Stop: with no turn running, the interrupt is sent and no kill is armed',
+      h.stdin.some((line: any) => line.request?.subtype === 'interrupt') && (h.conn as any).interruptPending === undefined);
+    await h.conn.close();
+  }
+
+  // ── live switches: ordering, ultracode, and an unanswered model switch ──────────────────────────
+  // Sends run one at a time. A send behind a live switch must not reach the child before the switch
+  // and the prompt that asked for it.
+  {
+    const h = newConn();
+    await h.history();
+    await h.conn.sendPrompt({ text: 'first turn' });
+    (h.conn as any).handleEvent({ type: 'result', subtype: 'success', is_error: false, terminal_reason: 'completed' });
+    const switching = h.conn.sendPrompt({ text: 'switched send', model: { providerID: 'anthropic', modelID: 'sonnet' } } as any);
+    const plain = h.conn.sendPrompt({ text: 'plain send' });
+    await settled();
+    const early = wrote(h, 'plain send');
+    const request = h.stdin.find((line: any) => line.type === 'control_request' && line.request?.subtype === 'set_model');
+    (h.conn as any).handleEvent({ type: 'control_response', response: { subtype: 'success', request_id: request?.request_id, response: { model: 'claude-sonnet-5-5' } } });
+    await Promise.all([switching, plain]);
+    const at = (text: string) => h.stdin.findIndex((line: any) => line.type === 'user' && JSON.stringify(line).includes(text));
+    const published = h.msgs.find((m: any) => m.type === 'metadata-update' && m.key === 'sessionInfo' && m.value?.currentModel) as any;
+    check('live switch: a later send waits behind it, and the session reports the model the child resolved',
+      !early && at('switched send') >= 0 && at('switched send') < at('plain send')
+        && published?.value?.currentModel?.modelID === 'claude-sonnet-5-5',
+      JSON.stringify({ early, switched: at('switched send'), plain: at('plain send'), published }));
+    await h.conn.close();
+  }
+
+  // A launch clamps ultracode away on a model without it; a live model switch does the same.
+  {
+    const h = newConn();
+    await h.history();
+    await h.conn.sendPrompt({ text: 'ultracode turn' });
+    Object.assign(h.conn as any, { launchModel: 'opus', launchEffort: 'ultracode' });
+    (h.conn as any).handleEvent({ type: 'result', subtype: 'success', is_error: false, terminal_reason: 'completed' });
+    h.answerControl = () => ({ subtype: 'success' });
+    await h.conn.sendPrompt({ text: 'on haiku', model: { providerID: 'anthropic', modelID: 'haiku' } } as any);
+    const settings = h.stdin.filter((line: any) => line.request?.subtype === 'apply_flag_settings').map((line: any) => line.request.settings);
+    check('live switch: moving to a model without ultracode turns ultracode off',
+      JSON.stringify(settings) === JSON.stringify([{ ultracode: false }]), JSON.stringify(settings));
+    await h.conn.close();
+  }
+
+  // A child that exits before answering `set_model` may still have written its `/model` row: the
+  // relaunch that applies the switch must not read that row as a second writer.
+  {
+    const h = newConn();
+    await h.history();
+    await h.conn.sendPrompt({ text: 'first turn' });
+    (h.conn as any).handleEvent({ type: 'result', subtype: 'success', is_error: false, terminal_reason: 'completed' });
+    const sending = h.conn.sendPrompt({ text: 'after a lost switch', model: { providerID: 'anthropic', modelID: 'sonnet' } } as any);
+    await settled();
+    (h.conn as any).handleChildExit((h.conn as any).proc);
+    await sending;
+    h.append(userLine('lost-1', 'first turn', nowIso()));
+    h.append({ type: 'user', uuid: 'lost-command', timestamp: nowIso(), message: { role: 'user', content: '<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args>sonnet</command-args>' } });
+    h.append(userLine('lost-2', 'after a lost switch', nowIso()));
+    h.drain();
+    check('live switch: an unanswered model switch keeps its /model row accounted for',
+      (h.conn as any).demoted === false && wrote(h, 'after a lost switch'),
+      JSON.stringify({ demoted: (h.conn as any).demoted }));
     await h.conn.close();
   }
 
