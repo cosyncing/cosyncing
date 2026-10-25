@@ -16,9 +16,10 @@ if test "$probe_status" = 78; then
 fi
 if test "$probe_status" = 79; then
   # The hosted image has Chrome's libraries but lacks CJK fonts. Install only
-  # the diagnosed font dependencies, retaining all supported script coverage.
+  # the small baseline fonts Playwright already uses for this image; the
+  # broad Noto core/CJK bundles add about 75 MB on a clean hosted runner.
   sudo apt-get update
-  sudo apt-get install -y --no-install-recommends fontconfig fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji
+  sudo apt-get install -y --no-install-recommends fontconfig fonts-freefont-ttf fonts-wqy-zenhei fonts-noto-color-emoji
   bun run scripts/ci/probe-browser.ts
 else
   exit "$probe_status"

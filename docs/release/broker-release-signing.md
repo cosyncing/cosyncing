@@ -55,8 +55,9 @@ report and reuse receipt, including flaky-task diagnostics, for 30 days.
 Staging packages last 30 days. The protected signing job acquires a fresh pinned
 browser, with no shared Actions browser cache restored into that job.
 The setup probe requires Linux font coverage as well as browser rendering;
-missing fonts install the required Noto/fontconfig packages without restoring
-the shared browser cache. Missing libraries use Playwright dependency setup.
+missing fonts install fontconfig plus Playwright's baseline FreeFont,
+WenQuanYi and emoji packages without restoring the shared browser cache. Missing
+libraries use Playwright dependency setup.
 
 A manual branch dispatch is a no-publish rehearsal. After the client rehearsal
 passes at the same commit, run `gh workflow run broker-release.yml --repo

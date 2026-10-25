@@ -350,7 +350,7 @@ Dir.mktmpdir('cosyncing-browser-bootstrap-') do |fixture|
     record("#{scenario} browser bootstrap installs dependencies only for missing libraries",
       calls.count { |call| call.include?('install-deps') } == (expected_dependency_setup ? 1 : 0), calls.inspect)
     record("#{scenario} browser bootstrap installs fonts only for missing coverage",
-      calls.count { |call| call.start_with?('apt-get install ') && call.include?('fonts-noto-cjk') } == (expected_font_setup ? 1 : 0), calls.inspect)
+      calls.count { |call| call.start_with?('apt-get install ') && call.include?('fonts-wqy-zenhei') } == (expected_font_setup ? 1 : 0), calls.inspect)
     record("#{scenario} browser bootstrap does not retry other rendering failures",
       calls.count { |call| call.start_with?('run ') } == expected_probes, calls.inspect)
   end
