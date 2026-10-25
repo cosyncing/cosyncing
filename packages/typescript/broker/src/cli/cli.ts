@@ -695,6 +695,8 @@ async function defaultRunUpgrade(options: {
       options.stdout.write(`${postUpgrade.upgradeProgressText(event)}\n`);
     } }),
   });
+  try { prepared?.recordOutcome(result); }
+  catch { /* Preserve the installer result; the broker deadline reconciles an unreadable job. */ }
   writeCommandResult(result, options.json, options.stdout, options.stderr);
   if (!options.json) {
     for (const line of postUpgrade.renderPostUpgradeChecks(result, cliPaint(options.color))) {

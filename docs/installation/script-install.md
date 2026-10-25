@@ -412,6 +412,15 @@ Re-run the installer for the new release, then re-run `setup` so cosyncing copie
 into its managed service and reconciles the installation. An install placed this way is owned by
 cosyncing rather than by a package manager, so npm's update path does not apply to it.
 
+Installer-owned Windows servers registered as a per-user Scheduled Task can
+also apply server updates from Settings → Updates. The desktop app stays open
+while the selected server updates. A paired device needs that server's update
+permission.
+
+An older server that reports **Update this server manually** needs one terminal
+`cosy update --components broker` to a release containing Windows in-app update
+support. Reconnect and check Updates again after that upgrade.
+
 `cosyncing upgrade` is the other way, on Windows as everywhere else. It downloads the next signed
 release, verifies it, switches the application and health-checks the result, restoring the previous
 build if that check fails. When the release needs a newer Bun, it installs that runtime and moves the

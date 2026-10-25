@@ -9,11 +9,12 @@ import {
   type WindowsTaskSchedulerSnapshot,
 } from './windows-task-scheduler.ts';
 
-const POWERSHELL_TIMEOUT_MS = 30_000;
+export const WINDOWS_TASK_SCHEDULER_TIMEOUT_MS = 30_000;
 const POWERSHELL_MAX_BUFFER = 512 * 1024;
 const INVALID_TEXT = /[\0\r\n]/;
 
 export type WindowsTaskSchedulerOperation =
+  | 'cleanup-update-tasks'
   | 'current-user'
   | 'inspect'
   | 'reconcile'
@@ -47,6 +48,34 @@ export type WindowsTaskSchedulerSpawn = (
   }>,
 ) => WindowsTaskSchedulerSpawnResult;
 
+/** Shared by the handoff and uninstall; never stop a task to make it removable. */
+export const WINDOWS_UPDATE_TASK_CLEANUP_POWERSHELL = String.raw`
+function Remove-StaleUpdateTasks($scheduler, [string] $prefix, [string] $sid) {
+  $folder = $scheduler.GetFolder('\')
+  foreach ($listed in @($folder.GetTasks(1))) {
+    if (-not $listed.Name.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { continue }
+    # Re-read just before deletion: a task may have started since enumeration.
+    try { $task = $folder.GetTask($listed.Name) } catch {
+      if ($_.Exception.HResult -eq -2147024894) { continue }
+      throw
+    }
+    if ([string] $task.Definition.RegistrationInfo.Description -ne 'cosyncing:update-runner:v1') { continue }
+    $principal = [string] $task.Definition.Principal.UserId
+    if (-not $principal.StartsWith('S-')) {
+      try { $principal = (New-Object Security.Principal.NTAccount($principal)).Translate([Security.Principal.SecurityIdentifier]).Value }
+      catch { continue }
+    }
+    if ($principal -ne $sid -or [int] $task.State -in @(2, 4) -or $task.GetInstances(0).Count -ne 0) { continue }
+    $name = [string] $task.Name
+    try { $folder.DeleteTask($name, 0) } catch {
+      if ($_.Exception.HResult -eq -2147024894) { continue }
+      throw
+    }
+    $name
+  }
+}
+`;
+
 export const WINDOWS_TASK_SCHEDULER_POWERSHELL_SOURCE = String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -66,6 +95,12 @@ $scheduler.Connect()
 $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 if ($operation -eq 'current-user') {
   [ordered]@{ currentUserSid = $currentSid } | ConvertTo-Json -Compress
+  exit 0
+}
+${WINDOWS_UPDATE_TASK_CLEANUP_POWERSHELL}
+if ($operation -eq 'cleanup-update-tasks') {
+  $removed = @(Remove-StaleUpdateTasks $scheduler ([string] $payload.prefix) $currentSid)
+  ConvertTo-Json -InputObject $removed -Compress
   exit 0
 }
 $root = $scheduler.GetFolder('\')
@@ -398,7 +433,7 @@ export class NativeWindowsTaskSchedulerExecutor implements WindowsTaskSchedulerE
           COSYNCING_SCHEDULER_INPUT: encodedInput,
         },
         maxBuffer: POWERSHELL_MAX_BUFFER,
-        timeout: POWERSHELL_TIMEOUT_MS,
+        timeout: WINDOWS_TASK_SCHEDULER_TIMEOUT_MS,
         windowsHide: true,
       },
     );
@@ -459,6 +494,10 @@ function commonInput(identity: WindowsScheduledTaskIdentity): Record<string, unk
 
 export class WindowsTaskSchedulerPowerShellBackend {
   constructor(private readonly executor: WindowsTaskSchedulerExecutor = new NativeWindowsTaskSchedulerExecutor()) {}
+
+  cleanupUpdateTasks(): void {
+    this.executor.execute('cleanup-update-tasks', { prefix: `${WINDOWS_TASK_ROOT_PATH.slice(1)}-Update-` });
+  }
 
   currentUserSid(): string {
     const result = this.executor.execute('current-user', {});

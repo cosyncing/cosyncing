@@ -12,6 +12,6 @@ export const DESKTOP_HELPER_RESOURCE_ID = 'desktop-update-helper';
  */
 export const QUALIFIED_DESKTOP_UPDATER_HOSTS: readonly DesktopClientHost[] = [];
 
-/** The systemd handoff predates this client UI. New native launchers remain
- * unavailable in production until their isolated restart/rollback pass exists. */
-export const QUALIFIED_BROKER_UPDATE_PROVIDERS: readonly BrokerServiceProvider[] = ['systemd'];
+/** Native providers require independent handoff, restart and rollback acceptance.
+ * Windows uses the isolated signed-upgrade journey in the native Windows suite. */
+export const QUALIFIED_BROKER_UPDATE_PROVIDERS: readonly BrokerServiceProvider[] = ['systemd', 'task-scheduler'];
