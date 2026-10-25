@@ -35,6 +35,7 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   symlinkSync,
   utimesSync,
   writeFileSync,
@@ -611,6 +612,49 @@ const codexExtras: ConformanceExtra[] = [];
 
 /** Native requests that write into a thread: its settings, its name (an index row), or a turn. */
 const THREAD_WRITES = new Set(['thread/settings/update', 'thread/name/set', 'turn/start', 'turn/steer']);
+
+codexExtras.push({
+  title: 'a custom profile launch without an explicit effort keeps its selected model on attach and subsequent prompts',
+  async run(context) {
+    const fake = context.fake as CodexFake;
+    const basePath = join(fake.codexHome, 'config.toml');
+    const base = readFileSync(basePath, 'utf8');
+    const profilePath = join(fake.codexHome, 'third-party.config.toml');
+    const catalogPath = join(fake.codexHome, 'third-party-models.json');
+    const selection = { providerID: 'third-party', modelID: 'qwen-fixture', variant: 'third-party' };
+    const before = fake.configure({ faults: { resumeConfigReloadsDefaults: true } }) as unknown as FakeCodexAppServerConfig;
+    let stream: SessionStream | undefined;
+    try {
+      writeFileSync(basePath, `${base}\n[model_providers.third-party]\nname = "Third party"\nbase_url = "http://127.0.0.1:1/v1"\nwire_api = "responses"\n`);
+      writeFileSync(profilePath, `model_provider = "third-party"\nmodel = "qwen-fixture"\nmodel_catalog_json = ${JSON.stringify(catalogPath)}\n`);
+      writeFileSync(catalogPath, JSON.stringify({ models: [{ slug: selection.modelID, display_name: 'Qwen fixture' }] }));
+      const created = await context.client.post('/api/sessions/codex', {
+        directory: fake.workspace('custom-profile-create'), model: selection,
+      });
+      expect(created.status, created.text).toBe(200);
+      expect(created.body.session.currentModel).toMatchObject(selection);
+      stream = await context.client.attach('codex', created.body.session.id, { mode: 'resume' });
+      await stream.waitForKind('history');
+      expect(lastSession(stream)?.info.currentModel).toMatchObject(selection);
+      for (const text of ['First custom profile prompt', 'Keep the selected profile']) {
+        const from = stream.frames.length;
+        expect((await stream.sendAndAwait({ kind: 'prompt', text })).kind).toBe('ack');
+        await stream.waitForFrame((frame) => frame.kind === 'message'
+          && frame.message?.type === 'model-output' && frame.message.final === true, { after: from });
+      }
+      const contexts = readFileSync(fake.rolloutOf(created.body.session.id), 'utf8').trim().split('\n')
+        .map((line) => JSON.parse(line)).filter((record) => record.type === 'turn_context');
+      expect(contexts.map((record) => record.payload.model)).toEqual([selection.modelID, selection.modelID]);
+      expect(lastSession(stream)?.info.currentModel).toMatchObject(selection);
+    } finally {
+      stream?.close();
+      fake.configure({ faults: before.faults });
+      writeFileSync(basePath, base);
+      rmSync(profilePath, { force: true });
+      rmSync(catalogPath, { force: true });
+    }
+  },
+});
 
 codexExtras.push({
   title: 'a new app session applies automatic review before its first prompt despite inherited untrusted workspace defaults',

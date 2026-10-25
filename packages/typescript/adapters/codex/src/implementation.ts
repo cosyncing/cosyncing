@@ -4555,7 +4555,10 @@ class CodexResumeConnection implements SessionConnection {
         threadId: this.threadId,
         path: this.path,
         cwd: this.cwd,
-        ...(threadConfig ? { config: threadConfig } : {}),
+        // A config override rebuilds Codex's loaded thread settings from the base defaults
+        // (observed on 0.164.0), replacing a profile's live model with GPT. Loaded threads already
+        // have their provider/catalog; only a cold load needs that material injected.
+        ...(!alreadyLoaded && threadConfig ? { config: threadConfig } : {}),
         // A resume response populates thread.turns by default. That made the
         // 451 MB Computer Use session serialize and synchronously JSON.parse
         // its complete native history on the broker event loop before the

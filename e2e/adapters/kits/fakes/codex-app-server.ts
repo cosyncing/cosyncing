@@ -90,6 +90,8 @@ export interface FakeCodexAppServerConfig {
   faults?: {
     /** The daemon accepts connections but answers nothing (a wedged daemon). */
     daemonSilent?: boolean;
+    /** A config override on resume reloads the base model even for a loaded thread (Codex 0.164.0). */
+    resumeConfigReloadsDefaults?: boolean;
   };
   /** A daemon outliving its fixture exits after this long (a leak guard, never a test timer). */
   daemonLifetimeMs?: number;
@@ -653,6 +655,10 @@ function runFakeCodex(): void {
         const threadId = String(params.threadId ?? '');
         const thread = loadThread(threadId, params.path ? String(params.path) : undefined);
         if (!thread) return fail(`no rollout found for thread id ${threadId}`, -32600);
+        if (params.config && config.faults?.resumeConfigReloadsDefaults) {
+          thread.settings.model = config.models[0]!.id;
+          thread.settings.effort = config.models[0]!.defaultEffort;
+        }
         thread.subscribers.add(conn);
         record({ kind: 'writer', conn: conn.id, transport: conn.transport, threadId, cwd: thread.cwd, argv: [process.execPath, ...args] });
         const turns = turnsView(thread);

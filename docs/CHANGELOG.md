@@ -11,6 +11,11 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Fixed
+
+- Loaded Codex custom-profile sessions keep their live model when the app
+  attaches, instead of resetting to the base configuration's default model.
+
 ## 0.8.2 — 2026-10-24
 
 ### Fixed
