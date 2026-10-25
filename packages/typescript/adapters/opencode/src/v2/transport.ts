@@ -4,6 +4,7 @@ import { PROMPT_ATTACHMENT_LIMITS } from '@cosyncing/adapter-api';
 
 // A maximum-size image prompt is hydrated into a single native event.
 const MAX_SSE_FRAME_BYTES = PROMPT_ATTACHMENT_LIMITS.maxFiles * PROMPT_ATTACHMENT_LIMITS.maxInlineEncodedBytes + 4 * 1024 * 1024;
+export const MAX_MESSAGE_RESPONSE_BYTES = 128 * 1024 * 1024;
 
 export class V2Error extends Error {
   constructor(readonly reason: V2Failure, readonly ambiguous = false) {
@@ -90,7 +91,7 @@ export class V2Transport {
     return value;
   }
 
-  async *events(signal: AbortSignal, onOpen: () => void, idleMs: number): AsyncGenerator<V2Event> {
+  async *events(signal: AbortSignal, onOpen: () => void, idleMs: number, onGap: () => void): AsyncGenerator<V2Event> {
     const abort = new AbortController();
     const combined = AbortSignal.any([signal, abort.signal]);
     let timer: ReturnType<typeof setTimeout>;
@@ -107,26 +108,47 @@ export class V2Transport {
       if (!response.body || !response.headers.get('content-type')?.includes('text/event-stream')) throw new V2Error('invalid-response');
       reader = response.body.getReader();
       onOpen();
-      const decoder = new TextDecoder();
-      let buffer = '';
+      let parts: Uint8Array[] = [];
+      let size = 0;
+      let dropping = false;
+      let tail = Buffer.alloc(0);
+      const append = (part: Uint8Array) => {
+        if (dropping) return;
+        size += part.byteLength;
+        if (size > MAX_SSE_FRAME_BYTES) {
+          parts = []; size = 0; dropping = true;
+        } else if (part.byteLength) parts.push(part);
+      };
       for (;;) {
         const chunk = await reader.read();
         if (chunk.done) break;
         arm();
-        buffer += decoder.decode(chunk.value, { stream: true });
-        buffer = buffer.replace(/\r\n/g, '\n');
-        let end: number;
-        while ((end = buffer.indexOf('\n\n')) !== -1) {
-          const frame = buffer.slice(0, end);
-          buffer = buffer.slice(end + 2);
-          if (Buffer.byteLength(frame) > MAX_SSE_FRAME_BYTES) throw new V2Error('invalid-response');
+        const bytes = tail.length ? Buffer.concat([tail, chunk.value]) : Buffer.from(chunk.value.buffer, chunk.value.byteOffset, chunk.value.byteLength);
+        let offset = 0;
+        while (offset < bytes.length) {
+          const lf = bytes.indexOf('\n\n', offset);
+          const crlf = bytes.indexOf('\n\r\n', offset);
+          const end = lf < 0 ? crlf : crlf < 0 ? lf : Math.min(lf, crlf);
+          if (end < 0) {
+            const keep = Math.max(offset, bytes.length - 3);
+            append(bytes.subarray(offset, keep));
+            // Copy the delimiter tail: a view could retain an oversized chunk.
+            tail = Buffer.from(bytes.subarray(keep));
+            break;
+          }
+          append(bytes.subarray(offset, end));
+          offset = end + (bytes[end + 1] === 13 ? 3 : 2);
+          tail = Buffer.alloc(0);
+          const skipped = dropping;
+          const frame = skipped ? '' : Buffer.concat(parts, size).toString('utf8').replace(/\r\n/g, '\n');
+          parts = []; size = 0; dropping = false;
+          if (skipped) { onGap(); continue; }
           const data = frame.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trimStart()).join('\n');
           if (!data) continue;
           let event: any;
           try { event = JSON.parse(data); } catch { throw new V2Error('invalid-response'); }
           if (typeof event?.type === 'string' && event.data && typeof event.data === 'object' && !Array.isArray(event.data)) yield event;
         }
-        if (buffer.length > MAX_SSE_FRAME_BYTES) throw new V2Error('invalid-response');
       }
     } finally {
       clearTimeout(timer!);

@@ -5,7 +5,7 @@ import type { BindingResolver, V2Binding } from '../binding.ts';
 import { attachedV2TuiSessions, v2TuiPresenceSupported, TUI_PRESENCE_WATCH_MS } from '../tui-presence.ts';
 import { OpenCodeV2Connection } from './connection.ts';
 import { arrayData, compactAttachments, formCard, isSession, modelsFrom, nativeId, newNativeId, object, permissionCard, sessionInfo, type Native } from './mapping.ts';
-import { V2Error, V2ResponseTooLargeError, V2Transport, type V2Event } from './transport.ts';
+import { MAX_MESSAGE_RESPONSE_BYTES, V2Error, V2ResponseTooLargeError, V2Transport, type V2Event } from './transport.ts';
 
 export interface LegacySession { id: string; title?: string; directory?: string; time?: { created?: number; updated?: number }; model?: { providerID?: string; id?: string; modelID?: string }; }
 export interface V2BackendOptions {
@@ -176,7 +176,11 @@ export class OpenCodeV2Backend {
               await Promise.all(reconnecting.map((connection) => connection.resnapshot()));
             }).catch(() => {});
           }
-        }, this.options.sseIdleMs)) {
+        }, this.options.sseIdleMs, () => {
+          if (epoch !== this.streamEpoch) return;
+          this.sequences.clear();
+          this.recoverGap();
+        })) {
           if (epoch !== this.streamEpoch) return;
           this.event(event);
         }
@@ -202,6 +206,11 @@ export class OpenCodeV2Backend {
     }
   }
 
+  private recoverGap(): void {
+    for (const connection of this.connections) connection.onGap(false);
+    void this.reconcile().then(() => Promise.all([...this.connections].map((connection) => connection.resnapshot()))).catch(() => {});
+  }
+
   private event(event: V2Event): void {
     const data = event.data;
     const id = data.sessionID ?? data.form?.sessionID ?? data.session?.id;
@@ -210,8 +219,7 @@ export class OpenCodeV2Backend {
       if (before !== undefined && event.durable.seq <= before) return;
       this.sequences.set(event.durable.aggregateID, event.durable.seq);
       if (before !== undefined && event.durable.seq !== before + 1) {
-        for (const connection of this.connections) connection.onGap(false);
-        void this.reconcile().then(() => Promise.all([...this.connections].map((connection) => connection.resnapshot()))).catch(() => {});
+        this.recoverGap();
       }
     }
     if (nativeId(id, 'ses')) {
@@ -361,18 +369,22 @@ export class OpenCodeV2Backend {
     const cursors = new Set<string>();
     let cursor: string | undefined;
     let limit = 100;
+    let largeSingleMessage = false;
     const deadline = Date.now() + 15_000;
     let bytes = 0;
     for (let page = 0; page < 500 && Date.now() < deadline;) {
       let value: any;
       try {
-        value = await this.transport!.json(`/api/session/${encodeURIComponent(id)}/message?limit=${limit}` + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '&order=desc'), { signal });
+        value = await this.transport!.json(`/api/session/${encodeURIComponent(id)}/message?limit=${limit}` + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '&order=desc'), { signal, ...(largeSingleMessage ? { maxBytes: MAX_MESSAGE_RESPONSE_BYTES } : {}) });
       } catch (error) {
-        if (!(error instanceof V2ResponseTooLargeError) || limit === 1) throw error;
-        limit = Math.max(1, Math.floor(limit / 2));
+        if (!(error instanceof V2ResponseTooLargeError) || largeSingleMessage) throw error;
+        if (limit === 1) largeSingleMessage = true;
+        else limit = Math.max(1, Math.floor(limit / 2));
         continue;
       }
       page++;
+      limit = Math.min(100, limit * 2);
+      largeSingleMessage = false;
       const data = arrayData(value).map(compactAttachments);
       bytes += Buffer.byteLength(JSON.stringify(data));
       if (bytes > 64 * 1024 * 1024) throw new V2Error('invalid-response');

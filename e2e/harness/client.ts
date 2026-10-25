@@ -69,6 +69,8 @@ export interface Response<T = any> {
 export type Frame = { kind: string; [key: string]: any };
 
 export interface AttachOptions {
+  /** An intentional refusal neither diagnoses nor consumes the failure-only guard. */
+  expectRefusal?: boolean;
   mode?: string;
   reason?: string;
   readOnly?: boolean;
@@ -203,7 +205,7 @@ export class BrokerClient {
     stream.closed.finally(() => this.#streams.delete(stream));
     try { await stream.opened; }
     catch (error) {
-      if (!upgradeFailureRecorded && error instanceof Error && error.message.includes('Expected 101')) {
+      if (!options.expectRefusal && !upgradeFailureRecorded && error instanceof Error && error.message.includes('Expected 101')) {
         upgradeFailureRecorded = true;
         try { await this.diagnoseUpgrade(path, tool, sessionId, params, query, expectedBrokerPid); }
         catch { console.error('[e2e] WebSocket upgrade diagnostic could not be recorded.'); }

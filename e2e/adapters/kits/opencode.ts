@@ -26,6 +26,7 @@ import { expect } from 'bun:test';
 import { PROMPT_ATTACHMENT_LIMITS } from '../../../packages/typescript/protocol/src/index.ts';
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { eventually, fixturePath, type FixturePaths, type SessionStream } from '../../harness/index.ts';
 import { openCodeRows } from '../../harness/fakes/opencode-server.ts';
 import { FakeOpenCodeServe } from './fakes/opencode-serve.ts';
@@ -1864,7 +1865,7 @@ opencodeV2Kit.extras!.push(
     async run(context) {
       const fake = context.fake as OpencodeV2Fake;
       const cwd = fake.workspace('files with spaces'), id = `ses_files${crypto.randomUUID().replaceAll('-', '')}`;
-      fake.serve.seed({ id, directory: cwd, title: 'native files', turns: 0 });
+      fake.serve.seed({ id, directory: cwd, title: 'native files', turns: 600 });
       const stream = await context.openDrive({ id, cwd, reason: 'takeover' });
       const otherSession = await context.drivableSession('independent image-stream observer');
       const other = await context.openDrive(otherSession);
@@ -1900,6 +1901,7 @@ opencodeV2Kit.extras!.push(
           expect(stream.frames.slice(from).filter((frame) => frame.kind === 'message' && frame.message.type === 'user-message' && frame.message.key === echo.message.key && !frame.message.queued)).toHaveLength(1);
           await stream.waitForFrame((frame) => frame.kind === 'message' && frame.message.type === 'run-summary' && frame.message.status === 'done', { after: from });
         }
+        const pagingMark = fake.ledger.mark();
         const replay = await context.client.attach('opencode', id, { readOnly: true });
         const history = (await replay.waitForKind('history')).messages;
         for (const text of ['eight inline images', 'a second image batch']) {
@@ -1907,11 +1909,36 @@ opencodeV2Kit.extras!.push(
         }
         expect(JSON.stringify(history)).not.toContain(imageData);
         replay.close();
-        expect(fake.ledger.routed('GET', new RegExp(`^/api/session/${id}/message$`), imageMark).some((entry) => Number((entry.query as any).limit) < 100)).toBe(true);
+        const pages = fake.ledger.routed('GET', new RegExp(`^/api/session/${id}/message$`), pagingMark);
+        expect(pages.some((entry) => Number((entry.query as any).limit) < 100)).toBe(true);
+        expect(pages.some((entry) => Number((entry.query as any).limit) === 100 && Number((entry.query as any).cursor) > 1000)).toBe(true);
         fake.serve.appendTurn(otherSession.id, 'image sentinel', 'the other stream stays connected');
         await other.waitForMessage((message) => message.type === 'model-output' && message.text === 'the other stream stays connected');
         expect(other.frames.slice(otherFrom).filter((frame) => frame.kind === 'history' && frame.reset === true)).toHaveLength(0);
         expect(fake.ledger.routed('GET', /^\/api\/event$/, imageMark)).toHaveLength(0);
+
+        // A terminal @-mention is hydrated by the native service, outside broker staging.
+        const nativePath = join(cwd, 'native terminal attachment.txt');
+        writeFileSync(nativePath, Buffer.alloc(13 * 1024 * 1024, 110));
+        const nativeFrom = stream.frames.length, nativeOtherFrom = other.frames.length, nativeMark = fake.ledger.mark();
+        const registration = fake.serve.registration();
+        const nativeId = `msg_terminal_${crypto.randomUUID().replaceAll('-', '')}`;
+        const response = await fetch(`${fake.serve.url}/api/session/${id}/prompt`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Basic ${Buffer.from(`opencode:${registration.password}`).toString('base64')}` },
+          body: JSON.stringify({ id: nativeId, text: 'native terminal attachment', delivery: 'steer', files: [{ uri: pathToFileURL(nativePath).href, name: 'native terminal attachment.txt' }] }),
+        });
+        expect(response.status).toBe(200);
+        await response.body?.cancel();
+        const reset = await stream.waitForFrame((frame) => frame.kind === 'history' && frame.reset === true && frame.messages.some((message: any) => message.type === 'user-message' && message.text === 'native terminal attachment'), { after: nativeFrom });
+        await stream.waitForFrame((frame) => frame.kind === 'message' && frame.message.type === 'user-message' && frame.message.key === nativeId, { after: nativeFrom });
+        expect(reset.messages.some((message: any) => message.type === 'user-message' && message.text === 'a second image batch' && message.imageCount === 8)).toBe(true);
+        const summary = await stream.waitForFrame((frame) => frame.kind === 'message' && frame.message.type === 'run-summary' && frame.message.status === 'done' && frame.message.tokens?.input === 8, { after: nativeFrom });
+        expect(summary.message.tokens).toMatchObject({ input: 8, output: 4 });
+        await other.waitForFrame((frame) => frame.kind === 'history' && frame.reset === true, { after: nativeOtherFrom });
+        fake.serve.appendTurn(otherSession.id, 'native attachment sentinel', 'the other stream survives the skipped frame');
+        await other.waitForMessage((message) => message.type === 'model-output' && message.text === 'the other stream survives the skipped frame');
+        expect(fake.ledger.routed('GET', /^\/api\/event$/, nativeMark)).toHaveLength(0);
 
         fake.serve.failNext('POST', `/api/session/${id}/prompt`, 400);
         const from = stream.frames.length, rejectedMark = fake.ledger.mark();
