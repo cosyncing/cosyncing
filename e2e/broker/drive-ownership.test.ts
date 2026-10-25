@@ -8,7 +8,9 @@
  * eviction grace is shortened through the source-mode hook, which makes "the
  * last client left" observable as that process exiting. A competing terminal
  * is staged in a fake `/proc`, and an OpenCode serve is faked for the one
- * agent whose bare attach is already a mutable owner.
+ * agent whose bare attach is already a mutable owner. A fake `claude` drives app-created Claude
+ * sessions the way Claude Code answers on stream-json, so its background tasks, interrupts and
+ * setting changes are observable as what happens to its process.
  *
  * A second broker runs Codex with terminal sync on against a daemon that
  * crashed and left its control socket behind: that socket is no daemon, so
@@ -28,6 +30,7 @@ import {
   installCodexDriveFake,
   unresponsiveDaemon,
 } from '../harness/fakes/codex-drive.ts';
+import { type ClaudeLaunch, type FakeClaudeCli, installFakeClaudeCli, promptTexts } from '../harness/fakes/claude-cli.ts';
 import { type FakeCommand, installFakeCommand } from '../harness/fakes/command.ts';
 import { type FakeOpenCodeServer, openCodeRows, startFakeOpenCode } from '../harness/fakes/opencode-server.ts';
 
@@ -69,6 +72,37 @@ describe('Drive ownership across clients, evictions and restarts', () => {
   let serve: FakeOpenCodeServer;
   let client: BrokerClient;
   let worktree: string;
+  let claude: FakeClaudeCli;
+  let claudeWorkspace: string;
+
+  async function createClaude(title: string): Promise<any> {
+    const created = await client.post('/api/sessions/claude', { directory: claudeWorkspace, title });
+    expect(created.status, created.text).toBe(200);
+    return created.body.session;
+  }
+
+  /** The native session a launch drives: `--session-id` on a first launch, `--resume` after. */
+  const nativeSession = (launch: ClaudeLaunch): string | undefined =>
+    claude.option(launch, '--session-id') ?? claude.option(launch, '--resume');
+
+  /** Every process the broker started for the Claude session that `launch` drives. */
+  const claudeLaunches = (launch: ClaudeLaunch): ClaudeLaunch[] =>
+    claude.launches().filter((candidate) => nativeSession(candidate) === nativeSession(launch));
+
+  /** The process that received a prompt containing `marker`. */
+  const claudeLaunchFor = (marker: string): Promise<ClaudeLaunch> =>
+    eventually(() => claude.launches().find((launch) => promptTexts(launch).some((text) => text.includes(marker))), {
+      what: `the Claude process given "${marker}"`,
+    });
+
+  /** The latest ledger view of a launch (its stdin grows as the broker writes). */
+  const reread = (launch: ClaudeLaunch): ClaudeLaunch => claude.launches().find((candidate) => candidate.pid === launch.pid)!;
+
+  const controlRequests = (launch: ClaudeLaunch): any[] =>
+    reread(launch).stdin.filter((line) => line?.type === 'control_request').map((line) => line.request);
+
+  const runSummaries = (stream: SessionStream, status: string): any[] =>
+    stream.messages().filter((message) => message.type === 'run-summary' && message.status === status);
 
   beforeAll(async () => {
     worktree = mkdtempSync(join(tmpdir(), 'cosyncing-e2e-drive-opencode-'));
@@ -79,11 +113,16 @@ describe('Drive ownership across clients, evictions and restarts', () => {
       setup: (paths) => {
         codex = installCodexDriveFake(paths);
         opencode = installFakeCommand(paths.bin, 'opencode', "if (argv[0] === '--version') console.log('1.17.19');");
+        claude = installFakeClaudeCli(paths.bin);
+        claudeWorkspace = join(paths.home, 'projects', 'claude-drive');
+        mkdirSync(claudeWorkspace, { recursive: true });
       },
       env: (paths) => ({
         ...CodexDriveFake.environment(paths),
         OPENCODE_URL: serve.url,
+        COSYNCING_CLAUDE_BIN: claude.path,
         COSYNCING_TEST_HUB_EVICT_GRACE_MS: '300',
+        COSYNCING_TEST_CLAUDE_INTERRUPT_GRACE_MS: '1500',
       }),
     });
     client = broker.client();
@@ -350,6 +389,152 @@ describe('Drive ownership across clients, evictions and restarts', () => {
     } finally {
       rmSync(socket, { force: true });
     }
+  });
+
+  test('a Claude process running background work outlives its last client, and is evicted when the work ends', async () => {
+    const working = await createClaude('background work');
+    const idle = await createClaude('no background work');
+    const workingStream = await client.attach('claude', working.id, { mode: 'resume' });
+    const idleStream = await client.attach('claude', idle.id, { mode: 'resume' });
+    await driving(workingStream);
+    await driving(idleStream);
+    expect((await prompt(workingStream, 'watch for the eviction scenario [fake:bg]')).kind).toBe('ack');
+    expect((await prompt(idleStream, 'answer once [fake:turn]')).kind).toBe('ack');
+    const watcher = await claudeLaunchFor('watch for the eviction scenario');
+    const answered = await claudeLaunchFor('answer once');
+    await workingStream.waitForMessage((message) => message.type === 'run-summary' && message.status === 'done');
+    await idleStream.waitForMessage((message) => message.type === 'run-summary' && message.status === 'done');
+
+    // Both turns are over and both sockets leave, the working one first. The idle owner being
+    // evicted proves the grace has passed for both; the process with background work is still there.
+    workingStream.close();
+    await workingStream.closed;
+    idleStream.close();
+    await eventually(() => !claude.alive(answered), { what: 'the idle Claude owner to be evicted' });
+    expect(claude.alive(watcher)).toBe(true);
+
+    // The user comes back to the same process and keeps going.
+    const back = await client.attach('claude', working.id, { mode: 'resume' });
+    await driving(back);
+    expect((await prompt(back, 'and then [fake:turn]')).kind).toBe('ack');
+    await eventually(() => promptTexts(reread(watcher)).some((text) => text.includes('and then')), {
+      what: 'the returning prompt to reach the same process',
+    });
+    expect(claudeLaunches(watcher)).toHaveLength(1);
+    back.close();
+    await back.closed;
+
+    // The background work ends while nobody is attached: the owner is evicted as usual.
+    claude.endBackgroundWork(watcher);
+    await eventually(() => !claude.alive(watcher), { what: 'the owner to be evicted once its background work ended' });
+  });
+
+  test('Stop interrupts a Claude turn and keeps its process; a process that ignores the interrupt is ended', async () => {
+    const session = await createClaude('stop');
+    const stream = await client.attach('claude', session.id, { mode: 'resume' });
+    await driving(stream);
+    expect((await prompt(stream, 'watch for the stop scenario [fake:bg]')).kind).toBe('ack');
+    const child = await claudeLaunchFor('watch for the stop scenario');
+    await stream.waitForMessage((message) => message.type === 'run-summary' && message.status === 'done');
+
+    expect((await prompt(stream, 'long work [fake:hold]')).kind).toBe('ack');
+    expect((await stream.sendAndAwait({ kind: 'command', name: 'stop' })).kind).toBe('ack');
+    await eventually(() => runSummaries(stream, 'cancelled').length === 1, { what: 'the interrupted turn to end as cancelled' });
+    expect(controlRequests(child)).toContainEqual({ subtype: 'interrupt', cancel_queued: true });
+    expect(claude.alive(child)).toBe(true);
+    expect(stream.messages().filter((message) => message.type === 'error')).toEqual([]);
+
+    // A permission ask open when Stop lands is withdrawn by the agent, and its card goes with it.
+    expect((await prompt(stream, 'needs approval [fake:permission]')).kind).toBe('ack');
+    const ask = await stream.waitForMessage((message) => message.type === 'permission-request');
+    expect((await stream.sendAndAwait({ kind: 'command', name: 'stop' })).kind).toBe('ack');
+    await stream.waitForMessage((message) => message.type === 'permission-resolved' && message.requestId === ask.requestId);
+    await eventually(() => runSummaries(stream, 'cancelled').length === 2, { what: 'the blocked turn to end as cancelled' });
+    expect(claude.alive(child)).toBe(true);
+    expect(claudeLaunches(child)).toHaveLength(1);
+
+    // An agent that never answers the interrupt is ended after the grace, as Stop always did.
+    expect((await prompt(stream, 'stuck [fake:deaf]')).kind).toBe('ack');
+    expect((await stream.sendAndAwait({ kind: 'command', name: 'stop' })).kind).toBe('ack');
+    await eventually(() => !claude.alive(child), { what: 'the unresponsive Claude process to be ended' });
+    await eventually(() => runSummaries(stream, 'cancelled').length === 3, { what: 'the stuck turn to end as cancelled' });
+    expect(stream.messages().filter((message) => message.type === 'error')).toEqual([]);
+    stream.close();
+  });
+
+  test('Stop drops a prompt queued behind the Claude turn, and nothing then holds the process once its client leaves', async () => {
+    const session = await createClaude('stop with a queued prompt');
+    const stream = await client.attach('claude', session.id, { mode: 'resume' });
+    await driving(stream);
+    expect((await prompt(stream, 'busy for the queue scenario [fake:hold]')).kind).toBe('ack');
+    const child = await claudeLaunchFor('busy for the queue scenario');
+    expect((await prompt(stream, 'queued behind it [fake:turn]')).kind).toBe('ack');
+    await stream.waitForMessage((message) => message.type === 'user-message' && message.queued === true && message.text.includes('queued behind it'));
+    await eventually(() => promptTexts(reread(child)).some((text) => text.includes('queued behind it')), {
+      what: 'the queued prompt to reach the agent',
+    });
+
+    expect((await stream.sendAndAwait({ kind: 'command', name: 'stop' })).kind).toBe('ack');
+    await eventually(() => runSummaries(stream, 'cancelled').length === 1, { what: 'the interrupted turn to end as cancelled' });
+    expect(runSummaries(stream, 'done')).toEqual([]);
+    stream.close();
+    await stream.closed;
+    await eventually(() => !claude.alive(child), { what: 'the owner to be evicted after Stop dropped its queued prompt' });
+  });
+
+  test('a model, permission-mode or effort change reaches the running Claude process instead of restarting it', async () => {
+    const session = await createClaude('switch');
+    const stream = await client.attach('claude', session.id, { mode: 'resume' });
+    await driving(stream);
+    expect((await prompt(stream, 'watch for the switch scenario [fake:bg]')).kind).toBe('ack');
+    const child = await claudeLaunchFor('watch for the switch scenario');
+    await stream.waitForMessage((message) => message.type === 'run-summary' && message.status === 'done');
+
+    const switched = await stream.sendAndAwait({
+      kind: 'prompt',
+      text: 'now on sonnet [fake:turn]',
+      model: { providerID: 'anthropic', modelID: 'sonnet', reasoningEffort: 'low' },
+      permissionMode: 'acceptEdits',
+    });
+    expect(switched.kind).toBe('ack');
+    await eventually(() => promptTexts(reread(child)).some((text) => text.includes('now on sonnet')), {
+      what: 'the switched prompt to reach the same process',
+    });
+    expect(controlRequests(child)).toEqual(expect.arrayContaining([
+      { subtype: 'set_model', model: 'sonnet' },
+      { subtype: 'set_permission_mode', mode: 'acceptEdits' },
+      { subtype: 'apply_flag_settings', settings: { effortLevel: 'low' } },
+    ]));
+    // Each change is applied before the prompt that asked for it.
+    const lines = reread(child).stdin;
+    const promptAt = lines.findIndex((line) => line?.type === 'user' && promptTexts({ ...child, stdin: [line] }).some((text) => text.includes('now on sonnet')));
+    expect(lines.findIndex((line) => line?.request?.subtype === 'set_model')).toBeLessThan(promptAt);
+    expect(claudeLaunches(child)).toHaveLength(1);
+    // Every client sees the session on the model, mode and effort the agent now runs.
+    await stream.waitForFrame((frame: any) => frame.kind === 'session'
+      && frame.info?.currentMode === 'acceptEdits'
+      && frame.info?.currentModel?.modelID === 'claude-sonnet'
+      && frame.info?.currentModel?.reasoningEffort === 'low');
+
+    // A change the agent refuses would need a restart; while background work runs it is refused.
+    expect((await prompt(stream, 'refuse changes from now [fake:refuse] [fake:turn]')).kind).toBe('ack');
+    const refused = await stream.sendAndAwait({ kind: 'prompt', text: 'back to opus', model: { providerID: 'anthropic', modelID: 'opus' } });
+    expect(refused.kind).toBe('nack');
+    expect(String(refused.message)).toContain('background tasks');
+    expect(claude.alive(child)).toBe(true);
+    expect(promptTexts(reread(child)).some((text) => text.includes('back to opus'))).toBe(false);
+
+    // With no background work left, the refused change restarts the agent with it, as before.
+    claude.endBackgroundWork(child);
+    await eventually(async () => {
+      const restarted = await stream.sendAndAwait({ kind: 'prompt', text: 'opus after the work [fake:turn]', model: { providerID: 'anthropic', modelID: 'opus' } });
+      return restarted.kind === 'ack';
+    }, { what: 'the change to be accepted by a restart once background work ended' });
+    const relaunched = await claudeLaunchFor('opus after the work');
+    expect(relaunched.pid).not.toBe(child.pid);
+    expect(claude.option(relaunched, '--model')).toBe('opus');
+    await eventually(() => !claude.alive(child), { what: 'the replaced process to exit' });
+    stream.close();
   });
 
   // Last: it restarts the broker.

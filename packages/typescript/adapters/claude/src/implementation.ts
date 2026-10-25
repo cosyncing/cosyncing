@@ -218,6 +218,11 @@ export const CLAUDE_DIVERGENCE_MESSAGE =
 export const CLAUDE_DEMOTED_REFUSAL =
   'this Claude session is being written by another program, so cosyncing is observing it only';
 
+/** Refusal when a model, mode or effort change needs a restart while background tasks run. */
+export const CLAUDE_LIVE_SWITCH_REFUSAL =
+  'Claude could not apply this change without restarting, and a restart would end its running '
+  + 'background tasks, so the prompt was not sent.';
+
 /** Post-turn window in which trailing transcript writes are still attributed to OUR just-finished turn
  *  rather than flagged foreign (issue 15a). The child flushes its final assistant rows within
  *  milliseconds of the stdout result; the echo tail polls every 1 s, so one poll interval of grace
@@ -235,6 +240,17 @@ export const CLAUDE_MOD_TURN_END_GRACE_MS = 1_500;
 /** Bound on the never-echoed submitted-prompt FIFO (exoneration list). Real depth is ≤2 (one in
  *  flight, one queued); the cap only bounds a pathological no-echo run. */
 export const CLAUDE_SUBMITTED_TEXTS_LIMIT = 32;
+/** How long a Drive child may take to settle an interrupted turn before Stop falls back to ending
+ *  the process. The CLI answers an interrupt in well under a second; this only catches a hung one. */
+export const CLAUDE_INTERRUPT_GRACE_MS = 10_000;
+/** Bound on one control request (model, permission mode, effort) the Drive child must answer. */
+export const CLAUDE_CONTROL_REQUEST_TIMEOUT_MS = 10_000;
+
+/** Test hook: a short interrupt grace makes the Stop fallback observable in a suite. */
+function claudeInterruptGraceMs(): number {
+  const configured = Number(process.env.COSYNCING_TEST_CLAUDE_INTERRUPT_GRACE_MS);
+  return Number.isFinite(configured) && configured > 0 ? configured : CLAUDE_INTERRUPT_GRACE_MS;
+}
 /**
  * A Claude session STORE: a `CLAUDE_CONFIG_DIR` and the launch binary that targets it. The official
  * account lives in `~/.claude`; each wrapper (`~/bin/claude-mi`, `claude-minimax`, …) redirects
@@ -967,6 +983,27 @@ export function resumeArgs(uuid: string, opts: { model?: string; mode?: string; 
   }
   if (opts.mode) args.push('--permission-mode', opts.mode);
   return args;
+}
+
+interface ClaudeEffortState { ultracode: boolean; effortLevel?: string }
+
+/** The effort a launch with `effort` gives a child running `model`, clamped as {@link resumeArgs}
+ *  clamps it: ultracode is xhigh plus the session orchestration setting, and a level the model does
+ *  not support sets nothing, as a launch passes no `--effort`. */
+function claudeEffortState(model: string | undefined, effort: string | undefined): ClaudeEffortState {
+  const target = model ?? 'opus';
+  if (effort === 'ultracode') return modelSupportsEffort(target, 'ultracode') ? { ultracode: true, effortLevel: 'xhigh' } : { ultracode: false };
+  return effort && modelSupportsEffort(target, effort) ? { ultracode: false, effortLevel: effort } : { ultracode: false };
+}
+
+/** Flag settings that move a warm child from one effort state to another, or undefined when the
+ *  move changes nothing. A model switch can move it too: ultracode ends on a model without it. */
+function claudeLiveEffortSettings(from: ClaudeEffortState, to: ClaudeEffortState): Record<string, unknown> | undefined {
+  if (to.ultracode && !from.ultracode) return { ultracode: true, effortLevel: 'xhigh' };
+  const settings: Record<string, unknown> = {};
+  if (from.ultracode && !to.ultracode) settings.ultracode = false;
+  if (to.effortLevel && to.effortLevel !== from.effortLevel) settings.effortLevel = to.effortLevel;
+  return Object.keys(settings).length ? settings : undefined;
 }
 
 /**
@@ -3278,6 +3315,22 @@ export class ClaudeResumeConnection implements SessionConnection {
   private readonly stopRequests = new Map<string, string>();
   /** Background shell commands, kept OUT of `backgroundToolUseIds` — see ParentActivityState. */
   private readonly backgroundCommands = new Map<string, ClaudeBackgroundCommand>();
+  /** How many background tasks (shell commands, agents) the CURRENT child reports running, from
+   *  its `system/background_tasks_changed` event — a full list, re-sent on every change. They end
+   *  with the child, so while any runs this connection must not be disposed for lack of clients. */
+  private childBackgroundTasks = 0;
+  private backgroundWorkReported = false;
+  private readonly backgroundWorkListeners = new Set<() => void>();
+  /** Control requests written to the child, awaiting its control_response, by request id. */
+  private readonly controlWaiters = new Map<string, (response: any) => void>();
+  private controlSeq = 0;
+  /** A Stop that asked the child to interrupt, until its `result` settles the turn or the grace
+   *  timer ends the child instead. Sends wait for it: a prompt written meanwhile starts a turn the
+   *  interrupted turn's `result` would then close. */
+  private interruptPending?: { timer: ReturnType<typeof setTimeout>; settled: Promise<void>; settle: () => void };
+  /** Sends and slash commands run one at a time. A live switch awaits the child between deciding
+   *  and writing; a send interleaved there would decide against settings about to change. */
+  private submitChain: Promise<void> = Promise.resolve();
   private initCommands?: SlashCommand[];
   /** Per-turn runtime/timestamp derivation (doc-15): history turns from the transcript (getHistory), then
    *  LIVE driven turns from stream events (message_start→running, result→done) since those carry no native ts. */
@@ -3898,7 +3951,15 @@ export class ClaudeResumeConnection implements SessionConnection {
   /** `fromCommand` = a runCommand-originated slash send. Such a send gets NO pending driven row: the CLI
    *  echoes it as a `<command-name>` wrapper that mapUser rewrites into its own uuid-keyed row, so a
    *  pending row minted here could never be claimed and would sit queued forever. */
-  private async submitTurn(input: PromptInput, fromCommand: boolean): Promise<void> {
+  private submitTurn(input: PromptInput, fromCommand: boolean): Promise<void> {
+    const turn = this.submitChain.then(() => this.submitTurnNow(input, fromCommand));
+    this.submitChain = turn.catch(() => undefined);
+    return turn;
+  }
+
+  private async submitTurnNow(input: PromptInput, fromCommand: boolean): Promise<void> {
+    // A Stop's interrupt settles first, within its grace: the child is still in the stopped turn.
+    while (this.interruptPending) await this.interruptPending.settled;
     // A demoted connection writes NOTHING (issue 15a): the session has a proven foreign writer, and any
     // further prompt from us is the two-writer hazard the demotion exists to prevent.
     if (this.demoted) {
@@ -3931,19 +3992,33 @@ export class ClaudeResumeConnection implements SessionConnection {
       if (img && typeof img.data === 'string' && img.data) content.push({ type: 'image', source: { type: 'base64', media_type: img.mimeType || 'image/png', data: img.data } });
     }
     if (!content.length) return;
-    // Relaunch ONLY for a cold start or an EXPLICIT per-turn model/mode switch — never merely because the
-    // session's configured currentModel/currentMode (seeded from the runtime `init`) differs from the
-    // value the warm child was launched with (that divergence would SIGTERM a live turn mid-conversation).
-    // On the (re)launch we reassert the configured default so a cold start uses currentModel/currentMode.
+    // Launch only for a cold start. An EXPLICIT per-turn model/mode/effort switch goes to the warm
+    // child's control channel: ending the child would end every background command and agent it runs.
+    // The session's configured currentModel/currentMode (seeded from the runtime `init`) differing from
+    // the launch value is never a switch. A cold launch reasserts the configured default.
     const explicitModel = input.model?.modelID;
     const explicitMode = input.permissionMode;
     const explicitEffort = input.model?.reasoningEffort;
-    if (
-      !this.proc ||
-      (explicitModel && explicitModel !== this.launchModel) ||
-      (explicitMode && explicitMode !== this.launchMode) ||
-      (explicitEffort && explicitEffort !== this.launchEffort)
-    ) {
+    let launch = !this.proc;
+    const change = {
+      model: explicitModel && explicitModel !== this.launchModel ? explicitModel : undefined,
+      mode: explicitMode && explicitMode !== this.launchMode ? explicitMode : undefined,
+      effort: explicitEffort && explicitEffort !== this.launchEffort ? explicitEffort : undefined,
+    };
+    if (!launch && (change.model || change.mode || change.effort)) {
+      const applied = await this.applyLiveSettings(change);
+      if (this.demoted) {
+        this.emit({ type: 'error', message: CLAUDE_DEMOTED_REFUSAL });
+        return;
+      }
+      if (!applied) {
+        // The child refused or never answered, or it exited meanwhile. A relaunch applies the change
+        // as launch arguments, but it would also end the child's background work: refuse instead.
+        if (this.hasLiveBackgroundWork()) throw new Error(CLAUDE_LIVE_SWITCH_REFUSAL);
+        launch = true;
+      }
+    }
+    if (launch || !this.proc) {
       this.relaunch(
         explicitModel ?? this.info.currentModel?.modelID,
         explicitMode ?? this.info.currentMode,
@@ -3964,8 +4039,12 @@ export class ClaudeResumeConnection implements SessionConnection {
     this.emit({ type: 'status', status: 'running' });
     // Live driven turn starts now (stream events carry no native ts → broker wall clock). A turn = this user
     // send through the next `result`; message_start fires per assistant message so it is NOT the turn boundary.
+    // A send queued behind a running turn opens no run of its own: that turn's `result` closes one run,
+    // and a second opened here left the first running for good, which kept a clientless owner alive.
     this.runtime ??= new ClaudeRuntimeTracker(this.liveUuid, 'claude-transcript');
-    this.emit(this.runtime.startLive(`live${this.connNonce}.${++this.liveTurnSeq}`, Date.now()));
+    if (!wasRunning || !this.runtime.openTurnId()) {
+      this.emit(this.runtime.startLive(`live${this.connNonce}.${++this.liveTurnSeq}`, Date.now()));
+    }
     // The child rewrites this send as a transcript user line with no id we control, so the echo
     // stays unstamped (clientMessageId unused); the client's narrow legacy reconcile converges it.
     // Record the exact text FIRST so the echo tail's foreign-write detection exonerates our own echo
@@ -4089,6 +4168,7 @@ export class ClaudeResumeConnection implements SessionConnection {
     // until the new child's result). Only the CURRENT child's exit ends the turn.
     if (this.proc !== proc) return;
     this.proc = undefined;
+    this.forgetChildState();
     // The child is gone — any pending permission/question can no longer be answered into it; clear them
     // so getPending() never replays a dead card and an answer can't be written to a closed stdin.
     if (this.pendingQuestionId) {
@@ -4120,6 +4200,190 @@ export class ClaudeResumeConnection implements SessionConnection {
     }
   }
 
+  /** Write one control request to the child and wait for its control_response. `unanswered` covers
+   *  a child that does not answer in time or exits first: it may still have acted on the request. */
+  private requestControl(request: Record<string, unknown>): Promise<{ outcome: 'accepted' | 'refused' | 'unanswered'; response?: any }> {
+    if (!this.proc) return Promise.resolve({ outcome: 'unanswered' });
+    const id = `cosyncing-${this.connNonce}-${++this.controlSeq}`;
+    return new Promise((resolve) => {
+      const settle = (response: any): void => {
+        clearTimeout(timer);
+        this.controlWaiters.delete(id);
+        if (!response) resolve({ outcome: 'unanswered' });
+        else resolve({ outcome: response.subtype === 'success' ? 'accepted' : 'refused', response: response.response });
+      };
+      const timer = setTimeout(() => settle(undefined), CLAUDE_CONTROL_REQUEST_TIMEOUT_MS);
+      this.controlWaiters.set(id, settle);
+      this.writeLine({ type: 'control_request', request_id: id, request });
+    });
+  }
+
+  /** Apply a model, permission-mode or effort change to the warm child through its control channel.
+   *  Verified on Claude Code 2.1.310: each reaches the next API request, including an effort the
+   *  child was launched with, and the child's background tasks keep running. Each accepted value is
+   *  recorded, so a later cold launch reasserts it, and published like the launch's own `init`.
+   *  Stops at the first value not accepted and returns false. */
+  private async applyLiveSettings(change: { model?: string; mode?: string; effort?: string }): Promise<boolean> {
+    const patch: Partial<SessionInfo> = {};
+    const publish = (): void => {
+      if (Object.keys(patch).length) this.emit({ type: 'metadata-update', key: 'sessionInfo', value: patch });
+    };
+    const effortBefore = claudeEffortState(this.launchModel, this.launchEffort);
+    if (change.model) {
+      // The child records the switch in the transcript as a `/model <model>` command row, which the
+      // echo tail reads as a user row. It is ours: account for it like a sent prompt, or the tail
+      // takes it for a second writer and stops driving (measured on 2.1.310). Only a refusal
+      // withdraws it; a child that did not answer may still write the row.
+      const echo = `/model ${change.model}`;
+      this.submittedTexts.push(echo);
+      while (this.submittedTexts.length > CLAUDE_SUBMITTED_TEXTS_LIMIT) this.submittedTexts.shift();
+      const { outcome, response } = await this.requestControl({ subtype: 'set_model', model: change.model });
+      if (outcome !== 'accepted') {
+        if (outcome === 'refused') this.exonerateSubmitted(echo);
+        return false;
+      }
+      this.launchModel = change.model;
+      // The child answers with the model it resolved, as its `init` reports one.
+      const model = typeof response?.model === 'string' && response.model ? response.model : change.model;
+      const effort = this.info.currentModel?.reasoningEffort;
+      seedClaudeContextModel(this.contextWindow, model);
+      this.info.model = model;
+      this.info.currentModel = {
+        providerID: this.store.isDefault ? 'anthropic' : 'wrapper',
+        modelID: model,
+        ...labelOf(model),
+        ...(effort ? { reasoningEffort: effort } : {}),
+      };
+      patch.model = model;
+      patch.currentModel = this.info.currentModel;
+    }
+    if (change.mode) {
+      if ((await this.requestControl({ subtype: 'set_permission_mode', mode: change.mode })).outcome !== 'accepted') {
+        publish();
+        return false;
+      }
+      this.launchMode = change.mode;
+      this.info.currentMode = change.mode;
+      patch.currentMode = change.mode;
+    }
+    const effort = change.effort ?? this.launchEffort;
+    const settings = claudeLiveEffortSettings(effortBefore, claudeEffortState(this.launchModel, effort));
+    if (settings && (await this.requestControl({ subtype: 'apply_flag_settings', settings })).outcome !== 'accepted') {
+      publish();
+      return false;
+    }
+    if (change.effort) {
+      this.launchEffort = change.effort;
+      if (this.info.currentModel) {
+        this.info.currentModel = { ...this.info.currentModel, reasoningEffort: change.effort };
+        patch.currentModel = this.info.currentModel;
+      }
+    }
+    publish();
+    return true;
+  }
+
+  hasLiveBackgroundWork(): boolean {
+    return this.proc !== undefined && this.childBackgroundTasks > 0;
+  }
+
+  watchBackgroundWork(listener: () => void): Unsubscribe {
+    this.backgroundWorkListeners.add(listener);
+    return () => {
+      this.backgroundWorkListeners.delete(listener);
+    };
+  }
+
+  private syncBackgroundWork(): void {
+    const live = this.hasLiveBackgroundWork();
+    if (live === this.backgroundWorkReported) return;
+    this.backgroundWorkReported = live;
+    for (const listener of [...this.backgroundWorkListeners]) {
+      try {
+        listener();
+      } catch {
+        /* a listener never breaks the stdout pump */
+      }
+    }
+  }
+
+  /** The child is gone: its background tasks, unanswered control requests and pending interrupt
+   *  went with it. */
+  private forgetChildState(): void {
+    this.childBackgroundTasks = 0;
+    this.settleInterrupt();
+    for (const settle of [...this.controlWaiters.values()]) settle(undefined);
+    this.syncBackgroundWork();
+  }
+
+  /** End a pending interrupt and release the sends waiting on it. True when one was pending. */
+  private settleInterrupt(): boolean {
+    const pending = this.interruptPending;
+    if (!pending) return false;
+    this.interruptPending = undefined;
+    clearTimeout(pending.timer);
+    pending.settle();
+    return true;
+  }
+
+  /**
+   * Stop the running turn and keep the child. Claude ends every background command and agent with
+   * its process; its own interrupt leaves them running (verified on 2.1.310). The `result` that
+   * follows settles the turn as cancelled, and `cancel_queued` drops prompts queued behind it, as
+   * ending the child did. A child that has not settled the turn within the grace is ended instead.
+   * With no turn of ours running, the interrupt still reaches whatever the child is doing.
+   */
+  private interruptTurn(): void {
+    const proc = this.proc;
+    if (!proc) {
+      this.finishLiveAbnormally('cancelled');
+      if (this.running) {
+        this.running = false;
+        this.emit({ type: 'status', status: 'idle' });
+      }
+      return;
+    }
+    if (this.interruptPending) return;
+    this.writeLine({
+      type: 'control_request',
+      request_id: `cosyncing-${this.connNonce}-${++this.controlSeq}`,
+      request: { subtype: 'interrupt', cancel_queued: true },
+    });
+    if (!this.running) return;
+    let settle!: () => void;
+    const settled = new Promise<void>((resolve) => { settle = resolve; });
+    // The child drops prompts queued behind the turn without naming them: it lists only prompts
+    // sent with a uuid, and ours carry none (2.1.310). A dropped prompt never reaches the
+    // transcript, so its row stays queued and the broker would hold the session for it. Once the
+    // turn settles, a reset makes the broker re-read what is still pending.
+    if (this.pendingDriven.some((row) => row.queued)) void settled.then(() => this.emit({ type: 'history-reset' }));
+    const timer = setTimeout(() => {
+      if (this.interruptPending?.timer !== timer) return;
+      this.settleInterrupt();
+      if (this.proc !== proc) return;
+      this.killProc();
+      this.finishLiveAbnormally('cancelled');
+      if (this.running) {
+        this.running = false;
+        this.emit({ type: 'status', status: 'idle' });
+      }
+    }, claudeInterruptGraceMs());
+    this.interruptPending = { timer, settled, settle };
+  }
+
+  /** The child withdrew a request it had asked us to answer: an interrupted turn cancels its open
+   *  permission or question gate (verified on 2.1.310). Its card must not stay answerable. */
+  private withdrawControlRequest(id: string): void {
+    if (!id) return;
+    if (this.pendingPerms.delete(id)) this.emit({ type: 'permission-resolved', requestId: id, decision: 'external' });
+    if (this.pendingQuestionControlId !== id) return;
+    if (this.pendingQuestionId) this.emit({ type: 'question-resolved', requestId: this.pendingQuestionId });
+    this.pendingQuestionId = undefined;
+    this.pendingQuestionCard = undefined;
+    this.pendingQuestionControlId = undefined;
+    this.pendingQuestionControlInput = undefined;
+  }
+
   private onStdout(b: Buffer): void {
     this.stdoutBuf += this.decoder.decode(b, { stream: true });
     let nl: number;
@@ -4144,6 +4408,13 @@ export class ClaudeResumeConnection implements SessionConnection {
       case 'system':
         if (o.subtype === 'init') {
           this.ingestInit(o);
+          return;
+        }
+        if (o.subtype === 'background_tasks_changed') {
+          if (Array.isArray(o.tasks)) {
+            this.childBackgroundTasks = o.tasks.length;
+            this.syncBackgroundWork();
+          }
           return;
         }
         for (const m of mapLine(o, this.callMeta, this.seenTokenIds, undefined, undefined, this.contextWindow, undefined, this.peerNames)) this.emit(m); // compact_boundary etc.
@@ -4181,6 +4452,10 @@ export class ClaudeResumeConnection implements SessionConnection {
         return;
       case 'result': {
         this.drainUserEcho();
+        // The turn a Stop interrupted ends here. A turn that completed before the interrupt reached
+        // the child keeps its own outcome.
+        const aborted = o.terminal_reason === undefined || String(o.terminal_reason).startsWith('aborted');
+        const interrupted = this.settleInterrupt() && aborted;
         // An owned result is also turn authority when the API failed before
         // message_start. A pending peer wake must still get its error footer.
         if (!this.running && this.pendingPeer) this.beginAutonomousTurn();
@@ -4212,7 +4487,7 @@ export class ClaudeResumeConnection implements SessionConnection {
             if (context) this.emit(context);
           }
         }
-        if (o.is_error && typeof o.result === 'string' && o.result) this.emit({ type: 'error', message: oneLine(o.result) });
+        if (o.is_error && !interrupted && typeof o.result === 'string' && o.result) this.emit({ type: 'error', message: oneLine(o.result) });
         // Turn over → the NEXT assistant event without a message_start is a local-command reply, not a
         // late per-block re-delivery of this turn's streamed message (see emitFinalAssistant).
         this.streamedThisMessage = false;
@@ -4223,7 +4498,7 @@ export class ClaudeResumeConnection implements SessionConnection {
           const tk = u && typeof u === 'object'
             ? { input: numOrUndef(u.input_tokens), output: numOrUndef(u.output_tokens), cacheRead: numOrUndef(u.cache_read_input_tokens), cacheWrite: numOrUndef(u.cache_creation_input_tokens), cost: typeof o.total_cost_usd === 'number' ? o.total_cost_usd : undefined }
             : undefined;
-          for (const m of this.runtime.finishLive(o.is_error ? 'error' : 'done', Date.now(), tk)) this.emit(m);
+          for (const m of this.runtime.finishLive(interrupted ? 'cancelled' : o.is_error ? 'error' : 'done', Date.now(), tk)) this.emit(m);
         }
         // Turn over → any still-open question died with it (interrupt while blocked on the gate): resolve
         // the card so getPending never replays it, and drop the stale control id (its gate no longer exists).
@@ -4292,6 +4567,14 @@ export class ClaudeResumeConnection implements SessionConnection {
         }
         return;
       }
+      case 'control_response': {
+        const response = o.response ?? {};
+        this.controlWaiters.get(String(response.request_id ?? ''))?.(response);
+        return;
+      }
+      case 'control_cancel_request':
+        this.withdrawControlRequest(String(o.request_id ?? ''));
+        return;
       default:
         return;
     }
@@ -4591,12 +4874,7 @@ export class ClaudeResumeConnection implements SessionConnection {
 
   async runCommand(name: string, args?: string): Promise<CommandResult | void> {
     if (name === 'stop' || name === 'abort') {
-      this.killProc();
-      this.finishLiveAbnormally('cancelled');
-      if (this.running) {
-        this.running = false;
-        this.emit({ type: 'status', status: 'idle' });
-      }
+      this.interruptTurn();
       return { notice: 'Interrupted the current turn.' };
     }
     // Any other slash command → send it as a turn-starting user message (Claude handles it in-stream).
@@ -4624,6 +4902,7 @@ export class ClaudeResumeConnection implements SessionConnection {
     const p = this.proc;
     this.proc = undefined;
     if (!p) return;
+    this.forgetChildState();
     try {
       p.stdin.end();
     } catch {

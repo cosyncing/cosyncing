@@ -14,8 +14,8 @@
  *  - **The ledger vocabulary.** The fake records what it natively receives (stream-json frames on
  *    stdin, its argv, signals). {@link ClaudeLedger} reads that in the conformance vocabulary the
  *    scenarios assert on: a turn the CLI started is a `session/prompt`, a `--resume <uuid>` launch is
- *    a `session/load` of that session, a `--session-id <uuid>` launch is a `session/new`, a signal
- *    that ends a running turn is a `session/cancel`, and a `control_response` is the reply to the
+ *    a `session/load` of that session, a `--session-id <uuid>` launch is a `session/new`, an
+ *    interrupt or a signal that ends a running turn is a `session/cancel`, and a `control_response` is the reply to the
  *    fake's `permission-*` / `question-*` request (its `result.outcome` is the native decision).
  *  - **The prompt ack.** The broker acks a Claude prompt once it is written to the child's stdin,
  *    not when the turn ends; {@link FakeController.promptSettled} waits for the turn's end.
@@ -277,7 +277,8 @@ export class ClaudeLedger extends Ledger {
         }));
       }
       case 'session/cancel':
-        return entries.filter((entry) => entry.kind === 'signal' && entry.midTurn === true).map((entry) => as(entry, { method }));
+        return entries.filter((entry) => (entry.kind === 'interrupt' || entry.kind === 'signal') && entry.midTurn === true)
+          .map((entry) => as(entry, { method }));
       default:
         return super.requests(method, from);
     }

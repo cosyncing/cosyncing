@@ -638,6 +638,10 @@ export class ManagedConn {
   /** Generic live source evidence used to keep long work observable after the last UI disconnects. */
   private readonly activeRunKeys = new Set<string>();
   private readonly activeGoalKeys = new Set<string>();
+  /** The connection's own report that its agent process runs background work which would end
+   *  with that process (a Claude background command). Cached so a change can be compared. */
+  private backgroundWorkLive = false;
+  private unwatchBackgroundWork?: Unsubscribe;
   /** The session's shared UNSENT composer draft (multi-client sync, issues-part2). Written through
    *  to the durable {@link SharedDraftStore} when one is configured, so owner eviction and broker
    *  restart cannot lose it; the in-memory value is only the low-latency fan-out cache. `revision`
@@ -706,7 +710,27 @@ export class ManagedConn {
     // eligible. Pre-fix cwd-outbox records carry no marker and fail closed.
     this.artifacts.push(...(this.artifactStore?.sessionQualifiedArtifacts(this.sessionRef()) ?? []));
     this.unsub = conn.subscribe((m) => this.push(m));
+    this.watchBackgroundWork(conn);
     void this.refreshPendingQueuedUsers();
+  }
+
+  /** Follow the connection's background-work report. Only the current connection may move it, so
+   *  a listener left behind by a replaced connection is inert. */
+  private watchBackgroundWork(conn: SessionConnection): void {
+    this.unwatchBackgroundWork?.();
+    this.backgroundWorkLive = conn.hasLiveBackgroundWork?.() === true;
+    this.unwatchBackgroundWork = conn.watchBackgroundWork?.(() => {
+      if (this.conn !== conn) return;
+      const retainedBefore = this.requiresAttentionRetention;
+      this.backgroundWorkLive = conn.hasLiveBackgroundWork?.() === true;
+      const retainedAfter = this.requiresAttentionRetention;
+      if (retainedBefore === retainedAfter) return;
+      try {
+        this.attentionHooks.onRetentionChanged?.(this.conn.info, retainedAfter);
+      } catch (error) {
+        console.warn('[hub] attention retention observer failed:', error instanceof Error ? error.message : String(error));
+      }
+    });
   }
 
   /** Push the latest SessionInfo to attached clients. This is the low-latency control-state path:
@@ -936,6 +960,7 @@ export class ManagedConn {
     }
     this.conn = conn;
     this.unsub = conn.subscribe((m) => this.push(m));
+    this.watchBackgroundWork(conn);
     conn.setClientCount?.(this.clients.size);
     this.clearLiveText();
     this.noteHistoryWrite();
@@ -2012,13 +2037,16 @@ export class ManagedConn {
     return this.clients.size;
   }
 
-  /** True only for live conditions observed on this owned connection. It never infers from history. */
+  /** True only for live conditions observed on this owned connection. It never infers from history.
+   *  Background work the connection reports counts too: disposing the owner ends its agent process,
+   *  and that process takes its background commands with it. */
   get requiresAttentionRetention(): boolean {
     return this.liveRunning
       || this.pendingInput.size > 0
       || this.pendingQueuedUserKeys.size > 0
       || this.activeRunKeys.size > 0
-      || this.activeGoalKeys.size > 0;
+      || this.activeGoalKeys.size > 0
+      || this.backgroundWorkLive;
   }
 
   /** Is a turn currently running on this live connection? Drives the roster's working/idle overlay
@@ -2062,6 +2090,9 @@ export class ManagedConn {
     } catch {
       /* subscription already torn down */
     }
+    this.unwatchBackgroundWork?.();
+    this.unwatchBackgroundWork = undefined;
+    this.backgroundWorkLive = false;
     this.clients.clear(); // never fan out to a stale client after teardown
     this.conn.setClientCount?.(0);
     this.ring.length = 0;
