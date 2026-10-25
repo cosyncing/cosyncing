@@ -43,6 +43,7 @@ class _QuotaLiquidMotionState extends State<QuotaLiquidMotion> {
   void didChangeDependencies() {
     super.didChangeDependencies();
     _motionAllowed =
+        !kIsWeb &&
         !MediaQuery.disableAnimationsOf(context) &&
         TickerMode.valuesOf(context).enabled;
     _syncMotion();
@@ -58,9 +59,8 @@ class _QuotaLiquidMotionState extends State<QuotaLiquidMotion> {
     final lifecycle = WidgetsBinding.instance.lifecycleState;
     final active = lifecycle == null || lifecycle == AppLifecycleState.resumed;
     if (widget.enabled && _motionAllowed && active) {
-      // A slow six-second drift needs only quarter-second samples. Flutter
-      // web presents the whole scene on a frame, even for isolated painters;
-      // a display-rate ticker would keep that expensive work running at 60 Hz.
+      // Native panels use a slow six-second drift. Web gauges stay static:
+      // even isolated painters otherwise present the whole scene each sample.
       _timer ??= Timer.periodic(const Duration(milliseconds: 250), (_) {
         _phase.value = (_phase.value + 1 / 24) % 1;
       });

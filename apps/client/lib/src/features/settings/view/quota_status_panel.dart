@@ -60,15 +60,50 @@ class QuotaStatusPanel extends StatelessWidget {
   /// Content width from which providers sit in two independent columns.
   static const double twoColumnWidth = 280;
 
+  /// Last laid-out height of embedded content per selection and column count,
+  /// so a later cold load reserves what the previous reading occupied.
+  static final _embeddedHeights = <String, double>{};
+
+  static double _textScale(BuildContext context) =>
+      math.max(1, MediaQuery.textScalerOf(context).scale(12) / 12);
+
+  static int _columns(BuildContext context, double maxWidth) =>
+      maxWidth >= twoColumnWidth * _textScale(context) ? 2 : 1;
+
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
     final now = this.now ?? DateTime.now();
+    final initialLoading = loading && quota == null;
 
     if (embedded) {
-      return loading
-          ? InlineNotice(text: l10n.settingsQuotaLoading, showSpinner: true)
-          : _buildContent(context, l10n, now);
+      return LayoutBuilder(
+        builder: (context, constraints) {
+          final columns = _columns(context, constraints.maxWidth);
+          final slot = '${selectedProviders?.join(',')}|$columns';
+          if (!initialLoading) {
+            return _ReportHeight(
+              onHeight: (height) => _embeddedHeights[slot] = height,
+              child: _buildContent(context, l10n, now),
+            );
+          }
+          // Before any reading has been laid out, estimate one card per row.
+          final rows = ((selectedProviders?.length ?? 1) / columns).ceil();
+          return ConstrainedBox(
+            constraints: BoxConstraints(
+              minHeight:
+                  _embeddedHeights[slot] ?? rows * 128.0 * _textScale(context),
+            ),
+            child: Align(
+              alignment: AlignmentDirectional.topStart,
+              child: InlineNotice(
+                text: l10n.settingsQuotaLoading,
+                showSpinner: true,
+              ),
+            ),
+          );
+        },
+      );
     }
 
     // Everything below is REMAINING allowance in rolling windows, never a sum
@@ -80,7 +115,7 @@ class QuotaStatusPanel extends StatelessWidget {
         description: l10n.settingsQuotaReadOnlyNote,
         child: Padding(
           padding: const EdgeInsets.only(top: 8),
-          child: loading
+          child: initialLoading
               ? InlineNotice(text: l10n.settingsQuotaLoading, showSpinner: true)
               : _buildContent(context, l10n, now),
         ),
@@ -146,11 +181,7 @@ class QuotaStatusPanel extends StatelessWidget {
       ),
       child: LayoutBuilder(
         builder: (context, constraints) {
-          final scale = MediaQuery.textScalerOf(context).scale(12) / 12;
-          final columns =
-              constraints.maxWidth >= twoColumnWidth * math.max(1, scale)
-              ? 2
-              : 1;
+          final columns = _columns(context, constraints.maxWidth);
           final gap = WindowSizeClass.of(context) == WindowSizeClass.compact
               ? 12.0
               : 16.0;
@@ -175,6 +206,37 @@ class QuotaStatusPanel extends StatelessWidget {
         },
       ),
     );
+  }
+}
+
+/// Reports its child's laid-out height without affecting layout.
+class _ReportHeight extends SingleChildRenderObjectWidget {
+  const _ReportHeight({required this.onHeight, required super.child});
+
+  final ValueChanged<double> onHeight;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderReportHeight(onHeight);
+
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    _RenderReportHeight renderObject,
+  ) {
+    renderObject.onHeight = onHeight;
+  }
+}
+
+class _RenderReportHeight extends RenderProxyBox {
+  _RenderReportHeight(this.onHeight);
+
+  ValueChanged<double> onHeight;
+
+  @override
+  void performLayout() {
+    super.performLayout();
+    onHeight(size.height);
   }
 }
 

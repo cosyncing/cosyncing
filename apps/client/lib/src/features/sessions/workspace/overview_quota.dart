@@ -43,7 +43,7 @@ class _OverviewQuotaState extends ConsumerState<OverviewQuota> {
         ? const <String>[]
         : preferences.valueOrNull ?? const <String>[];
     final reading = ref.watch(managedRuntimeQuotaProvider);
-    final quota = reading.isLoading || reading.hasError
+    final quota = reading.isReloading || reading.hasError
         ? null
         : reading.valueOrNull;
     final available = <String>{

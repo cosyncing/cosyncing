@@ -872,18 +872,13 @@ class SessionListController extends Notifier<SessionListState> {
         }
       }
     } on SessionRosterDeltaWaitCancelledException {
-      // Expected when hidden, disposed, or switching broker profiles.
+      // A caller stop changes the generation first. A cancellation from the
+      // transport must instead re-admit the feed on the replacement client.
+      await _retryFeed(generation);
     } on SessionRosterDeltaFeedUnsupportedException {
       _feedUnsupported = true;
     } on SessionRosterDeltaFeedRetryableException {
-      if (generation == _feedGeneration && _isForeground) {
-        await Future<void>.delayed(const Duration(seconds: 1));
-        if (generation == _feedGeneration) {
-          _feedActive = false;
-          _startFeed();
-          return;
-        }
-      }
+      await _retryFeed(generation);
     } on Object catch (error, stackTrace) {
       developer.log(
         'roster-delta-feed failed',
@@ -893,6 +888,32 @@ class SessionListController extends Notifier<SessionListState> {
       );
     } finally {
       if (generation == _feedGeneration) _feedActive = false;
+    }
+  }
+
+  Future<void> _retryFeed(int generation) async {
+    bool current() =>
+        !_disposed && generation == _feedGeneration && _isForeground;
+    if (!current()) return;
+    await Future<void>.delayed(const Duration(seconds: 1));
+    if (!current()) return;
+    try {
+      final repository = await ref.read(sessionListRepositoryProvider.future);
+      if (!current()) return;
+      _repository = repository;
+      _feedActive = false;
+      _adoptLiveRepository(repository);
+    } on Object catch (error, stackTrace) {
+      developer.log(
+        'roster-delta-feed reconnect failed',
+        name: 'cosyncing.sessions',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      if (current()) {
+        _feedActive = false;
+        _startFeed();
+      }
     }
   }
 
