@@ -71,7 +71,7 @@ describe.each([PI_DIALECT_FACTS, OMP_DIALECT_FACTS] as PiFamilyDialect[])('$disp
     message?.type === 'model-output' && new RegExp(text).test(message.delta ?? message.text ?? '');
 
   /** Integration wire fragments, without importing the product's reassembler into the scenario. */
-  async function transfer(path: string, body: unknown, beforeFinal?: () => Promise<void>) {
+  async function transfer(path: string, body: Record<string, unknown>, beforeFinal?: () => Promise<void>) {
     const bytes = Buffer.from(JSON.stringify(body));
     const count = Math.ceil(bytes.length / (128 * 1024));
     const transferId = crypto.randomUUID();
