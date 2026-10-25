@@ -45,7 +45,7 @@ export function installFakeExecutable(bin: string, name: string, entry: string, 
  * The harness default adds Bun's own directory, and on a developer machine that
  * is often `~/.local/bin`, next to the real `codex`, `claude`, `grok` and
  * friends: a broker would find and run them. Undefined on Windows, where the
- * harness keeps the runner's PATH.
+ * harness supplies its isolated platform PATH.
  */
 export function pathWithoutHostTools(bin: string): string | undefined {
   if (process.platform === 'win32') return undefined;

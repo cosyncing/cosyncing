@@ -14,8 +14,9 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { appendFileSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { type Broker, type BrokerClient, eventually, SOON_MS, startBroker } from '../harness/index.ts';
+import { installFakeCommand, type FakeCommand } from '../harness/fakes/command.ts';
 import { type FakeClaudeAgents, installFakeClaudeAgents } from '../harness/fakes/claude-agents.ts';
 import {
   age,
@@ -127,13 +128,21 @@ describe('the session roster', () => {
   let claudeDir: string;
   let replacementRegistries: string[] = [];
   const pi: Record<string, { path: string; id: string }> = {};
+  let hostPi: FakeCommand | undefined;
   let watchedPath = '';
   let waitingPath = '';
 
   beforeAll(async () => {
+    const originalPath = process.env.PATH;
     broker = await startBroker({
       name: 'roster',
       setup: (paths) => {
+        // A harmless host-only tool shadows any real Pi installation. The
+        // broker must use only its fixture PATH, including after restarts.
+        const hostBin = join(paths.root, 'host-tools');
+        mkdirSync(hostBin, { recursive: true });
+        hostPi = installFakeCommand(hostBin, 'pi', 'process.exit(2);');
+        process.env.PATH = [hostBin, originalPath ?? ''].join(delimiter);
         pi.recent = writePiSession(paths, 'recent', 2 * HOUR);
         pi.days3 = writePiSession(paths, 'days3', 3 * DAY);
         pi.days20 = writePiSession(paths, 'days20', 20 * DAY);
@@ -190,10 +199,16 @@ describe('the session roster', () => {
         // Exercise real window eviction with small fixtures on every platform.
         COSYNCING_TEST_ROSTER_WINDOW_LIMIT: '3',
       }),
+    }).finally(() => {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
     });
     client = broker.client();
   });
-  afterAll(() => broker?.stop());
+  afterAll(async () => {
+    try { if (hostPi) expect(hostPi.calls()).toEqual([]); }
+    finally { await broker?.stop(); }
+  });
 
   test('an unchanged roster answers its ETag with 304, is gzipped only when accepted, and says it is whole', async () => {
     const url = `${broker.url}/api/sessions?${rosterQuery()}`;

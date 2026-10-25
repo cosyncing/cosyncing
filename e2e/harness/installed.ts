@@ -14,7 +14,7 @@
  *   afterAll(() => installed.stop());
  *   installed.owner.get('/api/sessions');
  */
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { reserveLoopbackFixturePort } from '../../packages/typescript/broker/test/helpers/isolated-broker-fixture.ts';
@@ -28,7 +28,7 @@ import {
   committedInstallState,
   writeInstallState,
 } from '../../packages/typescript/broker/src/installation/install-state.ts';
-import { type Broker, type FixturePaths, fixturePaths, startBroker } from './broker.ts';
+import { type Broker, type FixturePaths, fixturePaths, startBroker, removeFixtureRoot } from './broker.ts';
 import type { BrokerClient } from './client.ts';
 
 export interface InstalledCredentials {
@@ -116,13 +116,13 @@ export async function startInstalledBroker(options: InstalledBrokerOptions = {})
       owner: started.client({ kind: 'owner', token: credentials.brokerToken }),
       async stop() {
         await started.stop();
-        rmSync(root, { recursive: true, force: true });
+        await removeFixtureRoot(root);
       },
     };
   } catch (error) {
     await lease.release().catch(() => undefined);
     await broker?.stop().catch(() => undefined);
-    rmSync(root, { recursive: true, force: true });
+    await removeFixtureRoot(root);
     throw error;
   }
 }
