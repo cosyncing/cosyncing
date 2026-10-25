@@ -18,6 +18,8 @@
  * in the pi adapter package; only `PiEngineAdapter` and the dialect helpers live here.
  */
 import { homedir } from 'node:os';
+import { isOwnershipConflictError } from '@cosyncing/adapter-api';
+import { assertNoPiNativeOwner } from './native-presence.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   closeSync,
@@ -675,7 +677,7 @@ async function createPiSessionViaRpc(
   }
   // Before the process exists: a session file born before this instant is not the one it creates.
   const startedAt = Date.now();
-  const proc = spawnPi(rt.dialect, bin, args, {
+  const proc = await spawnPi(rt.dialect, bin, args, {
     stdin: 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',
@@ -868,7 +870,7 @@ function piCreateAnsweredExistingSession(file: string, startedAt: number, sessio
 async function renamePiSessionViaRpc(rt: PiDialectRuntime, sessionFile: string, title: string): Promise<PiRpcSessionState> {
   const bin = resolveBin(rt);
   if (!bin) throw new Error(`${rt.dialect.displayName} CLI is not available on PATH; cannot rename a ${rt.dialect.displayName} session.`);
-  const proc = spawnPi(rt.dialect, bin, ['--mode', 'rpc', '--session', sessionFile], {
+  const proc = await spawnPi(rt.dialect, bin, ['--mode', 'rpc', '--session', sessionFile], {
     stdin: 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',
@@ -947,7 +949,7 @@ async function runPiLifecycleRpc(
 ): Promise<PiRpcSessionState> {
   const bin = resolveBin(rt);
   if (!bin) throw new Error(`${rt.dialect.displayName} CLI is not available on PATH; cannot ${action} a ${rt.dialect.displayName} session.`);
-  const proc = spawnPi(rt.dialect, bin, ['--mode', 'rpc', '--session', sessionFile], {
+  const proc = await spawnPi(rt.dialect, bin, ['--mode', 'rpc', '--session', sessionFile], {
     stdin: 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',
@@ -1067,7 +1069,7 @@ async function runPiLifecycleRpc(
 async function runPiExportHtmlRpc(rt: PiDialectRuntime, sessionFile: string, outputPath: string, timeoutMs: number): Promise<string> {
   const bin = resolveBin(rt);
   if (!bin) throw new Error(`${rt.dialect.displayName} CLI is not available on PATH; cannot export transcript.`);
-  const proc = spawnPi(rt.dialect, bin, ['--mode', 'rpc', '--session', sessionFile], {
+  const proc = await spawnPi(rt.dialect, bin, ['--mode', 'rpc', '--session', sessionFile], {
     stdin: 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',
@@ -1497,7 +1499,7 @@ class PiConnection implements SessionConnection {
       const effort = normalizePiThinkingLevel(selected.reasoningEffort);
       if (effort) args.push('--thinking', effort);
     }
-    this.proc = spawnPi(this.rt.dialect, bin, args, {
+    this.proc = await spawnPi(this.rt.dialect, bin, args, {
       stdin: 'pipe',
       stdout: 'pipe',
       stderr: 'pipe',
@@ -1632,9 +1634,14 @@ class PiConnection implements SessionConnection {
     this.demote(verdict.reason);
   }
 
-  /** Between turns, prove the file before a prompt reaches the runtime: a watched change may not
-   *  have been read yet. Throws, having ended Drive, when another program wrote it. */
+  /** Before mutation, verify native ownership and unread file changes. Unknown native evidence
+   *  refuses this action; a confirmed competing writer ends the stale Drive. */
   private async assertSessionFileOwned(): Promise<void> {
+    try { await assertNoPiNativeOwner(this.sessionPath, this.rt.dialect.displayName); } catch (error) {
+      // Unavailable evidence refuses this mutation, without destroying a valid shared Drive.
+      if (isOwnershipConflictError(error) && error.conflict === 'terminal-private') this.demote(error.message);
+      throw error;
+    }
     if (!this.guard) {
       this.establishGuard();
       return;
@@ -4767,7 +4774,7 @@ async function endPiChild(
   await Promise.race([proc.exited.catch(() => undefined), Bun.sleep(graceMs)]);
 }
 
-function spawnPi<
+async function spawnPi<
   const In extends Bun.SpawnOptions.Writable,
   const Out extends Bun.SpawnOptions.Readable,
   const Err extends Bun.SpawnOptions.Readable,
@@ -4776,7 +4783,10 @@ function spawnPi<
   executable: string,
   args: readonly string[],
   options: Bun.SpawnOptions.SpawnOptions<In, Out, Err>,
-): Bun.Subprocess<In, Out, Err> {
+): Promise<Bun.Subprocess<In, Out, Err>> {
+  const sessionIndex = args.indexOf('--session');
+  const sessionFile = sessionIndex >= 0 ? args[sessionIndex + 1] : args.find((arg) => arg.startsWith('--session='))?.slice(10);
+  if (sessionFile) await assertNoPiNativeOwner(sessionFile, dialect.displayName);
   const env = (options?.env ?? process.env) as Readonly<Record<string, string | undefined>>;
   const invocation = resolveInvocation(executable, { env, platform: process.platform });
   if (!invocation) throw new Error(`${dialect.displayName} executable is no longer available: ${executable}`);

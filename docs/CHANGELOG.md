@@ -19,6 +19,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Updated Pi/OMP terminals prevent app actions from starting another RPC writer
+  on their session file. Ownership checks are scoped per session; inconclusive
+  checks refuse the action while preserving an existing Drive connection.
 - Pi and OMP terminal bridges reconnect with large session histories and deliver
   large tool results without losing activity or completion updates. Rejected
   connections now show an actionable terminal status and broker diagnostic.
