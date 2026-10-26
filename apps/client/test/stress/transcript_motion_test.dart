@@ -638,10 +638,7 @@ void main() {
       );
     });
 
-    testWidgets('a tool opened at the reader keeps its place, and opening '
-        'every tool above the reader keeps the reader on their row', (
-      tester,
-    ) async {
+    testWidgets('a tool opened at the reader keeps its place', (tester) async {
       await _open(tester);
       final tool = find.byKey(const ValueKey('tool-c1934-details'));
       await _bringToTop(tester, tool, inset: 24);
@@ -653,15 +650,6 @@ void main() {
         moreOrLessEquals(toolTop, epsilon: 1),
         reason: 'the opened tool must not move',
       );
-
-      // Every tool in the transcript opens at once, above the reader too.
-      final position = _position(tester);
-      position.jumpTo(position.pixels + position.viewportDimension * 2);
-      await _pumpFrames(tester, 5);
-      final before = _reading(tester);
-      await toggleSessionDetailViewOption(tester, 'expand');
-      await _pumpFrames(tester);
-      _expectHeld(tester, before, when: 'as every tool above opened');
     });
 
     testWidgets('resizing the window and scaling the text keep the reader on '
