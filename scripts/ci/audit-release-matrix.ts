@@ -56,6 +56,14 @@ try {
   }), 'verification artifact names must preserve run, attempt and suite/shard identity');
   const pushOnly = "${{ github.event_name == 'push' }}";
   const dispatchOnly = "${{ github.event_name == 'workflow_dispatch' }}";
+  const publicationDependencies = new Map([
+    ['prepare-draft', 'stage-verified'],
+    ['publish-candidate', 'prepare-draft'],
+  ]);
+  const publicationCondition = (dependency: string): string =>
+    "${{ !cancelled() && github.event_name == 'push' && needs." + dependency + ".result == 'success' }}";
+  const sameCondition = (actual: unknown, expected: string): boolean =>
+    typeof actual === 'string' && actual.replace(/\s/g, '') === expected.replace(/\s/g, '');
   const steps = (job: Record<string, unknown>): Record<string, unknown>[] => {
     requireThat(Array.isArray(job.steps), 'release job has no steps');
     return job.steps.map(value => object(value, 'release step'));
@@ -70,11 +78,13 @@ try {
     requireThat(Object.hasOwn(object(workflow.on ?? workflow.true, 'release triggers'), 'workflow_dispatch'), 'release workflow needs a no-publish dispatch trigger');
     requireThat(env.RELEASE_REHEARSAL === "${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}", 'rehearsal mode must derive from the event, never an overridable input');
     requireThat(typeof env.BUN_VERSION === 'string', 'release workflow needs one Bun version setting');
-    for (const value of Object.values(jobs)) {
+    for (const [id, value] of Object.entries(jobs)) {
       const job = object(value, 'release job');
       const permissions = object(job.permissions ?? {}, 'job permissions');
       if (job.environment || permissions.contents === 'write' || JSON.stringify(job).includes('secrets.')) {
-        requireThat(job.if === pushOnly, 'signing and release writes must require tag push, never rehearsal');
+        const dependency = workflow === client ? publicationDependencies.get(id) : undefined;
+        requireThat(sameCondition(job.if, dependency ? publicationCondition(dependency) : pushOnly),
+          'signing and release writes must require tag push; publication must tolerate optional skips and require successful verified inputs');
       }
       for (const step of steps(job)) {
         if (typeof step.uses === 'string' && step.uses.startsWith('oven-sh/setup-bun@')) {
@@ -96,7 +106,12 @@ try {
   requireThat(String(handoff.if).replace(/\s/g, '') === handoffCondition.replace(/\s/g, ''), 'verified handoff must require the gate and the matching Android build');
   requireThat(object(handoff.permissions, 'handoff permissions').contents === 'read', 'verified handoff must be read-only');
   retained(handoff, 'complete', 30);
-  requireThat(object(clientJobs['prepare-draft'], 'client draft').needs === 'stage-verified', 'draft must wait for verified handoff');
+  for (const [id, dependency] of publicationDependencies) {
+    const publication = object(clientJobs[id], 'client publication');
+    requireThat(publication.needs === dependency, 'client publication must wait for its verified input dependency');
+    requireThat(sameCondition(publication.if, publicationCondition(dependency)),
+      'client publication must tolerate optional skips while requiring successful inputs and tag push');
+  }
   for (const target of ['linux','macos','windows','android','android-rehearsal']) {
     const build = object(clientJobs[target], 'client build');
     requireThat(build.needs === 'source' && object(build.permissions, 'build permissions').contents === 'read', 'builds must be read-only and follow source validation');

@@ -5,18 +5,18 @@ then use `cosy pair` to authorize the client.
 
 ## Update your client with this release
 
-0.8.4 adds navigation through earlier user prompts and improves session names,
+0.8.5 adds navigation through earlier user prompts and improves session names,
 reconnection, quota cards and server updates. Update your Android or desktop app
 for the client changes and update the Server with `cosy update` for the broker
 fixes. The web client ships with the Server and always matches it.
 
 The broker contract revision stays at 35, the minimum accepted client revision
-stays at 17, and Bun stays at 1.4.3. A 0.8.3 client can still drive a 0.8.4
+stays at 17, and Bun stays at 1.4.3. A 0.8.3 client can still drive a 0.8.5
 Server; updating the app adds the new navigation and interface improvements.
 Standalone desktop apps offer **Download**. For desktops placed by the
 all-in-one installer, quit the app before updating it with `cosy update`.
 
-## What's changed in 0.8.4
+## What's changed in 0.8.5
 
 - Transcript arrows step through earlier user prompts, including messages
   outside the loaded history. Searches can be canceled or continued, and the
@@ -41,7 +41,7 @@ all-in-one installer, quit the app before updating it with `cosy update`.
   upgrade to acquire this support. Windows and Linux report update failures
   and completed rollbacks promptly.
 
-For the full list, see the [0.8.4 changelog](../CHANGELOG.md#084--2026-10-26).
+For the full list, see the [0.8.5 changelog](../CHANGELOG.md#085--2026-10-26).
 
 ## Downloads
 
