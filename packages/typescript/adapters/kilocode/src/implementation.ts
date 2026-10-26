@@ -1428,7 +1428,7 @@ export class KiloAdapter implements AgentBackend {
       id,
       nativeId: id,
       tool: this.id,
-      title: String(raw.title ?? raw.slug ?? id),
+      title: String(raw.title ?? ''),
       ...(typeof raw.directory === 'string' ? { cwd: raw.directory } : {}),
       status: /busy|retry|running/u.test(String(raw.status?.type ?? raw.status ?? '').toLowerCase())
         ? 'working'

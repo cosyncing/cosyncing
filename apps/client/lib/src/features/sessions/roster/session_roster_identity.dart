@@ -154,7 +154,9 @@ final class SessionRosterIdentity {
     return SessionRosterIdentity(
       tool: tool,
       sessionId: sessionId,
-      title: _optionalString(json['title']) ?? '',
+      title: json['titleVersion'] != 2 && json['title'] == sessionId
+          ? ''
+          : _optionalString(json['title']) ?? '',
       machine: _optionalString(json['machine']),
       nativeId: _optionalString(json['nativeId']),
       parentThreadId: _optionalString(json['parentThreadId']),
@@ -232,6 +234,7 @@ final class SessionRosterIdentity {
     'tool': tool,
     'id': sessionId,
     if (title.isNotEmpty) 'title': title,
+    'titleVersion': 2,
     if (machine != null) 'machine': machine,
     if (nativeId != null) 'nativeId': nativeId,
     if (parentThreadId != null) 'parentThreadId': parentThreadId,

@@ -375,17 +375,9 @@ function optionalEpochMs(value: unknown): number | undefined {
   return undefined;
 }
 
-/**
- * The human-readable title for a session the host never named: the codex/pi
- * shape `basename(cwd) · id[0:8]`, never the raw `session_<uuid>` id. The
- * client's header suppresses titles equal to the session id, so mapping an
- * untitled row AS its id renders "Untitled session" there while the roster
- * shows the raw id — one session, two names. With no cwd there is nothing
- * better than the id, and the id is returned so the two surfaces at least
- * agree.
- */
-export function kimiFallbackTitle(id: string, cwd?: string): string {
-  return cwd ? `${basename(cwd)} · ${id.slice(0, 8)}` : id;
+/** Compatibility export for callers without native title evidence. Project and id are metadata. */
+export function kimiFallbackTitle(_id: string, _cwd?: string): string {
+  return '';
 }
 
 /**
@@ -409,7 +401,7 @@ export function mapKimiSession(
   if (!id || !isOpaqueSessionId(id)) return undefined;
   const meta = raw.meta ?? {};
   const cwd = optionalString(raw.workspace?.cwd);
-  const title = optionalString(meta.title) ?? optionalString(meta.last_prompt) ?? kimiFallbackTitle(id, cwd);
+  const title = optionalString(meta.title) ?? '';
   const createdAt = optionalEpochMs(meta.created_at);
   const updatedAt = optionalEpochMs(meta.updated_at);
   const owned = isOwned?.(id) === true;
@@ -473,7 +465,7 @@ export function mapKimiCreatedSession(raw: KimiV1Session | undefined): SessionIn
   return {
     id,
     tool: 'kimi',
-    title: optionalString(raw.title) ?? optionalString(raw.last_prompt) ?? kimiFallbackTitle(id, cwd),
+    title: optionalString(raw.title) ?? '',
     ...(cwd ? { cwd } : {}),
     // A create answer with unreadable liveness fields still describes a session
     // that has never run a turn — nothing has been submitted to it yet — so the

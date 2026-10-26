@@ -5,6 +5,7 @@ import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/connection/data/broker_identity_store.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_list_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -629,7 +630,27 @@ void main() {
         final studio = studioWith(f)
           ..agents = [fakeAgent(canRenameNative: true)];
         final app = await openSession(f, studio);
+        studio.updateSession('s1', {'titlePending': true});
+        await app.pumpUntil(
+          () => app.container
+              .read(sessionListControllerProvider)
+              .sessions
+              .any((row) => row.id == 's1' && (row.titlePending ?? false)),
+          reason: 'the title recovery is pending before the accepted rename',
+        );
         await rename(app, 'Fix the login bug');
+        await app.pumpUntil(
+          () => app.container
+              .read(sessionListControllerProvider)
+              .sessions
+              .any(
+                (row) =>
+                    row.id == 's1' &&
+                    row.title == 'Fix the login bug' &&
+                    !(row.titlePending ?? false),
+              ),
+          reason: 'the accepted rename clears pending title state',
+        );
 
         final request = studio
             .requestsTo('/api/sessions/codex/s1/rename', method: 'PATCH')
@@ -637,6 +658,53 @@ void main() {
         expect(request.body, {'title': 'Fix the login bug'});
         expect(headerTitle('Fix the login bug'), findsOneWidget);
         expect(app.tabLabel('s1'), 'Fix the login bug');
+
+        // A native clear can succeed before a large transcript's fallback is
+        // known. The mutation must not promote that incomplete result to empty.
+        final held = studio.hold('PATCH', '/api/sessions/codex/s1/rename');
+        await rename(app, '');
+        expect(held.pending, 1);
+        held.release(
+          FakeBrokerResponse(200, {
+            'ok': true,
+            'title': '',
+            'session': {
+              ...studio.sessions.singleWhere((row) => row['id'] == 's1'),
+              'title': '',
+              'titlePending': true,
+            },
+          }),
+        );
+        await app.pumpUntil(
+          () => app.container
+              .read(sessionListControllerProvider)
+              .sessions
+              .any(
+                (row) =>
+                    row.id == 's1' &&
+                    row.title == 'Fix the login bug' &&
+                    (row.titlePending ?? false),
+              ),
+          reason: 'a pending native clear keeps the accepted title',
+        );
+        expect(headerTitle('Fix the login bug'), findsOneWidget);
+        expect(app.tabLabel('s1'), 'Fix the login bug');
+        studio.updateSession('s1', {
+          'title': 'Original prompt',
+          'titlePending': null,
+        });
+        for (final socket
+            in studio.socketsFor('s1').where((s) => s.isConnected)) {
+          socket.emit({
+            'kind': 'session',
+            'info': {...socket.session!, 'control': FakeBroker.drivingControl},
+          });
+        }
+        await app.pumpUntil(
+          () => headerTitle('Original prompt').evaluate().isNotEmpty,
+          reason: 'the completed fallback replaces the retained title',
+        );
+        expect(app.tabLabel('s1'), 'Original prompt');
       },
     );
 

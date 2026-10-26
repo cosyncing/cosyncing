@@ -6,14 +6,23 @@ SessionInfo retainNewerSessionVisibility(
   SessionInfo incoming,
   SessionInfo? known,
 ) {
+  var retained = incoming;
+  if (known != null &&
+      ((incoming.titlePending ?? false) || incoming.updatedAt == null)) {
+    retained = SessionInfo.fromJson({
+      ...incoming.toJson(),
+      'title': (incoming.titlePending ?? false) ? known.title : incoming.title,
+      'updatedAt': incoming.updatedAt ?? known.updatedAt,
+    });
+  }
   if (known == null ||
-      incoming.appVisibilityRevision == null ||
-      (incoming.appVisibilityRevision ?? 0) >=
+      retained.appVisibilityRevision == null ||
+      (retained.appVisibilityRevision ?? 0) >=
           (known.appVisibilityRevision ?? 0)) {
-    return incoming;
+    return retained;
   }
   return SessionInfo.fromJson({
-    ...incoming.toJson(),
+    ...retained.toJson(),
     'appHidden': known.appHidden,
     'appHiddenByAncestor': known.appHiddenByAncestor,
     'appVisibilityRevision': known.appVisibilityRevision,

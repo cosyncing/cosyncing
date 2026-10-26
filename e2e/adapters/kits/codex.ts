@@ -43,6 +43,7 @@ import {
 import { basename, delimiter, join, relative, sep } from 'node:path';
 import { eventually, fixturePath, type FixturePaths, type SessionStream } from '../../harness/index.ts';
 import { installFakeExecutable as compileFakeExecutable } from '../../harness/fakes/executable.ts';
+import { TestClock } from '../../harness/fakes/test-clock.ts';
 import {
   answerRecords,
   appendRecords,
@@ -317,6 +318,12 @@ function processAlive(pid: number): boolean {
   }
 }
 
+function writeConfigFile(path: string, contents: string): void {
+  const pending = `${path}.kit`;
+  writeFileSync(pending, contents);
+  renameSync(pending, path);
+}
+
 function waitUntil(probe: () => boolean, what: string, timeoutMs = 20_000): void {
   const deadline = Date.now() + timeoutMs;
   while (!probe()) {
@@ -331,6 +338,7 @@ export const codexKit: ConformanceKit = {
     return codexExtras;
   },
   env: (paths) => ({
+    ...new TestClock(paths.root).env,
     // The fixture HOME already implies this; naming it keeps the isolation explicit.
     CODEX_HOME: join(paths.home, '.codex'),
     // The presence/loaded-set watcher at its floor, so a terminal joining or leaving shows within a poll.
@@ -360,9 +368,7 @@ export const codexKit: ConformanceKit = {
     };
     const readConfig = (): FakeCodexAppServerConfig => JSON.parse(readFileSync(configPath, 'utf8'));
     const writeConfig = (config: FakeCodexAppServerConfig): void => {
-      const pending = `${configPath}.kit`;
-      writeFileSync(pending, `${JSON.stringify(config, null, 2)}\n`);
-      renameSync(pending, configPath);
+      writeConfigFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
     };
     writeConfig(baseConfig);
     const daemonEnv = {
@@ -608,7 +614,272 @@ function lastSession(stream: SessionStream): any {
   return stream.frames.findLast((frame) => frame.kind === 'session');
 }
 
-const codexExtras: ConformanceExtra[] = [];
+const codexExtras: ConformanceExtra[] = [{
+  title: 'session naming uses the first prompt and observes index-only renames and clears after malformed rows',
+  async run({ fake: controller, client }) {
+    const fake = controller as CodexFake;
+    const session = fake.seedSession({ title: '' });
+    await client.waitForSession((row) => row.id === session.id && row.title === 'seeded prompt 1');
+    const stream = await client.attach('codex', session.id, { mode: 'observe' });
+    await stream.waitForFrame((frame) => frame.kind === 'session' && frame.info?.title === 'seeded prompt 1');
+    await stream.waitForFrame((frame) => frame.kind === 'history');
+    const index = join(fake.codexHome, 'session_index.jsonl');
+    appendFileSync(index, '{broken row\n');
+    appendThreadName(fake.codexHome, session.nativeId!, 'Native / 项目.md');
+    await client.waitForSession((row) => row.id === session.id && row.title === 'Native / 项目.md');
+    await stream.waitForFrame((frame) => frame.kind === 'session' && frame.info?.title === 'Native / 项目.md');
+    appendThreadName(fake.codexHome, session.nativeId!, '');
+    await client.waitForSession((row) => row.id === session.id && row.title === 'seeded prompt 1');
+    fake.appendTurn(session, 'A follow-up', 'An answer');
+    await stream.waitForFrame((frame) => frame.kind === 'message'
+      && String(frame.message?.text ?? frame.message?.delta ?? '').includes('An answer'));
+    await client.waitForSession((row) => row.id === session.id && row.title === 'seeded prompt 1');
+    const renamed = await client.request('PATCH', `/api/sessions/codex/${encodeURIComponent(session.id)}/rename`, { title: 'Accepted app rename' });
+    expect(renamed.status, renamed.text).toBe(200);
+    const afterRename = stream.frames.length;
+    for (let pass = 0; pass < 3; pass++) {
+      const rows = await client.sessions();
+      expect(rows.find((row) => row.id === session.id)?.title).toBe('Accepted app rename');
+    }
+    await stream.waitForFrame((frame) => frame.kind === 'session' && frame.info?.title === 'Accepted app rename');
+    expect(stream.frames.slice(afterRename).filter((frame) => frame.kind === 'session')
+      .every((frame) => frame.info.title === 'Accepted app rename')).toBe(true);
+    const drive = await client.attach('codex', session.id, { mode: 'resume' });
+    await drive.waitForKind('history');
+    appendThreadName(fake.codexHome, session.nativeId!, 'New terminal rename');
+    expect((await drive.sendAndAwait({ kind: 'prompt', text: '[[hold:naming-terminal]] naming watcher sentinel' })).kind).toBe('ack');
+    // A watcher must deliver this without any roster request after the rename.
+    await stream.waitForFrame((frame) => frame.kind === 'session' && frame.info?.title === 'New terminal rename');
+    fake.release('naming-terminal');
+    await drive.waitForFrame((frame) => frame.kind === 'message'
+      && String(frame.message?.text ?? frame.message?.delta ?? '').includes('naming watcher sentinel'));
+    drive.close();
+    stream.close();
+  },
+}];
+
+codexExtras.push({
+  title: 'session naming preserves the accepted name while a clear awaits an unread first prompt',
+  async run({ fake: controller, client }) {
+    const fake = controller as CodexFake;
+    const session = fake.seedSession({ title: 'Before unread clear' });
+    const file = decodeSessionId(session.id);
+    const original = readFileSync(file, 'utf8');
+    const split = original.indexOf('\n') + 1;
+    const padding = `${JSON.stringify({ type: 'naming-output', data: 'x'.repeat(256 * 1024) })}\n`;
+    writeFileSync(file, original.slice(0, split) + padding.repeat(80) + original.slice(split));
+    await client.waitForSession((row) => row.id === session.id && row.title === 'Before unread clear');
+    const clear = await client.request('PATCH', `/api/sessions/codex/${encodeURIComponent(session.id)}/rename`, { title: null });
+    expect(clear.status, clear.text).toBe(200);
+    expect(clear.body.session.titlePending).toBe(true);
+    expect(clear.body.session.title).toBe('Before unread clear');
+    try {
+      await client.waitForSession((row) => row.id === session.id && !row.titlePending && row.title === 'seeded prompt 1');
+    } catch (error) {
+      console.error('pending clear diagnostics', JSON.stringify({
+        row: (await client.sessions({ refresh: true, window: 'all' })).find((row) => row.id === session.id),
+        index: readFileSync(join(fake.codexHome, 'session_index.jsonl'), 'utf8').slice(-2000),
+        ledger: fake.ledger.since(0).slice(-15),
+      }));
+      throw error;
+    }
+    await eventually(() => readFileSync(join(fake.codexHome, 'session_index.jsonl'), 'utf8').split('\n').filter(Boolean)
+      .flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } })
+      .findLast((row) => row.id === session.nativeId)?.thread_name === 'seeded prompt 1',
+    { what: 'the cleared name to finish its native first-prompt replacement' });
+  },
+}, {
+  title: 'session naming keeps a child label pending while its native name is outside the scanned index prefix',
+  async run({ fake: controller, client }) {
+    const fake = controller as CodexFake;
+    const parent = fake.seedSession();
+    const child = fake.seedSession({ childOf: parent, title: 'Child native name', turns: 0 });
+    const file = decodeSessionId(child.id);
+    const records = readFileSync(file, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+    records[0].payload.agent_nickname = 'Fallback child label';
+    writeFileSync(file, `${records.map((row) => JSON.stringify(row)).join('\n')}\n`);
+    const index = join(fake.codexHome, 'session_index.jsonl');
+    const original = readFileSync(index, 'utf8');
+    const padding = `${JSON.stringify({ type: 'naming-output', data: 'x'.repeat(256 * 1024) })}\n`;
+    writeFileSync(index, padding.repeat(192) + original);
+    try {
+      const first = (await client.sessions({ refresh: true, window: 'all' })).find((row) => row.id === child.id)!;
+      expect(first.titlePending).toBe(true);
+      await client.waitForSession((row) => row.id === child.id && !row.titlePending && row.title === 'Child native name');
+    } finally { writeFileSync(index, original); }
+  },
+});
+
+codexExtras.push({
+  title: 'session naming waits for acknowledged metadata persistence without assigning a temporary name',
+  async run({ fake: controller, client }) {
+    const fake = controller as CodexFake;
+    const configPath = `${fake.executable}.json`;
+    const original = JSON.parse(readFileSync(configPath, 'utf8'));
+    try {
+      writeConfigFile(configPath, JSON.stringify({ ...original, metadataPersistence: true, metadataPersistenceGate: 'naming-flush' }));
+      const id = fake.prepareCreate();
+      const mark = fake.ledger.mark();
+      const creating = client.post('/api/sessions/codex', { directory: fake.workspace('delayed-unnamed') });
+      await eventually(() => fake.ledger.nativeRequests('thread/read', mark)
+        .some((entry) => entry.frame?.params.threadId === uuidOfRollout(fake.rolloutOf(id)) && entry.frame?.params.includeTurns === undefined),
+      { what: 'the native metadata persistence barrier' });
+      expect(fake.ledger.nativeRequests('thread/name/set', mark)).toEqual([]);
+      fake.release('naming-flush');
+      const created = await creating;
+      expect(created.status, created.text).toBe(200);
+      expect(created.body.session.title).toBe('');
+      expect(existsSync(fake.rolloutOf(id))).toBe(true);
+      expect(fake.ledger.nativeRequests('thread/name/set', mark)).toEqual([]);
+    } finally { writeConfigFile(configPath, JSON.stringify(original)); }
+  },
+});
+
+codexExtras.push({
+  title: 'session naming write failures preserve an already-created durable thread and settle rejected provenance',
+  async run({ fake: controller, client, broker }) {
+    const fake = controller as CodexFake;
+    const configPath = `${fake.executable}.json`;
+    const original = JSON.parse(readFileSync(configPath, 'utf8'));
+    try {
+      writeConfigFile(configPath, JSON.stringify({ ...original, metadataPersistence: true,
+        faults: { ...original.faults, rejectNameWrites: true } }));
+      const id = fake.prepareCreate();
+      const mark = fake.ledger.mark();
+      const created = await client.post('/api/sessions/codex', { directory: fake.workspace('refused-name'), title: 'Requested title' });
+      expect(created.status, created.text).toBe(200);
+      expect(created.body.session.id).toBe(id);
+      expect(created.body.session.title).toBe('');
+      expect(existsSync(fake.rolloutOf(id))).toBe(true);
+      expect(fake.ledger.nativeRequests('thread/start', mark)).toHaveLength(1);
+      const metadataPath = join(broker.paths.home, '.cache', 'cosyncing', 'session-metadata.json');
+      const key = `codex\0${created.body.session.nativeId}`;
+      expect(JSON.parse(readFileSync(metadataPath, 'utf8')).provenance[key]?.provisionalName).toBeUndefined();
+      const observe = await client.attach('codex', id, { mode: 'observe' });
+      await observe.waitForKind('history');
+      observe.close();
+
+      writeConfigFile(configPath, JSON.stringify({ ...original, metadataPersistence: false,
+        faults: { ...original.faults, rejectNameWrites: true, persistBeforeRejectedName: true } }));
+      const rejectedId = fake.prepareCreate();
+      const rejected = await client.post('/api/sessions/codex', { directory: fake.workspace('refused-provisional') });
+      expect(rejected.status, rejected.text).toBe(200);
+      expect(rejected.body.session.id).toBe(rejectedId);
+      expect(rejected.body.session.title).toBe('');
+      expect(existsSync(fake.rolloutOf(rejectedId))).toBe(true);
+      const rejectedKey = `codex\0${rejected.body.session.nativeId}`;
+      expect(JSON.parse(readFileSync(metadataPath, 'utf8')).provenance[rejectedKey]?.provisionalName).toBeUndefined();
+
+      writeConfigFile(configPath, JSON.stringify({ ...original, metadataPersistence: false,
+        faults: { ...original.faults, nameWriteAppliedThenError: true, resumeNameNull: true } }));
+      const ambiguousId = fake.prepareCreate();
+      const ambiguous = await client.post('/api/sessions/codex', { directory: fake.workspace('accepted-name-error') });
+      expect(ambiguous.status, ambiguous.text).toBe(200);
+      expect(ambiguous.body.session.id).toBe(ambiguousId);
+      expect(ambiguous.body.session.title).toBe('');
+      expect(existsSync(fake.rolloutOf(ambiguousId))).toBe(true);
+      const ambiguousKey = `codex\0${ambiguous.body.session.nativeId}`;
+      expect(JSON.parse(readFileSync(metadataPath, 'utf8')).provenance[ambiguousKey]?.provisionalName?.value).toBe('Untitled session');
+      const drive = await client.attach('codex', ambiguousId, { mode: 'resume' });
+      await drive.waitForKind('history');
+      expect(drive.ofKind('session').every((frame) => frame.info.title !== 'Untitled session')).toBe(true);
+      expect(JSON.parse(readFileSync(metadataPath, 'utf8')).provenance[ambiguousKey]?.provisionalName?.value).toBe('Untitled session');
+      drive.close();
+    } finally { writeConfigFile(configPath, JSON.stringify(original)); }
+  },
+});
+
+codexExtras.push({
+  title: 'session naming completes an unnamed durable create after an offline first prompt and preserves a user rename',
+  async run({ fake: controller, client, broker }) {
+    const fake = controller as CodexFake;
+    const id = fake.prepareCreate();
+    const created = await client.post('/api/sessions/codex', { directory: fake.workspace('unnamed-create') });
+    expect(created.status, created.text).toBe(200);
+    expect(created.body.session.title).toBe('');
+    expect(created.body.session.id).toBe(id);
+    expect(existsSync(fake.rolloutOf(id))).toBe(true);
+    const stream = await client.attach('codex', id, { mode: 'observe' });
+    await stream.waitForFrame((frame) => frame.kind === 'session' && frame.info?.title === '');
+    stream.close();
+    const metadataPath = join(broker.paths.home, '.cache', 'cosyncing', 'session-metadata.json');
+    const key = `codex\0${created.body.session.nativeId}`;
+    await broker.stop({ keepState: true });
+    // One bounded fixture write models provenance pressure accumulated while this session is idle.
+    const metadata = JSON.parse(readFileSync(metadataPath, 'utf8'));
+    expect(metadata.provenance[key].provisionalName).toEqual({ value: 'Untitled session', origin: 'automatic' });
+    for (let n = 0; n < 1005; n++) metadata.provenance[`fixture\0newer-${n}`] = { launchSurface: 'app', appCreatedAt: Date.now() + n };
+    writeFileSync(metadataPath, JSON.stringify(metadata));
+    await broker.start();
+    // A subsequent app create exercises the actual eviction policy, rather than a private helper.
+    fake.prepareCreate();
+    expect((await client.post('/api/sessions/codex', { directory: fake.workspace('eviction'), title: 'Explicit title' })).status).toBe(200);
+    expect(JSON.parse(readFileSync(metadataPath, 'utf8')).provenance[key].provisionalName.value).toBe('Untitled session');
+    await broker.stop({ keepState: true });
+    fake.appendTurn({ id, cwd: created.body.session.cwd }, '  First external 🧪 prompt\nwith whitespace  ', 'Done');
+    const configPath = `${fake.executable}.json`;
+    const unavailable = JSON.parse(readFileSync(configPath, 'utf8'));
+    writeConfigFile(configPath, JSON.stringify({ ...unavailable, faults: { ...unavailable.faults, unidentifiedTitleRead: true } }));
+    await broker.start();
+    await client.waitForSession((row) => row.id === id && row.title === 'First external 🧪 prompt with whitespace');
+    await eventually(() => fake.ledger.entries().some((entry) => entry.kind === 'title-read-unidentified'
+      && entry.threadId === created.body.session.nativeId), { what: 'the native unidentified-name failure' });
+    const reads = () => fake.ledger.nativeRequests('thread/read').filter((entry) =>
+      entry.frame?.params.threadId === created.body.session.nativeId && entry.frame?.params.includeTurns === undefined);
+    const failedReadCount = reads().length;
+    for (let pass = 0; pass < 3; pass++) await client.sessions({ refresh: true });
+    expect(reads()).toHaveLength(failedReadCount);
+    expect(reads().every((entry) => entry.transport === 'daemon')).toBe(true);
+    expect(JSON.parse(readFileSync(metadataPath, 'utf8')).provenance[key].provisionalName.value).toBe('Untitled session');
+    const available = JSON.parse(readFileSync(configPath, 'utf8'));
+    writeConfigFile(configPath, JSON.stringify({ ...available, faults: { ...available.faults, unidentifiedTitleRead: false } }));
+    new TestClock(broker.paths.root).advance(120_001);
+    await client.waitForSession((row) => row.id === id && row.title === 'First external 🧪 prompt with whitespace');
+    await eventually(() => !JSON.parse(readFileSync(metadataPath, 'utf8')).provenance[key]?.provisionalName, { what: 'automatic name completion persisted' });
+    const names = readFileSync(join(fake.codexHome, 'session_index.jsonl'), 'utf8');
+    expect(names).toContain('First external 🧪 prompt with whitespace');
+    fake.appendTurn({ id, cwd: created.body.session.cwd }, 'Later prompt never renames', 'Done again');
+    const followed = await client.attach('codex', id, { mode: 'observe' });
+    await followed.waitForFrame((frame) => frame.kind === 'history' && frame.messages.some((message: any) =>
+      String(message.text ?? message.delta ?? '').includes('Done again')));
+    followed.close();
+    await client.waitForSession((row) => row.id === id && row.title === 'First external 🧪 prompt with whitespace');
+
+    const namedId = fake.prepareCreate();
+    const unnamed = await client.post('/api/sessions/codex', { directory: fake.workspace('cancel-automatic') });
+    expect(unnamed.status, unnamed.text).toBe(200);
+    const renamed = await client.request('PATCH', `/api/sessions/codex/${encodeURIComponent(namedId)}/rename`, { title: 'Explicit / 用户.md' });
+    expect(renamed.status, renamed.text).toBe(200);
+    fake.appendTurn({ id: namedId, cwd: unnamed.body.session.cwd }, 'Do not replace my name', 'Done');
+    await broker.restart();
+    await client.waitForSession((row) => row.id === namedId && row.title === 'Explicit / 用户.md');
+  },
+});
+
+codexExtras.push({
+  title: 'session naming prefers native persistence without a provisional title when metadata updates materialize the rollout',
+  async run({ fake: controller, client }) {
+    const fake = controller as CodexFake;
+    const configPath = `${fake.executable}.json`;
+    const config = JSON.parse(readFileSync(configPath, 'utf8'));
+    writeConfigFile(configPath, JSON.stringify({ ...config, metadataPersistence: true }));
+    try {
+      const id = fake.prepareCreate();
+      const mark = fake.ledger.mark();
+      const created = await client.post('/api/sessions/codex', { directory: fake.workspace('native-unnamed') });
+      expect(created.status, created.text).toBe(200);
+      expect(created.body.session.title).toBe('');
+      expect(existsSync(fake.rolloutOf(id))).toBe(true);
+      const received = fake.ledger.since(mark).filter((entry) => entry.kind === 'recv').map((entry) => entry.frame);
+      expect(received.some((frame) => frame?.method === 'thread/metadata/update')).toBe(true);
+      expect(received.some((frame) => frame?.method === 'thread/name/set')).toBe(false);
+      await client.waitForSession((row) => row.id === id && row.title === '');
+    } finally {
+      const current = JSON.parse(readFileSync(configPath, 'utf8'));
+      writeConfigFile(configPath, JSON.stringify({ ...current, metadataPersistence: config.metadataPersistence }));
+    }
+  },
+});
 
 /** Native requests that write into a thread: its settings, its name (an index row), or a turn. */
 const THREAD_WRITES = new Set(['thread/settings/update', 'thread/name/set', 'turn/start', 'turn/steer']);

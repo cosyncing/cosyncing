@@ -356,7 +356,7 @@ import type {
   SessionInfo,
   SetupDiagnosisContext,
 } from '@cosyncing/adapter-api';
-import { SessionCreateTemporarilyUnavailableError } from '@cosyncing/adapter-api';
+import { SessionCreateTemporarilyUnavailableError, sessionPromptPreview, isSessionInstruction } from '@cosyncing/adapter-api';
 import { cachedAgyCliCatalog, ensureAgyCliCatalog } from './cli-catalog.ts';
 import { diagnoseAgySetup } from './diagnostics.ts';
 import { AgyObserveConnection } from './observe.ts';
@@ -705,11 +705,13 @@ export class AgyAdapter implements AgentBackend {
           metadata.get(candidate.conversationId),
           currentModel,
           candidate.updatedAt,
+          candidate.brain?.firstUserContent,
         )
         : this.supplementaryRow(
           candidate.brain!,
           lastConversations?.get(candidate.conversationId),
           currentModel,
+          metadata.get(candidate.conversationId),
         ));
     }
 
@@ -764,6 +766,7 @@ export class AgyAdapter implements AgentBackend {
     meta: AgyMetadataEntry | undefined,
     currentModel: ReturnType<typeof resolveAgyModel>,
     updatedAt: number | undefined,
+    firstUserContent?: string,
   ): SessionInfo {
     const cwd = row.workspaceDirs[0] ?? meta?.workspaceDirs[0];
     return {
@@ -771,7 +774,7 @@ export class AgyAdapter implements AgentBackend {
       id: row.conversationId,
       nativeId: row.conversationId,
       tool: this.id,
-      title: agyTitle(row.preview, meta?.preview, cwd, row.conversationId),
+      title: agyTitle(row, meta, firstUserContent),
       ...(cwd ? { cwd, projectName: basename(cwd) } : {}),
       // Every row is idle. A row can only be `working` if something is running,
       // and P0 owns no child and has no proven terminal-ownership signal
@@ -872,12 +875,13 @@ export class AgyAdapter implements AgentBackend {
     row: AgyBrainRow,
     cwd: string | undefined,
     currentModel: ReturnType<typeof resolveAgyModel>,
+    meta?: AgyMetadataEntry,
   ): SessionInfo {
     return {
       id: row.conversationId,
       nativeId: row.conversationId,
       tool: this.id,
-      title: agySupplementaryTitle(row.firstUserContent, cwd, row.conversationId),
+      title: agyTitle(undefined, meta, row.firstUserContent),
       ...(cwd ? { cwd, projectName: basename(cwd) } : {}),
       status: 'idle',
       attachMode: 'observe',
@@ -944,7 +948,7 @@ export class AgyAdapter implements AgentBackend {
         ...(match?.label ? { label: match.label } : {}),
       };
     }
-    const title = opts.title?.trim() || basename(cwd);
+    const title = opts.title?.trim() || '';
     this.pendingCreates.set(sessionId, {
       cwd,
       ...(opts.title?.trim() ? { title: opts.title.trim() } : {}),
@@ -964,7 +968,7 @@ export class AgyAdapter implements AgentBackend {
       id: sessionId,
       nativeId: sessionId,
       tool: this.id,
-      title: pending.title ?? basename(pending.cwd),
+      title: pending.title ?? '',
       cwd: pending.cwd,
       projectName: basename(pending.cwd),
       status: 'idle',
@@ -1022,11 +1026,14 @@ export class AgyAdapter implements AgentBackend {
     let info: SessionInfo;
     if (row) {
       const cwd = row.workspaceDirs[0] ?? meta?.workspaceDirs[0];
+      const nativeTitle = agyTitle(row, meta);
+      const firstUser = nativeTitle ? undefined
+        : scanAgyBrainDirs(this.roots, { only: [sessionId], trace: this.trace })[0]?.firstUserContent;
       info = {
         id: sessionId,
         nativeId: sessionId,
         tool: this.id,
-        title: agyTitle(row.preview, meta?.preview, cwd, sessionId),
+        title: nativeTitle || agySupplementaryTitle(firstUser),
         ...(cwd ? { cwd, projectName: basename(cwd) } : {}),
         status: 'idle',
         attachMode: mode === 'resume' ? 'resume' : 'observe',
@@ -1067,7 +1074,7 @@ export class AgyAdapter implements AgentBackend {
         id: sessionId,
         nativeId: sessionId,
         tool: this.id,
-        title: agySupplementaryTitle(scanned.firstUserContent, cwd, sessionId),
+        title: agyTitle(undefined, meta, scanned.firstUserContent),
         ...(cwd ? { cwd, projectName: basename(cwd) } : {}),
         status: 'idle',
         attachMode: mode === 'resume' ? 'resume' : 'observe',
@@ -1340,30 +1347,18 @@ export function agySubagentControlState(conversationId: string): SessionControlS
 }
 
 /**
- * A title that is HONEST about where it came from.
- *
- * `conversation_summaries.title` is empty on all 32 rows and
- * `conversation_metadata.json.Title` is empty on all 32 (MEASURED 2026-08-25),
- * so the human string that actually exists is `preview` — present on 30 of 32.
- * The fallbacks descend to the cwd's basename and then to a short id prefix;
- * none of them invents prose. Reflection §3's rule is about model names, but the
- * principle is the same: show what the host published, or show something plainly
- * mechanical, never something fabricated to look authored.
+ * Preserve the supported native title slots and stable picker preview before
+ * deriving a first-prompt preview. Project and session identity stay separate.
  */
 function agyTitle(
-  summaryPreview: string,
-  metadataPreview: string | undefined,
-  cwd: string | undefined,
-  conversationId: string,
+  summary: Pick<AgySummaryRow, 'title' | 'preview'> | undefined,
+  metadata: AgyMetadataEntry | undefined,
+  firstUserContent?: string,
 ): string {
-  const preview = summaryPreview.trim() || (metadataPreview ?? '').trim();
-  if (preview) return preview;
-  if (cwd) return basename(cwd);
-  return conversationId.slice(0, 8);
+  return summary?.title.trim() || metadata?.title.trim()
+    || summary?.preview.trim() || metadata?.preview.trim()
+    || agySupplementaryTitle(firstUserContent);
 }
-
-/** How long a derived title may run before it stops being a title. */
-const AGY_DERIVED_TITLE_MAX = 80;
 
 /**
  * Title a row the frozen caches cannot title.
@@ -1372,24 +1367,14 @@ const AGY_DERIVED_TITLE_MAX = 80;
  * stopped updating — so the title is DERIVED from the conversation's own first
  * user prompt, run through the same wrapper stripping the transcript view uses so
  * the `<USER_REQUEST>` tags and the appended local-time metadata never reach a
- * roster label. Falls back the same way {@link agyTitle} does.
+ * roster label. Empty or injected content stays unnamed.
  *
  * Derived, not invented: every character comes from something the user actually
  * typed in that conversation (reflection §3).
  */
 export function agySupplementaryTitle(
   firstUserContent: string | undefined,
-  cwd: string | undefined,
-  conversationId: string,
 ): string {
   const stripped = stripAgyUserWrappers(firstUserContent ?? '').text.trim();
-  // One line only: a prompt is often a paragraph, and a roster row is not.
-  const firstLine = stripped.split('\n').map((line) => line.trim()).find((line) => line.length > 0);
-  if (firstLine) {
-    return firstLine.length > AGY_DERIVED_TITLE_MAX
-      ? `${firstLine.slice(0, AGY_DERIVED_TITLE_MAX - 1).trimEnd()}…`
-      : firstLine;
-  }
-  if (cwd) return basename(cwd);
-  return conversationId.slice(0, 8);
+  return isSessionInstruction(stripped) ? '' : sessionPromptPreview(stripped) ?? '';
 }

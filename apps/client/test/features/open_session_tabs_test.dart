@@ -1,11 +1,15 @@
 // F02 — Open-session tabs, through the real App.
+import 'dart:convert';
+
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_store.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
+import 'package:cosyncing_client/src/features/sessions/roster/roster_snapshot_store.dart';
 import 'package:cosyncing_client/src/features/sessions/sessions.dart';
 import 'package:cosyncing_client/src/local/app_database.dart';
+import 'package:drift/drift.dart' show Value;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -139,7 +143,7 @@ void main() {
       'rather than by its id, and a rename on the broker reaches the tab',
       (f) async {
         final studio = f.network.add('http://studio.test:7734')
-          ..addSession('u1', 'u1')
+          ..addSession('u1', '')
           ..addSession('t1', 'Original name');
         await f.storage.seedServer(studio);
         final app = await f.launch();
@@ -149,6 +153,36 @@ void main() {
         expect(app.tabLabel('u1'), en.sessionDetailTitleUntitled);
         expect(find.text('u1'), findsNothing);
         expect(app.tabLabel('t1'), 'Original name');
+
+        studio.updateSession('t1', {
+          'title': '',
+          'titlePending': true,
+          'status': 'working',
+        });
+        await app.pumpUntil(
+          () =>
+              app.container
+                  .read(openSessionsControllerProvider)
+                  .valueOrNull
+                  ?.refs
+                  .where((ref) => ref.id == 't1')
+                  .singleOrNull
+                  ?.status ==
+              SessionStatus.working,
+          reason: 'activity updates while the title scan is pending',
+        );
+        expect(app.tabLabel('t1'), 'Original name');
+
+        studio.updateSession('t1', {'title': 't1', 'titlePending': false});
+        await app.pumpUntil(
+          () => app.tabLabel('t1') == 't1',
+          reason: 'an explicit title equal to the id stays a title',
+        );
+        studio.updateSession('t1', {'title': ''});
+        await app.pumpUntil(
+          () => app.tabLabel('t1') == en.sessionDetailTitleUntitled,
+          reason: 'a native clear retires the cached name',
+        );
 
         studio.updateSession('t1', {'title': 'Renamed upstream'});
         await app.pumpUntil(
@@ -240,6 +274,76 @@ void main() {
   });
 
   group('remembering tabs', () {
+    featureTest(
+      'offline legacy ID placeholders migrate while confirmed ID titles '
+      'survive',
+      (f) async {
+        final studio = f.network.add('http://studio.test:7734')
+          ..addSession('legacy', 'legacy')
+          ..addSession('confirmed', 'confirmed');
+        await f.storage.seedServer(studio);
+        var app = await f.launch();
+        await app.openFromRoster('legacy', cwd: '/work/studio');
+        await app.openFromRoster('confirmed');
+        final db = f.storage.database;
+        final memberships = await db.select(db.appSettingRows).get();
+        for (final row in memberships) {
+          if (!row.key.startsWith(openSessionMembershipSettingKeyPrefix)) {
+            continue;
+          }
+          final payload = jsonDecode(row.value) as Map<String, dynamic>;
+          final ref = payload['ref'] as Map<String, dynamic>;
+          if (ref['id'] != 'legacy') continue;
+          ref.remove('titleVersion');
+          await (db.update(
+            db.appSettingRows,
+          )..where((candidate) => candidate.key.equals(row.key))).write(
+            AppSettingRowsCompanion(value: Value(jsonEncode(payload))),
+          );
+        }
+        final snapshots = await db.select(db.rosterSnapshotRows).get();
+        expect(snapshots, isNotEmpty);
+        for (final snapshot in snapshots) {
+          final rows = jsonDecode(snapshot.rowsJson) as List<dynamic>;
+          for (final row in rows.cast<Map<String, dynamic>>()) {
+            if (row['id'] == 'legacy') row.remove('titleVersion');
+          }
+          await (db.update(db.rosterSnapshotRows)..where(
+                (candidate) => candidate.brokerProfileId.equals(
+                  snapshot.brokerProfileId,
+                ),
+              ))
+              .write(
+                RosterSnapshotRowsCompanion(rowsJson: Value(jsonEncode(rows))),
+              );
+        }
+        studio.reachable = false;
+        app = await f.restart();
+        await app.pumpUntil(
+          () => app.openTabKeys.length == 2,
+          reason: 'saved tabs load without a broker',
+        );
+        expect(app.tabLabel('legacy'), en.sessionDetailTitleUntitled);
+        expect(app.tabLabel('confirmed'), 'confirmed');
+        // The cached roster is independently migrated, including while offline.
+        final snapshot = await app.container
+            .read(rosterSnapshotRepositoryProvider)
+            .load(
+              snapshots.single.brokerProfileId,
+              endpoint: snapshots.single.endpoint,
+            );
+        expect(
+          snapshot!.rows.singleWhere((row) => row.sessionId == 'legacy').title,
+          '',
+        );
+        expect(
+          snapshot.rows
+              .singleWhere((row) => row.sessionId == 'confirmed')
+              .title,
+          'confirmed',
+        );
+      },
+    );
     featureTest(
       'tabs and the active one come back after a restart; another server '
       'has its own set',

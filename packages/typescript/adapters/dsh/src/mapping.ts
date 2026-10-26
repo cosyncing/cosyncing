@@ -311,8 +311,9 @@ export function dshProjectionMessages(
       } }];
     }
     case 'title': {
+      if (value !== null && typeof value !== 'string') return [];
       const title = optionalString(value);
-      return title ? [{ type: 'metadata-update', key: 'sessionInfo', value: { title } }] : [];
+      return [{ type: 'metadata-update', key: 'sessionInfo', value: { title: title ?? '' } }];
     }
     case 'contextPressure': {
       const pressure = record(value);
@@ -404,7 +405,7 @@ function dshGoalMessages(value: unknown): AgentMessage[] {
 // ── Sessions ────────────────────────────────────────────────────────────────
 
 export interface DshSessionMapOptions {
-  /** Workspace path/title for this session's workspace, when the caller resolved one. */
+  /** Project display name for this session's workspace, when the caller resolved one. */
   workspaceTitle?: string;
   /** Live-attach availability: false while the host cannot be driven. */
   driveSupported?: boolean;
@@ -445,9 +446,7 @@ export function mapDshSession(raw: DshSessionSummary, options: DshSessionMapOpti
   if (!id) return undefined;
   const store = new DshProjectionStore();
   store.seed(raw.projections);
-  const title = optionalString(store.get('title'))
-    ?? optionalString(options.workspaceTitle)
-    ?? id;
+  const title = optionalString(store.get('title')) ?? '';
   // The host's current permission mode rides the summary's `permissions`
   // projection. Seeding it on the ROW is what puts it on the info object before
   // the first session frame: the runtime sends that frame before history, so a
@@ -462,6 +461,7 @@ export function mapDshSession(raw: DshSessionSummary, options: DshSessionMapOpti
     id,
     tool: DSH_TOOL_ID,
     title,
+    ...(options.workspaceTitle ? { projectName: options.workspaceTitle } : {}),
     // BOTH halves of the roster link. The client's nesting table is built only
     // from rows carrying `nativeId`, so a child's `parentThreadId` resolves to
     // nothing unless the parent published one — and every dsh row is a possible

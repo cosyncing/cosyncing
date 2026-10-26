@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * omp discovery deltas the merged suites do not assert: session_info naming, subagent lineage on
+ * omp discovery deltas the merged suites do not assert: dialect-specific naming, subagent lineage on
  * attach and observe-only control, symlinked transcripts, shared-Pi-variable suppression, the
  * future-version fail-closed surface, and the XDG/PI_CONFIG_DIR/PI_CODING_AGENT_DIR path rules.
  * (Title/model parsing and subagent tree rows live in e2e/adapters/conformance/omp.test.ts.)
@@ -35,7 +35,7 @@ writeFileSync(sessionA, [
   JSON.stringify({ type: 'message', id: 'u1', parentId: 't2', timestamp: '2026-08-20T00:02:01.000Z', message: { role: 'user', content: [{ type: 'text', text: 'durable observe marker' }] } }),
 ].join('\n') + '\n');
 
-// Session B: pi-shaped session_info naming still reads (migrated/hand-built files).
+// Session B: the declared migration path preserves an older Pi-shaped session name.
 const sessionB = join(sessionsRoot, '2026-08-21_bbbb.jsonl');
 writeFileSync(sessionB, [
   JSON.stringify({ type: 'session', version: 3, id: 'sess-b', timestamp: '2026-08-21T00:00:00.000Z', cwd: cwdA }),
@@ -116,7 +116,7 @@ try {
     /owned by their parent.*only be observed/i.test(childDriveRefusal),
     childDriveRefusal);
 
-  check('session_info naming still reads', b?.title === 'Legacy pi-shaped name', String(b?.title));
+  check('migrated Pi session_info naming still reads', b?.title === 'Legacy pi-shaped name', String(b?.title));
 
 
   process.env.PI_CODING_AGENT_DIR = join(root, 'shared-agent');
@@ -125,6 +125,10 @@ try {
   check('a live adapter suppresses discovery when shared Pi variables collide',
     blockedSessions.length === 0 && adapter.canCreateSession() === false,
     `${blockedSessions.length}/${adapter.canCreateSession()}`);
+  const blockedTitle = await adapter.resolveSessionTitle(idOf(sessionB)).then(
+    () => false, () => true,
+  );
+  check('a blocked store also refuses direct title resolution', blockedTitle);
   delete process.env.PI_CODING_AGENT_DIR;
   delete process.env.PI_CODING_AGENT_SESSION_DIR;
 

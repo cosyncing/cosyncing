@@ -1138,6 +1138,9 @@ registry.register(new KiloAdapter({
   },
 }));
 registry.register(new CodexAdapter({
+  namingNow: () => attentionClock.now(),
+  resolveProvisionalName: (info) => sessionMetadata.provisionalName(info),
+  recordNativeName: (info, value, origin) => sessionMetadata.recordNativeName(info, value, origin),
   resolveStoredCurrentModel: (info) => sessionMetadata.currentModelHint(info),
   reportManagedStart: (failure) => {
     try {
@@ -1565,9 +1568,20 @@ const draftStore = new SharedDraftStore({
 const latestSessionInfoByKey = new Map<string, SessionInfo>();
 const MAX_LATEST_SESSION_INFO = 1024;
 const latestSessionKey = (tool: string, id: string): string => `${tool}\0${id}`;
+const titleObservationEpoch = Symbol('titleObservationEpoch');
+const watcherObservationStartedAt = Symbol('watcherObservationStartedAt');
+let titleMutationEpoch = 0;
+const acceptedSessionTitles = new Map<string, { epoch: number; acceptedAt: number; title?: string; pending: boolean }>();
 // Test hook (source runs only): a short zero-client eviction grace makes eviction and restore observable in a suite.
 const HUB_EVICT_GRACE_MS = BUILD_INFO.packaged ? 15000 : envNumber('COSYNCING_TEST_HUB_EVICT_GRACE_MS', 0) || 15000;
 const hub = new Hub(registry, HUB_EVICT_GRACE_MS, artifactStore, {
+  beginSessionInfoRead: () => {
+    const epoch = titleMutationEpoch;
+    const startedAt = performance.now();
+    // Qualify this snapshot at admission without leaving a stale observation
+    // tag on a mutable connection's later native title updates.
+    return (info) => retainAcceptedSessionTitle(info, epoch, startedAt);
+  },
   onMessage: (info, message) => {
     void attentionService.handleMessage(attentionSessionView(info, (tool, id) => sessionMetadata.titleOf(tool, id)), message).catch((error) =>
       console.error(`${LOG_PREFIX} attention message reconciliation failed for ${info.tool}:${info.id}: ${String(error)}`));
@@ -1602,6 +1616,7 @@ const hub = new Hub(registry, HUB_EVICT_GRACE_MS, artifactStore, {
   onSessionInfo: (info) => {
     rosterPublication.publishOwnerFrame(info);
   },
+  decorateSessionInfo: decorateSession,
   // A new connection starts from the lineage the roster already shows for it. The cache is keyed by
   // id and by nativeId, so only a row that IS this session answers.
   discoveredSession: (tool, id) => {
@@ -1620,8 +1635,13 @@ const rosterPublication = createRosterPublicationBoundary({
   liveOwners: () => hub.liveSnapshot(),
   publish: (info) => observeRosterViews(hub.projectSessionInfo(info)),
   acceptWatcher: (info) => nativePublicationAuthority.acceptsWatcher(info),
-  onWatcherAccepted: rememberLatestSessionInfo,
-  reconcile: (info) => hub.refreshExternalSession(decorateSession({ ...info, machine: MACHINE })),
+  onWatcherAccepted: (info) => {
+    sessionMetadata.observeNative(info);
+    Object.assign(info, qualifyNativeSessionInfo(info));
+    hub.adoptDiscoveredTitles((tool, id) => tool === info.tool && id === info.id ? info : undefined);
+    rememberLatestSessionInfo(info);
+  },
+  reconcile: (info) => hub.refreshExternalSession({ ...info, machine: MACHINE }, qualifyNativeSessionInfo),
   onReconcileError: (err, info) =>
     console.error(`${LOG_PREFIX} session-info refresh failed for ${info.tool}:${info.id}`, err),
 });
@@ -2059,7 +2079,7 @@ const claudeHooks = new ClaudeHooksRegistry(
 );
 function claudeHooksInfo(b: any, id: string, transcriptPath?: string): SessionInfo {
   const cwd = b?.cwd ? String(b.cwd) : undefined;
-  const title = b?.title ? String(b.title) : cwd ? (cwd.split('/').filter(Boolean).pop() ?? 'Claude session') : 'Claude session';
+  const title = hub.getConn('claude', id)?.conn.info.title ?? '';
   // maintainer hard-requirement (issues-todo §"Model selector / effort / permission level" + doc-14): model and
   // permission mode must ALWAYS be shown for a synced session — locked, not hidden. Read the authoritative
   // current values from the transcript tail (the same source the Observe path uses); answer-only sync can't
@@ -2069,7 +2089,7 @@ function claudeHooksInfo(b: any, id: string, transcriptPath?: string): SessionIn
   const liveEffort = typeof b?.effort === 'string' && b.effort ? b.effort : undefined;
   const liveMode = transcriptPath ? readLatestPermissionMode(transcriptPath) : undefined;
   return {
-    id, tool: 'claude', machine: MACHINE, title, cwd, status: 'idle', attachMode: 'live',
+    id, tool: 'claude', machine: MACHINE, title, titlePending: true, cwd, status: 'idle', attachMode: 'live',
     ...(liveModel ? { currentModel: { providerID: 'anthropic', modelID: String(liveModel), ...(liveEffort ? { reasoningEffort: liveEffort } : {}) } } : {}),
     ...(liveMode ? { currentMode: liveMode } : {}),
     control: {
@@ -2098,7 +2118,25 @@ function ensureClaudeHooksConn(id: string, transcriptPath: string, b: any) {
   if (existing) return existing;
   const conn = claudeHooks.hello(id, claudeHooksInfo(b, id, transcriptPath), transcriptPath);
   hub.adopt('claude', id, conn);
-  return conn;
+  return refreshRegisteredTitle('claude', id, conn).then(() => conn);
+}
+
+const titleLookupTickets = new WeakMap<SessionConnection, number>();
+function refreshRegisteredTitle(tool: string, id: string, conn: SessionConnection): Promise<void> {
+  const ticket = (titleLookupTickets.get(conn) ?? 0) + 1;
+  titleLookupTickets.set(conn, ticket);
+  const epoch = titleMutationEpoch;
+  const backend = registry.get(tool);
+  if (!backend?.resolveSessionTitle) return Promise.resolve();
+  return backend.resolveSessionTitle(id).then((title) => {
+    if (title === undefined || titleLookupTickets.get(conn) !== ticket
+      || hub.getConn(tool, id)?.conn !== conn) return;
+    const accepted = acceptedSessionTitles.get(latestSessionKey(tool, id));
+    if (accepted && epoch < accepted.epoch) return;
+    conn.info.title = title;
+    delete conn.info.titlePending;
+    hub.broadcastSessionWhere((info) => info === conn.info, decorateSession);
+  }).catch(() => { /* Unavailable metadata preserves the registered identity and known title. */ });
 }
 
 // ── Claude true-sync mod socket ──
@@ -2216,7 +2254,8 @@ function cachedSessionInfoForMutation(info: SessionInfo): SessionInfo[] {
 }
 
 const sessionInfoWatchers = registry.list().map((backend) =>
-  backend.watchSessionInfo?.((info) => {
+  backend.watchSessionInfo?.((info, startedAt) => {
+    (info as any)[watcherObservationStartedAt] = startedAt ?? performance.now();
     // Never journal or reconcile the raw inferred snapshot directly: the qualified publication
     // boundary native-qualifies it first, updates bounded caches only after admission, and
     // serializes/coalesces the Hub refresh per native incarnation identity.
@@ -2495,7 +2534,36 @@ function clearDivergenceOnSharedRejoin(info: SessionInfo): boolean {
   });
 }
 
+function retainAcceptedSessionTitle(info: SessionInfo, observationEpoch: number, startedAt?: number): SessionInfo {
+  const key = latestSessionKey(info.tool, info.id);
+  const accepted = acceptedSessionTitles.get(key);
+  const knownInfo = latestSessionInfoByKey.get(key) ?? hub.getConn(info.tool, info.id)?.conn.info;
+  const known = knownInfo?.title;
+  if (info.updatedAt === undefined && knownInfo?.updatedAt !== undefined) info = { ...info, updatedAt: knownInfo.updatedAt };
+  if (accepted && (startedAt === undefined ? observationEpoch < accepted.epoch : startedAt < accepted.acceptedAt)) {
+    return { ...info, title: accepted.title ?? known ?? info.title, titlePending: accepted.pending || undefined };
+  }
+  if (info.titlePending && known !== undefined) return { ...info, title: known };
+  if (accepted && !info.titlePending) {
+    if (accepted.title !== info.title) {
+      accepted.epoch = ++titleMutationEpoch;
+      accepted.acceptedAt = startedAt ?? performance.now();
+    }
+    accepted.title = info.title;
+    accepted.pending = false;
+  }
+  return info;
+}
+
+function qualifyNativeSessionInfo(info: SessionInfo): SessionInfo {
+  const startedAt = (info as any)[watcherObservationStartedAt];
+  const epoch = (info as any)[titleObservationEpoch];
+  return typeof startedAt === 'number' ? retainAcceptedSessionTitle(info, Infinity, startedAt)
+    : typeof epoch === 'number' ? retainAcceptedSessionTitle(info, epoch) : info;
+}
+
 function decorateSession(info: SessionInfo): SessionInfo {
+  info = qualifyNativeSessionInfo(info);
   clearDivergenceOnSharedRejoin(info);
   sessionVisibility.observe([info]);
   return sessionVisibility.apply(sessionMetadata.apply({ ...info, machine: MACHINE }));
@@ -2672,6 +2740,7 @@ function startRosterSweep(
   windowMs: number | undefined,
   now: number,
 ): Promise<RosterSweepAnswer<SessionInfo>> {
+  const titleEpoch = titleMutationEpoch;
   // Per-leg WALL-CLOCK, with the overlap that produced it. Not the leg's own
   // cost: six legs share this event loop, so a starved leg reports the sweep's
   // duration. `x6` on a line means five other legs were running inside it, and
@@ -2741,7 +2810,9 @@ function startRosterSweep(
       // already have ended. See `RosterSweepCache.seedLeg` for why the seeded
       // snapshot keeps the SWEEP's start time rather than the leg's.
       onLegRows: (backendId, rows) => {
-        rosterSweeps.seedLeg(key, seededAt, (existing) => mergeLegRows(existing, backendId, rows));
+        for (const info of rows) sessionMetadata.observeNative(info);
+        const observed = rows.map((info) => ({ ...info, [titleObservationEpoch]: titleEpoch }));
+        rosterSweeps.seedLeg(key, seededAt, (existing) => mergeLegRows(existing, backendId, observed));
       },
     })
     .then((sessions) => {
@@ -2761,7 +2832,6 @@ function startRosterSweep(
     })
     .then((sessions) => {
       rosterSafetyReconciledAt.set(key, attentionClock.now());
-      for (const session of sessions) rememberLatestSessionInfo(session);
       // A finished sweep is not automatically a COMPLETE one. A leg that
       // overran its budget or threw did not read its adapter, and what it
       // returns is `carryLastGood` -- the rows of an EARLIER sweep of this same
@@ -2780,6 +2850,7 @@ function startRosterSweep(
       // session was deleted. Every abandoned or failed leg is therefore
       // unconfirmed, whatever it returned.
       const withheld = unconfirmedBackends(legs);
+      for (const info of sessions) if (!withheld.includes(info.tool)) sessionMetadata.observeNative(info);
       if (withheld.length > 0) {
         console.warn(
           `${LOG_PREFIX} roster sweep (window=${key}) cannot speak for ${withheld.join(', ')}: `
@@ -2787,7 +2858,9 @@ function startRosterSweep(
         );
       }
       return {
-        rows: sessions,
+        rows: sessions.map((info) => ({ ...info,
+          [titleObservationEpoch]: withheld.includes(info.tool) ? 0 : titleEpoch,
+        })),
         coverage: withheld.length === 0
           ? ROSTER_COVERAGE_COMPLETE
           : { kind: 'incomplete' as const, withheld },
@@ -2891,8 +2964,9 @@ async function discoverLocalRosterRetained(
   piBridgeIds.canonicalizeAll();
   ompBridgeIds.canonicalizeAll();
   const swept = await discoverAllCached(force, windowMs, now, allowSweeping);
-  const sessions = filterSessionsByWindow(swept.rows, windowMs, now)
-    .map((s) => ({ ...s, machine: MACHINE }));
+  const sessions = filterSessionsByWindow(swept.rows.map((s) =>
+    retainAcceptedSessionTitle({ ...s, machine: MACHINE },
+      (s as any)[titleObservationEpoch] ?? 0)), windowMs, now);
   const withheldTools = withheldBackends(swept.coverage);
   // A native runtime may replace the adapter id while retaining one exact native identity (Claude
   // bridge continuation is the measured case). Retire every superseded Hub owner and remove its
@@ -2928,7 +3002,9 @@ async function discoverLocalRosterRetained(
   // sweep will journal: a mid-sweep snapshot is not reconciled, and a withheld leg is a carry.
   if (swept.coverage.kind !== 'sweeping') {
     const withheld = new Set(withheldTools);
-    hub.adoptDiscoveredLineage((tool, id) => (withheld.has(tool) ? undefined : byKey.get(`${tool}:${id}`)));
+    const discovered = (tool: string, id: string) => withheld.has(tool) ? undefined : byKey.get(`${tool}:${id}`);
+    hub.adoptDiscoveredTitles(discovered);
+    hub.adoptDiscoveredLineage(discovered);
   }
   // Reduce every live owner of a session to ONE authoritative owner BEFORE applying anything.
   // Otherwise a read-only Observe wrapper and a Drive wrapper both write, and Map iteration order
@@ -7112,7 +7188,7 @@ server = Bun.serve<WsData>({
       const backend = registry.get(tool);
       if (!backend) return json({ error: `unknown tool: ${tool}` }, 404);
       const body: any = await req.json().catch(() => ({}));
-      const title = body?.title == null ? null : String(body.title).trim().slice(0, 160);
+      const title = body?.title == null ? null : Array.from(String(body.title).trim()).slice(0, 160).join('');
       let record: ReturnType<typeof sessionMetadata.renameSession> | null = null;
       let nativeSession: Awaited<ReturnType<NonNullable<typeof backend.renameSession>>> | undefined;
       if (backend.renameSession) {
@@ -7138,18 +7214,36 @@ server = Bun.serve<WsData>({
       // accepted title; adapter rename responses are allowed to reconstruct
       // otherwise-idle metadata from disk.
       const liveSession = nativeSession ? hub.getConn(tool, id)?.conn.info : undefined;
+      const knownTitle = acceptedSessionTitles.get(latestSessionKey(tool, id))?.title
+        ?? liveSession?.title ?? latestSessionInfoByKey.get(latestSessionKey(tool, id))?.title;
       const base = nativeSession
         ? liveSession
-          ? { ...liveSession, title: nativeSession.title }
-          : nativeSession
+          ? { ...liveSession, title: nativeSession.titlePending ? liveSession.title : nativeSession.title, titlePending: nativeSession.titlePending }
+          : { ...nativeSession, ...(nativeSession.titlePending && knownTitle !== undefined ? { title: knownTitle } : {}) }
         : await discoverSession(tool, id);
+      // The mutation reply itself is current authority, even when its base was
+      // retained from a snapshot that predates an earlier rename.
+      if (base) { delete (base as any)[titleObservationEpoch]; delete (base as any)[watcherObservationStartedAt]; }
       const session = base ? decorateSession(base) : undefined;
+      const pendingTitle = nativeSession?.titlePending === true;
+      const acceptedTitle = pendingTitle
+        ? knownTitle
+        : nativeSession?.title ?? session?.title ?? record?.title;
+      if (pendingTitle || (acceptedTitle !== undefined && acceptedTitle !== null)) {
+        const key = latestSessionKey(tool, id);
+        acceptedSessionTitles.delete(key);
+        acceptedSessionTitles.set(key, { epoch: ++titleMutationEpoch, acceptedAt: performance.now(), title: acceptedTitle ?? undefined, pending: pendingTitle });
+        if (acceptedSessionTitles.size > 8192) acceptedSessionTitles.delete(acceptedSessionTitles.keys().next().value!);
+      }
+      rosterSweeps.invalidate();
+      rosterRepresentations.clear();
+      rosterSafetyReconciledAt.clear();
       // A NATIVE rename must also update any open connection's in-memory title: the alias was just
       // cleared, so a stale `mc.conn.info.title` would flicker back on every later status broadcast
       // until the roster poll re-corrected it (issues-part2 item 15). The alias path needs no patch —
       // decorateSession applies the alias on every broadcast.
       if (nativeSession !== undefined) {
-        hub.patchSessionInfoWhere((info) => info.tool === tool && info.id === id, { title: nativeSession.title });
+        hub.patchSessionInfoWhere((info) => info.tool === tool && info.id === id, pendingTitle ? { titlePending: true } : { title: nativeSession.title, titlePending: undefined });
       }
       hub.broadcastSessionWhere((info) => info.tool === tool && info.id === id, decorateSession);
       return json({ ok: true, title: session?.title ?? record?.title ?? null, session });
@@ -7454,13 +7548,13 @@ server = Bun.serve<WsData>({
           const sessionId = typeof body?.sessionId === 'string' ? body.sessionId.trim() : '';
           if (!sessionId) return scheduleInvalid('sessionId is required for a message schedule');
           const sessionTitle = typeof body?.sessionTitle === 'string' && body.sessionTitle.trim()
-            ? body.sessionTitle.trim().slice(0, 160)
+            ? Array.from(body.sessionTitle.trim()).slice(0, 160).join('')
             : undefined;
           created = scheduleStore.create({ kind, tool, sessionId, sessionTitle, text, at: at!, retryPolicy });
         } else {
           if (!registry.get(tool)?.createSession) return scheduleInvalid(`tool '${tool}' cannot create sessions`);
           const directory = typeof body?.directory === 'string' && body.directory.trim() ? body.directory.trim() : undefined;
-          const title = typeof body?.title === 'string' && body.title.trim() ? body.title.trim().slice(0, 160) : undefined;
+          const title = typeof body?.title === 'string' && body.title.trim() ? Array.from(body.title.trim()).slice(0, 160).join('') : undefined;
           let model: ModelSelection | undefined;
           try {
             model = normalizeModelSelection(body?.model);
@@ -7625,7 +7719,8 @@ server = Bun.serve<WsData>({
       const info: SessionInfo = {
         id, tool: 'pi', machine: MACHINE,
         ...(bridgeNativeId ? { nativeId: bridgeNativeId } : {}),
-        title: String(b?.title || sessionFile.split('/').pop() || 'Pi session'),
+        title: piBridge.get(id)?.info.title ?? '',
+        titlePending: true,
         cwd: b?.cwd ? String(b.cwd) : undefined,
         // A bridge hello is exact live-source activity. Publish that observation
         // time so the default recent-session roster does not hide an otherwise
@@ -7658,6 +7753,8 @@ server = Bun.serve<WsData>({
       const adopted = hub.adopt('pi', id, conn); // pinned: lives as long as the terminal session, not the clients
       if (typeof b?.running === 'boolean') conn.ingest({ t: 'status', running: b.running });
       if (b?.running === true && b?.activeRun?.status === 'running') conn.publishActiveRun(b.activeRun);
+      // Complete hello without yielding; title enrichment has its own owner fence.
+      void refreshRegisteredTitle('pi', id, conn);
       // Journal the row now: the extension sends no frame until the user acts, so a delta or ETag
       // poller would otherwise learn of this live session only at its first frame.
       rosterPublication.publishOwnerFrame(adopted.conn.info);
@@ -7772,7 +7869,8 @@ server = Bun.serve<WsData>({
       const info: SessionInfo = {
         id, tool: 'omp', machine: MACHINE,
         ...(bridgeNativeId ? { nativeId: bridgeNativeId } : {}),
-        title: String(b?.title || sessionFile.split('/').pop() || 'omp session'),
+        title: ompBridge.get(id)?.info.title ?? '',
+        titlePending: true,
         cwd: b?.cwd ? String(b.cwd) : undefined,
         // Same rule as pi: a bridge hello is exact live-source activity, published so the default
         // recent-session roster does not hide an undated terminal session; never artifact ownership.
@@ -7804,6 +7902,8 @@ server = Bun.serve<WsData>({
       const adopted = hub.adopt('omp', id, conn); // pinned: lives as long as the terminal session, not the clients
       if (typeof b?.running === 'boolean') conn.ingest({ t: 'status', running: b.running });
       if (b?.running === true && b?.activeRun?.status === 'running') conn.publishActiveRun(b.activeRun);
+      // Complete hello without yielding; title enrichment has its own owner fence.
+      void refreshRegisteredTitle('omp', id, conn);
       // Journal the row now: the extension sends no frame until the user acts, so a delta or ETag
       // poller would otherwise learn of this live session only at its first frame.
       rosterPublication.publishOwnerFrame(adopted.conn.info);
@@ -7871,7 +7971,7 @@ server = Bun.serve<WsData>({
       const transcriptPath = String(b?.transcriptPath ?? '');
       if (!isClaudeTranscriptPathAllowed(transcriptPath)) return new Response('invalid transcriptPath', { status: 400 });
       const id = claudeSessionId(transcriptPath);
-      ensureClaudeHooksConn(id, transcriptPath, b);
+      await ensureClaudeHooksConn(id, transcriptPath, b);
       return json({ ok: true, id });
     }
     // request: ingest the relayed prompt + long-poll the decision. Returns {viewers:0} when no app is
@@ -7883,7 +7983,7 @@ server = Bun.serve<WsData>({
       const requestId = String(b?.requestId ?? '');
       if (!requestId || !isClaudeTranscriptPathAllowed(transcriptPath)) return json({ error: 'missing requestId or invalid transcriptPath' }, 400);
       const id = String(b?.id || claudeSessionId(transcriptPath));
-      const conn = ensureClaudeHooksConn(id, transcriptPath, b);
+      const conn = await ensureClaudeHooksConn(id, transcriptPath, b);
       const mc = hub.getConn('claude', id);
       if (!mc || mc.clientCount === 0) return json({ viewers: 0 }); // nobody watching → let the terminal handle it
       conn.ingestRequest({

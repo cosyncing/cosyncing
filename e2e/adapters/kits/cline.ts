@@ -23,6 +23,7 @@ import type { ClineControlCommand, FakeClineConfig } from './fakes/cline-program
 import {
   type ConformanceContext,
   type ConformanceExtra,
+  stableUnnamedTitle,
   type ConformanceKit,
   type ConformanceProfile,
   type FakeController,
@@ -535,6 +536,7 @@ async function refusedDrive(context: ConformanceContext, id: string, params: Rec
 }
 
 const clineExtras: ConformanceExtra[] = [
+  stableUnnamedTitle('cline'),
   {
     title: 'a create is one Hub session.create in the isolated profile, with the configured model and the managed origin',
     async run(context) {

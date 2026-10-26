@@ -457,14 +457,20 @@ try {
       mkdirSync(dataRoot, { recursive: true });
       createKiloDatabase(join(dataRoot, 'kilo.db'), { id: 'ses_seed', title: 'seed' });
       const database = new Database(join(dataRoot, 'kilo.db'));
-      const insert = database.query(`insert into session
+      try {
+        const insert = database.query(`insert into session
         (id, parent_id, slug, directory, title, model, revert, agent, time_created, time_updated, time_archived)
         values (?, null, ?, ?, ?, null, null, ?, ?, ?, null)`);
-      const seeded = Number((database.query('select count(*) as c from session where time_archived is null').get() as { c: number }).c);
-      for (let index = seeded; index < total; index += 1) {
-        insert.run(`ses_${index}`, `s-${index}`, join(capRoot, `wd-${index}`), `S${index}`, 'code', 1, 2);
+        const seeded = Number((database.query('select count(*) as c from session where time_archived is null').get() as { c: number }).c);
+        // One atomic fixture seed avoids thousands of autocommit fsyncs under parallel load.
+        database.transaction(() => {
+          for (let index = seeded; index < total; index += 1) {
+            insert.run(`ses_${index}`, `s-${index}`, join(capRoot, `wd-${index}`), `S${index}`, 'code', 1, 2);
+          }
+        })();
+      } finally {
+        database.close();
       }
-      database.close();
       return total;
     };
     const discoverAt = async (total: number): Promise<number> => {

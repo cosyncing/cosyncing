@@ -74,6 +74,10 @@ export interface FakeCodexAppServerConfig {
   version: string;
   /** Replaces the whole `--version` output when set. */
   versionOutput?: string;
+  /** 0.164 can materialize an unnamed thread through a metadata update. */
+  metadataPersistence?: boolean;
+  /** A controlled native-writer flush after its metadata acknowledgement. */
+  metadataPersistenceGate?: string;
   /** The thread id the next `thread/start` answers with; a fresh UUIDv7 when absent. */
   nextThreadId?: string;
   /** The rollout the next `thread/start` answers with (a native that reuses a stored thread). */
@@ -90,6 +94,12 @@ export interface FakeCodexAppServerConfig {
   faults?: {
     /** The daemon accepts connections but answers nothing (a wedged daemon). */
     daemonSilent?: boolean;
+    /** Unknown native metadata must not settle an automatic name. */
+    unidentifiedTitleRead?: boolean;
+    rejectNameWrites?: boolean;
+    persistBeforeRejectedName?: boolean;
+    nameWriteAppliedThenError?: boolean;
+    resumeNameNull?: boolean;
     /** A config override on resume reloads the base model even for a loaded thread (Codex 0.164.0). */
     resumeConfigReloadsDefaults?: boolean;
   };
@@ -323,6 +333,7 @@ function runFakeCodex(): void {
     path: string;
     cwd: string;
     name?: string;
+    pendingRecords?: Json[];
     legacyHistory: boolean;
     settings: CodexThreadSettings;
     turn?: Turn;
@@ -395,7 +406,11 @@ function runFakeCodex(): void {
       if (context.sandbox_policy) settings.sandboxPolicy = camelSandbox(context.sandbox_policy, cwd);
     }
     if (meta.model_provider) settings.modelProvider = String(meta.model_provider);
+    const names = readFileSync(join(codexHome, 'session_index.jsonl'), 'utf8').split('\n').flatMap((line) => {
+      try { return [JSON.parse(line)]; } catch { return []; }
+    });
     const thread: Thread = {
+      name: names.findLast((row) => row.id === threadId)?.thread_name,
       id: threadId,
       path: file,
       cwd,
@@ -570,8 +585,12 @@ function runFakeCodex(): void {
         return;
       }
       case 'thread/read': {
-        const thread = threadOf();
+        const thread = threadOf() ?? loadThread(String(params.threadId), undefined);
         if (!thread) return fail(`thread not loaded: ${String(params.threadId)}`);
+        if (config.faults?.unidentifiedTitleRead) {
+          record({ kind: 'title-read-unidentified', threadId: thread.id, transport: conn.transport });
+          return reply({ thread: { name: thread.name } });
+        }
         reply({ thread: threadView(thread, params.includeTurns === true) });
         return;
       }
@@ -610,22 +629,44 @@ function runFakeCodex(): void {
         record({ kind: 'writer', conn: conn.id, transport: conn.transport, threadId: id, cwd, argv: [process.execPath, ...args] });
         // A prepared path that already holds a rollout is a native reusing a stored thread.
         if (thread.legacyHistory && !existsSync(thread.path)) {
-          appendRecords(thread.path, [sessionMetaRecord({
+          thread.pendingRecords = [sessionMetaRecord({
             id,
             cwd,
             originator: String(params.serviceName ?? conn.clientName ?? 'codex_cli_rs'),
             modelProvider: settings.modelProvider,
-          })]);
+          })];
         }
         const now = Math.floor(Date.now() / 1000);
         reply({ thread: { ...threadView(thread), createdAt: now, updatedAt: now }, ...settingsView(thread) });
         return;
       }
-      case 'thread/name/set': {
+      case 'thread/metadata/update': {
+        if (!config.metadataPersistence) return fail('thread metadata update unsupported');
         const thread = threadOf();
+        if (!thread) return fail('thread not loaded');
+        const flush = (): void => {
+          if (thread.pendingRecords) { appendRecords(thread.path, thread.pendingRecords); delete thread.pendingRecords; }
+        };
+        if (config.metadataPersistenceGate) {
+          void released(config.metadataPersistenceGate, () => conn.closed).then((state) => { if (state === 'released') flush(); });
+        } else flush();
+        reply({ thread: threadView(thread) });
+        return;
+      }
+      case 'thread/name/set': {
+        const thread = threadOf() ?? loadThread(String(params.threadId), undefined);
         if (!thread) return fail(`thread not loaded: ${String(params.threadId)}`);
-        thread.name = String(params.name ?? '');
+        if (config.faults?.rejectNameWrites) {
+          if (config.faults.persistBeforeRejectedName && thread.pendingRecords) {
+            appendRecords(thread.path, thread.pendingRecords); delete thread.pendingRecords;
+          }
+          return fail('native name write refused');
+        }
+        if (typeof params.name !== 'string' || !params.name.trim()) return fail('thread name must not be empty');
+        if (thread.pendingRecords) { appendRecords(thread.path, thread.pendingRecords); delete thread.pendingRecords; }
+        thread.name = params.name;
         appendThreadName(codexHome, thread.id, thread.name);
+        if (config.faults?.nameWriteAppliedThenError) return fail('native name acknowledgement failed after applying');
         reply({});
         return;
       }
@@ -663,7 +704,7 @@ function runFakeCodex(): void {
         record({ kind: 'writer', conn: conn.id, transport: conn.transport, threadId, cwd: thread.cwd, argv: [process.execPath, ...args] });
         const turns = turnsView(thread);
         reply({
-          thread: threadView(thread),
+          thread: { ...threadView(thread), ...(config.faults?.resumeNameNull ? { name: null } : {}) },
           ...settingsView(thread),
           initialTurnsPage: { data: turns.slice(-1), nextCursor: null },
         });

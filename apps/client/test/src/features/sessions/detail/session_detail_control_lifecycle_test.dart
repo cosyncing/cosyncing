@@ -2220,7 +2220,7 @@ void main() {
         );
         expect(
           container.read(sessionListControllerProvider).sessions.single.title,
-          'Old server roster',
+          'Old server detail',
           reason: 'the retired response must not change the current roster',
         );
         expect(

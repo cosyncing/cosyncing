@@ -61,6 +61,33 @@ void main() {
   );
 
   group('identity projection', () {
+    test('an older pending save cannot overwrite an accepted title', () async {
+      await repository.save(
+        brokerProfileId: 'profile-a',
+        endpoint: endpoint,
+        sessions: [session(title: 'old')],
+      );
+      final stalePending = repository.save(
+        brokerProfileId: 'profile-a',
+        endpoint: endpoint,
+        sessions: [
+          SessionInfo.fromJson({
+            ...session(title: 'old').toJson(),
+            'titlePending': true,
+          }),
+        ],
+      );
+      final renamed = repository.save(
+        brokerProfileId: 'profile-a',
+        endpoint: endpoint,
+        sessions: [session(title: 'accepted rename')],
+      );
+      expect((await stalePending).rows.single.title, 'accepted rename');
+      await renamed;
+      final stored = await repository.load('profile-a', endpoint: endpoint);
+      expect(stored!.rows.single.title, 'accepted rename');
+    });
+
     test('stores identity and drops every activity field', () async {
       await repository.save(
         brokerProfileId: 'profile-a',

@@ -244,7 +244,14 @@ void main() {
               connections.latest(session.key).disposeCount == 1;
         }),
       );
-      expect(openStore.snapshot.refs, [_a]);
+      expect(openStore.snapshot.refs, [
+        SessionRef(
+          tool: _a.tool,
+          id: _a.id,
+          title: 'Lifecycle a',
+          status: _a.status,
+        ),
+      ]);
 
       // Re-point the saved profile. The equal session key must wait for the
       // old provider/socket retirement, then attach once against the new

@@ -68,6 +68,8 @@
  * Not in this round, deliberately: native file/image input, and agent/mode
  * switching.
  */
+import { SessionTitleCache, sessionPromptPreview, isSessionInstruction, containedStorePath, isRegularFileSync, openRegularFileSync } from '@cosyncing/adapter-api';
+
 import {
   CLIENT_REVISION_WITH_TOLERANT_INTEGRATION_KIND_DECODE,
   EXTERNAL_HOST_DISCOVERY_BUDGET_MS,
@@ -895,6 +897,16 @@ export class KimiAdapter implements AgentBackend {
    */
   /** Positive `agents/main` head answers, per session id. See withSubagentRows. */
   private readonly parentModelAliasCache = new Map<string, string>();
+  private readonly titlePaths = new Map<string, string>();
+  private readonly titleCache = new SessionTitleCache<{ firstPrompt?: string }>(() => ({}), (row, facts) => {
+    if (facts.firstPrompt || row.type !== 'turn.prompt') return;
+    const text = Array.isArray(row.payload?.input ?? row.input)
+      ? (row.payload?.input ?? row.input).filter((part: any) => part?.type === 'text' && typeof part.text === 'string').map((part: any) => part.text).filter((text: string) => !isSessionInstruction(text)).join('\n') : '';
+    if (!isSessionInstruction(text)) facts.firstPrompt = sessionPromptPreview(text);
+  }, (path) => {
+    const file = containedStorePath([kimiSessionWireRoot(this.home())], path, { regularFile: true });
+    return file ? openRegularFileSync(file, { noFollow: true }) : undefined;
+  }, { stopWhen: (facts) => !!facts.firstPrompt });
 
   private async withSubagentRows(
     parents: SessionInfo[],
@@ -903,6 +915,22 @@ export class KimiAdapter implements AgentBackend {
   ): Promise<SessionInfo[]> {
     const wireRoot = kimiSessionWireRoot(this.home());
     const now = Date.now();
+    for (const parent of parents) {
+      if (parent.title) continue;
+      let file = this.titlePaths.get(parent.id);
+      if (!file || !isRegularFileSync(file, { noFollow: true })) {
+        const located = locateKimiSessionDirectory(wireRoot, parent.id);
+        if (!located.sessionDir) continue;
+        file = containedStorePath([wireRoot], join(located.sessionDir, 'agents', 'main', 'wire.jsonl'), { regularFile: true });
+        if (!file) continue;
+        if (this.titlePaths.size >= 2048) this.titlePaths.delete(this.titlePaths.keys().next().value!);
+        this.titlePaths.set(parent.id, file);
+      }
+      const { facts, complete } = await this.titleCache.readResult(file, options?.signal);
+      parent.title = facts.firstPrompt ?? '';
+      parent.titlePending = !complete || undefined;
+    }
+
 
     // The PARENT's own launch model, from its `agents/main` journal head.
     // `/api/v2/sessions` carries no model field, so before this an unopened
@@ -1279,7 +1307,7 @@ export class KimiAdapter implements AgentBackend {
     const info: SessionInfo = known ?? {
       id: sessionId,
       tool: this.id,
-      title: sessionId,
+      title: '',
       status: 'idle',
       attachMode: 'observe',
       launchSurface: 'unknown',
@@ -1578,24 +1606,20 @@ export class KimiAdapter implements AgentBackend {
    * in the terminal too — which a broker-side alias never could.
    *
    * `null` (a cleared display-title override) has no native expression — the
-   * profile schema requires a non-empty string — so it resolves to the same
-   * human-readable name codex uses for a cleared title, the session's cwd
-   * basename; with no cwd on record there is nothing honest to write and the
-   * call is a no-op, dsh-style.
+   * profile schema requires a non-empty string. Clearing a broker alias therefore leaves
+   * the native name alone; it must not assign a project name as a replacement.
    */
   async renameSession(sessionId: string, title: string | null): Promise<SessionInfo | void> {
     const { resolved, token } = await this.verifiedInstance();
     if (!resolved.ok) {
       throw new Error(ATTACH_REFUSAL[resolved.reason]);
     }
-    // The roster row supplies the cwd the null-case fallback is composed from,
-    // and is the base the returned info is patched over, so an open session's
-    // facts survive the rename rather than being reconstructed bare.
+    // Patch the native name onto the existing row without changing its live metadata.
     const known = (await this.discoverFrom(resolved.http)).find((session) => session.id === sessionId);
-    const name = title?.trim() || (known?.cwd ? basename(known.cwd) : '');
+    const name = title?.trim() || '';
     if (!name) return;
     await this.driveClient(resolved.instance, token).renameSession(sessionId, { title: name });
-    if (known) return { ...known, title: name };
+    if (known) return { ...known, title: name, titlePending: undefined };
     return {
       id: sessionId,
       tool: this.id,

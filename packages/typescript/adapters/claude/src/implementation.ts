@@ -43,6 +43,8 @@
  *    bounded depth-2 walk in {@link claudeSubagentTranscripts}. The main file shows just the Agent
  *    tool call/result.
  */
+import { sessionPromptPreview, isSessionInstruction, TitleRecordProjection } from '@cosyncing/adapter-api';
+
 import { homedir } from 'node:os';
 import {
   existsSync,
@@ -1490,7 +1492,7 @@ export class ClaudeAdapter implements AgentBackend {
     return {
       id: rowId,
       tool: this.id,
-      title: opts.title?.trim() || basename(cwd) || 'Claude session',
+      title: opts.title?.trim() || '',
       cwd,
       ...(opts.model
         ? {
@@ -1513,7 +1515,7 @@ export class ClaudeAdapter implements AgentBackend {
     };
   }
 
-  watchSessionInfo(onChange: (info: SessionInfo) => void): Unsubscribe {
+  watchSessionInfo(onChange: (info: SessionInfo, observationStartedAt?: number) => void): Unsubscribe {
     const watchers: FSWatcher[] = [];
     const timers = new Map<string, ReturnType<typeof setTimeout>>();
     const refresh = (store: ClaudeStore, uuid?: string): void => {
@@ -1522,6 +1524,7 @@ export class ClaudeAdapter implements AgentBackend {
       if (prev) clearTimeout(prev);
       timers.set(key, setTimeout(() => {
         timers.delete(key);
+        const observationStartedAt = performance.now();
         void this.discoverSessions()
           .then((sessions) => {
             for (const s of sessions) {
@@ -1538,7 +1541,7 @@ export class ClaudeAdapter implements AgentBackend {
               const sessionUuid =
                 claudeSubagentPathInfo(path)?.parentUuid ?? basename(path).replace(/\.jsonl$/, '');
               if (uuid && sessionUuid !== uuid) continue;
-              onChange(s);
+              onChange(s, observationStartedAt);
             }
           })
           .catch(() => {});
@@ -1668,17 +1671,18 @@ export class ClaudeAdapter implements AgentBackend {
             continue;
           }
           options?.onWork?.({ kind: 'decode-file', source: full });
-          const { cwd, firstUser, firstUserUuid, model: headModel } = readHeadInfo(full);
+          const { cwd, firstUserUuid, model: headModel } = readHeadInfo(full);
           // CURRENT model = the latest assistant turn (tail), not the model the session was BORN on
           // (head). A long-lived session started on opus-4-6 and since continued on opus-4-8 must be
           // labelled by what it runs NOW. Falls back to the head model when the tail has none yet.
           const model = readLatestModel(full) ?? headModel;
-          const title = readTitle(full) ?? firstUser ?? (cwd ? basename(cwd) : uuid.slice(0, 8));
           // Exact transcript turn evidence prevents freshness from expiring a LIVE foreground tool.
           // It cannot manufacture a live process: an abandoned transcript with no matching
           // `agents --json` row is idle even if its final durable record was a tool_use.
           const conversationTs = lastConversationTs(full) ?? st.mtimeMs;
-          const status = await claudeSessionStatus(full, raw, now);
+          const status = await claudeSessionStatus(full, raw, now, options?.signal);
+          const naming = cachedClaudeTitle(full);
+          const title = naming.title;
           const rowId = enc(full); // base64url of the transcript path — attach re-opens the exact file (like Codex/Pi)
           // DEPTH-2 roster lineage. Walked HERE and only here — after the cutoff `continue` above — so a
           // windowed discovery never pays for a cold session's subagent tree, and the walk is the same
@@ -1697,6 +1701,7 @@ export class ClaudeAdapter implements AgentBackend {
             tool: this.id,
             ...(publishedNativeId ? { nativeId: publishedNativeId } : {}),
             title,
+            titlePending: naming.titlePending || undefined,
             cwd,
             // Label by the producing model so wrapper sessions read e.g. 'MiniMax-M3' (Issue D).
             model: store.isDefault ? model : store.model,
@@ -1770,6 +1775,13 @@ export class ClaudeAdapter implements AgentBackend {
     return out;
   }
 
+  async resolveSessionTitle(sessionId: string): Promise<string | undefined> {
+    const path = containedClaudePath(dec(sessionId));
+    await claudeTranscriptTurnAuthorityResult(path);
+    const naming = cachedClaudeTitle(path);
+    return naming.titlePending ? undefined : naming.title;
+  }
+
   async attach(sessionId: string, mode?: AttachMode): Promise<SessionConnection> {
     // Defense-in-depth: ids only ever come from discoverSessions (within some store's projectsRoot), but
     // refuse to open a path outside EVERY known store root so a crafted id can't read arbitrary files.
@@ -1836,7 +1848,8 @@ export class ClaudeAdapter implements AgentBackend {
           : {}),
       title: subagent
         ? claudeSubagentTitle(subagent.agent, subagentMeta ?? undefined)
-        : readTitle(path) ?? (cwd ? basename(cwd) : basename(path)),
+        : await readTitle(path),
+      titlePending: subagent ? undefined : !claudeTurnAuthorityCache.get(path)?.titleResolved || undefined,
       cwd,
       model: liveModel,
       // currentModel is resolved-session identity, not the curated selection alias. A later selection may
@@ -8213,6 +8226,13 @@ type ClaudeAuthorityStat = {
 };
 
 interface ClaudeTurnAuthorityEntry {
+  titleFacts: ClaudeTitleFacts;
+  titleResolved: boolean;
+  titleInitialEnd: number;
+  titleProcessedSize: number;
+  titleTail: ClaudeAuthorityTail;
+  titlePublished?: string;
+  titleOpaque?: boolean;
   sourceKey: string;
   /** Validated source EOF used for append/replacement fencing. */
   size: number;
@@ -8239,7 +8259,7 @@ interface ClaudeTurnAuthorityEntry {
 
 type ClaudeAuthorityTail =
   | { kind: 'complete' }
-  | { kind: 'partial'; start: number }
+  | { kind: 'partial'; start: number; projection?: TitleRecordProjection }
   | { kind: 'opaque' };
 
 const claudeTurnAuthorityCache = new Map<string, ClaudeTurnAuthorityEntry>();
@@ -8362,11 +8382,17 @@ export type ClaudeTurnAuthorityInference =
 
 /** Test-only seams for deterministic admission and source-race coverage. */
 export interface ClaudeTurnAuthorityScanOptions {
+  signal?: AbortSignal;
   maxSourceBytes?: number;
   maxElapsedMs?: number;
   /** The clock {@link maxElapsedMs} is measured on (default `Date.now`). */
   now?: () => number;
+  /** Append/replacement between snapshot admission and opening its range. */
+  beforeOpen?: () => void;
   beforeValidation?: () => void;
+  /** Internal bounds for the forward title backlog, sharing the range parser. */
+  end?: number;
+  allowAppend?: boolean;
 }
 
 /** Exact latest-turn evidence retained across incremental transcript growth.
@@ -8382,114 +8408,121 @@ export async function claudeTranscriptTurnAuthority(path: string): Promise<Claud
   return (await claudeTranscriptTurnAuthorityResult(path)).authority;
 }
 
+const claudeAuthorityReads = new Map<string, Promise<ClaudeTurnAuthorityInference>>();
+
 export async function claudeTranscriptTurnAuthorityResult(
   path: string,
   options?: ClaudeTurnAuthorityScanOptions,
 ): Promise<ClaudeTurnAuthorityInference> {
+  const held = claudeAuthorityReads.get(path);
+  if (held) {
+    await held.catch(() => undefined);
+    options?.signal?.throwIfAborted();
+    return claudeTranscriptTurnAuthorityResult(path, options);
+  }
+  const work = scanClaudeTranscriptTurnAuthorityResult(path, options);
+  claudeAuthorityReads.set(path, work);
+  try { return await work; } finally { claudeAuthorityReads.delete(path); }
+}
+
+async function scanClaudeTranscriptTurnAuthorityResult(
+  path: string,
+  options: ClaudeTurnAuthorityScanOptions = {},
+): Promise<ClaudeTurnAuthorityInference> {
+  options.signal?.throwIfAborted();
   const st = statSafe(path);
   if (!st || st.size <= 0) {
     claudeTurnAuthorityCache.delete(path);
     return { kind: 'authority', authority: 'unknown', scannedBytes: 0 };
   }
-  const cached = claudeTurnAuthorityCache.get(path);
-  if (cached && claudeAuthorityAppendCompatible(path, st, cached)) {
-    if (st.size > cached.size || cached.processedSize < st.size) {
-      const advanced = await scanClaudeAuthorityRange(path, st, cached, options);
-      if (advanced.reason === 'source-changed') {
-        // The admitted prefix was still valid when this scan started, so only the racing
-        // candidate is rejected; the published authority stands until the settled follow-up
-        // re-validates the source or append incompatibility forces a reseed.
-        return {
-          kind: 'fallback',
-          authority: cached.authority,
-          ...(cached.continuationOpenedAt !== undefined
-            ? { continuationOpenedAt: cached.continuationOpenedAt }
-            : {}),
-          reason: advanced.reason,
-          scannedBytes: advanced.scannedBytes,
-        };
-      }
-      cached.authority = advanced.authority;
-      cached.size = st.size;
-      cached.processedSize = advanced.processedThrough;
-      cached.tail = advanced.tail;
-      cached.candidateAuthority = advanced.candidateAuthority;
-      cached.candidateAuthoritative = advanced.candidateAuthoritative;
-      cached.continuationOpenedAt = advanced.continuationOpenedAt;
-      cached.candidateContinuationOpenedAt = advanced.candidateContinuationOpenedAt;
-      cached.resolution = advanced.kind;
-      cached.fallbackReason = advanced.kind === 'fallback' ? advanced.reason : undefined;
-      refreshClaudeAuthoritySamples(path, st, cached);
-      rememberClaudeTurnAuthority(path, cached);
-      return advanced.kind === 'authority'
-        ? {
-            kind: 'authority',
-            authority: advanced.authority,
-            ...(advanced.continuationOpenedAt !== undefined
-              ? { continuationOpenedAt: advanced.continuationOpenedAt }
-              : {}),
-            scannedBytes: advanced.scannedBytes,
-          }
-        : {
-            kind: 'fallback',
-            authority: advanced.authority,
-            ...(advanced.continuationOpenedAt !== undefined
-              ? { continuationOpenedAt: advanced.continuationOpenedAt }
-              : {}),
-            reason: advanced.reason,
-            scannedBytes: advanced.scannedBytes,
-          };
-    }
-    rememberClaudeTurnAuthority(path, cached);
-    return cached.resolution === 'authority'
-      ? {
-          kind: 'authority',
-          authority: cached.authority,
-          ...(cached.continuationOpenedAt !== undefined
-            ? { continuationOpenedAt: cached.continuationOpenedAt }
-            : {}),
-          scannedBytes: 0,
-        }
-      : {
-          kind: 'fallback',
-          authority: cached.authority,
-          ...(cached.continuationOpenedAt !== undefined
-            ? { continuationOpenedAt: cached.continuationOpenedAt }
-            : {}),
-          reason: cached.fallbackReason ?? 'source-limit',
-          scannedBytes: 0,
-        };
+  const started = Date.now();
+  let scannedBytes = 0;
+  let entry = claudeTurnAuthorityCache.get(path);
+  if (entry && !claudeAuthorityAppendCompatible(path, st, entry)) {
+    claudeTurnAuthorityCache.delete(path);
+    entry = undefined;
   }
-
-  const recovered = await scanClaudeAuthorityCold(path, st, options);
-  if (recovered.reason === 'source-changed') return recovered;
-  const entry: ClaudeTurnAuthorityEntry = {
-    sourceKey: claudeAuthoritySourceKey(st),
-    size: st.size,
-    processedSize: st.size,
-    prefixLength: 0,
-    prefixHash: '',
-    boundaryLength: 0,
-    boundaryHash: '',
-    authority: recovered.authority,
-    resolution: recovered.kind,
-    ...(recovered.kind === 'fallback' ? { fallbackReason: recovered.reason } : {}),
-    tail: recovered.tail ?? (recovered.kind === 'authority'
-      ? recovered.scannedThrough === st.size
-        ? { kind: 'complete' }
-        : { kind: 'partial', start: recovered.scannedThrough }
-      : { kind: 'opaque' }),
-    candidateAuthority: recovered.authority,
-    candidateAuthoritative: recovered.kind === 'authority',
-    continuationOpenedAt: recovered.continuationOpenedAt,
-    candidateContinuationOpenedAt: recovered.continuationOpenedAt,
-  };
+  // An unfinished record at the frozen backlog EOF must consume its appended
+  // continuation; it cannot be skipped by the independent append cursor.
+  if (entry && entry.titleTail.kind === 'partial'
+    && entry.titleProcessedSize >= entry.titleInitialEnd) entry.titleInitialEnd = st.size;
+  if (!entry) {
+    const recovered = await scanClaudeAuthorityCold(path, st, options);
+    options.signal?.throwIfAborted();
+    scannedBytes += recovered.scannedBytes;
+    if (recovered.reason === 'source-changed' && !recovered.appendValidated) return recovered;
+    const coveredFrom = recovered.titleCoveredFrom ?? st.size;
+    entry = {
+      titleFacts: recovered.titleFacts ?? {}, titleResolved: false,
+      titleInitialEnd: coveredFrom, titleProcessedSize: 0, titleTail: { kind: 'complete' },
+      sourceKey: claudeAuthoritySourceKey(st), size: st.size, processedSize: st.size,
+      prefixLength: 0, prefixHash: '', boundaryLength: 0, boundaryHash: '',
+      authority: recovered.authority, resolution: recovered.kind,
+      fallbackReason: recovered.kind === 'fallback' ? recovered.reason : undefined,
+      tail: recovered.tail ?? { kind: 'opaque' },
+      candidateAuthority: recovered.candidateAuthority ?? recovered.authority,
+      candidateAuthoritative: recovered.candidateAuthoritative ?? recovered.kind === 'authority',
+      continuationOpenedAt: recovered.continuationOpenedAt,
+      candidateContinuationOpenedAt: recovered.candidateContinuationOpenedAt ?? recovered.continuationOpenedAt,
+    };
+  } else if (st.size > entry.size || entry.processedSize < st.size) {
+    const backlogPending = entry.titleProcessedSize < entry.titleInitialEnd;
+    const advanced = await scanClaudeAuthorityRange(path, st, entry, backlogPending ? {
+      ...options,
+      maxSourceBytes: Math.max(1, (options.maxSourceBytes ?? CLAUDE_TURN_AUTHORITY_MAX_SOURCE_BYTES) / 4),
+      maxElapsedMs: Math.max(1, (options.maxElapsedMs ?? CLAUDE_TURN_AUTHORITY_MAX_ELAPSED_MS) / 4),
+    } : options);
+    options.signal?.throwIfAborted();
+    scannedBytes += advanced.scannedBytes;
+    if (advanced.reason === 'source-changed' && !advanced.appendValidated) {
+      // A replaced/unverifiable generation must never keep serving a final title.
+      claudeTurnAuthorityCache.delete(path);
+      return { kind: 'fallback', authority: entry.authority, reason: 'source-changed', scannedBytes };
+    }
+    entry.authority = advanced.authority;
+    entry.processedSize = advanced.processedThrough;
+    entry.tail = advanced.tail;
+    entry.candidateAuthority = advanced.candidateAuthority;
+    entry.candidateAuthoritative = advanced.candidateAuthoritative;
+    entry.continuationOpenedAt = advanced.continuationOpenedAt;
+    entry.candidateContinuationOpenedAt = advanced.candidateContinuationOpenedAt;
+    if (advanced.titleFacts) entry.titleFacts = advanced.titleFacts;
+    entry.titleOpaque ||= advanced.titleOpaque;
+    entry.resolution = advanced.kind;
+    entry.fallbackReason = advanced.kind === 'fallback' ? advanced.reason : undefined;
+  }
+  const bytesLeft = (options.maxSourceBytes ?? CLAUDE_TURN_AUTHORITY_MAX_SOURCE_BYTES) - scannedBytes;
+  const timeLeft = (options.maxElapsedMs ?? CLAUDE_TURN_AUTHORITY_MAX_ELAPSED_MS) - (Date.now() - started);
+  if (entry.titleProcessedSize < entry.titleInitialEnd && bytesLeft > 0 && timeLeft > 0) {
+    const advanced = await scanClaudeAuthorityRange(path, st, {
+      ...entry, processedSize: entry.titleProcessedSize, tail: entry.titleTail,
+    }, { ...options, end: entry.titleInitialEnd, allowAppend: true,
+      maxSourceBytes: bytesLeft, maxElapsedMs: timeLeft });
+    options.signal?.throwIfAborted();
+    scannedBytes += advanced.scannedBytes;
+    if (advanced.reason === 'source-changed' && !advanced.appendValidated) {
+      claudeTurnAuthorityCache.delete(path);
+      return { kind: 'fallback', authority: entry.authority, reason: 'source-changed', scannedBytes };
+    }
+    entry.titleProcessedSize = advanced.processedThrough;
+    entry.titleTail = advanced.tail;
+    if (advanced.titleFacts) entry.titleFacts = advanced.titleFacts;
+    entry.titleOpaque ||= advanced.titleOpaque;
+  }
+  entry.size = st.size;
+  entry.titleResolved = !entry.titleOpaque && entry.titleTail.kind === 'complete'
+    && entry.tail.kind === 'complete'
+    && entry.titleProcessedSize >= entry.titleInitialEnd && entry.processedSize >= st.size;
+  if (entry.titleResolved) entry.titlePublished = resolvedClaudeTitle(entry.titleFacts);
   refreshClaudeAuthoritySamples(path, st, entry);
   rememberClaudeTurnAuthority(path, entry);
-  return recovered;
+  return entry.resolution === 'authority'
+    ? { kind: 'authority', authority: entry.authority, continuationOpenedAt: entry.continuationOpenedAt, scannedBytes }
+    : { kind: 'fallback', authority: entry.authority, continuationOpenedAt: entry.continuationOpenedAt,
+      reason: entry.fallbackReason ?? 'source-limit', scannedBytes };
 }
 
-type ClaudeColdAuthorityScan =
+type ClaudeColdAuthorityScan = (
   | {
       kind: 'authority';
       authority: ClaudeTranscriptTurnAuthority;
@@ -8507,7 +8540,9 @@ type ClaudeColdAuthorityScan =
       scannedThrough: number;
       scannedBytes: number;
       tail?: ClaudeAuthorityTail;
-    };
+    }) & { titleFacts?: ClaudeTitleFacts; titleCoveredFrom?: number; appendValidated?: boolean;
+      candidateAuthority?: ClaudeTranscriptTurnAuthority; candidateAuthoritative?: boolean;
+      candidateContinuationOpenedAt?: number };
 
 async function scanClaudeAuthorityCold(
   path: string,
@@ -8528,6 +8563,11 @@ async function scanClaudeAuthorityCold(
   let latestAuthority: ClaudeTranscriptTurnAuthority | undefined;
   let continuationOpenedAt: number | undefined;
   let continuationResolved = false;
+  const firstPrompt = readHeadInfo(path).firstUser;
+  const titleFacts: ClaudeTitleFacts = firstPrompt ? { firstPrompt, firstPromptOffset: -1 } : {};
+  let inspectedFrom = st.size;
+  let partialEOF = false;
+  let firstRecord = true;
   const boundedResult = (
     reason: ClaudeTurnAuthorityFallbackReason,
   ): ClaudeColdAuthorityScan => latestAuthority
@@ -8547,8 +8587,11 @@ async function scanClaudeAuthorityCold(
         scannedThrough: st.size,
         scannedBytes,
       };
-  const inspectReverseRecord = (record: Buffer): boolean => {
+  const inspectReverseRecord = (record: Buffer, offset: number): boolean => {
     const state = claudeRecordTurnState(record);
+    inspectedFrom = Math.min(inspectedFrom, offset);
+    if (!firstRecord || !partialEOF) observeClaudeTitles(state.line, titleFacts, offset);
+    firstRecord = false;
     if (!latestAuthority && state.authority) latestAuthority = state.authority;
     if (!latestAuthority) return false;
     if (!continuationResolved && state.continuationTransition) {
@@ -8561,21 +8604,25 @@ async function scanClaudeAuthorityCold(
     return continuationResolved;
   };
   try {
+    options.beforeOpen?.();
     fd = openRegularFileSync(path);
     const opened = fstatSync(fd);
-    if (!claudeAuthorityStatMatches(st, opened)) {
+    if (!claudeAuthorityOpenedSnapshotMatches(fd, st, opened)) {
       return { kind: 'fallback', authority: 'unknown', reason: 'source-changed', scannedThrough: st.size, scannedBytes };
     }
-    const guard = claudeAuthorityGuardFromFd(fd, opened);
+    // Keep the admitted EOF, even when opening already observes an append.
+    const guard = claudeAuthorityGuardFromFd(fd, st);
     const last = Buffer.alloc(1);
     if (readSync(fd, last, 0, 1, st.size - 1) !== 1) {
       return { kind: 'fallback', authority: 'unknown', reason: 'source-changed', scannedThrough: st.size, scannedBytes };
     }
     if (last[0] === 0x0a) scannedThrough = st.size;
+    partialEOF = last[0] !== 0x0a;
 
     let pos = st.size;
     let suffix: Buffer = Buffer.alloc(0);
     scan: while (pos > 0) {
+      options.signal?.throwIfAborted();
       if (scannedBytes >= maxSourceBytes) {
         result = boundedResult('source-limit');
         break;
@@ -8621,7 +8668,7 @@ async function scanClaudeAuthorityCold(
         const record = suffix.length > 0
           ? Buffer.concat([fragment, suffix], recordLength)
           : fragment;
-        if (inspectReverseRecord(record)) {
+        if (inspectReverseRecord(record, pos + left)) {
           result = {
             kind: 'authority',
             authority: latestAuthority ?? 'unknown',
@@ -8642,7 +8689,8 @@ async function scanClaudeAuthorityCold(
       await yieldToEventLoop();
     }
     if (!result) {
-      if (suffix.length > 0) inspectReverseRecord(suffix);
+      if (suffix.length > 0) inspectReverseRecord(suffix, 0);
+      inspectedFrom = 0;
       result = {
         kind: 'authority',
         authority: latestAuthority ?? 'unknown',
@@ -8652,11 +8700,20 @@ async function scanClaudeAuthorityCold(
       };
     }
     options.beforeValidation?.();
-    if (!claudeAuthorityGuardStillMatches(path, fd, guard)) {
+    const unchanged = claudeAuthorityGuardStillMatches(path, fd, guard);
+    const appendValidated = !unchanged && claudeAuthorityGuardStillMatches(path, fd, guard, true);
+    if (!unchanged && !appendValidated) {
       return { kind: 'fallback', authority: 'unknown', reason: 'source-changed', scannedThrough: st.size, scannedBytes };
     }
+    if (appendValidated) result = { kind: 'fallback', authority: 'unknown', reason: 'source-changed', scannedThrough: st.size, scannedBytes };
     return {
       ...result,
+      titleFacts,
+      titleCoveredFrom: partialEOF ? st.size : inspectedFrom,
+      appendValidated,
+      candidateAuthority: latestAuthority ?? result.authority,
+      candidateAuthoritative: latestAuthority !== undefined || result.kind === 'authority',
+      candidateContinuationOpenedAt: continuationOpenedAt,
       tail: last[0] === 0x0a
         ? { kind: 'complete' }
         : result.kind === 'authority'
@@ -8670,7 +8727,7 @@ async function scanClaudeAuthorityCold(
   }
 }
 
-type ClaudeRangeAuthorityScan =
+type ClaudeRangeAuthorityScan = (
   | {
       kind: 'authority';
       authority: ClaudeTranscriptTurnAuthority;
@@ -8694,12 +8751,12 @@ type ClaudeRangeAuthorityScan =
       candidateAuthoritative: boolean;
       continuationOpenedAt?: number;
       candidateContinuationOpenedAt?: number;
-    };
+    }) & { titleFacts?: ClaudeTitleFacts; titleOpaque?: boolean; appendValidated?: boolean };
 
 /** Cooperatively advance an admitted transcript without revisiting an unbounded suffix.
  *
- * Observed EOF and processed position advance independently. A partial record may be reread once;
- * an oversized tail remains opaque across calls until a newline. Exact candidates are retained
+ * Observed EOF and processed position advance independently. A bounded projection
+ * resumes partial records, including images larger than a pass. Exact candidates are retained
  * while catching up but published only at validated EOF. */
 async function scanClaudeAuthorityRange(
   path: string,
@@ -8708,13 +8765,15 @@ async function scanClaudeAuthorityRange(
   options: ClaudeTurnAuthorityScanOptions = {},
 ): Promise<ClaudeRangeAuthorityScan> {
   const maxSourceBytes = Math.max(
-    CLAUDE_TURN_AUTHORITY_CHUNK_BYTES,
+    1,
     options.maxSourceBytes ?? CLAUDE_TURN_AUTHORITY_MAX_SOURCE_BYTES,
   );
   const now = options.now ?? Date.now;
   const deadline = now()
     + Math.max(1, options.maxElapsedMs ?? CLAUDE_TURN_AUTHORITY_MAX_ELAPSED_MS);
   const initialAuthority = cached.authority;
+  const titleFacts = { ...cached.titleFacts };
+  let titleOpaque = cached.titleOpaque;
   let candidateAuthority = cached.candidateAuthority;
   let candidateAuthoritative = cached.candidateAuthoritative;
   let candidateContinuationOpenedAt = cached.candidateContinuationOpenedAt;
@@ -8722,9 +8781,10 @@ async function scanClaudeAuthorityRange(
   let scannedBytes = 0;
   let fd: number | undefined;
   try {
+    options.beforeOpen?.();
     fd = openRegularFileSync(path);
     const opened = fstatSync(fd);
-    if (!claudeAuthorityStatMatches(st, opened)) {
+    if (!claudeAuthorityOpenedSnapshotMatches(fd, st, opened, cached)) {
       return {
         kind: 'fallback',
         authority: cached.authority,
@@ -8742,15 +8802,18 @@ async function scanClaudeAuthorityRange(
           : {}),
       };
     }
-    const guard = claudeAuthorityGuardFromFd(fd, opened);
-    const start = cached.tail.kind === 'partial' ? cached.tail.start : cached.processedSize;
+    const guard = claudeAuthorityGuardFromFd(fd, st);
+    const start = cached.tail.kind === 'partial' && !cached.tail.projection ? cached.tail.start : cached.processedSize;
     let pos = start;
-    let fragments: Buffer[] = [];
-    let fragmentBytes = 0;
+    let recordStart = cached.tail.kind === 'partial' ? cached.tail.start : start;
+    let projection = cached.tail.kind === 'partial' && cached.tail.projection
+      ? cached.tail.projection.clone() : new TitleRecordProjection();
     let skippingOversized = cached.tail.kind === 'opaque';
     let boundedReason: ClaudeTurnAuthorityFallbackReason | undefined;
 
-    while (pos < st.size) {
+    const scanEnd = Math.min(st.size, options.end ?? st.size);
+    while (pos < scanEnd) {
+      options.signal?.throwIfAborted();
       if (scannedBytes >= maxSourceBytes) {
         boundedReason = 'source-limit';
         break;
@@ -8761,7 +8824,7 @@ async function scanClaudeAuthorityRange(
       }
       const len = Math.min(
         CLAUDE_TURN_AUTHORITY_CHUNK_BYTES,
-        st.size - pos,
+        scanEnd - pos,
         maxSourceBytes - scannedBytes,
       );
       const chunk = Buffer.alloc(len);
@@ -8775,12 +8838,17 @@ async function scanClaudeAuthorityRange(
         const fragment = chunk.subarray(segmentStart, newline);
         if (skippingOversized) {
           skippingOversized = false;
-        } else if (fragmentBytes + fragment.length <= CLAUDE_TURN_AUTHORITY_MAX_RECORD_BYTES) {
-          const recordLength = fragmentBytes + fragment.length;
-          const record = fragments.length > 0
-            ? Buffer.concat([...fragments, fragment], recordLength)
-            : fragment;
-          const next = claudeRecordTurnState(record);
+        } else {
+          projection.append(fragment);
+          const projected = projection.finish();
+          if (projected.kind === 'opaque') {
+            titleOpaque = true;
+            fallbackReason = 'record-limit';
+            candidateAuthoritative = false;
+            candidateContinuationOpenedAt = cached.continuationOpenedAt;
+          }
+          const next = claudeRowTurnState(projected.kind === 'record' ? projected.value : undefined);
+          observeClaudeTitles(next.line, titleFacts, recordStart);
           if (next.authority) {
             candidateAuthority = next.authority;
             candidateAuthoritative = true;
@@ -8790,31 +8858,26 @@ async function scanClaudeAuthorityRange(
             next.continuationTransition,
           );
         }
-        fragments = [];
-        fragmentBytes = 0;
+        projection = new TitleRecordProjection();
         segmentStart = newline + 1;
+        recordStart = pos + segmentStart;
       }
       const trailing = chunk.subarray(segmentStart);
       if (!skippingOversized && trailing.length > 0) {
-        if (fragmentBytes + trailing.length > CLAUDE_TURN_AUTHORITY_MAX_RECORD_BYTES) {
-          fragments = [];
-          fragmentBytes = 0;
-          skippingOversized = true;
-          fallbackReason = 'record-limit';
-          candidateAuthority = initialAuthority;
-          candidateAuthoritative = false;
-          candidateContinuationOpenedAt = cached.continuationOpenedAt;
-        } else {
-          fragments.push(trailing);
-          fragmentBytes += trailing.length;
-        }
+        projection.append(trailing);
       }
       pos += len;
       await yieldToEventLoop();
     }
 
-    if (!boundedReason && !skippingOversized && fragmentBytes > 0) {
-      const trailing = claudeRecordTurnState(Buffer.concat(fragments, fragmentBytes));
+    if (!boundedReason && !skippingOversized && projection.bytes > 0) {
+      const projected = projection.finish();
+      if (projected.kind === 'opaque') titleOpaque = true;
+      if (projected.kind !== 'record' && projection.bytes > CLAUDE_TURN_AUTHORITY_MAX_RECORD_BYTES) {
+        candidateAuthoritative = false;
+        fallbackReason = 'record-limit';
+      }
+      const trailing = claudeRowTurnState(projected.kind === 'record' ? projected.value : undefined);
       if (trailing.authority) {
         candidateAuthority = trailing.authority;
         candidateAuthoritative = true;
@@ -8827,33 +8890,31 @@ async function scanClaudeAuthorityRange(
 
     let tail: ClaudeAuthorityTail;
     if (skippingOversized) tail = { kind: 'opaque' };
-    else if (fragmentBytes > 0) tail = { kind: 'partial', start: pos - fragmentBytes };
+    else if (projection.bytes > 0) tail = { kind: 'partial', start: recordStart, projection };
     else tail = { kind: 'complete' };
     if (boundedReason) fallbackReason = boundedReason;
     else if (skippingOversized) fallbackReason = 'record-limit';
 
     options.beforeValidation?.();
-    if (!claudeAuthorityGuardStillMatches(path, fd, guard)) {
+    const unchanged = claudeAuthorityGuardStillMatches(path, fd, guard);
+    const appendValidated = !unchanged && claudeAuthorityGuardStillMatches(path, fd, guard, true);
+    if (!unchanged && (!options.allowAppend || !appendValidated)) {
       return {
-        kind: 'fallback',
-        authority: cached.authority,
-        ...(cached.continuationOpenedAt !== undefined
-          ? { continuationOpenedAt: cached.continuationOpenedAt }
-          : {}),
-        reason: 'source-changed',
-        tail: cached.tail,
-        scannedBytes,
-        processedThrough: cached.processedSize,
-        candidateAuthority: cached.candidateAuthority,
-        candidateAuthoritative: cached.candidateAuthoritative,
-        ...(cached.candidateContinuationOpenedAt !== undefined
-          ? { candidateContinuationOpenedAt: cached.candidateContinuationOpenedAt }
-          : {}),
+        kind: 'fallback', authority: cached.authority, continuationOpenedAt: cached.continuationOpenedAt,
+        reason: 'source-changed', scannedBytes,
+        tail: appendValidated ? tail : cached.tail,
+        processedThrough: appendValidated ? pos : cached.processedSize,
+        candidateAuthority: appendValidated ? candidateAuthority : cached.candidateAuthority,
+        candidateAuthoritative: appendValidated ? candidateAuthoritative : cached.candidateAuthoritative,
+        candidateContinuationOpenedAt: appendValidated ? candidateContinuationOpenedAt : cached.candidateContinuationOpenedAt,
+        ...(appendValidated ? { appendValidated, titleFacts, titleOpaque } : {}),
       };
     }
-    const caughtUp = !boundedReason && pos === st.size;
+    const caughtUp = !boundedReason && pos === scanEnd;
     if (caughtUp && candidateAuthoritative && !skippingOversized) {
       return {
+        titleFacts,
+        titleOpaque,
         kind: 'authority',
         authority: candidateAuthority,
         ...(candidateContinuationOpenedAt !== undefined
@@ -8870,6 +8931,8 @@ async function scanClaudeAuthorityRange(
       };
     }
     return {
+      titleFacts,
+      titleOpaque,
       kind: 'fallback',
       authority: initialAuthority,
       ...(cached.continuationOpenedAt !== undefined ? { continuationOpenedAt: cached.continuationOpenedAt } : {}),
@@ -8910,14 +8973,24 @@ function claudeRecordTurnAuthority(
 }
 
 function claudeRecordTurnState(record: Buffer): {
+  line?: any;
   authority?: Exclude<ClaudeTranscriptTurnAuthority, 'unknown'>;
   continuationTransition?: ClaudeContinuationTransition;
 } {
   const raw = record.toString('utf8');
-  if (!/"type"\s*:\s*"(?:assistant|user|system)"/.test(raw)) return {};
+  if (!/"type"\s*:\s*"(?:assistant|user|system|custom-title|ai-title)"/.test(raw)) return {};
   const line = parseLineOrNull(raw);
+  return claudeRowTurnState(line);
+}
+
+function claudeRowTurnState(line: any): {
+  line?: any;
+  authority?: Exclude<ClaudeTranscriptTurnAuthority, 'unknown'>;
+  continuationTransition?: ClaudeContinuationTransition;
+} {
   return line
     ? {
+        line,
         authority: claudeLineTurnAuthority(line),
         continuationTransition: claudeLineContinuationTransition(line),
       }
@@ -8945,10 +9018,16 @@ function claudeAuthorityFdRangeHash(fd: number, offset: number, length: number):
   return createHash('sha256').update(bytes.subarray(0, read)).digest('hex');
 }
 
-function claudeAuthorityStatMatches(expected: ClaudeAuthorityStat, actual: ClaudeAuthorityStat): boolean {
-  return expected.size === actual.size
-    && expected.mtimeMs === actual.mtimeMs
-    && claudeAuthoritySourceKey(expected) === claudeAuthoritySourceKey(actual);
+function claudeAuthorityOpenedSnapshotMatches(
+  fd: number, expected: ClaudeAuthorityStat, actual: ClaudeAuthorityStat, cached?: ClaudeTurnAuthorityEntry,
+): boolean {
+  if (claudeAuthoritySourceKey(expected) !== claudeAuthoritySourceKey(actual)
+    || actual.size < expected.size
+    || (actual.size === expected.size && actual.mtimeMs !== expected.mtimeMs)) return false;
+  // Growth after admission is compatible only with the same retained bytes.
+  // Check the opened descriptor as well as the path sampled by admission.
+  return !cached || (claudeAuthorityFdRangeHash(fd, 0, cached.prefixLength) === cached.prefixHash
+    && claudeAuthorityFdRangeHash(fd, cached.size - cached.boundaryLength, cached.boundaryLength) === cached.boundaryHash);
 }
 
 function claudeAuthorityGuardFromFd(fd: number, st: ClaudeAuthorityStat): ClaudeAuthorityGuard {
@@ -8969,12 +9048,12 @@ function claudeAuthorityGuardStillMatches(
   path: string,
   fd: number,
   guard: ClaudeAuthorityGuard,
+  allowAppend = false,
 ): boolean {
   const opened = fstatSync(fd);
   const current = statSafe(path);
   const matchesGuard = (candidate: ClaudeAuthorityStat): boolean =>
-    candidate.size === guard.size
-    && candidate.mtimeMs === guard.mtimeMs
+    (allowAppend ? candidate.size >= guard.size : candidate.size === guard.size && candidate.mtimeMs === guard.mtimeMs)
     && claudeAuthoritySourceKey(candidate) === guard.sourceKey;
   if (!current || !matchesGuard(opened) || !matchesGuard(current)) return false;
   return claudeAuthorityFdRangeHash(fd, 0, guard.prefixLength) === guard.prefixHash
@@ -9060,8 +9139,9 @@ export async function claudeSessionStatus(
   path: string,
   raw: RawStatus | undefined,
   now: number,
+  signal?: AbortSignal,
 ): Promise<RawStatus> {
-  const authorityResult = await claudeTranscriptTurnAuthorityResult(path);
+  const authorityResult = await claudeTranscriptTurnAuthorityResult(path, { signal });
   const authority = authorityResult.authority;
   const continuationPending =
     authorityResult.continuationOpenedAt !== undefined
@@ -9328,14 +9408,15 @@ function runAgentsJson(store: ClaudeStore): Promise<LiveStatusProbe> {
  *  so cache them keyed by (size, mtimeMs); an unchanged file costs one stat. The whole cache is
  *  dropped past a soft cap so deleted sessions can't accumulate forever. */
 const FILE_FACT_CACHE_MAX = 8192;
-const fileFactCache = new Map<string, { size: number; mtimeMs: number; facts: Map<string, unknown> }>();
+const fileFactCache = new Map<string, { size: number; mtimeMs: number; sourceKey: string; facts: Map<string, unknown> }>();
 function cachedFileFact<T>(path: string, kind: string, compute: () => T): T {
   const st = statSafe(path);
   if (!st) return compute(); // missing/unreadable file: never cache
   let entry = fileFactCache.get(path);
-  if (!entry || entry.size !== st.size || entry.mtimeMs !== st.mtimeMs) {
+  const sourceKey = claudeAuthoritySourceKey(st);
+  if (!entry || entry.sourceKey !== sourceKey || entry.size !== st.size || entry.mtimeMs !== st.mtimeMs) {
     if (fileFactCache.size >= FILE_FACT_CACHE_MAX) fileFactCache.clear();
-    entry = { size: st.size, mtimeMs: st.mtimeMs, facts: new Map() };
+    entry = { size: st.size, mtimeMs: st.mtimeMs, sourceKey, facts: new Map() };
     fileFactCache.set(path, entry);
   }
   if (entry.facts.has(kind)) return entry.facts.get(kind) as T;
@@ -9399,13 +9480,7 @@ function computeHeadInfo(path: string): { cwd?: string; firstUser?: string; firs
       const md = o.message?.model;
       if (typeof md === 'string' && md && md !== '<synthetic>') model = md;
     }
-    if (!firstUser && o.type === 'user' && !o.isMeta && !o.isCompactSummary) {
-      const c = o.message?.content;
-      let text: string | undefined;
-      if (typeof c === 'string') text = c;
-      else if (Array.isArray(c)) text = c.find((b: any) => b?.type === 'text' && typeof b.text === 'string' && b.text.trim())?.text;
-      if (text && text.trim() && !isWrapper(text) && !isBadTitle(text)) firstUser = text.trim().slice(0, 120);
-    }
+    if (!firstUser) firstUser = claudeFirstPrompt(o);
     if (cwd && firstUser && firstUserUuid && model) break;
   }
   return { cwd, firstUser, firstUserUuid, model };
@@ -9422,23 +9497,51 @@ function isBadTitle(t: string | undefined): boolean {
   );
 }
 
-/** Best title from the tail: latest custom-title (user-set) > ai-title (model) > last-prompt. */
-function readTitle(path: string): string | undefined {
-  return cachedFileFact(path, 'title', () => computeTitle(path));
+interface ClaudeTitleFacts {
+  custom?: string; customOffset?: number;
+  ai?: string; aiOffset?: number;
+  firstPrompt?: string; firstPromptOffset?: number;
 }
-function computeTitle(path: string): string | undefined {
-  let custom: string | undefined;
-  let ai: string | undefined;
-  let last: string | undefined;
-  for (const seg of readTailLines(path, 64 * 1024)) {
-    const o = parseLineOrNull(seg);
-    if (!o) continue;
-    if (o.type === 'custom-title' && typeof o.customTitle === 'string') custom = o.customTitle;
-    else if (o.type === 'ai-title' && typeof o.aiTitle === 'string') ai = o.aiTitle;
-    else if (o.type === 'last-prompt' && typeof o.lastPrompt === 'string') last = o.lastPrompt;
+
+function claudeFirstPrompt(row: any): string | undefined {
+  if (row?.type !== 'user' || row.isMeta || row.isCompactSummary || row.origin?.kind === 'peer') return undefined;
+  const content = row.message?.content;
+  const text = typeof content === 'string' ? content : Array.isArray(content)
+    ? content.filter((part: any) => part?.type === 'text' && typeof part.text === 'string').map((part: any) => part.text)
+      .filter((part: string) => !isWrapper(part) && !isBadTitle(part) && !isSessionInstruction(part)).join('\n') : '';
+  return !isWrapper(text) && !isBadTitle(text) && !isSessionInstruction(text) && !isInterruptMarker(text)
+    ? sessionPromptPreview(text) : undefined;
+}
+
+function observeClaudeTitles(row: any, facts: ClaudeTitleFacts, offset: number): void {
+  if (!row) return;
+  const bound = (value: string): string => isBadTitle(value) ? '' : Array.from(value).slice(0, 160).join('');
+  if (row.type === 'custom-title' && typeof row.customTitle === 'string' && offset >= (facts.customOffset ?? -1)) {
+    facts.custom = bound(row.customTitle); facts.customOffset = offset;
   }
-  const t = [custom, ai, last].find((c) => c && !isBadTitle(c));
-  return t ? t.slice(0, 120) : undefined;
+  if (row.type === 'ai-title' && typeof row.aiTitle === 'string' && offset >= (facts.aiOffset ?? -1)) {
+    facts.ai = bound(row.aiTitle); facts.aiOffset = offset;
+  }
+  if (offset < (facts.firstPromptOffset ?? Infinity)) {
+    const preview = claudeFirstPrompt(row);
+    if (preview) { facts.firstPrompt = preview; facts.firstPromptOffset = offset; }
+  }
+}
+function resolvedClaudeTitle(facts: ClaudeTitleFacts): string {
+  return facts.custom || facts.ai || facts.firstPrompt || '';
+}
+
+function cachedClaudeTitle(path: string): { title: string; titlePending: boolean } {
+  const entry = claudeTurnAuthorityCache.get(path);
+  const firstProven = entry && (entry.titleFacts.firstPromptOffset ?? Infinity) < entry.titleProcessedSize;
+  const candidate = entry && !entry.titleOpaque ? resolvedClaudeTitle({ ...entry.titleFacts,
+    firstPrompt: firstProven ? entry.titleFacts.firstPrompt : undefined,
+  }) : '';
+  return { title: entry?.titlePublished ?? candidate, titlePending: !entry?.titleResolved };
+}
+async function readTitle(path: string, signal?: AbortSignal): Promise<string> {
+  await claudeTranscriptTurnAuthorityResult(path, { signal });
+  return cachedClaudeTitle(path).title;
 }
 
 /** The session's CURRENT model: the most-recent NON-synthetic assistant `message.model` in the

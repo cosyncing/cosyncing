@@ -1244,7 +1244,7 @@ class FakeSocket implements DshSocketLike {
   check(
     'a failed verification before the optional rename degrades the title, never reports the create as failed',
     created.id === 's-new'
-      && created.title === 'W'
+      && created.title === '' && created.projectName === 'W'
       && flaky.sent.join(',') === ['workspace.list', 'host.describe', 'session.create', 'host.describe'].join(','),
     `${JSON.stringify(created)} via ${flaky.sent.join(',')}`,
   );
@@ -1253,9 +1253,9 @@ class FakeSocket implements DshSocketLike {
   const renameBroken = make([valid, valid], ['session.rename']);
   const untitled = await renameBroken.adapter.createSession({ title: 'T' });
   check(
-    'a failed rename RPC degrades to the default title rather than failing the create',
+    'a failed rename RPC leaves the conversation unnamed rather than failing the create',
     untitled.id === 's-new'
-      && untitled.title === 'W'
+      && untitled.title === '' && untitled.projectName === 'W'
       && renameBroken.sent.join(',')
         === ['workspace.list', 'host.describe', 'session.create', 'host.describe', 'session.rename'].join(','),
     `${JSON.stringify(untitled)} via ${renameBroken.sent.join(',')}`,

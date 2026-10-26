@@ -619,6 +619,13 @@ function userEvent(seq: number, text: string, id: string): Record<string, unknow
     JSON.stringify(queued),
   );
 
+  connection.handleMuxFrame(frame('session/projection', { key: 'title', value: null, seq: 42 }));
+  connection.handleMuxFrame(frame('session/projection', { key: 'title', value: 'old name', seq: 40 }));
+  const clearedTitle = seen.filter((message) => message.type === 'metadata-update' && message.key === 'sessionInfo').at(-1);
+  check('a native clear publishes an unnamed title and an older name cannot resurface',
+    clearedTitle?.type === 'metadata-update' && (clearedTitle.value as { title?: string }).title === ''
+      && connection.projectionValue('title') === null);
+
   connection.handleMuxFrame(frame('session/jobs', { jobs: [{ id: 'bash-1', kind: 'bash', status: 'running' }] }));
   check(
     'the authoritative jobs snapshot is held rather than rendered as an invented card',

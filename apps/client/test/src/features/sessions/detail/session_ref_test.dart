@@ -26,9 +26,9 @@ void main() {
       expect(ref.key, 'claude/abc');
     });
 
-    test('fromSession falls back to id when title is empty', () {
+    test('fromSession preserves an unnamed value', () {
       final ref = SessionRef.fromSession(_session(title: ''));
-      expect(ref.title, 'abc');
+      expect(ref.title, '');
     });
 
     test('JSON round-trips', () {

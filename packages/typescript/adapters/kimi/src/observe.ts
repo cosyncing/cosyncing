@@ -2853,6 +2853,16 @@ export class KimiObserveConnection implements SessionConnection {
   ): void {
     if (this.closedTurnRefs.has(ref)) return;
     this.rememberClosedTurnRef(ref);
+    if (source === 'prompt') {
+      const started = this.turnStartNaming(ref);
+      if (started && this.closedTurnRefs.has(started.ref)) {
+        // The named turn already closed. Its delayed prompt terminal cannot
+        // consume an opener the content walk has assigned to the next turn.
+        this.attributePromptEnding(ref, promptEnding);
+        this.endAnnouncedRunOf(ref, promptEnding ?? status);
+        return;
+      }
+    }
     const turn = this.openTurn;
     if (turn) {
       this.openTurn = undefined;

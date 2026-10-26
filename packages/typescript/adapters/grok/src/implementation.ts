@@ -166,6 +166,7 @@ function sessionInfo(
     nativeId: session.id,
     tool: 'grok',
     title: session.title,
+    titlePending: session.titlePending,
     cwd: session.cwd,
     status: session.status,
     attachMode: isSubagent ? 'observe' : attachMode ?? (effectiveDriving || effectiveEligible ? 'resume' : 'observe'),
@@ -247,7 +248,7 @@ export class GrokAdapter implements AgentBackend {
     return diagnoseGrokSetup(context);
   }
 
-  async discoverSessions(options?: { updatedAfter?: number }): Promise<SessionInfo[]> {
+  async discoverSessions(options?: { updatedAfter?: number; signal?: AbortSignal }): Promise<SessionInfo[]> {
     const candidateEnabled = await this.hasPinnedBinaryVersion();
     // Batched, not fanned out over every row at once: each element below opens
     // the session's `updates.jsonl` for its boundary, so an unbounded map is one
@@ -255,7 +256,7 @@ export class GrokAdapter implements AgentBackend {
     // several discovery legs. `discoverGrokStore` batches its own `summary.json`
     // reads 16 at a time for the same reason.
     return mapInBatches(
-      await discoverGrokStore({ root: this.root, updatedAfter: options?.updatedAfter }),
+      await discoverGrokStore({ root: this.root, updatedAfter: options?.updatedAfter, signal: options?.signal }),
       DISCOVERY_ROW_BATCH,
       async (session) => {
         const isSubagent = session.origin === 'subagent';

@@ -372,11 +372,16 @@ try {
     midOk === false && midWrites === 2 && Date.now() - midStartedAt < 1_000 && /the connection had closed/.test(midReports[0] ?? ''),
     `${midWrites} write(s) in ${Date.now() - midStartedAt} ms; ${midReports[0]}`);
   const refusedReports: string[] = [];
-  const refusedReader = new Http1RequestReader({ onUndelivered: (_sock, detail) => refusedReports.push(detail) });
-  const refusedOk = await refusedReader.respond({ fd: 4, end() {}, write: () => -1 }, 200, '{"ok":true}');
+  let refusedWrites = 0;
+  let refusedWaits = 0;
+  const refusedReader = new Http1RequestReader({
+    sleep: async () => { refusedWaits++; },
+    onUndelivered: (_sock, detail) => refusedReports.push(detail),
+  });
+  const refusedOk = await refusedReader.respond({ fd: 4, end() {}, write: () => { refusedWrites++; return -1; } }, 200, '{"ok":true}');
   check('BH10 a write the socket refuses is reported at once, with its own elapsed time, not the 10 s deadline',
-    refusedOk === false && /undelivered after [0-9] ms: the socket refused the write$/.test(refusedReports[0] ?? '')
-      && !/10000/.test(refusedReports[0] ?? ''), refusedReports[0]);
+    refusedOk === false && refusedWrites === 1 && refusedWaits === 0 && refusedReports.length === 1
+      && /undelivered after \d+ ms: the socket refused the write$/.test(refusedReports[0] ?? ''), refusedReports[0]);
 
   // Rule 14 needs the first handler to remain in flight when the extra bytes
   // arrive. A real completed socket may reset the late writer before its first

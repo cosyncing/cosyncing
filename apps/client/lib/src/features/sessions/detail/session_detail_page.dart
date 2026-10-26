@@ -2110,10 +2110,9 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
   /// 2. the loaded roster, which is what compact navigation just tapped; and
   /// 3. the bounded N3 identity snapshot.
   ///
-  /// All three use the session id as their own "no title yet" placeholder (see
-  /// `knownSessionTitle`), so one that reads as the id falls through rather
-  /// than being displayed. Null means nothing is known — a direct deep link —
-  /// and the caller substitutes the localized neutral label.
+  /// Null or empty means no title is known yet. Presentation supplies a
+  /// localized neutral label. A native title's spelling does not define its
+  /// origin.
   ///
   /// Every source belongs to the ACTIVE broker profile: [openTitle] comes from
   /// the working set only once its hydration has settled on the current
@@ -2157,16 +2156,11 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
       // as finished, and overwriting the title with the raw id is how a named
       // session becomes a fingerprint the user cannot recognise.
       //
-      // The durable placeholder stays the id, not the localized neutral label
-      // the page displays: the working set is persisted, and freezing one
-      // locale's words into it would read like a title the broker had actually
-      // supplied. Display substitutes the label; storage keeps the identity.
+      // Store an unnamed value; presentation supplies the localized label.
       entry = SessionRef.cachedIdentity(
         tool: widget.tool,
         id: widget.sessionId,
-        title:
-            _knownSessionTitle(session, _openSessionTitle(open)) ??
-            widget.sessionId,
+        title: _knownSessionTitle(session, _openSessionTitle(open)) ?? '',
       );
     }
     // Matched on the ENTRY's key, which is the row `open` will write: a

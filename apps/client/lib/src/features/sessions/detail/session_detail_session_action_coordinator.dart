@@ -74,6 +74,7 @@ extension _SessionDetailSessionActions on SessionDetailController {
       }
 
       final current = state.sessionInfo;
+      final pending = response.session?.titlePending ?? false;
       final acceptedTitle =
           response.session?.title ??
           response.title ??
@@ -82,7 +83,8 @@ extension _SessionDetailSessionActions on SessionDetailController {
           ? response.session
           : SessionInfo.fromJson({
               ...current.toJson(),
-              'title': acceptedTitle ?? current.title,
+              'title': pending ? current.title : acceptedTitle ?? current.title,
+              'titlePending': pending ? true : null,
             });
       state = state.copyWith(
         sessionInfo: updated,
@@ -94,28 +96,35 @@ extension _SessionDetailSessionActions on SessionDetailController {
       if (acceptedTitle != null) {
         ref
             .read(sessionListControllerProvider.notifier)
-            .renameSessionTitle(arg.tool, arg.sessionId, acceptedTitle);
+            .renameSessionTitle(
+              arg.tool,
+              arg.sessionId,
+              acceptedTitle,
+              pending: pending,
+            );
         // The durable open-tab set may still be hydrating when a compact
         // detail route accepts the rename. Patch after hydration so a stored
         // old title cannot win merely because the mutation returned quickly.
-        unawaited(
-          ref
-              .read(openSessionsControllerProvider.future)
-              .then((_) {
-                if (!_canPublishRenameFor(source)) return;
-                ref
-                    .read(openSessionsControllerProvider.notifier)
-                    .renameSessionTitle(
-                      arg.tool,
-                      arg.sessionId,
-                      acceptedTitle,
-                    );
-              })
-              .catchError((Object _) {
-                // Local tab persistence cannot turn a successful native rename
-                // into a failed user action. Roster/native truth heals it.
-              }),
-        );
+        if (!pending) {
+          unawaited(
+            ref
+                .read(openSessionsControllerProvider.future)
+                .then((_) {
+                  if (!_canPublishRenameFor(source)) return;
+                  ref
+                      .read(openSessionsControllerProvider.notifier)
+                      .renameSessionTitle(
+                        arg.tool,
+                        arg.sessionId,
+                        acceptedTitle,
+                      );
+                })
+                .catchError((Object _) {
+                  // Local tab persistence cannot fail an accepted rename.
+                  // into a failed user action. Roster/native truth heals it.
+                }),
+          );
+        }
       }
       return true;
     } on Object catch (error) {

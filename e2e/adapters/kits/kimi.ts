@@ -14,7 +14,7 @@
  * `session/cancel`), so the shared scenarios read it unchanged.
  */
 import { expect } from 'bun:test';
-import { mkdirSync, utimesSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, renameSync, utimesSync, writeFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { eventually, fixturePath, type FixturePaths, type SessionStream } from '../../harness/index.ts';
 import { FakeKimiHost, type KimiSession } from './fakes/kimi-host.ts';
@@ -404,6 +404,53 @@ export function installKimi(paths: FixturePaths, options: { version?: string } =
 const fakeOf = (context: { fake: FakeController }): KimiFake => context.fake as KimiFake;
 
 const kimiExtras: ConformanceExtra[] = [
+  {
+    title: 'a delayed prompt completion cannot close the next live turn a second time',
+    async run(context) {
+      const fake = fakeOf(context);
+      const session = await context.drivableSession('delayed-prompt-completion');
+      const stream = await context.openDrive(session);
+      const from = stream.frames.length;
+      try {
+        expect((await context.prompt(stream, '[[hold-completion:old-completion]] first completed turn')).kind).toBe('ack');
+        const first = await stream.waitForMessage((message) => message.type === 'run-summary' && message.status === 'done');
+        expect((await stream.sendAndAwait({ kind: 'prompt', text: '[[hold:next-completion]] second live turn' })).kind).toBe('ack');
+        const second = await stream.waitForMessage((message) => message.type === 'run-summary' && message.status === 'running' && message.key !== first.key);
+        fake.release('old-completion');
+        fake.release('next-completion');
+        await stream.waitForMessage((message) => message.type === 'model-output' && message.text === 'answer: second live turn');
+        await stream.waitForMessage((message) => message.type === 'run-summary' && message.status === 'done' && message.key === second.key);
+        const completed = stream.frames.slice(from).filter((frame) => frame.kind === 'message' && frame.message?.type === 'run-summary' && frame.message.status === 'done');
+        expect(new Set(completed.map((frame) => frame.message.key)).size, JSON.stringify(completed)).toBe(2);
+      } finally {
+        fake.release('old-completion');
+        fake.release('next-completion');
+        stream.close();
+      }
+    },
+  },
+  {
+    title: 'an unnamed session stays pending until its first prompt beyond a large prefix is recovered',
+    async run(context) {
+      const fake = fakeOf(context);
+      const session = fake.seedSession({ title: '', turns: 0 });
+      const journal = join(fake.host.sessionDirectory(session.id), 'agents', 'main', 'wire.jsonl');
+      const padding = `${JSON.stringify({ type: 'progress', text: 'x'.repeat(256 * 1024) })}\n`;
+      writeFileSync(journal, padding.repeat(80));
+      appendFileSync(journal, `${JSON.stringify({ type: 'turn.prompt', input: [{ type: 'text', text: 'Late first prompt' }] })}\n`);
+      const pending = (await context.client.sessions({ refresh: true })).find((row) => row.id === session.id)!;
+      expect(pending.titlePending).toBe(true);
+      await context.client.waitForSession((row) => row.id === session.id && !row.titlePending && row.title === 'Late first prompt');
+      // A replacement makes the fallback unknown again. Native rename succeeds
+      // independently of that scan and must be authoritative in its own reply.
+      writeFileSync(`${journal}.replacement`, padding.repeat(192));
+      renameSync(`${journal}.replacement`, journal);
+      const renamed = await context.client.request('PATCH', `/api/sessions/kimi/${encodeURIComponent(session.id)}/rename`, { title: 'Explicit native name' });
+      expect(renamed.status, renamed.text).toBe(200);
+      expect(renamed.body.title).toBe('Explicit native name');
+      expect(renamed.body.session?.titlePending).not.toBe(true);
+    },
+  },
   {
     title: 'Drive is a live attach to the user\'s host: the broker contacts nothing but the host and starts no process',
     async run(context) {

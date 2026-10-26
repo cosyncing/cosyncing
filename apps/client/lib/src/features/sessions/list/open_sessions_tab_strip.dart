@@ -508,19 +508,13 @@ class _StripScrollbarState extends State<_StripScrollbar> {
                 onHorizontalDragEnd: (_) => setState(() => _dragging = false),
                 onHorizontalDragCancel: () => setState(() => _dragging = false),
                 child: CustomPaint(
-                  size: const Size(
-                    double.infinity,
-                    _StripScrollbar.hitHeight,
-                  ),
+                  size: const Size(double.infinity, _StripScrollbar.hitHeight),
                   painter: painter,
                 ),
               )
             : IgnorePointer(
                 child: CustomPaint(
-                  size: const Size(
-                    double.infinity,
-                    _StripScrollbar.hitHeight,
-                  ),
+                  size: const Size(double.infinity, _StripScrollbar.hitHeight),
                   painter: painter,
                 ),
               ),
@@ -613,11 +607,7 @@ class _Tab extends StatelessWidget {
     final tokens = context.tokens;
     final theme = Theme.of(context);
     final needsInput = showLiveStatus && ref.status == SessionStatus.needsInput;
-    // U3: a working-set row persists the session id as its "no title yet"
-    // placeholder — `SessionRef.fromSession` writes it for an authoritatively
-    // untitled session too. That is right for storage and wrong on a tab: the
-    // label would be a fingerprint, and it would disagree with the top strip,
-    // which names the same session neutrally.
+    // Store an unnamed value without a locale; presentation supplies the label.
     //
     // Which neutral label follows the row's own resolution marker: a null
     // status is "never resolved" (still opening), a present one is a session

@@ -19,6 +19,21 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Session titles prefer native names and stable first-prompt previews across
+  lists, tabs, and detail views. Pi path prompts retain their text, Claude
+  follow-up prompts no longer rename unnamed conversations, and Codex index-only
+  renames remain visible after malformed index rows. Unnamed Codex creates remain
+  durable without assigning a title on current Codex. For older runtimes that
+  need naming to persist, its native picker temporarily shows “Untitled session”
+  until the first prompt replaces that provisional name once. Cosyncing shows its
+  localized unnamed label during that interval. Large histories retain current
+  titles, late name clears, and activity times after restart. Accepted renames
+  survive cached roster refreshes, and unnamed tabs saved by older clients show
+  localized labels while offline. Persisted Codex creates remain available when
+  setting their name fails. Continuously growing histories finish their initial
+  title scan, pending clears keep the displayed name, and terminal renames remain
+  visible after app renames.
+
 - Updated Pi/OMP terminals prevent app actions from starting another RPC writer
   on their session file. Ownership checks are scoped per session; inconclusive
   checks refuse the action while preserving an existing Drive connection.

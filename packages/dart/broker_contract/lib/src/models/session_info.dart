@@ -430,6 +430,7 @@ class SessionInfo {
     required this.title,
     required this.status,
     required this.attachMode,
+    this.titlePending,
     this.launchSurface,
     this.lineageId,
     this.liveUuid,
@@ -482,13 +483,17 @@ class SessionInfo {
   /// Session title.
   final String title;
 
+  /// Title recovery is incomplete; keep a previously resolved title.
+  @JsonKey(includeIfNull: false)
+  final bool? titlePending;
+
   /// Optional URL slug.
   final String? slug;
 
   /// Current working directory.
   final String? cwd;
 
-  /// User-facing broker/project alias for this cwd group.
+  /// Native workspace name or broker project alias for this cwd group.
   final String? projectName;
 
   /// How this session came to exist when it was not directly human-started.

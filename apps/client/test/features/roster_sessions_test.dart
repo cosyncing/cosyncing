@@ -356,10 +356,8 @@ void main() {
       await app.openFromRoster('same-id', cwd: '/work/studio');
       await app.openStatus();
       final button = find.byKey(const Key('session-detail-hide-button'));
-      Finder action(String label) => find.descendant(
-        of: button,
-        matching: find.text(label),
-      );
+      Finder action(String label) =>
+          find.descendant(of: button, matching: find.text(label));
       const path = '/api/sessions/codex/same-id/visibility';
       final rejected = FakeBrokerResponse.error(
         500,
@@ -553,7 +551,7 @@ void main() {
       (f) async {
         final studio = f.network.add('http://studio.test:7734')
           ..addSession('a1', 'Fix login', cwd: '/work/app')
-          ..addSession('a2', 'a2', cwd: '/work/app')
+          ..addSession('a2', '', cwd: '/work/app')
           ..addSession(
             'b1',
             'Write docs',

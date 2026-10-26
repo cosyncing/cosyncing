@@ -51,6 +51,30 @@ async function test(name: string, fn: () => Promise<[boolean, string]>): Promise
   }
 }
 
+// HTTP cannot hold the rollout deadline while creating each previously absent
+// date directory. A virtual deadline proves the filesystem event resolves the
+// existing persistence wait, rather than merely succeeding when it times out.
+await test('a new dated rollout folder is observed before its deadline fires', async () => {
+  const { waitForCodexRollout } = await import('../src/implementation.ts');
+  const directory = join(SESSIONS, 'future-year', 'future-month', 'future-day');
+  const path = join(directory, 'new-rollout.jsonl');
+  let expire!: () => void;
+  let cancelled = false;
+  let expired = false;
+  const waiting = waitForCodexRollout(path, 10_000, (callback) => {
+    expire = callback;
+    return () => { cancelled = true; };
+  });
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(path, '{}\n');
+  let guard!: ReturnType<typeof setTimeout>;
+  const observed = await Promise.race([waiting, new Promise<boolean>((resolve) => {
+    guard = setTimeout(() => { expired = true; expire(); resolve(false); }, 5_000);
+  })]);
+  clearTimeout(guard);
+  return [observed && cancelled && !expired, `observed=${observed} cancelled=${cancelled} expired=${expired}`];
+});
+
 // A fake `codex` whose app-server answers thread/fork by writing the fork rollout to __FORKPATH__ and
 // returning the forked Thread; thread/name/set just materializes/acks (real codex lazy-writes).
 const FAKE = `#!/usr/bin/env bun

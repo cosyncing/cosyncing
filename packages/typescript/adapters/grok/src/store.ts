@@ -1,4 +1,7 @@
 /** Read-only, bounded Grok Build store discovery and update-log reads. */
+import { SessionTitleCache, sessionPromptPreview, isSessionInstruction } from '@cosyncing/adapter-api';
+import { mapGrokUpdate } from './mapping.ts';
+
 import { lstat, open, opendir, realpath, type FileHandle } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -93,6 +96,7 @@ export interface GrokStoreTrace {
 export interface GrokStoredSession {
   id: string;
   title: string;
+  titlePending?: boolean;
   cwd: string;
   model?: string;
   currentModel?: { providerID: string; modelID: string; reasoningEffort?: string };
@@ -113,6 +117,7 @@ export interface GrokStoredSession {
 }
 
 export interface GrokDiscoveryOptions {
+  signal?: AbortSignal;
   root?: string;
   updatedAfter?: number;
   maxSessions?: number;
@@ -417,6 +422,23 @@ async function collectSubagentLineage(
   return { claimsByChild, refusedChildIds };
 }
 
+const grokTitleCaches = new Map<string, SessionTitleCache<{ firstPrompt?: string }>>();
+async function grokFirstPrompt(session: GrokStoredSession, signal?: AbortSignal): Promise<string> {
+  let cache = grokTitleCaches.get(session.id);
+  if (!cache) {
+    cache = new SessionTitleCache<{ firstPrompt?: string }>(() => ({}), (record, facts) => {
+      if (facts.firstPrompt) return;
+      const prompt = mapGrokUpdate(record, { sessionId: session.id, lineIndex: 0 }).find((row) => row.type === 'user-message');
+      if (prompt?.type === 'user-message' && !isSessionInstruction(prompt.text)) facts.firstPrompt = sessionPromptPreview(prompt.text);
+    }, (path) => openRegularInside(session.storeRoot, path), { stopWhen: (facts) => !!facts.firstPrompt });
+    if (grokTitleCaches.size >= 2048) grokTitleCaches.delete(grokTitleCaches.keys().next().value!);
+    grokTitleCaches.set(session.id, cache);
+  }
+  const { facts, complete } = await cache.readResult(session.updatesPath, signal);
+  session.titlePending = !complete || undefined;
+  return facts.firstPrompt ?? '';
+}
+
 export async function discoverGrokStore(options: GrokDiscoveryOptions = {}): Promise<GrokStoredSession[]> {
   const root = resolve(options.root ?? grokStoreRoot());
   const sessionsRoot = join(root, 'sessions');
@@ -533,7 +555,7 @@ export async function discoverGrokStore(options: GrokDiscoveryOptions = {}): Pro
     const currentModel = grokModelSelection(model, summary.reasoning_effort);
     const title = boundedString(summary.session_summary, MAX_TITLE_CHARS, true)
       ?? boundedString(summary.generated_title, MAX_TITLE_CHARS, true)
-      ?? id;
+      ?? '';
     const createdAt = parseTimestamp(summary.created_at);
     const messageCount = parseCount(summary.num_messages);
     parsed.push({ session: {
@@ -572,6 +594,7 @@ export async function discoverGrokStore(options: GrokDiscoveryOptions = {}): Pro
         });
         continue;
       }
+      if (!session.title) session.title = await grokFirstPrompt(session, options.signal);
       projected.push(session);
       continue;
     }

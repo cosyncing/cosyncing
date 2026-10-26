@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { eventually, type SessionStream } from '../../harness/index.ts';
 import type { ConformanceContext, ConformanceExtra } from './kit.ts';
 import { type PiFake, type PiFamilyDialect, promptText, piFileOf, piRowId, piUuidOf } from './pi-family.ts';
-import { PI_COLLAB_PROMPT_PREFIX, piHeader, piModelEntry, piTitleEntry, appendLines } from './fakes/pi-agent.ts';
+import { PI_COLLAB_PROMPT_PREFIX, piHeader, piModelEntry, piTitleEntry, appendLines, lastEntryId } from './fakes/pi-agent.ts';
 
 const asFake = (context: ConformanceContext): PiFake => context.fake as PiFake;
 
@@ -49,6 +49,155 @@ export function piFamilyExtras(dialect: PiFamilyDialect): ConformanceExtra[] {
   const omp = dialect.name === 'omp';
   const agent = dialect.name;
   const extras: ConformanceExtra[] = [];
+
+  if (!omp) extras.push({
+    title: 'an acknowledged prompt can be steered before native agent_start arrives',
+    async run(context) {
+      const fake = asFake(context);
+      const session = await context.drivableSession('delayed-native-start');
+      const owner = await context.openDrive(session);
+      const other = await context.client.attach(agent, session.id, { mode: 'resume' });
+      await other.waitForKind('history');
+      try {
+        expect((await owner.sendAndAwait({ kind: 'prompt', text: '[[hold-start:delayed-native-start]] first waiting prompt' })).kind).toBe('ack');
+        const second = await other.sendAndAwait({ kind: 'prompt', text: 'second waiting prompt' });
+        expect(second.kind, JSON.stringify(second)).toBe('ack');
+        fake.release('delayed-native-start');
+        await owner.waitForMessage((message) => message.type === 'model-output' && text(message) === 'answer: second waiting prompt');
+      } finally {
+        fake.release('delayed-native-start');
+        owner.close();
+        other.close();
+      }
+    },
+  });
+
+  extras.push({
+    title: 'session naming keeps the first prompt through follow-ups, native renames, clears and large output',
+    async run(context) {
+      const fake = asFake(context);
+      const empty = fake.seedSession({ title: '', turns: 0 });
+      await context.client.waitForSession((row) => row.id === empty.id && !row.titlePending && row.title === '');
+      fake.appendForeignUser(empty, 'First prompt after a cold empty scan');
+      await context.client.waitForSession((row) => row.id === empty.id && !row.titlePending
+        && row.title === 'First prompt after a cold empty scan');
+      const largePrompt = 'First oversized prompt 😀 '.repeat(12);
+      const imagePrompt = '分析图片 😀 / "quoted" \\ path';
+      for (const variant of [
+        { expected: imagePrompt, content: [
+          { type: 'image', mimeType: 'image/png', data: 'A'.repeat(2 * 1024 * 1024) },
+          { type: 'text', text: imagePrompt },
+        ] },
+        { expected: Array.from(largePrompt).slice(0, 160).join(''), content: [
+          { type: 'text', text: largePrompt + 'x'.repeat(2 * 1024 * 1024) },
+        ] },
+      ]) {
+        const large = fake.seedSession({ title: '', turns: 0 });
+        fake.appendRaw(large, [{
+          type: 'message', id: crypto.randomUUID(), parentId: lastEntryId(piFileOf(large.id)),
+          timestamp: new Date().toISOString(), message: { role: 'user', content: variant.content },
+        }]);
+        fake.appendForeignUser(large, 'A later small prompt must not become the title');
+        await context.client.waitForSession((row) => row.id === large.id && !row.titlePending && row.title === variant.expected);
+      }
+      const session = fake.seedSession({ title: '', turns: 0 });
+      const path = 'coordination/relay/2026-10-24/r62_A.md';
+      fake.appendForeignUser(session, path);
+      const row = await context.client.waitForSession((row) => row.id === session.id && row.title === path);
+      const stream = await context.client.attach(agent, session.id, { mode: 'observe' });
+      await stream.waitForFrame((frame) => frame.kind === 'session' && frame.info?.title === path);
+      await stream.waitForFrame((frame) => frame.kind === 'history');
+      fake.appendTurn(session, 'A later prompt', 'A later answer');
+      await stream.waitForFrame((frame) => frame.kind === 'message' && text(frame.message).includes('A later answer'));
+      const active = await context.client.waitForSession((candidate) => candidate.id === session.id && candidate.updatedAt! > row.updatedAt!);
+      fake.appendRaw(session, [piTitleEntry(agent, lastEntryId(piFileOf(session.id)), '项目 / Native.md', Date.now())]);
+      const named = await context.client.waitForSession((row) => row.id === session.id && row.title === '项目 / Native.md');
+      expect(named.updatedAt).toBe(active.updatedAt);
+      await stream.waitForFrame((frame) => frame.kind === 'session' && frame.info?.title === '项目 / Native.md');
+      // Push the name outside both old discovery windows without changing it.
+      const appendOutput = (target: { id: string }): void => {
+        let parentId = lastEntryId(piFileOf(target.id));
+        const output = Array.from({ length: 65 }, () => {
+          const id = crypto.randomUUID();
+          const row = { type: 'custom', id, parentId, customType: 'naming-output', data: 'x'.repeat(320 * 1024) };
+          parentId = id;
+          return row;
+        });
+        fake.appendRaw(target, output);
+      };
+      appendOutput(session);
+      const renamed = await context.client.waitForSession((row) => row.id === session.id && row.title === '项目 / Native.md');
+      expect(renamed.cwd).toBe(row.cwd);
+      expect(renamed.updatedAt).toBe(active.updatedAt);
+      fake.appendTurn(session, 'Tail activity after 16 MiB', 'large naming sentinel');
+      await stream.waitForFrame((frame) => frame.kind === 'message' && text(frame.message).includes('large naming sentinel'));
+      const latest = await context.client.waitForSession((candidate) => candidate.id === session.id && candidate.updatedAt! > active.updatedAt!);
+      fake.appendRaw(session, [piTitleEntry(agent, lastEntryId(piFileOf(session.id)), '', Date.now())]);
+      const cleared = (await context.client.sessions({ refresh: true, window: 'all' })).find((candidate) => candidate.id === session.id)!;
+      expect(cleared.title).toBe(cleared.titlePending ? '项目 / Native.md' : path);
+      await context.client.waitForSession((candidate) => candidate.id === session.id && !candidate.titlePending && candidate.title === path);
+      expect(cleared.updatedAt).toBe(latest.updatedAt);
+      await stream.waitForFrame((frame) => frame.kind === 'session' && frame.info?.title === path);
+      stream.close();
+      await context.broker.restart();
+      const cold = (await context.client.sessions({ refresh: true, window: 'all' })).find((candidate) => candidate.id === session.id)!;
+      expect(cold.title).toBe(path);
+      await context.client.waitForSession((candidate) => candidate.id === session.id && !candidate.titlePending && candidate.title === path);
+      expect(cold.updatedAt).toBe(latest.updatedAt);
+      const growing = fake.seedSession({ title: '', turns: 0 });
+      fake.appendForeignUser(growing, path);
+      appendOutput(growing);
+      await context.broker.restart();
+      const pending = (await context.client.sessions({ refresh: true, window: 'all' })).find((candidate) => candidate.id === growing.id)!;
+      expect(pending.titlePending).toBe(true);
+      expect(pending.updatedAt).toBeGreaterThan(0);
+      const settled = await eventually(async () => {
+        fake.appendRaw(growing, [{ type: 'custom', id: crypto.randomUUID(), parentId: lastEntryId(piFileOf(growing.id)), data: 'keeps growing' }]);
+        const row = (await context.client.sessions({ refresh: true, window: 'all' })).find((candidate) => candidate.id === growing.id);
+        return row && !row.titlePending ? row : undefined;
+      }, { what: 'a growing unnamed transcript to finish its original backlog' });
+      expect(settled.title).toBe(path);
+      expect((await context.client.sessions({ window: '7d', refresh: true })).some((row) => row.id === growing.id)).toBe(true);
+      if (!omp) {
+        // Retain a known disk title even without an open connection or an app
+        // rename fence. Raw pending rows must not replace the last-good cache.
+        fake.appendRaw(growing, [piTitleEntry(agent, lastEntryId(piFileOf(growing.id)), 'Known terminal name', Date.now())]);
+        await context.client.waitForSession((row) => row.id === growing.id && !row.titlePending && row.title === 'Known terminal name');
+        appendOutput(growing);
+        appendOutput(growing);
+        fake.appendRaw(growing, [piTitleEntry(agent, lastEntryId(piFileOf(growing.id)), '', Date.now())]);
+        const idlePending = (await context.client.sessions({ refresh: true, window: 'all' })).find((row) => row.id === growing.id)!;
+        expect(idlePending.titlePending).toBe(true);
+        expect(idlePending.title).toBe('Known terminal name');
+        await context.client.waitForSession((row) => row.id === growing.id && !row.titlePending && row.title === path);
+        // The HTTP mutation must retain the last accepted title while its
+        // native clear is still behind an unscanned append range.
+        const observer = await context.client.attach(agent, growing.id, { mode: 'observe' });
+        await observer.waitForKind('history');
+        const renamed = await context.client.request('PATCH', `/api/sessions/${agent}/${encodeURIComponent(growing.id)}/rename`, { title: 'Before pending clear' });
+        expect(renamed.status, renamed.text).toBe(200);
+        appendOutput(growing);
+        appendOutput(growing);
+        const result = await context.client.request('PATCH', `/api/sessions/${agent}/${encodeURIComponent(growing.id)}/rename`, { title: null });
+        expect(result.status, result.text).toBe(200);
+        expect(result.body.session.titlePending).toBe(true);
+        expect(result.body.session.title).toBe('Before pending clear');
+        await context.client.waitForSession((row) => row.id === growing.id && !row.titlePending && row.title === path);
+        observer.close();
+      } else {
+        // A migrated Pi name in the suffix cannot settle an OMP title hidden
+        // in the middle of the still-unread original range.
+        fake.appendRaw(growing, [piTitleEntry(agent, lastEntryId(piFileOf(growing.id)), 'Native OMP middle', Date.now())]);
+        appendOutput(growing);
+        fake.appendRaw(growing, [{ type: 'session_info', id: crypto.randomUUID(), parentId: lastEntryId(piFileOf(growing.id)), name: 'Legacy Pi suffix' }]);
+        await context.broker.restart();
+        const first = (await context.client.sessions({ refresh: true, window: 'all' })).find((row) => row.id === growing.id)!;
+        expect(first.titlePending).toBe(true);
+        expect(first.title).not.toBe('Legacy Pi suffix');
+        await context.client.waitForSession((row) => row.id === growing.id && !row.titlePending && row.title === 'Native OMP middle');
+      }
+    },
+  });
 
   // ----------------------------------------------------------------- create
   extras.push({
@@ -231,15 +380,16 @@ export function piFamilyExtras(dialect: PiFamilyDialect): ConformanceExtra[] {
       const stored = fake.seedSession({ title: 'before rename' });
       await context.client.waitForSession((row) => row.id === stored.id);
       const mark = fake.ledger.mark();
-      const renamed = await context.client.request('PATCH', `/api/sessions/${agent}/${stored.id}/rename`, { title: '  New name  ' });
+      const nativeTitle = 'n'.repeat(159) + '🧪';
+      const renamed = await context.client.request('PATCH', `/api/sessions/${agent}/${stored.id}/rename`, { title: `  ${nativeTitle}  ` });
       expect(renamed.status, renamed.text).toBe(200);
-      expect(renamed.body.title).toBe('New name');
-      expect(fake.ledger.commands('set_session_name', mark)[0]!.frame).toMatchObject({ name: 'New name' });
+      expect(renamed.body.title).toBe(nativeTitle);
+      expect(fake.ledger.commands('set_session_name', mark)[0]!.frame).toMatchObject({ name: nativeTitle });
       // The name is a durable entry in the dialect's own shape.
       const entry = readEntries(piFileOf(stored.id)).filter((row) => row.type === (omp ? 'title_change' : 'session_info')).at(-1);
-      expect(omp ? entry?.title : entry?.name).toBe('New name');
+      expect(omp ? entry?.title : entry?.name).toBe(nativeTitle);
       expect(readFileSync(piFileOf(stored.id), 'utf8')).not.toContain(omp ? '"session_info"' : '"title_change"');
-      await context.client.waitForSession((row) => row.id === stored.id && row.title === 'New name');
+      await context.client.waitForSession((row) => row.id === stored.id && row.title === nativeTitle);
 
       // A native failure reaches the client as a bare failure: no runtime text, path or credential.
       const failed = await context.client.request('PATCH', `/api/sessions/${agent}/${stored.id}/rename`, { title: 'fail-secret' });
@@ -250,10 +400,10 @@ export function piFamilyExtras(dialect: PiFamilyDialect): ConformanceExtra[] {
       const cleared = await context.client.request('PATCH', `/api/sessions/${agent}/${stored.id}/rename`, { title: null });
       if (omp) {
         expect(cleared.status).toBe(502);
-        expect((await context.client.waitForSession((row) => row.id === stored.id)).title).toBe('New name');
+        expect((await context.client.waitForSession((row) => row.id === stored.id)).title).toBe(nativeTitle);
       } else {
         expect(cleared.status, cleared.text).toBe(200);
-        await context.client.waitForSession((row) => row.id === stored.id && row.title !== 'New name');
+        await context.client.waitForSession((row) => row.id === stored.id && row.title !== nativeTitle);
       }
     },
   });

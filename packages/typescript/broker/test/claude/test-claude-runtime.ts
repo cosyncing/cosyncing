@@ -522,6 +522,29 @@ const lines = [
       JSON.stringify({ warmAppendChanged, warmAppendSettled }),
     );
 
+    // A normal conversation cannot deterministically append between stat and
+    // open. Hold that narrow boundary for both cold and admitted generations.
+    for (const warm of [false, true]) {
+      const earlyAppendFile = join(dir, `early-append-${warm}.jsonl`);
+      writeFileSync(earlyAppendFile, warmSeedText);
+      if (warm) await claudeTranscriptTurnAuthorityResult(earlyAppendFile);
+      appendFileSync(earlyAppendFile, warmProgressLine);
+      let appended = false;
+      const raced = await claudeTranscriptTurnAuthorityResult(earlyAppendFile, {
+        beforeOpen: () => {
+          if (appended) return;
+          appended = true;
+          appendFileSync(earlyAppendFile, warmLateProgressLine);
+        },
+      });
+      const settled = await claudeTranscriptTurnAuthorityResult(earlyAppendFile);
+      check(`an append before ${warm ? 'warm' : 'cold'} range opening retains validated progress and authority candidates`,
+        raced.kind === 'fallback' && raced.reason === 'source-changed' && raced.scannedBytes > 0
+          && settled.kind === 'authority' && settled.authority === 'active'
+          && settled.scannedBytes === Buffer.byteLength(warmLateProgressLine),
+        JSON.stringify({ raced, settled }));
+    }
+
     const observe = new ClaudeObserveConnection(file, { id: 'sess', tool: 'claude', title: 'quiet', status: 'idle', attachMode: 'observe' });
     const live: AgentMessage[] = [];
     const attention = new AttentionService({ store: { home: join(dir, 'attention') } });

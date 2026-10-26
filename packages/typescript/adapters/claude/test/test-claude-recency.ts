@@ -8,7 +8,7 @@
  *   bun packages/typescript/adapters/claude/test/test-claude-recency.ts
  */
 export {};
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -183,6 +183,36 @@ check('fable fixture row discovered', rows.some((s: any) => s.id === fableId), `
 const fableConn = await adapter.attach(fableId, 'observe') as any;
 check('P2: a fable session carries the adapter-authored currentModel.label the roster reads', fableConn.info.currentModel?.label === 'Fable 5' && fableConn.info.currentModel?.modelID === 'claude-fable-5', JSON.stringify(fableConn.info.currentModel));
 await fableConn.close();
+
+// Permission failure after atomic replacement is a store fault that the HTTP
+// harness cannot portably arrange. A previous generation must not stay final.
+if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+  const replacement = `${wrapperTranscript}.replacement`;
+  writeFileSync(replacement, JSON.stringify({ type: 'user', uuid: 'replacement-user', cwd, message: { content: 'Replacement prompt' } }) + '\n');
+  chmodSync(replacement, 0);
+  renameSync(replacement, wrapperTranscript);
+  try {
+    const unreadable = (await adapter.discoverSessions()).find((row) => row.id === wrapperId);
+    check('a failed replacement scan never publishes the previous Claude title as final',
+      unreadable?.titlePending === true && await adapter.resolveSessionTitle(wrapperId) === undefined,
+      JSON.stringify(unreadable));
+  } finally { chmodSync(wrapperTranscript, 0o600); }
+  const recovered = (await adapter.discoverSessions()).find((row) => row.id === wrapperId);
+  check('a readable replacement recovers its own title', recovered?.title === 'Replacement prompt' && !recovered.titlePending, JSON.stringify(recovered));
+}
+
+const cancelTranscript = join(wrapperProjectDir, 'ffffffff-ffff-4fff-8fff-ffffffffffff.jsonl');
+writeFileSync(cancelTranscript, JSON.stringify({ type: 'user', uuid: 'cancel-user', cwd, message: { content: 'Cancel this scan' } }) + '\n');
+const padding = JSON.stringify({ type: 'progress', data: 'x'.repeat(256 * 1024) }) + '\n';
+for (let index = 0; index < 80; index++) appendFileSync(cancelTranscript, padding);
+const cancellation = new AbortController();
+let cancelled = false;
+try {
+  await adapter.discoverSessions({ signal: cancellation.signal, onWork: (work) => {
+    if (work.kind === 'decode-file' && work.source === cancelTranscript) setImmediate(() => cancellation.abort());
+  } });
+} catch (error) { cancelled = (error as Error).name === 'AbortError'; }
+check('discovery cancellation interrupts a yielded title scan on its last transcript', cancellation.signal.aborted && cancelled);
 
 const failed = results.filter((r) => !r.ok).length;
 console.log(`\n${results.length - failed} passed, ${failed} failed`);

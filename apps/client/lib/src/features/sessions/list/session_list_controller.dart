@@ -316,17 +316,27 @@ class SessionListController extends Notifier<SessionListState> {
   ///
   /// Only the title changes: the rename response must not overwrite fresher
   /// status, control, model, or project facts already held by the roster.
-  void renameSessionTitle(String tool, String id, String title) {
+  void renameSessionTitle(
+    String tool,
+    String id,
+    String title, {
+    bool pending = false,
+  }) {
     if (_disposed) return;
     final index = state.sessions.indexWhere(
       (session) => session.tool == tool && session.id == id,
     );
-    if (index < 0 || state.sessions[index].title == title) return;
+    if (index < 0 ||
+        (state.sessions[index].title == title &&
+            (state.sessions[index].titlePending ?? false) == pending)) {
+      return;
+    }
     final sessions = [...state.sessions];
     final existing = sessions[index];
     sessions[index] = SessionInfo.fromJson({
       ...existing.toJson(),
-      'title': title,
+      'title': pending ? existing.title : title,
+      'titlePending': pending ? true : null,
     });
     state = state.copyWith(sessions: sessions);
     _markSnapshotDirty();

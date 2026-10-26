@@ -2954,9 +2954,11 @@ export interface SessionInfo {
   /** Set by the broker (machine/tailnet name); undefined locally. */
   machine?: string;
   title: string;
+  /** Metadata recovery is incomplete; retain a previously resolved display title. */
+  titlePending?: boolean;
   slug?: string;
   cwd?: string;
-  /** User-facing broker/project alias for this cwd group. Does not rename or move the real directory. */
+  /** Native workspace name or broker project alias for this cwd group. Does not rename or move the real directory. */
   projectName?: string;
   /**
    * How this session came to exist, when it was NOT directly human-initiated (omitted = a normal
@@ -3013,6 +3015,7 @@ export interface SessionInfo {
 }
 
 const SESSION_INFO_KEYS = new Set([
+  'titlePending',
   'id', 'lineageId', 'liveUuid', 'tool', 'machine', 'title', 'slug', 'cwd',
   'projectName', 'origin', 'parentThreadId', 'nativeId', 'status', 'launchSurface',
   'attachMode', 'model', 'currentModel', 'currentAgent', 'currentMode', 'createdAt',
@@ -3109,6 +3112,7 @@ export function decodeSessionInfo(value: unknown): SessionInfo | undefined {
     || typeof value.title !== 'string'
     || !['working', 'needs-input', 'idle'].includes(String(value.status))
     || !['live', 'resume', 'observe'].includes(String(value.attachMode))) return undefined;
+  if (value.titlePending !== undefined && typeof value.titlePending !== 'boolean') return undefined;
   for (const key of [
     'lineageId', 'liveUuid', 'machine', 'slug', 'cwd', 'projectName', 'parentThreadId',
     'nativeId', 'model', 'currentAgent', 'currentMode',

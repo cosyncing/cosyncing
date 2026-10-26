@@ -18,7 +18,7 @@ import { pathToFileURL } from 'node:url';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import type { Browser, Download, Locator, Page } from 'playwright-core';
 import { type Broker, eventually } from '../harness/index.ts';
-import { collectBrowserErrors, launchBrowser, newScenarioContext, waitForFlutter } from '../harness/browser.ts';
+import { collectBrowserErrors, fillFlutterTextField, launchBrowser, newScenarioContext, waitForFlutter } from '../harness/browser.ts';
 import { startWebBroker } from '../harness/web-scenario.ts';
 import { writeMediaFixtures } from '../harness/media-fixtures.ts';
 import { startFakeTokdash } from '../harness/fakes/tokdash.ts';
@@ -44,14 +44,19 @@ async function startFixture(): Promise<Fixture> {
   mkdirSync(workspace, { recursive: true });
   const reportPath = join(workspace, 'report.txt');
   writeFileSync(reportPath, REPORT_BYTES);
-  const files = { owner: join(root, 'owner.jsonl'), peer: join(root, 'peer.jsonl') };
+  const sessionsRoot = join(root, 'pi-sessions');
+  mkdirSync(sessionsRoot, { recursive: true });
+  const files = { owner: join(sessionsRoot, 'owner.jsonl'), peer: join(sessionsRoot, 'peer.jsonl') };
   for (const [name, file] of Object.entries(files)) {
-    writeFileSync(file, `${JSON.stringify({ type: 'session', id: name, cwd: workspace })}\n`);
+    writeFileSync(file, [
+      { type: 'session', version: 3, id: name, cwd: workspace },
+      { type: 'session_info', id: 'name', parentId: null, name: `Artifact ${name}` },
+    ].map((row) => JSON.stringify(row)).join('\n') + '\n');
   }
   const tokdash = startFakeTokdash();
   const [a, b] = await Promise.all([
-    startWebBroker({ name: 'web-art-a', env: { COSYNCING_FS_REMOTE_ENABLED: '1', COSYNCING_TOKDASH_URL: tokdash.url } }),
-    startWebBroker({ name: 'web-art-b', env: { COSYNCING_FS_REMOTE_ENABLED: '1', COSYNCING_TOKDASH_URL: tokdash.url } }),
+    startWebBroker({ name: 'web-art-a', env: { COSYNCING_FS_REMOTE_ENABLED: '1', COSYNCING_TOKDASH_URL: tokdash.url, COSYNCING_PI_SESSIONS_ROOT: sessionsRoot } }),
+    startWebBroker({ name: 'web-art-b', env: { COSYNCING_FS_REMOTE_ENABLED: '1', COSYNCING_TOKDASH_URL: tokdash.url, COSYNCING_PI_SESSIONS_ROOT: sessionsRoot } }),
   ]);
   const hello = async (broker: Broker, file: string, title: string, row: string): Promise<string> => {
     const response = await broker.client().post('/pi/bridge/hello', {
@@ -96,27 +101,30 @@ async function openView(page: Page, view: 'Chat' | 'Files'): Promise<void> {
 }
 
 /**
- * Open a session from the roster, as the user does, and come back to a fresh
- * load of Sessions with its tab mounted from the durable working set. Flutter
- * can replace a semantics node while the roster repaints, so each attempt
- * re-resolves everything.
+ * Open a session from the roster, as the user does. Keep the current document
+ * when switching tabs; the outage/restart scenario explicitly reloads to prove
+ * durable membership. Re-resolve semantics nodes when the roster repaints.
  */
 async function openFromRoster(page: Page, origin: string, title: string): Promise<void> {
   await page.setViewportSize({ width: 1440, height: 1000 });
+  const route = `${origin}/cosy/#/sessions`;
+  if (!page.url().startsWith(route)) {
+    await page.goto(route, { waitUntil: 'domcontentloaded' });
+  }
+  await waitForFlutter(page);
   await eventually(async () => {
-    await page.goto(`${origin}/cosy/#/sessions`, { waitUntil: 'domcontentloaded' });
-    await waitForFlutter(page);
     if (await sessionTab(page, title).count() > 0) return true;
     try {
       const row = page.getByRole('button', { name: title, exact: false });
       if (!(await row.first().isVisible().catch(() => false))) {
-        await page.getByRole('textbox', { name: 'Search sessions' }).first().fill(title, { timeout: 5_000 });
+        await fillFlutterTextField(page, 'Search sessions', title);
         await row.first().waitFor({ state: 'visible', timeout: 5_000 });
       }
       await row.first().click({ force: true, timeout: 5_000 });
       await sessionTab(page, title).first().waitFor({ state: 'attached', timeout: 5_000 });
+      return true;
     } catch {
-      // The roster repainted under us: load again and retry.
+      // The roster repainted under us: resolve the row again.
     }
     return false;
   }, { timeoutMs: 90_000, intervalMs: 50, what: `session ${title} in the working set` });
@@ -166,7 +174,12 @@ describe('delivered files in the web client', () => {
   }
 
   test.concurrent('HTML is interactive by default, stable while visible, and destroyed by pane lifecycle', async () => {
+    const phase = (name: string): void => {
+      if (process.env.FILE_PREVIEW_REVIEW === '1') console.error(`[HTML lifecycle ${Date.now()}] ${name}`);
+    };
+    phase('starting fixture');
     await scenario(async (f, page) => {
+      phase('fixture ready');
       writeFileSync(join(f.workspace, 'dashboard.html'), `<!doctype html><title>Dashboard</title>
         <button onclick="count.textContent=++window.clicks">Increment</button><output id="count">0</output>
         <canvas id="chart" width="20" height="20"></canvas><script>
@@ -175,16 +188,20 @@ describe('delivered files in the web client', () => {
         chart.getContext('2d').fillRect(0,0,20,20); document.body.dataset.ready='yes';
         </script>`);
       await openFromRoster(page, f.a.url, 'Artifact peer');
+      phase('peer open');
       await openFromRoster(page, f.a.url, 'Artifact owner');
+      phase('owner open');
       expect(page.frames()).toHaveLength(1);
       await openView(page, 'Files');
       await page.getByRole('button', { name: 'Preview file', exact: true }).first().click();
       const child = () => page.frameLocator('iframe').frameLocator('iframe');
       await child().locator('body[data-ready="yes"]').waitFor();
+      phase('initial document ready');
       const frame = page.frames().find((frame) => frame.parentFrame()?.parentFrame())!;
       const identity = await frame.evaluate<number>('window.identity');
       await child().getByRole('button', { name: 'Increment' }).click();
       expect(await child().locator('output').innerText()).toBe('1');
+      phase('interactive document stable');
       expect(await frame.evaluate<number>("document.querySelector('canvas').getContext('2d').getImageData(0,0,1,1).data[3]")).toBe(255);
       await page.setViewportSize({ width: 1480, height: 960 });
       await page.emulateMedia({ colorScheme: 'dark' });
@@ -196,14 +213,17 @@ describe('delivered files in the web client', () => {
       expect(await child().locator('output').innerText()).toBe('1');
       await page.getByRole('button', { name: 'Source', exact: true }).click();
       await eventually(() => page.frames().length === 1, { what: 'Source removes all HTML contexts' });
+      phase('source removed document');
       expect(frame.isDetached()).toBe(true);
       await page.getByRole('button', { name: 'Rendered', exact: true }).click();
       await child().locator('body[data-ready="yes"]').waitFor();
       expect(await child().locator('output').innerText()).toBe('0');
+      phase('rendered document restored');
       await selectTab(page, 'Artifact peer');
       await eventually(() => page.frames().length === 1, { what: 'hidden retained session removes frames' });
       await selectTab(page, 'Artifact owner');
       await child().locator('body[data-ready="yes"]').waitFor();
+      phase('owner document restored after tab switch');
       // Browser visibility delivery is controlled; native lifecycle is exercised
       // through the app driver in file_previews_test.dart.
       await page.evaluate(() => {
@@ -211,6 +231,7 @@ describe('delivered files in the web client', () => {
         document.dispatchEvent(new Event('visibilitychange'));
       });
       await eventually(() => page.frames().length === 1, { what: 'background destroys document synchronously' });
+      phase('background removed document');
       await page.evaluate(() => {
         delete (document as any).hidden;
         document.dispatchEvent(new Event('visibilitychange'));
@@ -221,22 +242,27 @@ describe('delivered files in the web client', () => {
       // Wait for the compact workspace control before acting on that layout.
       const showSessions = page.getByRole('button', { name: 'Show sessions', exact: true });
       await showSessions.waitFor();
+      phase('compact workspace ready');
       await child().locator('body[data-ready="yes"]').waitFor();
       expect(page.frames()).toHaveLength(3);
       await page.getByRole('button', { name: 'Close', exact: true }).last().click();
       await eventually(() => page.frames().length === 1, { what: 'close removes every frame' });
+      phase('compact preview closed');
       // Closing persists asynchronously, then publishes its Undo notice.
       // Settle and dismiss it before changing layout and reopening the file.
       const undo = page.getByRole('button', { name: 'Undo', exact: true });
       await undo.waitFor();
       await page.getByRole('button', { name: 'Close', exact: true }).last().click();
       await undo.waitFor({ state: 'hidden' });
+      phase('close notice dismissed');
       await page.setViewportSize({ width: 1440, height: 1000 });
       await showSessions.waitFor({ state: 'hidden' });
       await openView(page, 'Files');
       await page.getByRole('button', { name: 'Preview file', exact: true }).first().click();
       await child().locator('body[data-ready="yes"]').waitFor();
+      phase('wide preview restored');
       await openFromRoster(page, f.b.url, 'Artifact owner');
+      phase('other broker open');
       expect(page.frames()).toHaveLength(1);
     });
   });
@@ -321,7 +347,12 @@ describe('delivered files in the web client', () => {
   });
 
   test.concurrent('media stays lazy, images and PDFs render, videos play, and close revokes access', async () => {
+    const phase = (name: string): void => {
+      if (process.env.FILE_PREVIEW_REVIEW === '1') console.error(`[Media lifecycle ${Date.now()}] ${name}`);
+    };
+    phase('starting fixture');
     await scenario(async (f, page) => {
+      phase('fixture ready');
       writeMediaFixtures(f.workspace);
       const review = async (name: string): Promise<void> => {
         if (process.env.FILE_PREVIEW_REVIEW !== '1') return;
@@ -340,6 +371,7 @@ describe('delivered files in the web client', () => {
         if (request.method() === 'DELETE' && request.url().includes('/api/media-previews/')) released.push(request.url());
       });
       await openFromRoster(page, f.a.url, 'Artifact owner');
+      phase('owner open');
       await openView(page, 'Files');
       await review('files-before-preview');
       if (process.env.FILE_PREVIEW_REVIEW === '1') writeFileSync('output/review/file-previews/files-semantics.txt', await page.locator('body').innerText());
@@ -367,6 +399,7 @@ describe('delivered files in the web client', () => {
       expect(engineRequests).toHaveLength(0);
       await review('image-light');
       await close(1);
+      phase('image rendered and closed');
       await review('after-image-close');
 
       await preview('document.pdf');
@@ -378,6 +411,7 @@ describe('delivered files in the web client', () => {
       expect(engineRequests.length).toBeGreaterThan(0);
       await review('pdf-dark');
       await close(2);
+      phase('PDF rendered and closed');
 
       await preview('clip.webm');
       await page.getByRole('button', { name: 'Play', exact: true }).waitFor();
@@ -392,6 +426,7 @@ describe('delivered files in the web client', () => {
       await page.waitForFunction(() => document.querySelector('video')?.paused === true);
       await review('video-dark');
       await close(3);
+      phase('video played and closed');
       await page.waitForFunction(() => document.querySelector('video') === null);
       // Delivered files use the same viewer without reading the workspace path.
       const sent = await f.a.client().post('/pi/bridge/send-file', { id: f.ownerId, path: join(f.workspace, 'picture.png') });
@@ -402,6 +437,7 @@ describe('delivered files in the web client', () => {
       await page.getByRole('button', { name: 'Fit to view', exact: true }).waitFor();
       await page.getByRole('img', { name: 'picture.png', exact: true }).waitFor();
       await close(4);
+      phase('delivered image rendered and closed');
 
       await page.setViewportSize({ width: 390, height: 844 });
       await openView(page, 'Chat');
@@ -410,6 +446,7 @@ describe('delivered files in the web client', () => {
       await page.getByRole('img', { name: 'picture.png', exact: true }).waitFor();
       await review('image-phone-dark');
       await close(5);
+      phase('compact image rendered and closed');
       await openView(page, 'Files');
       await preview('document.pdf');
       await page.getByRole('group', { name: /Page 1 of 2$/ }).waitFor();
@@ -419,6 +456,7 @@ describe('delivered files in the web client', () => {
       await page.getByRole('group', { name: /Page 2 of 2$/ }).waitFor();
       await review('pdf-phone-light');
       await close(6);
+      phase('compact PDF rendered and closed');
       expect(await page.getByText('This file could not be previewed.', { exact: false }).count()).toBe(0);
     });
   });

@@ -303,6 +303,10 @@ export interface ManagedConnAttentionHooks {
 }
 
 export interface HubAttentionHooks {
+  /** Capture metadata ordering before an adapter read; qualify at admission. */
+  beginSessionInfoRead?: () => (info: SessionInfo) => SessionInfo;
+  /** Runtime metadata decoration used by Session Detail, for visible-change comparison. */
+  decorateSessionInfo?: (info: SessionInfo) => SessionInfo;
   onMessage?: (info: SessionInfo, message: AgentMessage) => void;
   onSessionEnded?: (info: SessionInfo, reason?: string) => void;
   onLeaseDenied?: (info: SessionInfo) => void;
@@ -335,6 +339,7 @@ function controlPathState(
 }
 
 const SESSION_OPTIONAL_KEYS = [
+  'titlePending',
   'lineageId',
   'liveUuid',
   'machine',
@@ -377,7 +382,9 @@ const SESSION_OPTIONAL_KEYS = [
  * Everything else discovery owns (title, model, timestamps, hints) flows in as before.
  */
 function discoveryRefresh(current: SessionInfo, discovered: SessionInfo, status: SessionInfo['status']): SessionInfo {
-  const next: SessionInfo = { ...discovered, status, attachMode: current.attachMode };
+  const next: SessionInfo = { ...discovered, status, attachMode: current.attachMode,
+    title: discovered.titlePending ? current.title : discovered.title,
+    updatedAt: discovered.updatedAt ?? current.updatedAt };
   if (discovered.attachMode === current.attachMode) return next;
   if (current.control) {
     next.control = {
@@ -415,6 +422,7 @@ function replaceInfo(target: SessionInfo, source: SessionInfo): boolean {
 }
 
 const SESSION_INFO_PATCH_KEYS = new Set([
+  'titlePending',
   'title',
   'status',
   'attachMode',
@@ -509,6 +517,8 @@ export function applySessionInfoPatch(target: SessionInfo, value: unknown): bool
   for (const [key, inner] of Object.entries(value)) {
     const valid = key === 'title'
       ? typeof inner === 'string'
+      : key === 'titlePending'
+        ? inner === undefined || typeof inner === 'boolean'
       : key === 'status'
         ? ['working', 'needs-input', 'idle'].includes(String(inner))
         : key === 'attachMode'
@@ -2329,6 +2339,7 @@ export class Hub {
       const backend = this.registry.get(tool);
       if (!backend) throw new Error(`unknown tool: ${tool}`);
       await this.requireNativeForWriter(tool, mode);
+      const qualifyAttached = this.attentionHooks.beginSessionInfoRead?.();
       const conn = await backend.attach(id, mode as AttachMode | undefined, reason ? { reason } : undefined);
       // ADMISSION, as a real compare-and-swap. The generation alone is not
       // enough: it moves only when ownership is deliberately RETIRED, while an
@@ -2367,6 +2378,7 @@ export class Hub {
       // here is on the failing path, where there is no longer anything to race.
       let replacement: ManagedConn;
       try {
+        if (qualifyAttached) Object.assign(conn.info, qualifyAttached(conn.info));
         replacement = this.createManaged(conn);
       } catch (error) {
         // AWAITED, not fired and forgotten. The close is what settles the
@@ -2465,6 +2477,18 @@ export class Hub {
     for (const managed of this.conns.values()) {
       const row = discovered(managed.conn.info.tool, managed.conn.info.id);
       if (row && managed.adoptLineage(row)) managed.broadcastSession(managed.conn.info);
+    }
+  }
+
+  /** Native metadata owns the title even while an attached owner owns run/control state. */
+  adoptDiscoveredTitles(discovered: (tool: string, id: string) => SessionInfo | undefined): void {
+    for (const managed of this.conns.values()) {
+      const row = discovered(managed.conn.info.tool, managed.conn.info.id);
+      if (row && !row.titlePending && (managed.conn.info.title !== row.title || managed.conn.info.titlePending)) {
+        managed.conn.info.title = row.title;
+        delete managed.conn.info.titlePending;
+        managed.broadcastSession(managed.conn.info);
+      }
     }
   }
 
@@ -3150,6 +3174,7 @@ export class Hub {
       const generation = this.generationOf(key);
       const before: SessionInfo = structuredClone(mc.conn.info);
       let conn: SessionConnection;
+      const qualifyAttached = this.attentionHooks.beginSessionInfoRead?.();
       try {
         conn = await backend.attach(id, mode);
       } catch {
@@ -3163,6 +3188,7 @@ export class Hub {
         void conn.close().catch(() => {});
         continue;
       }
+      if (qualifyAttached) Object.assign(conn.info, qualifyAttached(conn.info));
       mc.replaceConnection(conn);
       this.emitControlTransitions(before, mc.conn.info, 'unknown');
       this.reconcileSessionOwner(tool, id, mc.conn.info);
@@ -3176,7 +3202,7 @@ export class Hub {
    *  through the adapter's default path so the same websocket becomes mutable. If sync disappears,
    *  the same path downgrades back to Observe. Resume/Drive owners are keyed separately and are not
    *  rewritten by terminal-side changes. */
-  async refreshExternalSession(info: SessionInfo): Promise<void> {
+  async refreshExternalSession(info: SessionInfo, qualifyMetadata: (info: SessionInfo) => SessionInfo = (value) => value): Promise<void> {
     const key = this.key(info.tool, info.id);
     // A pinned connection is a broker-OWNED live bridge (Pi extension / Claude hooks overlay): its control
     // state is authoritative and flows from its own hello/hook endpoints, NOT from adapter discovery. An
@@ -3213,6 +3239,7 @@ export class Hub {
     if ((incomingSynced && cur.attachMode !== 'live') || (!incomingSynced && cur.attachMode === 'live' && info.attachMode !== 'live')) {
       const backend = this.registry.get(info.tool);
       if (!backend) return;
+      const qualifyAttached = this.attentionHooks.beginSessionInfoRead?.();
       const conn = await backend.attach(info.id);
       // Generation fence: this refresh was derived from a snapshot that predates the attach await.
       // If the owner was replaced, retired, or adopted as a pinned bridge while attach was in
@@ -3222,6 +3249,10 @@ export class Hub {
         void conn.close().catch(() => {});
         return;
       }
+      if (qualifyAttached) Object.assign(conn.info, qualifyAttached(conn.info));
+      const qualified = qualifyMetadata({ ...info, title: conn.info.title, titlePending: conn.info.titlePending });
+      conn.info.title = qualified.title;
+      conn.info.titlePending = qualified.titlePending;
       mc.replaceConnection(conn);
       this.emitControlTransitions(before, mc.conn.info, 'runtime-unreachable');
       return;
@@ -3253,8 +3284,15 @@ export class Hub {
     // and Drive state are not discovery's either ({@link discoveryRefresh}), and a pass that changes
     // nothing about this connection sends no frame: discovery re-derives a row on every input edge,
     // and re-sending an identical session frame each time is noise every client has to absorb.
-    const next = discoveryRefresh(mc.conn.info, info, mc.status);
+    const next = discoveryRefresh(mc.conn.info, qualifyMetadata(info), mc.status);
     if (sameWireInfo(mc.conn.info, next)) return;
+    // A title can arrive before discovery fills the broker's default visibility/machine fields.
+    // Compare the same decoration Session Detail renders before publishing another frame.
+    const decorate = this.attentionHooks.decorateSessionInfo;
+    if (decorate && sameWireInfo(
+      decorate(structuredClone(mc.conn.info)),
+      decorate(structuredClone(next)),
+    )) return;
     mc.updateInfo(next);
     this.emitControlTransitions(before, mc.conn.info, 'runtime-unreachable');
   }
@@ -3459,6 +3497,7 @@ export class Hub {
       const backend = this.registry.get(tool);
       if (!backend) throw new Error(`unknown tool: ${tool}`);
       await this.requireNativeForWriter(tool, mode);
+      const qualifyAttached = this.attentionHooks.beginSessionInfoRead?.();
       const conn = await backend.attach(id, mode as AttachMode | undefined, reason ? { reason } : undefined);
       // Checked at ADMISSION, not at call time: the adapter snapshots what it
       // may do when the attach starts, and the whole window between that
@@ -3491,6 +3530,7 @@ export class Hub {
       // before the rejection propagates.
       let mc: ManagedConn;
       try {
+        if (qualifyAttached) Object.assign(conn.info, qualifyAttached(conn.info));
         mc = this.createManaged(conn);
       } catch (error) {
         this.clearPending(key, entry);

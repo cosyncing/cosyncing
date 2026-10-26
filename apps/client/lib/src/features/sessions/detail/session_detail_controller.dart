@@ -445,9 +445,7 @@ class SessionDetailController
       if (connection != null) {
         unawaited(
           connection.dispose().whenComplete(
-            () => _completeTransportAttachCancellation(
-              transportCancellations,
-            ),
+            () => _completeTransportAttachCancellation(transportCancellations),
           ),
         );
       } else {
@@ -455,10 +453,7 @@ class SessionDetailController
       }
     });
 
-    return SessionDetailState(
-      tool: arg.tool,
-      sessionId: arg.sessionId,
-    );
+    return SessionDetailState(tool: arg.tool, sessionId: arg.sessionId);
   }
 
   /// Attaches to the session stream, creating the connection if needed.
@@ -952,9 +947,7 @@ class SessionDetailController
     return sync.supported && sync.active && sync.input != 'answer-only';
   }
 
-  Future<void> _joinExistingDriver(
-    SessionJoinExistingAction action,
-  ) async {
+  Future<void> _joinExistingDriver(SessionJoinExistingAction action) async {
     final intent = _attachInFlightIntent ?? _establishedAttachIntent;
     final connection = _connection;
     final revision = action.ownerRevision;
@@ -1540,9 +1533,7 @@ class SessionDetailController
       truncation: state.latestHistoryTruncation,
       updatedAt: DateTime.now(),
     );
-    _pendingTranscriptAdmission = _replaceTranscriptAdmission(
-      brokerProfileId,
-    );
+    _pendingTranscriptAdmission = _replaceTranscriptAdmission(brokerProfileId);
 
     final attachTicket = event is HistoryWireEvent
         ? event.attachTicket?.trim()
@@ -2312,6 +2303,22 @@ class SessionDetailController
         rosterState.source ??
         RosterSource.of(ref.read(activeBrokerProfileProvider));
     if (currentSource != null && currentSource != source) return;
+    if (event is SessionWireEvent && sessionInfo.titlePending != true) {
+      ref
+          .read(openSessionsControllerProvider.notifier)
+          .renameSessionTitle(
+            sessionInfo.tool,
+            sessionInfo.id,
+            sessionInfo.title,
+          );
+      ref
+          .read(sessionListControllerProvider.notifier)
+          .renameSessionTitle(
+            sessionInfo.tool,
+            sessionInfo.id,
+            sessionInfo.title,
+          );
+    }
     ref
         .read(sessionStatusRegistryProvider.notifier)
         .publishLive(
@@ -2645,10 +2652,7 @@ class SessionDetailController
   Future<bool> sendAttachTicketReceipt(
     String attachTicket, {
     required bool accepted,
-  }) => _sendAttachTicketReceiptCoordinated(
-    attachTicket,
-    accepted: accepted,
-  );
+  }) => _sendAttachTicketReceiptCoordinated(attachTicket, accepted: accepted);
 
   Future<bool> loadEarlierHistory({
     int limit = kTranscriptHistoryPageMessages,
@@ -2696,11 +2700,8 @@ class SessionDetailController
     required String cursor,
     required String until,
     int limit = kTranscriptHistoryPageMessages,
-  }) => _loadNewerHistoryCoordinated(
-    cursor: cursor,
-    until: until,
-    limit: limit,
-  );
+  }) =>
+      _loadNewerHistoryCoordinated(cursor: cursor, until: until, limit: limit);
 
   /// Records the first visible canonical row so active-history eviction keeps
   /// that page plus the recent tail. This is local memory policy only.
@@ -2747,10 +2748,8 @@ class SessionDetailController
     permissionMode: permissionMode,
   );
 
-  Future<bool> sendActionCommand(
-    String name, {
-    Map<String, dynamic>? args,
-  }) => _sendActionCommandCoordinated(name, args: args);
+  Future<bool> sendActionCommand(String name, {Map<String, dynamic>? args}) =>
+      _sendActionCommandCoordinated(name, args: args);
 
   Future<bool> pickAttachments() => _pickAttachmentsCoordinated();
 
@@ -2793,12 +2792,20 @@ class SessionDetailController
   Future<bool> renameSession(String title) => _renameSessionCoordinated(title);
 
   /// Applies a broker-accepted rename made from a tab or roster context menu.
-  void acceptRenamedTitle(RosterSource source, String title) {
+  void acceptRenamedTitle(
+    RosterSource source,
+    String title, {
+    bool pending = false,
+  }) {
     if (!_canPublishRenameFor(source)) return;
     final info = state.sessionInfo;
     if (info == null) return;
     state = state.copyWith(
-      sessionInfo: SessionInfo.fromJson({...info.toJson(), 'title': title}),
+      sessionInfo: SessionInfo.fromJson({
+        ...info.toJson(),
+        'title': pending ? info.title : title,
+        'titlePending': pending ? true : null,
+      }),
     );
   }
 
@@ -2839,10 +2846,7 @@ class SessionDetailController
   Future<bool> sendQuestionAnswer({
     required String requestId,
     required List<List<String>> answers,
-  }) => _sendQuestionAnswerCoordinated(
-    requestId: requestId,
-    answers: answers,
-  );
+  }) => _sendQuestionAnswerCoordinated(requestId: requestId, answers: answers);
 
   Future<bool> rejectQuestion(String requestId) =>
       _rejectQuestionCoordinated(requestId);

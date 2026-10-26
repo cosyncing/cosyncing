@@ -313,7 +313,7 @@ describe('the session roster', () => {
     // No bounded view can place an undated idle row, so only all-time lists it.
     for (const window of ['1d', '7d', '1m']) expect(listed(window, hello.body.id)).toBe(false);
     const undated = windows.all!.find((row) => row.id === hello.body.id);
-    expect(undated).toMatchObject({ status: 'idle', title: 'undated live' });
+    expect(undated).toMatchObject({ status: 'idle', title: '' });
     expect(undated.updatedAt).toBeUndefined();
     expect(undated.createdAt).toBeUndefined();
   });

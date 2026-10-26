@@ -624,9 +624,13 @@ export function conformanceSuite(kit: ConformanceKit): void {
       expect((await prompt(stream, 'sentinel turn')).kind).toBe('ack');
       await stream.waitForMessage((message) => message.type === 'model-output' && rowText(message) === 'answer: sentinel turn');
       if (summarised) {
-        await eventually(() => new Set(liveMessages(stream, from)
-          .filter((message) => message.type === 'run-summary' && message.status === 'done')
-          .map((message) => message.key)).size === 2, { what: 'the sentinel turn summary' });
+        await eventually(() => {
+          const summaries = liveMessages(stream, from).filter((message) => message.type === 'run-summary');
+          if (new Set(summaries.filter((message) => message.status === 'done').map((message) => message.key)).size !== 2) {
+            throw new Error(JSON.stringify(summaries));
+          }
+          return true;
+        }, { what: 'the sentinel turn summary' });
       }
       expect(liveMessages(stream, from).some((message) => message.type === 'run-summary' && message.status === 'error')).toBe(false);
       // The sender sees its own row leave the queue live, by the time a later turn answered.
@@ -687,7 +691,8 @@ export function conformanceSuite(kit: ConformanceKit): void {
       }
       fake.release('c10');
       expect((await first).kind).toBe('ack');
-      expect((await second).kind).toBe('ack');
+      const secondReply = await second;
+      expect(secondReply.kind, JSON.stringify({ reply: secondReply, frames: stream.frames.slice(-12) })).toBe('ack');
       await stream.waitForMessage((message) => message.type === 'model-output' && rowText(message) === 'answer: second in line');
       expect(prompted(session, mark)).toEqual(['[[hold:c10]] first in line', 'second in line']);
       expect(childStarts(session, mark).length).toBeLessThanOrEqual(1);

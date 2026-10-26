@@ -6,7 +6,7 @@
  * goodbye (`/pi/bridge/bye`). This does the same over HTTP, so a test produces agent activity —
  * turns, permission requests, questions — exactly as an agent would, with no agent binary.
  */
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BrokerClient } from '../client.ts';
 
@@ -26,7 +26,7 @@ export class PiBridgeSession {
     this.title = title;
   }
 
-  /** Announce a session at `<root>/pi/<name>.jsonl`, working in `<root>/work/<name>`. */
+  /** Persist and announce a named native session in the broker's isolated Pi store. */
   static async open(
     client: BrokerClient,
     root: string,
@@ -35,8 +35,14 @@ export class PiBridgeSession {
   ): Promise<PiBridgeSession> {
     const cwd = join(root, 'work', name);
     mkdirSync(cwd, { recursive: true });
-    mkdirSync(join(root, 'pi'), { recursive: true });
-    const session = new PiBridgeSession(client, join(root, 'pi', `${name}.jsonl`), cwd, options.title ?? name);
+    const store = join(root, 'pi-sessions', '--fixture--');
+    mkdirSync(store, { recursive: true });
+    const session = new PiBridgeSession(client, join(store, `${name}.jsonl`), cwd, options.title ?? name);
+    const timestamp = new Date().toISOString();
+    writeFileSync(session.sessionFile, [
+      { type: 'session', version: 3, id: name, cwd, timestamp },
+      { type: 'session_info', id: 'name', parentId: null, name: session.title, timestamp },
+    ].map((row) => JSON.stringify(row)).join('\n') + '\n');
     await session.hello();
     return session;
   }

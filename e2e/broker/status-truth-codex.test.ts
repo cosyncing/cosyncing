@@ -560,13 +560,16 @@ describe.skipIf(!posix)('Codex run state', () => {
 
     // Three discovery passes re-derive the row, and each is reconciled onto the open owners of the
     // session, one after another. The first (a turn starts on the daemon) carries discovery's own
-    // title for the row, which the Observe tail did not have: seeing it is seeing that pass arrive.
+    // native rename for the row: seeing it is seeing that pass arrive. Attach and discovery
+    // initially resolve the same title, so an invented fallback difference cannot mark this pass.
     const attachedTitle = observer.ofKind('session')[0]!.info.title;
+    writeFileSync(join(codex.codexHome, 'session_index.jsonl'), `${JSON.stringify({ id, thread_name: 'discovery beside' })}\n`);
     codex.thread(id, { status: 'active', turns: [{ id: 'turn-beside', status: 'inProgress', startedAt: at(1) }] });
     const discovered = await observer.waitForFrame((frame) => frame.kind === 'session' && frame.info.title !== attachedTitle, {
       what: 'the first discovery pass to reach the Observe owner',
     });
     expect(discovered.info.title).toBe((await rosterRow(id))?.title);
+    expect(discovered.info.title).toBe('discovery beside');
     // The second (the turn ends) changes nothing the Observe owner holds: its run state is its own.
     codex.thread(id, { status: 'idle', turns: [{ id: 'turn-beside', status: 'completed', startedAt: at(1), completedAt: at(2) }] });
     await watcherPolls(4);

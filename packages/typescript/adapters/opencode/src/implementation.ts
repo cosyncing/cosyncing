@@ -568,7 +568,7 @@ export class OpenCodeAdapter implements AgentBackend {
         id: s.id,
         tool: this.id,
         ...opencodeLineage(s),
-        title: s.title || s.slug || s.id,
+        title: s.title || '',
         slug: s.slug,
         cwd: s.directory,
         status,
@@ -839,7 +839,7 @@ export class OpenCodeAdapter implements AgentBackend {
       id: s.id,
       tool: this.id,
       ...opencodeLineage(s),
-      title: s.title || s.slug || s.id,
+      title: s.title || '',
       slug: s.slug,
       cwd: s.directory,
       status: this.diskActivity(s.id),
@@ -941,7 +941,7 @@ export class OpenCodeAdapter implements AgentBackend {
    *  sessions, so the app's synced badge flips in ~poll-tick time (the Pi-bridge UX) instead of
    *  waiting for the next roster sweep. First scan is a baseline (no events); scan errors keep the
    *  last confirmed set rather than synthesizing a mass detach. */
-  watchSessionInfo(onChange: (info: SessionInfo) => void): Unsubscribe {
+  watchSessionInfo(onChange: (info: SessionInfo, observationStartedAt?: number) => void): Unsubscribe {
     if (!tuiPresenceSupported(this.baseUrl)) return () => {};
     let stopped = false;
     let prev: Set<string> | undefined;
@@ -953,12 +953,13 @@ export class OpenCodeAdapter implements AgentBackend {
       if (!before) return; // baseline
       const changed = [...new Set([...before, ...now])].filter((id) => before.has(id) !== now.has(id));
       for (const id of changed) {
+        const observationStartedAt = performance.now();
         const info = await this.fetchSessionInfo(id).catch(() => undefined);
         if (!info || stopped) continue;
         // fetchSessionInfo hardcodes 'idle'; overlay the live tracker so this push can't regress a
         // working session's status (hub.updateInfo replaces info wholesale).
         if (this.tracker.get(id) === 'working') info.status = 'working';
-        onChange(info);
+        onChange(info, observationStartedAt);
       }
     };
     const timer = setInterval(() => void poll(), TUI_PRESENCE_WATCH_MS);
@@ -984,7 +985,7 @@ export class OpenCodeAdapter implements AgentBackend {
         id: s.id,
         tool: this.id,
         ...opencodeLineage(s),
-        title: s.title || s.slug || s.id,
+        title: s.title || '',
         slug: s.slug,
         cwd: s.directory,
         status: 'idle',
@@ -1025,7 +1026,7 @@ export class OpenCodeAdapter implements AgentBackend {
     return {
       id: s.id,
       tool: this.id,
-      title: s.title || s.slug || s.id,
+      title: s.title || '',
       slug: s.slug,
       cwd: s.directory,
       status: 'idle',
@@ -1041,7 +1042,7 @@ export class OpenCodeAdapter implements AgentBackend {
 
   async renameSession(sessionId: string, title: string | null): Promise<SessionInfo> {
     if (!isOpaqueSessionId(sessionId)) throw new SessionNotFoundError('This OpenCode session id is not a session id.');
-    const trimmed = title == null ? null : title.trim().slice(0, 160);
+    const trimmed = title == null ? null : Array.from(title.trim()).slice(0, 160).join('');
     const res = await fetch(this.url(`/session/${encodeURIComponent(sessionId)}`), {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
@@ -1053,7 +1054,7 @@ export class OpenCodeAdapter implements AgentBackend {
     return {
       id: s.id || sessionId,
       tool: this.id,
-      title: s.title || s.slug || s.id || sessionId,
+      title: s.title || '',
       slug: s.slug,
       cwd: s.directory,
       status: 'idle',
@@ -1082,7 +1083,7 @@ export class OpenCodeAdapter implements AgentBackend {
     return {
       id: s.id,
       tool: this.id,
-      title: s.title || s.slug || s.id,
+      title: s.title || '',
       slug: s.slug,
       cwd: s.directory,
       status: 'idle',

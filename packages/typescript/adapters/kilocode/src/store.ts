@@ -756,8 +756,8 @@ export async function discoverKiloStore(options: KiloDiscoveryOptions = {}): Pro
           if (session.parentID && !options.includeUnverifiedChildren) return [];
           const updatedAt = session.time?.updated ?? session.time?.created;
           const currentModel = modelOf(session);
-          const rawTitle = session.title || session.slug || session.id;
-          const title = [...rawTitle].length <= KILO_MAX_TITLE_SCALARS ? rawTitle : session.id;
+          const rawTitle = session.title || '';
+          const title = [...rawTitle].length <= KILO_MAX_TITLE_SCALARS ? rawTitle : '';
           const currentAgent = session.agent && [...session.agent].length <= KILO_MAX_MODEL_SCALARS
             ? session.agent : undefined;
           return [{
