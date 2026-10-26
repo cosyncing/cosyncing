@@ -361,6 +361,8 @@ end
 Dir.mktmpdir('cosyncing-release-matrix-') do |fixture|
   original = YAML.load_file(ROOT.join('.github/workflows/client-release.yml'))
   %w[valid missing-suite missing-shard overlap wrong-part wrong-name unguarded-signing unguarded-draft
+     implicit-draft-status implicit-publish-status unchecked-draft-input unchecked-publish-input
+     unguarded-publish publication-on-dispatch wrong-publication-dependency
      missing-gate short-staging long-early-apk rehearsal-secrets write-rehearsal bun-literal missing-dispatch
      broker-cache broker-unguarded-signing flutter-drift].each do |scenario|
     workflow = Marshal.load(Marshal.dump(original))
@@ -376,6 +378,14 @@ Dir.mktmpdir('cosyncing-release-matrix-') do |fixture|
     when 'wrong-name' then verify['name'] = 'verify ${{ matrix.suite }}'
     when 'unguarded-signing' then jobs.fetch('android').delete('if')
     when 'unguarded-draft' then jobs.fetch('prepare-draft').delete('if')
+    when 'implicit-draft-status' then jobs.fetch('prepare-draft')['if'] = "${{ github.event_name == 'push' }}"
+    when 'implicit-publish-status' then jobs.fetch('publish-candidate')['if'] = "${{ github.event_name == 'push' }}"
+    when 'unchecked-draft-input' then jobs.fetch('prepare-draft')['if'] = "${{ !cancelled() && github.event_name == 'push' }}"
+    when 'unchecked-publish-input' then jobs.fetch('publish-candidate')['if'] = "${{ !cancelled() && github.event_name == 'push' }}"
+    when 'unguarded-publish' then jobs.fetch('publish-candidate').delete('if')
+    when 'publication-on-dispatch'
+      jobs.fetch('publish-candidate')['if'] = "${{ !cancelled() && needs.prepare-draft.result == 'success' }}"
+    when 'wrong-publication-dependency' then jobs.fetch('publish-candidate')['needs'] = 'source'
     when 'missing-gate' then jobs.fetch('stage-verified').fetch('needs').delete('gate')
     when 'short-staging'
       jobs.fetch('stage-verified').fetch('steps').find { |step| step['uses'].to_s.start_with?('actions/upload-artifact@') }.fetch('with')['retention-days'] = 1

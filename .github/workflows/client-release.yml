@@ -202,7 +202,7 @@ jobs:
 
   prepare-draft:
     needs: stage-verified
-    if: ${{ github.event_name == 'push' }}
+    if: ${{ !cancelled() && github.event_name == 'push' && needs.stage-verified.result == 'success' }}
     name: prepare empty client draft
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -542,7 +542,7 @@ jobs:
 
   publish-candidate:
     needs: prepare-draft
-    if: ${{ github.event_name == 'push' }}
+    if: ${{ !cancelled() && github.event_name == 'push' && needs.prepare-draft.result == 'success' }}
     name: publish checksummed client prerelease
     runs-on: ubuntu-24.04
     timeout-minutes: 15

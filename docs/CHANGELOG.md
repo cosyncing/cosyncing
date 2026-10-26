@@ -11,7 +11,7 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
-## 0.8.4 — 2026-10-26
+## 0.8.5 — 2026-10-26
 
 ### Added
 
