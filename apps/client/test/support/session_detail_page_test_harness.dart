@@ -450,7 +450,7 @@ Future<void> expectSessionDetailViewItem(
   });
 }
 
-/// Flips a checkable option (`report`, `expand`) in the `⋮` view menu.
+/// Flips a checkable option (`report`) in the `⋮` view menu.
 Future<void> toggleSessionDetailViewOption(
   WidgetTester tester,
   String name,

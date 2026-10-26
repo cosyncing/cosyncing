@@ -5,29 +5,43 @@ then use `cosy pair` to authorize the client.
 
 ## Update your client with this release
 
-0.8.3 fixes a Server problem with Codex custom profiles: when the app attached
-to a session the Server still had loaded, that session kept the model it was
-actually running instead of being reset to the base configuration's default
-model. Nothing in the app itself changes, so this client carries the version
-bump and the same behaviour as 0.8.2. The broker contract revision stays at 35,
-the minimum accepted client revision stays at 17, and Bun stays at 1.4.3, so a
-0.8.2 client keeps driving a 0.8.3 Server.
+0.8.4 adds navigation through earlier user prompts and improves session names,
+reconnection, quota cards and server updates. Update your Android or desktop app
+for the client changes and update the Server with `cosy update` for the broker
+fixes. The web client ships with the Server and always matches it.
 
-Get the fix by updating the Server with `cosy update`: that is where it lives,
-and the web client ships with the Server and always matches it. A desktop client
-update still ends in a **Download**, or in `cosy update` for a desktop the
-all-in-one installer placed, once the Server is on 0.8.3.
+The broker contract revision stays at 35, the minimum accepted client revision
+stays at 17, and Bun stays at 1.4.3. A 0.8.3 client can still drive a 0.8.4
+Server; updating the app adds the new navigation and interface improvements.
+Standalone desktop apps offer **Download**. For desktops placed by the
+all-in-one installer, quit the app before updating it with `cosy update`.
 
-## What's fixed in 0.8.3
+## What's changed in 0.8.4
 
-- Loaded Codex custom-profile sessions keep their live model when the app
-  attaches, instead of resetting to the base configuration's default model.
-  Sessions you start fresh keep the profile model you picked, as they did in
-  0.8.2.
+- Transcript arrows step through earlier user prompts, including messages
+  outside the loaded history. Searches can be canceled or continued, and the
+  down arrow returns to live updates without disturbing your draft or focus.
+- Session names stay consistent across lists, tabs, detail views and native
+  terminals. Renames survive refreshes and restarts, and unnamed conversations
+  keep their localized label until a title is available.
+- Network changes reconnect sessions and roster updates more reliably. Home
+  retains recent quota readings during refresh, and quota cards use independent
+  columns with consistent themed surfaces.
+- The session menu has a single-click **Hide tool calls** checkbox on narrow
+  and wide screens.
+- Pi and OMP bridges recover large histories and tool results while retaining
+  the running turn. Updated terminals prevent app actions from starting a second
+  writer on the same session. Restart or `/reload` open Pi/OMP terminals after
+  updating the Server to load the new bridge extension.
+- Background tasks in app-driven Claude Code sessions keep running through
+  client disconnects, Stop and settings changes. A setting that requires a
+  restart is refused while background tasks run.
+- Installer-owned Windows servers can apply updates from **Settings → Updates**
+  while preserving a running desktop app. Older servers need one terminal
+  upgrade to acquire this support. Windows and Linux report update failures
+  and completed rollbacks promptly.
 
-Android, Linux, macOS and Windows downloads are otherwise the 0.8.2 app: install
-this release if you want every part of your setup on the same version number.
-For everything else that changed, see the 0.8.2 section of the changelog.
+For the full list, see the [0.8.4 changelog](../CHANGELOG.md#084--2026-10-26).
 
 ## Downloads
 
