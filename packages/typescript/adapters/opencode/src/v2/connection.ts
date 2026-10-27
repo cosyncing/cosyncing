@@ -350,7 +350,10 @@ class BoundV2Connection implements SessionConnection {
       if (this.backend.clientKeys.size > 4096) this.backend.clientKeys.delete(this.backend.clientKeys.keys().next().value!);
     }
     try {
-      const result = await this.backend.write(this.binding, this.path('/prompt'), { id, text, delivery: 'steer', ...(files.length ? { files } : {}) });
+      // Native 2.1.4 hydrates attachments before returning its admission
+      // response: eight full-limit images measured 8.8 s locally. Keep the
+      // ordinary control deadline, with a bounded budget for this larger IO.
+      const result = await this.backend.write(this.binding, this.path('/prompt'), { id, text, delivery: 'steer', ...(files.length ? { files } : {}) }, 'POST', files.length ? { timeoutMs: 30_000 } : {});
       if (!object(result?.data) || result.data.id !== id) throw new V2Error('invalid-response', true);
     } catch (error) {
       if (!(error instanceof V2Error) || !error.ambiguous) { this.backend.clientKeys.delete(id); throw error; }

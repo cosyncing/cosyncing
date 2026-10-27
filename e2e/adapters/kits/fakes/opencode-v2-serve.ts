@@ -44,6 +44,7 @@ export class FakeOpenCodeV2Serve {
   malformedPendingFor?: string;
   beforeRosterReply?: () => Promise<void>;
   beforePendingReply?: (id: string) => Promise<void>;
+  beforePromptReply?: () => Promise<void>;
 
   constructor(options: { record: (value: Json) => void; onRegistration: (value: Json | undefined) => void }) {
     this.record = options.record;
@@ -287,6 +288,11 @@ export class FakeOpenCodeV2Serve {
           throw new Error('Invalid attachment URI');
         });
       } catch { return Response.json({ _tag: 'InvalidRequestError', field: 'files' }, { status: 400 }); }
+      if (this.beforePromptReply) {
+        const beforeReply = this.beforePromptReply;
+        this.beforePromptReply = undefined;
+        await beforeReply();
+      }
       if (session.info.revert) {
         const boundary = session.messages.findIndex((message) => message.id === session.info.revert.messageID);
         if (boundary >= 0) session.messages = session.messages.slice(0, boundary);

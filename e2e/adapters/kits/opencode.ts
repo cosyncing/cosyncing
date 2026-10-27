@@ -1895,11 +1895,16 @@ opencodeV2Kit.extras!.push(
         expect((await context.prompt(stream, 'one full-limit image', { images: images.slice(0, 1) })).kind).toBe('ack');
         for (const text of ['eight inline images', 'a second image batch']) {
           const from = stream.frames.length;
+          // The installed 2.1.4 service took 4.5 s to return headers and 8.8 s
+          // to finish its hydrated eight-image response. Model that latency;
+          // the delay is a native fault injection, not test synchronization.
+          if (text === 'eight inline images') fake.serve.beforePromptReply = () => Bun.sleep(4500);
           expect((await context.prompt(stream, text, { images })).kind).toBe('ack');
           const echo = await stream.waitForFrame((frame) => frame.kind === 'message' && frame.message.type === 'user-message' && frame.message.text === text && !frame.message.queued, { after: from });
           expect(echo.message.imageCount).toBe(PROMPT_ATTACHMENT_LIMITS.maxFiles);
           expect(stream.frames.slice(from).filter((frame) => frame.kind === 'message' && frame.message.type === 'user-message' && frame.message.key === echo.message.key && !frame.message.queued)).toHaveLength(1);
           await stream.waitForFrame((frame) => frame.kind === 'message' && frame.message.type === 'run-summary' && frame.message.status === 'done', { after: from });
+          expect(fake.ledger.routed('POST', /\/prompt$/, imageMark).filter((entry) => (entry.body as any).text === text)).toHaveLength(1);
         }
         const pagingMark = fake.ledger.mark();
         const replay = await context.client.attach('opencode', id, { readOnly: true });
