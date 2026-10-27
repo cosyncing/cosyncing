@@ -45,6 +45,7 @@ export class FakeOpenCodeV2Serve {
   beforeRosterReply?: () => Promise<void>;
   beforePendingReply?: (id: string) => Promise<void>;
   beforePromptReply?: () => Promise<void>;
+  beforeMessageReply?: (id: string, query: URLSearchParams) => Promise<void>;
 
   constructor(options: { record: (value: Json) => void; onRegistration: (value: Json | undefined) => void }) {
     this.record = options.record;
@@ -263,7 +264,10 @@ export class FakeOpenCodeV2Serve {
       this.appendTurn(id, `/review${body.text ? ` ${body.text}` : ''}`, 'Synthetic command response.');
       return new Response(null, { status: 204 });
     }
-    if (sub === '/message') return this.page([...session.messages].reverse(), url);
+    if (sub === '/message') {
+      await this.beforeMessageReply?.(id, url.searchParams);
+      return this.page([...session.messages].reverse(), url);
+    }
     if (sub.startsWith('/message/')) {
       const message = session.messages.find((item) => item.id === decodeURIComponent(sub.slice(9)));
       return Response.json(message ? { data: message } : { _tag: 'MessageNotFoundError' }, { status: message ? 200 : 404 });

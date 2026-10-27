@@ -379,7 +379,10 @@ export class OpenCodeV2Backend {
       } catch (error) {
         if (!(error instanceof V2ResponseTooLargeError) || largeSingleMessage) throw error;
         if (limit === 1) largeSingleMessage = true;
-        else limit = Math.max(1, Math.floor(limit / 2));
+        // Native history rehydrates attachments on every request. Halving a
+        // page repeatedly can spend the entire read budget on the same row.
+        // Isolate it immediately; successful pages grow back toward 100.
+        else limit = 1;
         continue;
       }
       page++;

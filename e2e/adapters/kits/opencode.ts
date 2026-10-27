@@ -1928,6 +1928,15 @@ opencodeV2Kit.extras!.push(
         const nativeFrom = stream.frames.length, nativeOtherFrom = other.frames.length, nativeMark = fake.ledger.mark();
         const registration = fake.serve.registration();
         const nativeId = `msg_terminal_${crypto.randomUUID().replaceAll('-', '')}`;
+        // Real native history rehydrated the same oversized row at every
+        // halved page size (1.6–4 s each), exhausting the whole read budget.
+        // Inject that response latency only for pages containing the large row.
+        fake.serve.beforeMessageReply = async (sessionId, query) => {
+          const limit = Number(query.get('limit')) || 100;
+          const offset = Number(query.get('cursor')) || 0;
+          if (sessionId === id && limit > 1 && [...fake.serve.session(id).messages].reverse()
+            .slice(offset, offset + limit).some((message) => message.id === nativeId)) await Bun.sleep(1800);
+        };
         const response = await fetch(`${fake.serve.url}/api/session/${id}/prompt`, {
           method: 'POST',
           headers: { 'content-type': 'application/json', authorization: `Basic ${Buffer.from(`opencode:${registration.password}`).toString('base64')}` },
@@ -1936,6 +1945,7 @@ opencodeV2Kit.extras!.push(
         expect(response.status).toBe(200);
         await response.body?.cancel();
         const reset = await stream.waitForFrame((frame) => frame.kind === 'history' && frame.reset === true && frame.messages.some((message: any) => message.type === 'user-message' && message.text === 'native terminal attachment'), { after: nativeFrom });
+        fake.serve.beforeMessageReply = undefined;
         await stream.waitForFrame((frame) => frame.kind === 'message' && frame.message.type === 'user-message' && frame.message.key === nativeId, { after: nativeFrom });
         expect(reset.messages.some((message: any) => message.type === 'user-message' && message.text === 'a second image batch' && message.imageCount === 8)).toBe(true);
         const summary = await stream.waitForFrame((frame) => frame.kind === 'message' && frame.message.type === 'run-summary' && frame.message.status === 'done' && frame.message.tokens?.input === 8, { after: nativeFrom });
@@ -1952,7 +1962,7 @@ opencodeV2Kit.extras!.push(
         await stream.waitForMessage((message) => message.type === 'model-output' && message.text === 'answer: after file rejection');
         expect(stream.frames.slice(from).some((frame) => frame.kind === 'message' && frame.message.type === 'user-message' && frame.message.text === 'rejected attachment')).toBe(false);
         expect(fake.ledger.routed('GET', /\/inbox$/, rejectedMark)).toHaveLength(0);
-      } finally { stream.close(); other.close(); }
+      } finally { fake.serve.beforeMessageReply = undefined; stream.close(); other.close(); }
 
       if (process.platform === 'linux') {
         const saved = context.broker.env.OPENCODE_URL;
