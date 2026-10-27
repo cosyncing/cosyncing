@@ -5,7 +5,7 @@ import { OPENCODE_SHARED_ACTIONS } from '../commands.ts';
 import type { V2Binding } from '../binding.ts';
 import type { OpenCodeV2Backend } from './backend.ts';
 import { arrayData, compactAttachments, contentKey, finite, formAnswer, formCard, historyRows, messageRows, nativeId, newNativeId, object, permissionCard, runSummary, sessionPatch, toolMessages, type Native } from './mapping.ts';
-import { MAX_MESSAGE_RESPONSE_BYTES, V2Error, type V2Event } from './transport.ts';
+import { MAX_MESSAGE_RESPONSE_BYTES, MESSAGE_READ_BUDGET_MS, V2Error, type V2Event } from './transport.ts';
 
 /** A V1 history seat switches source when the shared service imports that same native ID. */
 export function followV2Import(backend: OpenCodeV2Backend, legacy: SessionConnection, observe: boolean): SessionConnection {
@@ -272,7 +272,7 @@ class BoundV2Connection implements SessionConnection {
       const user = this.inbox.get(data.inboxID);
       this.inbox.delete(data.inboxID);
       if (user) for (const row of messageRows(user, this.backend.clientKeys)) this.emit(row);
-      else void this.backend.transport!.json(this.path(`/message/${encodeURIComponent(data.inboxID)}`), { maxBytes: MAX_MESSAGE_RESPONSE_BYTES }).then((value) => {
+      else void this.backend.transport!.json(this.path(`/message/${encodeURIComponent(data.inboxID)}`), { maxBytes: MAX_MESSAGE_RESPONSE_BYTES, timeoutMs: MESSAGE_READ_BUDGET_MS }).then((value) => {
         if (this.binding !== this.backend.binding || !object(value?.data)) return;
         for (const row of messageRows(compactAttachments(value.data), this.backend.clientKeys)) this.emit(row);
       }).catch(() => {});

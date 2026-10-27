@@ -5,6 +5,7 @@ import { PROMPT_ATTACHMENT_LIMITS } from '@cosyncing/adapter-api';
 // A maximum-size image prompt is hydrated into a single native event.
 const MAX_SSE_FRAME_BYTES = PROMPT_ATTACHMENT_LIMITS.maxFiles * PROMPT_ATTACHMENT_LIMITS.maxInlineEncodedBytes + 4 * 1024 * 1024;
 export const MAX_MESSAGE_RESPONSE_BYTES = 128 * 1024 * 1024;
+export const MESSAGE_READ_BUDGET_MS = 15_000;
 
 export class V2Error extends Error {
   constructor(readonly reason: V2Failure, readonly ambiguous = false) {

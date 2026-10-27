@@ -35,6 +35,7 @@ import { chmodSync, readFileSync, rmSync } from 'node:fs';
 import { OpencodeStore, type FakeOpencodeCliConfig } from './fakes/opencode-cli.ts';
 import { Database } from 'bun:sqlite';
 import { runCli } from '../../harness/cli.ts';
+import { ask } from '../../harness/history.ts';
 import {
   type ConformanceContext,
   type ConformanceExtra,
@@ -1928,14 +1929,21 @@ opencodeV2Kit.extras!.push(
         const nativeFrom = stream.frames.length, nativeOtherFrom = other.frames.length, nativeMark = fake.ledger.mark();
         const registration = fake.serve.registration();
         const nativeId = `msg_terminal_${crypto.randomUUID().replaceAll('-', '')}`;
-        // Real native history rehydrated the same oversized row at every
-        // halved page size (1.6–4 s each), exhausting the whole read budget.
-        // Inject that response latency only for pages containing the large row.
+        // Native reads exceeded the ordinary four-second request deadline.
+        // Delay one containing page and the delivered-row lookup, rather than
+        // delaying every page or using a sleep to synchronize the driver.
+        let delayedPage = false;
         fake.serve.beforeMessageReply = async (sessionId, query) => {
           const limit = Number(query.get('limit')) || 100;
           const offset = Number(query.get('cursor')) || 0;
-          if (sessionId === id && limit > 1 && [...fake.serve.session(id).messages].reverse()
-            .slice(offset, offset + limit).some((message) => message.id === nativeId)) await Bun.sleep(1800);
+          if (!delayedPage && sessionId === id && [...fake.serve.session(id).messages].reverse()
+            .slice(offset, offset + limit).some((message) => message.id === nativeId)) {
+            delayedPage = true;
+            await Bun.sleep(4500);
+          }
+        };
+        fake.serve.beforeMessageLookupReply = async (sessionId, messageId) => {
+          if (sessionId === id && messageId === nativeId) await Bun.sleep(4500);
         };
         const response = await fetch(`${fake.serve.url}/api/session/${id}/prompt`, {
           method: 'POST',
@@ -1947,6 +1955,7 @@ opencodeV2Kit.extras!.push(
         const reset = await stream.waitForFrame((frame) => frame.kind === 'history' && frame.reset === true && frame.messages.some((message: any) => message.type === 'user-message' && message.text === 'native terminal attachment'), { after: nativeFrom });
         fake.serve.beforeMessageReply = undefined;
         await stream.waitForFrame((frame) => frame.kind === 'message' && frame.message.type === 'user-message' && frame.message.key === nativeId, { after: nativeFrom });
+        fake.serve.beforeMessageLookupReply = undefined;
         expect(reset.messages.some((message: any) => message.type === 'user-message' && message.text === 'a second image batch' && message.imageCount === 8)).toBe(true);
         const summary = await stream.waitForFrame((frame) => frame.kind === 'message' && frame.message.type === 'run-summary' && frame.message.status === 'done' && frame.message.tokens?.input === 8, { after: nativeFrom });
         expect(summary.message.tokens).toMatchObject({ input: 8, output: 4 });
@@ -1955,6 +1964,33 @@ opencodeV2Kit.extras!.push(
         await other.waitForMessage((message) => message.type === 'model-output' && message.text === 'the other stream survives the skipped frame');
         expect(fake.ledger.routed('GET', /^\/api\/event$/, nativeMark)).toHaveLength(0);
 
+        // Move the large row below several doubling steps without starting
+        // twenty-five unrelated executions while measuring this fresh read.
+        for (let turn = 1; turn <= 25; turn++) fake.serve.appendTurn(id, `after attachment ${turn}`, `seeded tail ${turn}`, { emit: false });
+        const nativePosition = [...fake.serve.session(id).messages].reverse().findIndex((message) => message.id === nativeId);
+        const containsLargeRow = (entry: any) => {
+          const offset = Number(entry.query.cursor ?? 0), limit = Number(entry.query.limit);
+          return offset <= nativePosition && nativePosition < offset + limit;
+        };
+        const deepMark = fake.ledger.mark();
+        const refreshed = await ask(stream, { kind: 'history-refresh', cursor: stream.ofKind('history').at(-1)!.cursor, limit: 500 });
+        expect(refreshed.kind).toBe('history');
+        expect(refreshed.messages.some((message: any) => message.type === 'model-output' && message.text === 'seeded tail 25')).toBe(true);
+        const deepPages = fake.ledger.routed('GET', new RegExp(`^/api/session/${id}/message$`), deepMark);
+        expect(deepPages.filter(containsLargeRow).length).toBeGreaterThan(0);
+        expect(deepPages.filter(containsLargeRow).length).toBeLessThanOrEqual(2);
+
+        const telemetryFrom = stream.frames.length, telemetryMark = fake.ledger.mark();
+        expect((await context.prompt(stream, 'ordinary prompt after deep attachment')).kind).toBe('ack');
+        await stream.waitForFrame((frame) => frame.kind === 'message' && frame.message.type === 'run-summary' && frame.message.status === 'done', { after: telemetryFrom });
+        const telemetryPages = fake.ledger.routed('GET', new RegExp(`^/api/session/${id}/message$`), telemetryMark);
+        const latestPosition = [...fake.serve.session(id).messages].reverse().findIndex((message) => message.id === nativeId);
+        expect(telemetryPages.length).toBeGreaterThan(0);
+        expect(telemetryPages.filter((entry: any) => {
+          const offset = Number(entry.query.cursor ?? 0);
+          return offset <= latestPosition && latestPosition < offset + Number(entry.query.limit);
+        })).toHaveLength(0);
+
         fake.serve.failNext('POST', `/api/session/${id}/prompt`, 400);
         const from = stream.frames.length, rejectedMark = fake.ledger.mark();
         expect((await context.prompt(stream, 'rejected attachment', { images: [{ name: 'refused.png', mimeType: 'image/png', data: 'eA==' }] })).kind).toBe('nack');
@@ -1962,7 +1998,7 @@ opencodeV2Kit.extras!.push(
         await stream.waitForMessage((message) => message.type === 'model-output' && message.text === 'answer: after file rejection');
         expect(stream.frames.slice(from).some((frame) => frame.kind === 'message' && frame.message.type === 'user-message' && frame.message.text === 'rejected attachment')).toBe(false);
         expect(fake.ledger.routed('GET', /\/inbox$/, rejectedMark)).toHaveLength(0);
-      } finally { fake.serve.beforeMessageReply = undefined; stream.close(); other.close(); }
+      } finally { fake.serve.beforeMessageReply = undefined; fake.serve.beforeMessageLookupReply = undefined; stream.close(); other.close(); }
 
       if (process.platform === 'linux') {
         const saved = context.broker.env.OPENCODE_URL;

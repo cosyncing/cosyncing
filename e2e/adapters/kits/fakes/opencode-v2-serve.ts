@@ -46,6 +46,7 @@ export class FakeOpenCodeV2Serve {
   beforePendingReply?: (id: string) => Promise<void>;
   beforePromptReply?: () => Promise<void>;
   beforeMessageReply?: (id: string, query: URLSearchParams) => Promise<void>;
+  beforeMessageLookupReply?: (id: string, messageId: string) => Promise<void>;
 
   constructor(options: { record: (value: Json) => void; onRegistration: (value: Json | undefined) => void }) {
     this.record = options.record;
@@ -103,9 +104,10 @@ export class FakeOpenCodeV2Serve {
     return { user: input, assistant, idle };
   }
 
-  appendTurn(id: string, user: string, answer: string): void {
+  appendTurn(id: string, user: string, answer: string, options: { emit?: boolean } = {}): void {
     const session = this.session(id);
     const rows = this.appendRows(session, user, answer);
+    if (options.emit === false) return;
     this.emit('session.inbox.enqueued', { sessionID: id, inboxID: rows.user.id, item: { type: 'user', payload: { text: user }, delivery: 'steer' } }, true);
     this.emit('session.execution.started', { sessionID: id }, true);
     this.emit('session.inbox.delivered', { sessionID: id, inboxID: rows.user.id }, true);
@@ -269,7 +271,9 @@ export class FakeOpenCodeV2Serve {
       return this.page([...session.messages].reverse(), url);
     }
     if (sub.startsWith('/message/')) {
-      const message = session.messages.find((item) => item.id === decodeURIComponent(sub.slice(9)));
+      const messageId = decodeURIComponent(sub.slice(9));
+      await this.beforeMessageLookupReply?.(id, messageId);
+      const message = session.messages.find((item) => item.id === messageId);
       return Response.json(message ? { data: message } : { _tag: 'MessageNotFoundError' }, { status: message ? 200 : 404 });
     }
     if (sub === '/inbox') return Response.json({ data: session.inbox });

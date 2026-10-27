@@ -5,7 +5,7 @@ import type { BindingResolver, V2Binding } from '../binding.ts';
 import { attachedV2TuiSessions, v2TuiPresenceSupported, TUI_PRESENCE_WATCH_MS } from '../tui-presence.ts';
 import { OpenCodeV2Connection } from './connection.ts';
 import { arrayData, compactAttachments, formCard, isSession, modelsFrom, nativeId, newNativeId, object, permissionCard, sessionInfo, type Native } from './mapping.ts';
-import { MAX_MESSAGE_RESPONSE_BYTES, V2Error, V2ResponseTooLargeError, V2Transport, type V2Event } from './transport.ts';
+import { MAX_MESSAGE_RESPONSE_BYTES, MESSAGE_READ_BUDGET_MS, V2Error, V2ResponseTooLargeError, V2Transport, type V2Event } from './transport.ts';
 
 export interface LegacySession { id: string; title?: string; directory?: string; time?: { created?: number; updated?: number }; model?: { providerID?: string; id?: string; modelID?: string }; }
 export interface V2BackendOptions {
@@ -368,27 +368,32 @@ export class OpenCodeV2Backend {
     const pages: Native[][] = [];
     const cursors = new Set<string>();
     let cursor: string | undefined;
-    let limit = 100;
-    let largeSingleMessage = false;
-    const deadline = Date.now() + 15_000;
+    let limit = until ? 10 : 100;
+    let windowRemaining = 0;
+    let resumeLimit = limit;
+    const deadline = Date.now() + MESSAGE_READ_BUDGET_MS;
     let bytes = 0;
     for (let page = 0; page < 500 && Date.now() < deadline;) {
       let value: any;
       try {
-        value = await this.transport!.json(`/api/session/${encodeURIComponent(id)}/message?limit=${limit}` + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '&order=desc'), { signal, ...(largeSingleMessage ? { maxBytes: MAX_MESSAGE_RESPONSE_BYTES } : {}) });
+        value = await this.transport!.json(`/api/session/${encodeURIComponent(id)}/message?limit=${limit}` + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '&order=desc'), {
+          signal, timeoutMs: Math.max(1, deadline - Date.now()),
+          ...(windowRemaining ? { maxBytes: MAX_MESSAGE_RESPONSE_BYTES } : {}),
+        });
       } catch (error) {
-        if (!(error instanceof V2ResponseTooLargeError) || largeSingleMessage) throw error;
-        if (limit === 1) largeSingleMessage = true;
-        // Native history rehydrates attachments on every request. Halving a
-        // page repeatedly can spend the entire read budget on the same row.
-        // Isolate it immediately; successful pages grow back toward 100.
-        else limit = 1;
+        if (!(error instanceof V2ResponseTooLargeError) || windowRemaining) throw error;
+        // Cover the entire rejected window once at the single-message ceiling.
+        // Growing between its rows would repeatedly rehydrate large attachments.
+        windowRemaining = limit;
+        resumeLimit = Math.min(100, limit * 2);
+        limit = 1;
         continue;
       }
-      page++;
-      limit = Math.min(100, limit * 2);
-      largeSingleMessage = false;
       const data = arrayData(value).map(compactAttachments);
+      if (windowRemaining) {
+        windowRemaining -= data.length;
+        if (windowRemaining <= 0) { windowRemaining = 0; page++; limit = resumeLimit; }
+      } else { page++; limit = Math.min(100, limit * 2); }
       bytes += Buffer.byteLength(JSON.stringify(data));
       if (bytes > 64 * 1024 * 1024) throw new V2Error('invalid-response');
       this.unknownMessages += data.filter((message) => !['user', 'assistant', 'idle', 'compaction'].includes(message.type)).length;
