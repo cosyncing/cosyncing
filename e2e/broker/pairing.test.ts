@@ -753,7 +753,12 @@ describe('cosyncing pair against an endpoint that is not this broker', () => {
       return new Promise<Response>(() => undefined);
     });
     try {
-      const result = await runCli(['pair', '--status', 'pair_fake_status_offer_000002', '--json', '--timeout', '2'], { env: env(vanishing.home) });
+      // Control the subprocess clock: wall time under load must not consume the
+      // deadline before the endpoint receives its second status read. The real
+      // CLI, credential checks, HTTP requests and vanished response still run.
+      const clock = join(vanishing.home, 'pair-status-clock.ts');
+      writeFileSync(clock, 'let time = Date.now(); Date.now = () => time; Bun.sleep = async (ms) => { time += Number(ms); };\n');
+      const result = await runCli(['pair', '--status', 'pair_fake_status_offer_000002', '--json', '--timeout', '2'], { env: env(vanishing.home), preload: clock });
       expect(result.exitCode).toBe(1);
       // Pending, then silence: the last answer is not "still pending".
       expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, state: 'unverifiable' });

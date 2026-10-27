@@ -119,6 +119,6 @@ export function commandLineOf(pid: number): string {
 }
 
 /** `cosyncing <args>` from source, as the operator would run it. */
-export function runCli(args: string[], options: RunOptions): Promise<ProcessResult> {
-  return runToExit(['bun', CLI_ENTRY, ...args], { label: `cosyncing ${args.join(' ')}`, ...options });
+export function runCli(args: string[], options: RunOptions & { preload?: string }): Promise<ProcessResult> {
+  return runToExit(['bun', ...(options.preload ? ['--preload', options.preload] : []), CLI_ENTRY, ...args], { label: `cosyncing ${args.join(' ')}`, ...options });
 }
