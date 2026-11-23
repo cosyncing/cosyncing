@@ -5,7 +5,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentMessage } from '@cosyncing/adapter-api';
 import type { GrokDriveConnection } from '../src/drive.ts';
-import { GrokAdapter } from '../src/implementation.ts';
+import {
+  GROK_AUTH_READY_TTL_MS,
+  GROK_AUTH_UNREADY_TTL_MS,
+  GrokAdapter,
+} from '../src/implementation.ts';
 import { grokAuthMethod } from '../src/auth.ts';
 import {
   GROK_MEASURED_VERSIONS,
@@ -18,6 +22,15 @@ const results: Array<{ name: string; ok: boolean; detail: string }> = [];
 function check(name: string, ok: boolean, detail = ''): void {
   results.push({ name, ok, detail });
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await Bun.sleep(25);
+  }
+  return predicate();
 }
 
 const root = mkdtempSync(join(tmpdir(), 'cosyncing-grok-identity-'));
@@ -41,6 +54,102 @@ try {
     missingAuthRefused && malformedAuthRefused && interactiveOnlyRefused && overLimitAuthRefused);
   check('auth readiness selects only the measured reusable cached token by default',
     grokAuthMethod({ authMethods: [{ id: 'cached_token' }, { id: 'grok.com' }] }) === 'cached_token');
+
+  // The auth-readiness probe as the roster asks it: how often it starts a child,
+  // how that child is closed, and what it logs. Probe clients have no trace sink
+  // of their own, so their lines reach console.error exactly as they reach the
+  // broker log, and this block reads them there. It runs before any other Grok
+  // child exists, so every exit line below belongs to a probe.
+  {
+    const probeFake = writeFakeGrokBinary(join(root, 'probe-bin'), join(root, 'probe-home'));
+    let clock = Date.parse('2026-11-23T00:00:00.000Z');
+    const probeAdapter = new GrokAdapter({
+      command: probeFake.path,
+      env: probeFake.env,
+      requestTimeoutMs: 2_000,
+      now: () => clock,
+    });
+    const logged: string[] = [];
+    const consoleError = console.error;
+    console.error = (...args: unknown[]) => { logged.push(args.map(String).join(' ')); };
+    const exits = () => logged.filter((line) => line.includes('child-exit op=child'));
+    const probeSpawns = () => probeFake.events().filter((event) => event.kind === 'spawn');
+    const ledgerOf = (pid: unknown) => probeFake.events()
+      .filter((event) => event.pid === pid)
+      .map((event) => String(event.kind));
+    try {
+      probeFake.env.FAKE_GROK_VENDOR_NOTICES = '1';
+      const firstReady = await probeAdapter.canCreateSession();
+      const firstExited = await waitFor(() => exits().length === 1, 10_000);
+      const firstPid = probeSpawns()[0]?.pid;
+      check('GK-2: a probe logs no line for Grok\'s _x.ai vendor notices and still traces other unknown notifications',
+        firstReady
+          && ledgerOf(firstPid).includes('vendor-notices')
+          && !logged.some((line) => line.includes('op=_x.ai/'))
+          && logged.some((line) => line.includes('unhandled-extension op=_vendor.test/notice'))
+          && logged.some((line) => line.includes('unknown-method op=fake/unknown_notice')),
+        JSON.stringify(logged));
+      check('GK-1: a probe child that finishes its stdin-EOF cleanup in time exits on stdin close, with no signal',
+        firstExited
+          && exits()[0]?.includes('(code 0, signal null)') === true
+          && ledgerOf(firstPid).includes('stdin-end')
+          && !ledgerOf(firstPid).includes('sigterm'),
+        JSON.stringify({ exits: exits(), ledger: ledgerOf(firstPid) }));
+      delete probeFake.env.FAKE_GROK_VENDOR_NOTICES;
+
+      clock += GROK_AUTH_READY_TTL_MS - 1;
+      const reusedReady = await probeAdapter.canCreateSession();
+      const spawnsInsideWindow = probeSpawns().length;
+      // A real Grok usually needs longer than the 2-second stdin grace to finish
+      // its EOF cleanup. The next probe child behaves that way.
+      probeFake.env.FAKE_GROK_LINGER_AFTER_STDIN_END_MS = '30000';
+      clock += 1;
+      const renewedReady = await probeAdapter.canCreateSession();
+      const answeredBeforeReap = exits().length === 1;
+      check('GK-1: a ready answer is reused for the whole success window, then renewed by exactly one probe child',
+        reusedReady && spawnsInsideWindow === 1 && renewedReady && probeSpawns().length === 2,
+        JSON.stringify({ spawnsInsideWindow, spawns: probeSpawns().length, readyTtlMs: GROK_AUTH_READY_TTL_MS }));
+      const lingerExited = await waitFor(() => exits().length === 2, 15_000);
+      const lingerLedger = ledgerOf(probeSpawns()[1]?.pid);
+      check('GK-1: a probe child still alive after the stdin grace gets SIGTERM, not SIGKILL, and the answer does not wait for it',
+        answeredBeforeReap
+          && lingerExited
+          && exits()[1]?.includes('(code 143, signal null)') === true
+          && lingerLedger.includes('stdin-end')
+          && lingerLedger.indexOf('stdin-end') < lingerLedger.indexOf('sigterm'),
+        JSON.stringify({ answeredBeforeReap, exits: exits(), ledger: lingerLedger }));
+      delete probeFake.env.FAKE_GROK_LINGER_AFTER_STDIN_END_MS;
+
+      // Signed out: Grok advertises only its interactive login.
+      probeFake.env.FAKE_GROK_AUTH_METHODS = JSON.stringify([{ id: 'grok.com', name: 'Grok' }]);
+      clock += GROK_AUTH_READY_TTL_MS;
+      const signedOut = await probeAdapter.canCreateSession();
+      clock += GROK_AUTH_UNREADY_TTL_MS - 1;
+      const stillSignedOut = await probeAdapter.canCreateSession();
+      const spawnsInsideFailureWindow = probeSpawns().length;
+      delete probeFake.env.FAKE_GROK_AUTH_METHODS; // `grok login`
+      clock += 1;
+      const signedIn = await probeAdapter.canCreateSession();
+      check('GK-1: a not-ready answer is reused only for the shorter failure window, so a sign-in is noticed within it',
+        GROK_AUTH_UNREADY_TTL_MS < GROK_AUTH_READY_TTL_MS
+          && !signedOut && !stillSignedOut && spawnsInsideFailureWindow === 3
+          && signedIn && probeSpawns().length === 4,
+        JSON.stringify({ spawnsInsideFailureWindow, spawns: probeSpawns().length }));
+      const allExited = await waitFor(() => exits().length === 4, 10_000);
+      check('GK-1: no probe child needed SIGKILL',
+        allExited && !logged.some((line) => line.includes('SIGKILL')),
+        JSON.stringify(exits()));
+      const probeStarts = probeFake.events()
+        .filter((event) => event.kind === 'spawn' || event.kind === 'version-probe');
+      check('SP-1: every probe child and every version probe carries the self-updater guard',
+        probeStarts.some((event) => event.kind === 'spawn')
+          && probeStarts.some((event) => event.kind === 'version-probe')
+          && probeStarts.every((event) => event.autoUpdateDisabled === '1'),
+        JSON.stringify(probeStarts.filter((event) => event.autoUpdateDisabled !== '1')));
+    } finally {
+      console.error = consoleError;
+    }
+  }
 
   const fake = writeFakeGrokBinary(bin, store);
   const adapter = new GrokAdapter({ command: fake.path, env: fake.env, homeDir: root, requestTimeoutMs: 2_000, testOnlyEnableUnverifiedDrive: true });

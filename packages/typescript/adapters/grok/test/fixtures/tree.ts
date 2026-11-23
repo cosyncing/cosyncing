@@ -168,6 +168,21 @@ if (process.argv.includes('--version')) {
   process.exit(0);
 }
 record({ kind: 'spawn', argv: process.argv.slice(2), pid: process.pid, autoUpdateDisabled: process.env.GROK_DISABLE_AUTOUPDATER });
+// Grok's stdio agent treats stdin EOF as its cleanup path, but that shutdown
+// usually outlasts a 2-second grace on a real host. FAKE_GROK_LINGER_AFTER_STDIN_END_MS
+// stands in for that slow shutdown, and the SIGTERM handler for Grok's documented
+// "143 Terminated by SIGTERM". The linger is bounded, so a fake can never outlive it.
+const lingerAfterStdinEndMs = Number(process.env.FAKE_GROK_LINGER_AFTER_STDIN_END_MS || 0);
+if (lingerAfterStdinEndMs > 0) {
+  process.on('SIGTERM', () => {
+    record({ kind: 'sigterm', pid: process.pid });
+    process.exit(143);
+  });
+}
+process.stdin.on('end', () => {
+  record({ kind: 'stdin-end', pid: process.pid });
+  if (lingerAfterStdinEndMs > 0) setTimeout(() => process.exit(0), lingerAfterStdinEndMs);
+});
 let buffer = '';
 let promptCount = 0;
 let pendingPermissionFinish;
@@ -224,7 +239,7 @@ const handle = (frame) => {
     send({ jsonrpc: '2.0', id: frame.id, result: {
       protocolVersion: 1,
       agentCapabilities: { loadSession: true, promptCapabilities: { image: false } },
-      authMethods: [
+      authMethods: process.env.FAKE_GROK_AUTH_METHODS ? JSON.parse(process.env.FAKE_GROK_AUTH_METHODS) : [
         { id: 'cached_token', name: 'cached_token' },
         { id: 'grok.com', name: 'Grok' },
       ],
@@ -235,6 +250,15 @@ const handle = (frame) => {
         availableCommands: [{ name: 'compact', description: 'Compact context', input: null }],
       },
     } });
+    if (process.env.FAKE_GROK_VENDOR_NOTICES === '1') {
+      // The first method name comes from a real broker log, which traced it thousands
+      // of times; its params were never logged, and no client here reads them. The
+      // other two are deliberately unknown, so a client must still trace them.
+      for (const method of ['_x.ai/mcp/servers_updated', '_vendor.test/notice', 'fake/unknown_notice']) {
+        send({ jsonrpc: '2.0', method, params: {} });
+      }
+      record({ kind: 'vendor-notices', pid: process.pid });
+    }
     return;
   }
   if (frame.method === 'authenticate') {

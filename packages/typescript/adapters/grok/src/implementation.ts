@@ -32,7 +32,12 @@
  */
 import { stat } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
-import { AcpClient } from '@cosyncing/acp-client';
+import {
+  AcpClient,
+  type AcpClientHooks,
+  type AcpClientOptions,
+  type AcpCloseEscalation,
+} from '@cosyncing/acp-client';
 import {
   DISCOVERY_ROW_BATCH,
   NativeSessionUnresumableError,
@@ -88,6 +93,73 @@ export const GROK_CAPABILITIES: AgentCapabilities = Object.freeze({
   permissionGranularity: 'per-tool',
 });
 
+/**
+ * How long one auth-readiness answer is reused, by outcome.
+ *
+ * Every answer costs a full `grok agent stdio` start. `/api/agents` asks on
+ * every roster refresh, and `cosy status` and `cosy doctor` read it from
+ * there, so the old 30-second window started a new child whenever the last
+ * answer was more than 30 seconds old: about 80 children an hour on a measured
+ * host.
+ *
+ * A ready answer proves that Grok advertises a reusable `cached_token` login
+ * and accepts it. That changes only when the user signs in or out, or the token
+ * can no longer be refreshed, and a stale "ready" fails closed: Create starts
+ * its own child, authenticates again and refuses with an error. The version
+ * gate in front of this cache is not cached. Ten minutes caps an idle broker
+ * at six probe children an hour.
+ *
+ * A not-ready answer is what a user fixes by running `grok login`, and it may
+ * be transient (a timeout, a failed refresh). Create should come back within a
+ * minute of either, so this window stays short. It still halves the old
+ * ceiling for a host where Grok is installed but never signed in.
+ */
+export const GROK_AUTH_READY_TTL_MS = 10 * 60_000;
+export const GROK_AUTH_UNREADY_TTL_MS = 60_000;
+
+/**
+ * Hooks for the probe children: auth readiness and the model catalogue.
+ *
+ * A probe needs only `initialize` and `authenticate`, but Grok pushes vendor
+ * notices such as `_x.ai/mcp/servers_updated` to every client it starts for.
+ * With no `xai` hook, acp-client traces each one as an unhandled extension, so
+ * every probe added at least one log line. A notification in Grok's wire
+ * namespace `_x.ai/` is accepted and dropped here. Everything else is still
+ * traced by the dispatcher: the `x.ai/` spelling, other vendors' namespaces,
+ * unknown core methods, and any vendor request, which a probe cannot answer.
+ */
+const GROK_PROBE_HOOKS: AcpClientHooks = {
+  extensions: {
+    xai: (event) => (event.kind === 'notification' && event.method.startsWith('_x.ai/') ? null : undefined),
+  },
+};
+
+/**
+ * How a probe child is asked to exit.
+ *
+ * Grok's stdio agent treats stdin EOF as its cleanup path (its 1.0.41 binary:
+ * "agent will not die with its parent; stdin EOF remains the only cleanup"),
+ * but that shutdown usually outlasts acp-client's 2-second default grace: on a
+ * measured host 93% of probe children were then killed with SIGKILL. Grok's
+ * bundled documentation lists exit status 143, "Terminated by SIGTERM", so a
+ * probe still alive after the stdin grace gets SIGTERM and five more seconds.
+ * SIGKILL is left for a child that ignores both. The probe's answer does not
+ * wait for any of this (see {@link retireProbeClient}).
+ */
+const GROK_PROBE_CLOSE: AcpCloseEscalation = { stdinGraceMs: 2_000, terminateGraceMs: 5_000 };
+
+/**
+ * Close a probe child without making the caller wait for it.
+ *
+ * The probe's answer is known before its child is reaped, and the caller is a
+ * roster refresh, a status call or the model picker. The close is bounded by
+ * {@link GROK_PROBE_CLOSE}, and Grok binds its stdio agent to parent death
+ * where it can, so a broker that exits mid-close does not leave it behind.
+ */
+function retireProbeClient(client: AcpClient): void {
+  void client.close().catch(() => undefined);
+}
+
 function preserveModelLabel(
   native: SessionInfo['currentModel'],
   fallback: SessionInfo['currentModel'],
@@ -125,6 +197,8 @@ export interface GrokAdapterOptions {
   }) => void;
   /** @deprecated The floor-gated writer is shipped; retained for fixture compatibility. */
   testOnlyEnableUnverifiedDrive?: boolean;
+  /** Clock for the auth-readiness cache. Default `Date.now`. */
+  now?: () => number;
 }
 
 function shellQuote(value: string): string {
@@ -220,9 +294,11 @@ export class GrokAdapter implements AgentBackend {
   private readonly terminalSummaries = new Map<string, TerminalSummaryRegistry<GrokTerminalSummary>>();
   private cachedModels?: ModelOption[];
   private authReadiness?: { checkedAt: number; ready: boolean };
+  private readonly now: () => number;
 
   constructor(options: GrokAdapterOptions = {}) {
     this.capabilities = GROK_CAPABILITIES;
+    this.now = options.now ?? Date.now;
     this.env = options.env ?? process.env;
     this.command = options.command ?? (this.env.COSYNCING_GROK_BIN?.trim() || 'grok');
     this.root = grokStoreRoot(this.env, options.homeDir);
@@ -299,9 +375,13 @@ export class GrokAdapter implements AgentBackend {
 
   async canCreateSession(): Promise<boolean> {
     if (!await this.hasPinnedBinaryVersion()) return false;
-    const now = Date.now();
-    if (this.authReadiness && now - this.authReadiness.checkedAt < 30_000) {
-      return this.authReadiness.ready;
+    const cached = this.authReadiness;
+    if (cached) {
+      const age = this.now() - cached.checkedAt;
+      // A clock stepped backwards (negative age) counts as expired, not as fresh.
+      if (age >= 0 && age < (cached.ready ? GROK_AUTH_READY_TTL_MS : GROK_AUTH_UNREADY_TTL_MS)) {
+        return cached.ready;
+      }
     }
     if (this.authReadinessFlight) return this.authReadinessFlight;
     const operation = this.probeAuthReadiness().finally(() => { this.authReadinessFlight = undefined; });
@@ -309,25 +389,32 @@ export class GrokAdapter implements AgentBackend {
     return operation;
   }
 
+  /** One `grok agent stdio` probe child: updater off, vendor notices dropped, polite close. */
+  private probeClientOptions(): AcpClientOptions {
+    return {
+      command: this.command,
+      args: ['agent', '--no-leader', 'stdio'],
+      cwd: process.cwd(),
+      env: grokChildEnv(this.env),
+      requestTimeoutMs: this.requestTimeoutMs,
+      hooks: GROK_PROBE_HOOKS,
+      closeEscalation: GROK_PROBE_CLOSE,
+    };
+  }
+
   private async probeAuthReadiness(): Promise<boolean> {
     let ready = false;
     let client: AcpClient | undefined;
     try {
-      client = await AcpClient.connect({
-        command: this.command,
-        args: ['agent', '--no-leader', 'stdio'],
-        cwd: process.cwd(),
-        env: grokChildEnv(this.env),
-        requestTimeoutMs: this.requestTimeoutMs,
-      });
+      client = await AcpClient.connect(this.probeClientOptions());
       await authenticateGrokClient(client, this.authMethodId);
       ready = true;
     } catch {
       ready = false;
     } finally {
-      await client?.close().catch(() => undefined);
+      if (client) retireProbeClient(client);
     }
-    this.authReadiness = { checkedAt: Date.now(), ready };
+    this.authReadiness = { checkedAt: this.now(), ready };
     return ready;
   }
 
@@ -351,13 +438,7 @@ export class GrokAdapter implements AgentBackend {
       throw new Error(`Grok model catalog requires Grok Build ${GROK_MINIMUM_SUPPORTED_VERSION} or newer.`);
     }
     if (this.cachedModels?.length) return this.cachedModels.map((model) => ({ ...model }));
-    const client = await AcpClient.connect({
-      command: this.command,
-      args: ['agent', '--no-leader', 'stdio'],
-      cwd: process.cwd(),
-      env: grokChildEnv(this.env),
-      requestTimeoutMs: this.requestTimeoutMs,
-    });
+    const client = await AcpClient.connect(this.probeClientOptions());
     try {
       await authenticateGrokClient(client, this.authMethodId);
       const meta = client.initializeResult?._meta;
@@ -370,7 +451,7 @@ export class GrokAdapter implements AgentBackend {
       this.cachedModels = models;
       return models.map((model) => ({ ...model }));
     } finally {
-      await client.close();
+      retireProbeClient(client);
     }
   }
 
