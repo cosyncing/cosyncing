@@ -70,6 +70,7 @@ import {
   clineManagedDataRoot,
   clineManagedHubDiscoveryPath,
   clineManagedHubIdentity,
+  clineManagedHubModel,
   clineManagedHubPort,
   parseClineHubMessages,
   probeClineHub,
@@ -535,10 +536,11 @@ export class ClineAdapter implements AgentBackend {
       && await this.isManagedHostReady();
   }
 
+  /** Doctor reads the same pair (`cline.create-configuration`), so its reason for "Create
+   *  unavailable" is this predicate, not a guess. */
   private configuredHubModel(): ModelOption | undefined {
-    const providerID = boundedConfiguration(this.env.COSYNCING_CLINE_PROVIDER);
-    const modelID = boundedConfiguration(this.env.COSYNCING_CLINE_MODEL);
-    return providerID && modelID ? { providerID, modelID, label: modelID } : undefined;
+    const model = clineManagedHubModel(this.env);
+    return model ? { ...model, label: model.modelID } : undefined;
   }
 
   /** Throws rather than returning `[]` when the binary is off-version: an empty

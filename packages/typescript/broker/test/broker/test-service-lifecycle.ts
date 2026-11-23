@@ -14,7 +14,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import type { SetupDiagnosisContext } from '../../../adapter-api/src/index.ts';
+import type { SetupCheck, SetupDiagnosisContext } from '../../../adapter-api/src/index.ts';
 import { OMP_DIALECT } from '../../../adapters/omp/src/index.ts';
 import { PI_DIALECT, resolvePiDialectPaths } from '../../../pi-engine/src/index.ts';
 import { BUILD_INFO, buildFingerprint, type BuildInfo } from '../../src/runtime/build-info.ts';
@@ -1621,6 +1621,123 @@ try {
         && stale.issueCodes?.includes('cline-retained-executable-unavailable') === true
         && readFileSync(provider.environmentPath, 'utf8') === finalEnvironment,
       `${stale.status}:${stale.issueCodes?.join(',')}`);
+  }
+
+  // Cline installed and on a current service PATH, but the service names no provider/model, which is
+  // how the owner's host sat: the broker can only answer "cannot create", and doctor used to call that
+  // a runtime fault and suggest a restart that comes back with the same environment. Following the
+  // advice it gives now (setup from a configured shell) must land the pair in the service; a broker
+  // that still cannot create after that is a runtime question again, and a restart is the right advice.
+  {
+    const machine = join(root, 'cline-create-unconfigured');
+    const stateHome = join(machine, '.cosyncing');
+    const provider = new AgentPathServiceProvider(machine);
+    const cline = join(machine, 'global', 'cline', 'cline');
+    mkdirSync(dirname(cline), { recursive: true });
+    writeFileSync(cline, 'fixture Cline', { mode: 0o755 });
+    const serviceBuild = {
+      ...BUILD_INFO,
+      packaged: true,
+      target: 'bun-linux-x64',
+      distribution: 'native',
+    } satisfies BuildInfo;
+    const shell = (selection: Record<string, string> = {}): SetupDiagnosisContext => {
+      const base = contextFor({
+        root: machine,
+        provider,
+        systemd: true,
+        agentExecutables: { cline },
+        healthBuild: serviceBuild,
+      });
+      return {
+        ...base,
+        env: { ...base.env, ...selection },
+        async runReadOnly(executable, args, timeoutMs, envOverrides) {
+          if (executable === cline && args.includes('--version')) {
+            return { status: 'ok', exitCode: 0, stdout: `${CLINE_VERIFIED_VERSION}\n`, stderr: '' };
+          }
+          return base.runReadOnly(executable, args, timeoutMs, envOverrides);
+        },
+      };
+    };
+    // The running broker: healthy, with Cline registered and its Create surface not usable yet.
+    const brokerAnswers = (context: SetupDiagnosisContext): SetupDiagnosisContext => ({
+      ...context,
+      async fetchJson(url, headers, timeoutMs, maxBytes) {
+        const path = new URL(url).pathname;
+        if (path === '/api/broker/health') return { status: 'ok', statusCode: 200, json: { status: 'healthy' } };
+        if (path === '/api/agent-runtime-updates') return { status: 'ok', statusCode: 200, json: { updates: [] } };
+        if (path === '/api/agents') {
+          return {
+            status: 'ok',
+            statusCode: 200,
+            json: [{ id: 'cline', displayName: 'Cline', supportsCreateSession: true, canCreateSession: false }],
+          };
+        }
+        return context.fetchJson(url, headers, timeoutMs, maxBytes);
+      },
+    });
+    const providerFactory = (options: SystemdProviderOptions) => {
+      provider.agentDirectories = options.agentExecutableDirectories ?? [];
+      provider.agentOverrides = options.agentExecutableOverrides ?? {};
+      provider.agentConfiguration = options.agentConfigurationOverrides ?? {};
+      return provider;
+    };
+    const setup = (context: SetupDiagnosisContext) => runSetup({
+      ...setupOptions({
+        root: machine,
+        provider,
+        presenter: new ServicePresenter({ service: 'systemd' }),
+        buildInfo: serviceBuild,
+      }),
+      context,
+      systemdProviderFactory: providerFactory,
+    });
+    // Always from a shell WITHOUT the pair, so whatever doctor sees of it came from the service.
+    const doctorChecks = async (): Promise<SetupCheck[]> => (await collectDoctorReport({
+      buildInfo: serviceBuild,
+      context: brokerAnswers(shell()),
+      assetReport: inspectRuntimeAssets(),
+      stateHome,
+      codexTuiReadiness: { status: 'ok', customSocket: false, staleCandidatePids: [], message: 'fixture' },
+    })).sections.flatMap((section) => section.checks);
+    const find = (checks: readonly SetupCheck[], id: string): SetupCheck | undefined =>
+      checks.find((candidate) => candidate.id === id);
+
+    const installed = await setup(shell());
+    const before = await doctorChecks();
+    const servicePath = find(before, 'service.agent-executable-path');
+    const gap = find(before, 'cline.create-configuration');
+    const readiness = find(before, 'cline.broker-create-readiness');
+    const advice = `${readiness?.summary} ${readiness?.remediation?.message} ${readiness?.remediation?.command}`;
+    check('doctor names the unset Cline provider/model as why Create is off, and does not suggest a restart',
+      installed.status === 'complete'
+        && servicePath?.status === 'pass'
+        && gap?.status === 'warn'
+        && gap.detailCode === 'create-model-unset'
+        && readiness?.detailCode === 'broker-session-creation-unconfigured'
+        && readiness.evidence?.configurationCheck === 'cline.create-configuration'
+        && readiness.remediation?.command === 'cosyncing setup'
+        && advice.includes('COSYNCING_CLINE_PROVIDER')
+        && advice.includes('COSYNCING_CLINE_MODEL')
+        && !/restart/i.test(advice),
+      `${installed.status} path=${servicePath?.status} gap=${JSON.stringify(gap)} readiness=${JSON.stringify(readiness)}`);
+
+    const reconfigured = await setup(shell({
+      COSYNCING_CLINE_PROVIDER: 'openai-compatible',
+      COSYNCING_CLINE_MODEL: 'fixture-model',
+    }));
+    const environment = readFileSync(provider.environmentPath, 'utf8');
+    const after = await doctorChecks();
+    const afterReadiness = find(after, 'cline.broker-create-readiness');
+    check('setup from a configured shell lands the pair in the service; a broker still unable to create is then a runtime question',
+      reconfigured.status === 'complete'
+        && environment.includes('COSYNCING_CLINE_PROVIDER="openai-compatible"')
+        && environment.includes('COSYNCING_CLINE_MODEL="fixture-model"')
+        && find(after, 'cline.create-configuration')?.status === 'pass'
+        && afterReadiness?.detailCode === 'broker-agent-runtime-unavailable'
+        && afterReadiness.remediation?.command === 'cosyncing restart',
+      `${reconfigured.status} readiness=${JSON.stringify(afterReadiness)}`);
   }
 
   // Removing agents is the inverse of installation/move discovery: doctor must flag the receipt-owned

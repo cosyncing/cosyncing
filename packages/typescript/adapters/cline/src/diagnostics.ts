@@ -6,7 +6,12 @@ import {
   type SetupCheck,
   type SetupDiagnosisContext,
 } from '@cosyncing/adapter-api';
-import { CLINE_HUB_CORE_MINIMUM_VERSION } from './hub.ts';
+import {
+  CLINE_HUB_CORE_MINIMUM_VERSION,
+  CLINE_MANAGED_MODEL_VARIABLES,
+  clineManagedHubModel,
+  clineManagedHubModelUnset,
+} from './hub.ts';
 import {
   CLINE_MEASURED_VERSIONS,
   CLINE_MINIMUM_SUPPORTED_VERSION,
@@ -65,6 +70,50 @@ function storageCheck(context: SetupDiagnosisContext, binaryPresent: boolean): S
     summary: 'Cline local session storage is unreadable or has an unexpected type.',
     evidence: { path: inspected.displayPath },
     remediation: { kind: 'manual', message: 'Repair the Cline data-directory permissions or configuration, then rerun doctor.' },
+  };
+}
+
+/**
+ * Create's configuration prerequisite, named where an operator can act on it.
+ *
+ * Create, and the Drive and Resume that follow it, use only the provider/model
+ * pair the service environment names; `canCreateSession` refuses without both.
+ * The broker's roster can only say "cannot create", so doctor used to read that
+ * as an unavailable runtime and suggest a restart, which brings the broker back
+ * with the same environment. Doctor's create-readiness row now defers to a
+ * non-passing `<agent>.create-configuration` check and repeats its remedy.
+ *
+ * Setup is what copies the pair from a shell into the service, and it takes the
+ * pair whole: a shell that sets only one clears the other
+ * (`contextWithOwnedServiceAgentEnvironment`). So the remedy always names both.
+ */
+export const CLINE_CREATE_CONFIGURATION_CHECK_ID = 'cline.create-configuration';
+
+function createConfigurationCheck(context: SetupDiagnosisContext): SetupCheck {
+  const model = clineManagedHubModel(context.env);
+  if (model) {
+    return {
+      id: CLINE_CREATE_CONFIGURATION_CHECK_ID,
+      status: 'pass',
+      detailCode: 'create-model-configured',
+      summary: 'Cline Create has a provider and model for the managed profile.',
+      evidence: { provider: model.providerID, model: model.modelID },
+    };
+  }
+  const unset = clineManagedHubModelUnset(context.env);
+  const both = CLINE_MANAGED_MODEL_VARIABLES.join(' and ');
+  return {
+    id: CLINE_CREATE_CONFIGURATION_CHECK_ID,
+    status: 'warn',
+    detailCode: 'create-model-unset',
+    summary: `Cline Create, Drive and Resume need ${both} in the cosyncing service environment; `
+      + `${unset.join(' and ')} ${unset.length === 1 ? 'is' : 'are'} not set. Observe is unaffected.`,
+    evidence: { unset: unset.join(', ') },
+    remediation: {
+      kind: 'command',
+      message: `Export both ${both} in a shell, then run setup from that shell so the service keeps them.`,
+      command: 'cosyncing setup',
+    },
   };
 }
 
@@ -167,6 +216,11 @@ export async function diagnoseClineSetup(context: SetupDiagnosisContext): Promis
     agent: 'cline',
     displayName: 'Cline',
     minimumVersion: CLINE_MINIMUM_VERSION,
-    checks: [...binary.checks, storageCheck(context, !!binary.executable)],
+    checks: [
+      ...binary.checks,
+      storageCheck(context, !!binary.executable),
+      // Without a binary, Create is unavailable for that reason, which `cline.binary` already says.
+      ...(binary.executable ? [createConfigurationCheck(context)] : []),
+    ],
   };
 }

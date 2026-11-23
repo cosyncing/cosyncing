@@ -41,7 +41,9 @@ path; its default is `~/.cosyncing/agents/cline`.
 non-secret provider/model pair used for managed sessions.
 `COSYNCING_CLINE_HUB_PORT` can replace the dedicated port when needed. Run
 `cosyncing setup` from that configured shell so the installed service retains
-those non-secret values.
+those non-secret values. Until the service has both, `cosy doctor` reports
+`cline.create-configuration` as a warning and New Session stays unavailable;
+restarting the broker does not change that, rerunning setup does.
 
 Setup does not install or update Cline, copy credentials, or read
 `data/settings/providers.json`. `CLINE_DIR` selects a non-default Observe root,

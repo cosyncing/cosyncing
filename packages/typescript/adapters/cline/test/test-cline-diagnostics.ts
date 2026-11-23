@@ -6,7 +6,11 @@ import type {
   SetupHttpProbe,
   SetupPathInspection,
 } from '@cosyncing/adapter-api';
-import { CLINE_MINIMUM_VERSION, diagnoseClineSetup } from '../src/diagnostics.ts';
+import {
+  CLINE_CREATE_CONFIGURATION_CHECK_ID,
+  CLINE_MINIMUM_VERSION,
+  diagnoseClineSetup,
+} from '../src/diagnostics.ts';
 import { CLINE_HUB_CORE_MINIMUM_VERSION } from '../src/hub.ts';
 import {
   CLINE_MEASURED_VERSIONS,
@@ -155,6 +159,54 @@ const defaultData = `${HOME}/.cline/data`;
     checkOf(diagnosis, 'cline.binary')?.evidence?.executable === '/fixture/custom/cline'
       && checkOf(diagnosis, 'cline.storage')?.evidence?.path === '/fixture/data',
     JSON.stringify(diagnosis.checks));
+}
+// Create's own prerequisite. On the owner's host neither variable was set for
+// the service and doctor blamed the runtime, suggesting a restart that comes
+// back with the same environment. The check names what is unset and sends the
+// operator to setup, which is what copies the pair into the service.
+{
+  const createCheck = async (env: Record<string, string | undefined>) => checkOf(await diagnoseClineSetup(context({
+    env,
+    executable: '/fixture/bin/cline',
+    version: CLINE_VERIFIED_VERSION,
+    paths: { [defaultData]: 'directory', [`${defaultData}/sessions`]: 'directory' },
+  })), CLINE_CREATE_CONFIGURATION_CHECK_ID);
+  const neither = await createCheck({});
+  check('an unset provider/model pair is a Create warning that names both and points at setup, not a restart',
+    neither?.status === 'warn'
+      && neither.detailCode === 'create-model-unset'
+      && /COSYNCING_CLINE_PROVIDER and COSYNCING_CLINE_MODEL are not set/.test(neither.summary)
+      && /Observe is unaffected/.test(neither.summary)
+      && neither.remediation?.kind === 'command'
+      && neither.remediation.command === 'cosyncing setup'
+      && /COSYNCING_CLINE_PROVIDER and COSYNCING_CLINE_MODEL/.test(neither.remediation.message)
+      && !/restart/i.test(`${neither.summary} ${neither.remediation.message}`),
+    JSON.stringify(neither));
+  // Setup takes the pair whole: a shell that sets one clears the other, so
+  // the remedy names both even when only one is missing.
+  const providerOnly = await createCheck({ COSYNCING_CLINE_PROVIDER: 'openai-compatible' });
+  check('a half-set pair names only the unset variable, and the remedy still names both',
+    providerOnly?.status === 'warn'
+      && /COSYNCING_CLINE_MODEL is not set/.test(providerOnly.summary)
+      && !/COSYNCING_CLINE_PROVIDER is not set/.test(providerOnly.summary)
+      && /COSYNCING_CLINE_PROVIDER and COSYNCING_CLINE_MODEL/.test(providerOnly.remediation?.message ?? ''),
+    JSON.stringify(providerOnly));
+  const blank = await createCheck({ COSYNCING_CLINE_PROVIDER: 'openai-compatible', COSYNCING_CLINE_MODEL: '  ' });
+  check('a blank value counts as unset, exactly as setup and Create treat it',
+    blank?.status === 'warn' && /COSYNCING_CLINE_MODEL is not set/.test(blank.summary),
+    JSON.stringify(blank));
+  const configured = await createCheck({
+    COSYNCING_CLINE_PROVIDER: 'openai-compatible',
+    COSYNCING_CLINE_MODEL: 'fixture-model',
+  });
+  check('a configured pair passes and names the pair Create will use',
+    configured?.status === 'pass'
+      && configured.evidence?.provider === 'openai-compatible'
+      && configured.evidence?.model === 'fixture-model'
+      && configured.remediation === undefined,
+    JSON.stringify(configured));
+  check('without a binary there is no Create configuration finding; cline.binary already says why',
+    checkOf(await diagnoseClineSetup(context({})), CLINE_CREATE_CONFIGURATION_CHECK_ID) === undefined);
 }
 {
   const unsafe = await diagnoseClineSetup(context({

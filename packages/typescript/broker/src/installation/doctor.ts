@@ -1480,12 +1480,30 @@ function installedState(home: string): ReturnType<typeof inspectInstallState> {
   }
 }
 
+/**
+ * An adapter's own explanation for session creation being off by CONFIGURATION:
+ * a non-passing `<agent>.create-configuration` check in its diagnosis.
+ *
+ * The roster can only say "cannot create". Without this, a configuration gap
+ * read as an unavailable runtime and doctor suggested a restart, which returns
+ * with the same environment. Cline's provider/model pair is the case it exists for.
+ */
+function createConfigurationGaps(
+  diagnoses: readonly AgentSetupDiagnosis[],
+): ReadonlyMap<string, Readonly<SetupCheck>> {
+  return new Map(diagnoses.flatMap((diagnosis) => diagnosis.checks
+    .filter((check) => check.id === `${diagnosis.agent}.create-configuration`
+      && (check.status === 'warn' || check.status === 'fail'))
+    .map((check) => [diagnosis.agent, check] as const)));
+}
+
 async function endpointAndRuntimeChecks(options: {
   context: SetupDiagnosisContext;
   config: BrokerConfigInspection;
   brokerToken: ReturnType<typeof inspectBrokerToken>;
   home: string;
   agentPathCheck?: Readonly<SetupCheck>;
+  createConfigurationGaps?: ReadonlyMap<string, Readonly<SetupCheck>>;
 }): Promise<{ network: SetupCheck[]; runtime: SetupCheck[]; agents: SetupCheck[] }> {
   if (options.config.status !== 'ok') return { network: [], runtime: [], agents: [] };
   const install = installedState(options.home);
@@ -1606,7 +1624,11 @@ async function endpointAndRuntimeChecks(options: {
         const installedInShell = installed.has(row.id as 'codex' | 'opencode' | 'pi' | 'claude');
         const pathStale = !creationUnsupported && installedInShell && options.agentPathCheck?.status === 'fail';
         const pathCurrent = !creationUnsupported && installedInShell && options.agentPathCheck?.status === 'pass';
-        const runtimeUnavailable = !ready && reported && !creationUnsupported && pathCurrent;
+        // Off by configuration the adapter itself named: repeat its remedy instead of a restart.
+        const unconfigured = !ready && reported && !creationUnsupported && installedInShell && !pathStale
+          ? options.createConfigurationGaps?.get(row.id)
+          : undefined;
+        const runtimeUnavailable = !ready && reported && !creationUnsupported && pathCurrent && !unconfigured;
         agents.push({
           id: `${row.id}.broker-create-readiness`,
           status: ready ? 'pass' : creationUnsupported ? 'skip' : !reported ? 'warn' : installedInShell ? 'fail' : 'skip',
@@ -1615,6 +1637,7 @@ async function endpointAndRuntimeChecks(options: {
             : creationUnsupported ? 'broker-session-creation-unsupported'
             : !reported ? 'broker-session-creation-unreported'
               : pathStale ? 'broker-session-creation-path-stale'
+                : unconfigured ? 'broker-session-creation-unconfigured'
                 : runtimeUnavailable ? 'broker-agent-runtime-unavailable'
                   : installedInShell ? 'broker-session-creation-unavailable' : 'broker-agent-executable-unavailable',
           summary: ready
@@ -1638,9 +1661,12 @@ async function endpointAndRuntimeChecks(options: {
               : {}),
             installedInInteractiveShell: installedInShell,
             ...(typeof row.syncEnabled === 'boolean' ? { syncEnabled: row.syncEnabled } : {}),
+            ...(unconfigured ? { configurationCheck: unconfigured.id } : {}),
           },
           ...(pathStale ? {
             remediation: remediation('cosyncing repair', 'Reconcile the durable service PATH and restart the broker.'),
+          } : unconfigured?.remediation ? {
+            remediation: unconfigured.remediation,
           } : runtimeUnavailable ? {
             remediation: remediation(
               'cosyncing restart',
@@ -2006,6 +2032,7 @@ export async function collectDoctorReport(dependencies: DoctorDependencies): Pro
       brokerToken,
       home,
       agentPathCheck: installedService.find((candidate) => candidate.id === 'service.agent-executable-path'),
+      createConfigurationGaps: createConfigurationGaps(agents),
     }),
     dependencies.probeTokdashVersion === false
       ? Promise.resolve(undefined)
