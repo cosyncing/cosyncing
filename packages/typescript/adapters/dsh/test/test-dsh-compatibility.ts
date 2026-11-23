@@ -18,6 +18,7 @@ import {
   classifyDshVersion,
   compareDshVersions,
   DSH_CONTRACT_FAMILIES,
+  DSH_QUALIFIED_VERSION_LIST,
   DSH_QUALIFIED_VERSIONS,
   decideManagedLaunch,
   mayFallBackToLegacyAfterProbe,
@@ -29,6 +30,7 @@ import {
   type DshProbeFetch,
 } from '../src/compatibility.ts';
 import { DshAdapter } from '../src/implementation.ts';
+import type { DshFetch } from '../src/envelope.ts';
 
 const results: Array<{ name: string; ok: boolean }> = [];
 function check(name: string, ok: boolean, detail = ''): void {
@@ -80,12 +82,16 @@ function check(name: string, ok: boolean, detail = ''): void {
     qualified('0.1.0-rc.6') === 'legacy-0.1' && qualified('0.2.0-rc.2') === 'remote-0.2',
     [qualified('0.1.0-rc.6'), qualified('0.2.0-rc.2')].join(' / '));
 
-  const verdict = classifyDshVersion('0.2.0-rc.9');
-  check('an unexercised rc in a recognised family is family evidence, NOT a qualified version',
-    verdict.status === 'family-recognised'
-      && verdict.status === 'family-recognised' && verdict.family === 'remote-0.2'
+  // Published builds that share a qualified build's minor. Each used to be
+  // admitted as "the same family"; 0.2.2 kept the 0.2 routes and auth and still
+  // changed the live control frames and the image readback request, so a family
+  // match is not evidence of anything. 0.1 gets the same rule as 0.2.
+  const unlisted = ['0.2.0-rc.1', '0.2.1-rc.5', '0.2.2-rc.5', '0.2.3-alpha.2', '0.1.0-rc.7', '0.1.7-rc.2'];
+  const verdicts = unlisted.map((version) => [version, classifyDshVersion(version).status] as const);
+  check('a published 0.1 or 0.2 build that is not on the qualified list is unsupported, not recognised as its family',
+    verdicts.every(([, status]) => status === 'unsupported')
       && DSH_QUALIFIED_VERSIONS['remote-0.2'].includes('0.2.0-rc.2'),
-    JSON.stringify(verdict));
+    JSON.stringify(verdicts));
 
   // The floor rule, asserted as the absence of the bug rather than the presence
   // of a comparison: a number ABOVE everything captured gets no benefit of the
@@ -123,22 +129,25 @@ function check(name: string, ok: boolean, detail = ''): void {
       && !legacy.detail.includes('0.1.0-rc.6 --no-open'),
     legacy.allowed ? 'allowed' : `${legacy.code}: ${legacy.detail}`);
 
-  // Family recognition is not qualification, and the launch policy is the place
-  // where that distinction has teeth. A 0.2 build nobody has exercised IS
-  // started: what the launch depends on is the family's route shapes, auth model
-  // and flag set, and those are shared. What the qualified list means is narrower
-  // and different — it names the version the fixtures, mappings and physical
-  // acceptance were captured against. So `0.2.0-rc.999` gets a launch and does
-  // NOT get to be described as a tested version, and anything downstream that
-  // reports readiness has to be able to say "started, unverified" rather than
-  // implying the exact build was exercised.
-  const unexercised = decideManagedLaunch('0.2.0-rc.999', 3080);
-  check('an unexercised 0.2 build is permitted to launch without being a qualified version',
-    unexercised.allowed === true && unexercised.allowed
-      && classifyDshVersion('0.2.0-rc.999').status === 'family-recognised'
-      && !DSH_QUALIFIED_VERSIONS['remote-0.2'].includes('0.2.0-rc.999')
-      && unexercised.plan.args.join(' ') === 'web --port 3080 --no-open',
-    unexercised.allowed ? unexercised.plan.args.join(' ') : unexercised.detail);
+  // A 0.2 build nobody captured is NOT started. It used to be, on the grounds
+  // that its route shapes, auth model and flags matched the family; 0.2.2 matched
+  // all three and still lost live updates and image readback once running. The
+  // refusal names the version and the qualified list, so the log line says what
+  // to install rather than "host did not become ready".
+  for (const version of ['0.2.1-rc.5', '0.2.2-rc.5', '0.2.3-alpha.2']) {
+    const refused = decideManagedLaunch(version, 3080);
+    check(`published but unqualified ${version} is refused before the spawn, with the qualified versions named`,
+      refused.allowed === false && refused.code === 'version-unsupported'
+        && refused.detail.includes(version) && refused.detail.includes(DSH_QUALIFIED_VERSION_LIST)
+        && refused.detail.includes('@deepseek-ai/dsh@0.2.0-rc.2'),
+      refused.allowed ? refused.plan.args.join(' ') : refused.detail);
+  }
+  // 0.1 builds were never launched (no verified --no-open); an unlisted one is
+  // now refused for its version first, which is the more useful sentence.
+  const laterLegacy = decideManagedLaunch('0.1.7-rc.2', 3080);
+  check('an unlisted 0.1 build is refused for its version, not only for its missing browser flag',
+    laterLegacy.allowed === false && laterLegacy.code === 'version-unsupported',
+    laterLegacy.allowed ? 'allowed' : `${laterLegacy.code}: ${laterLegacy.detail}`);
   check('exactly one 0.2 build carries the qualification this build was verified against',
     DSH_QUALIFIED_VERSIONS['remote-0.2'].join(',') === '0.2.0-rc.2'
       && decideManagedLaunch('0.2.0-rc.2', 3080).allowed === true
@@ -280,12 +289,14 @@ function check(name: string, ok: boolean, detail = ''): void {
 }
 
 {
-  // Refusing to start is not the same as refusing to see. A host on an
-  // unsupported contract must stay connectable and reportable.
+  // Refusing to start is not refusing to DESCRIBE. The broker still has to
+  // locate, and if it owns one stop, a host at this address — one it started
+  // before the install changed included — so the descriptor keeps its locator
+  // and identity while the launch is withheld.
   const unsupported = await new DshAdapter({
     baseUrl: 'http://127.0.0.1:3080', homeDir: '/fixture/home', env: {},
     resolveExecutable: () => '/usr/local/bin/dsh',
-    readExecutableVersion: () => '0.3.0',
+    readExecutableVersion: () => '0.2.2-rc.5',
   }).describeManagedHost();
   check('an unqualified executable is not started, and the host is still described',
     unsupported?.launch === null && unsupported?.serving?.port === 3080
@@ -322,6 +333,97 @@ function check(name: string, ok: boolean, detail = ''): void {
     remote?.launch !== null && elsewhere?.launch === null
       && elsewhere?.locator.kind === 'unknown',
     JSON.stringify(elsewhere?.locator));
+}
+
+// ── Readiness, Create, Drive and Observe on the installed version ───────────
+//
+// The managed launch is one consumer of the version. A host the operator
+// started — or one this broker started before an upgrade — reaches every other
+// path through readiness, and the 0.2 routes and auth survived the upgrade that
+// broke live updates, so a host that answers is exactly the case that would
+// half-work. One scripted 0.2 host, answering the captured anonymous 401 and an
+// authenticated roster; only the installed version differs between the runs.
+
+{
+  const BASE = 'http://127.0.0.1:17831';
+  const credential = { name: 'dsh-auth-fixture', value: 'v1.fixture-only', expiresAt: Date.now() + 30 * 86_400_000 };
+  const scripted = (version: string, baseUrl = BASE) => {
+    const sent: string[] = [];
+    const fetchImpl: DshFetch = async (url, init) => {
+      const method = (init as { method: string }).method;
+      sent.push(`${method} ${new URL(url).pathname}`);
+      if (method === 'GET') return { status: 401, text: async () => 'unauthorized' };
+      const request = JSON.parse(init.body) as { rpcId: string };
+      return {
+        status: 200,
+        text: async () => JSON.stringify({
+          type: 'server-response', rpcId: request.rpcId, result: { ok: true, value: { items: [] } },
+        }),
+      };
+    };
+    const adapter = new DshAdapter({
+      baseUrl, env: {}, homeDir: '/fixture/home', dshHome: '/fixture/home/.dsh',
+      resolveExecutable: () => '/usr/local/bin/dsh',
+      readExecutableVersion: () => version,
+      credentialStore: { async load() { return credential; }, async save() {}, async clear() {} },
+      fetchImpl,
+    });
+    return { adapter, sent };
+  };
+  const failure = async (attempt: () => Promise<unknown>): Promise<string> => {
+    try {
+      await attempt();
+      return '';
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  };
+
+  const qualified = scripted('0.2.0-rc.2');
+  const qualifiedAvailable = await qualified.adapter.isAvailable();
+  check('the qualified 0.2.0-rc.2 install still reaches the host and is available',
+    qualifiedAvailable === true && qualified.sent.includes('POST /api/session/list')
+      && await qualified.adapter.canCreateSession() === true,
+    qualified.sent.join(' '));
+
+  for (const version of ['0.2.1-rc.5', '0.2.3-alpha.2']) {
+    const { adapter, sent } = scripted(version);
+    const available = await adapter.isAvailable();
+    const sessions = await adapter.discoverSessions();
+    const creatable = await adapter.canCreateSession();
+    check(`${version}: readiness, discovery and Create are unavailable before anything is sent to the host`,
+      available === false && sessions.length === 0 && creatable === false && sent.length === 0,
+      JSON.stringify({ available, sessions: sessions.length, creatable, sent }));
+
+    const refusals = {
+      attach: await failure(() => adapter.attach('session-fixture-001', 'live')),
+      create: await failure(() => adapter.createSession()),
+      rename: await failure(() => adapter.renameSession('session-fixture-001', 'renamed')),
+      models: await failure(() => adapter.listModels()),
+    };
+    check(`${version}: Observe, Drive, Create, rename and the model catalog refuse with a reason naming the qualified versions`,
+      Object.values(refusals).every((message) => message.includes(version)
+        && message.includes(DSH_QUALIFIED_VERSION_LIST) && message.includes('@deepseek-ai/dsh@0.2.0-rc.2'))
+        && sent.length === 0,
+      JSON.stringify({ refusals, sent }));
+
+    // A host answering on the port is left running: the refusal is ours, and a
+    // restart could only start the same build or nothing.
+    const fault = await adapter.managedHostReadinessFault();
+    check(`${version}: supervision is told the fault is the adapter's, with the same reason, so a running host is not restarted`,
+      fault.kind === 'adapter' && fault.remedy === 'contract' && fault.detail.includes(version)
+        && sent.every((request) => request.startsWith('GET ')),
+      JSON.stringify({ fault, sent }));
+    check(`${version}: and no managed launch is described for it`,
+      (await adapter.describeManagedHost())?.launch === null);
+  }
+
+  // The installed binary describes this machine only. A host on another machine
+  // is not refused on its evidence: the contract probe decides, as before.
+  const elsewhere = scripted('0.2.2-rc.5', 'http://dsh-host.example:3080');
+  await elsewhere.adapter.isAvailable();
+  check('an unqualified local install does not refuse a host configured on another machine',
+    elsewhere.sent.includes('GET /api/remote.mux'), elsewhere.sent.join(' '));
 }
 
 const failed = results.filter((entry) => !entry.ok);

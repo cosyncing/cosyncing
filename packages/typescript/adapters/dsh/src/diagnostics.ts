@@ -6,7 +6,7 @@
  * while every dsh RPC — `host.describe` included — is a POST. So this path
  * proves what a read-only observer honestly can:
  *
- *  - is a `dsh` binary installed, and is it new enough;
+ *  - is a `dsh` binary installed, and is it a version this build qualified;
  *  - does the config root exist;
  *  - is something listening on the configured base URL;
  *  - and does that something answer the dsh downlink contract.
@@ -26,6 +26,8 @@ import {
 } from '@cosyncing/adapter-api';
 import { dshCredentialScope, type DshCookie, type DshCredentialStore } from './auth.ts';
 import {
+  classifyDshVersion,
+  dshVersionRefusal,
   probeDshContract,
   DSH_CURRENT_VERSION,
   DSH_QUALIFIED_VERSION_LIST,
@@ -119,8 +121,13 @@ export const DSH_MINIMUM_VERSION: AgentMinimumVersion = Object.freeze({
   evidenceNote:
     'Conservative floor: this repository captured its dsh fixtures from a real 0.1.0-rc.6 host and verified the envelope, '
     + 'the history tail projections block, and the mux open frames against it. The product is a developer preview whose rc '
-    + 'train may change the wire contract, so the floor is the exact tested version rather than an inferred earlier one.',
+    + 'train may change the wire contract, so the floor is the exact tested version rather than an inferred earlier one. '
+    + `It is not a range: only the qualified versions (${DSH_QUALIFIED_VERSION_LIST}) are accepted, and every other `
+    + 'version is refused until it is qualified.',
 });
+
+/** The install that clears a version refusal: the build this adapter's current fixtures were captured from. */
+const DSH_QUALIFIED_INSTALL_COMMAND = `npm i -g @deepseek-ai/dsh@${DSH_CURRENT_VERSION}`;
 
 /** `$DSH_HOME` overrides the config root; otherwise it is `~/.dsh`. */
 export function resolveDshHome(
@@ -422,9 +429,33 @@ export async function diagnoseDshSetup(
     versionArgs: ['--version'],
     packageNames: ['@deepseek-ai/dsh'],
     minimum: DSH_MINIMUM_VERSION,
-    installMessage: 'Install DeepSeek Harness (npm i -g @deepseek-ai/dsh), or run it with npx, then rerun doctor.',
-    upgradeCommand: 'npm i -g @deepseek-ai/dsh@latest',
+    // Pinned, never `@latest`: the latest dsh build is the one most likely NOT
+    // to be qualified, so an unpinned install is advice to get refused.
+    installMessage: `Install DeepSeek Harness (${DSH_QUALIFIED_INSTALL_COMMAND}), or run that version with npx, then rerun doctor.`,
+    upgradeCommand: DSH_QUALIFIED_INSTALL_COMMAND,
   });
+  // The shared check reads the minimum as a FLOOR and passes anything above it.
+  // dsh support is the qualified list, and the running adapter refuses every
+  // other version, so doctor must not call a build "supported" that the roster
+  // and the managed launch will refuse — and it says so in the adapter's words.
+  const installedVerdict = binary.installedVersion ? classifyDshVersion(binary.installedVersion) : undefined;
+  const versionIndex = binary.checks.findIndex((check) => check.id === 'dsh.version');
+  if (installedVerdict?.status === 'unsupported' && versionIndex >= 0
+      && binary.checks[versionIndex]?.status === 'pass') {
+    const installed = installedVerdict.version.raw;
+    binary.checks[versionIndex] = {
+      id: 'dsh.version',
+      status: 'fail',
+      detailCode: 'version-unqualified',
+      summary: `DeepSeek Harness ${installed} is not a version this cosyncing build has qualified.`,
+      evidence: { installedVersion: installed, qualifiedVersions: DSH_QUALIFIED_VERSION_LIST },
+      remediation: {
+        kind: 'command',
+        message: dshVersionRefusal(installed),
+        command: DSH_QUALIFIED_INSTALL_COMMAND,
+      },
+    };
+  }
   const checks: SetupCheck[] = [...binary.checks];
 
   if (!binary.executable) {

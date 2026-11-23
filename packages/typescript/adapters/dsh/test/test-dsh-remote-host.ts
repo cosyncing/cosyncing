@@ -24,7 +24,7 @@ import { DshAuthSession, type DshCookie, type DshCredentialStore } from '../src/
 import { DshRemoteClient } from '../src/remote.ts';
 import { DshRemoteHostLink, DSH_INTERACTION_HANDOFF_MS } from '../src/remote-host.ts';
 import { DshSessionConnection } from '../src/observe.ts';
-import { DshAdapter } from '../src/implementation.ts';
+import { DshAdapter, type DshAdapterOptions } from '../src/implementation.ts';
 import { dshCredentialScope } from '../src/auth.ts';
 import { DshAssistantStream } from '../src/assistant-stream.ts';
 import type { DshMuxSocketLike } from '../src/mux.ts';
@@ -321,7 +321,12 @@ function harness(options: {
  * The anonymous GET is answered the way the capture answered it — a 401 on the
  * carrier, which is what selects the 0.2 family.
  */
-function adapterOver(host: ScriptedHost, store: DshCredentialStore): DshAdapter {
+function adapterOver(
+  host: ScriptedHost,
+  store: DshCredentialStore,
+  /** The installed-dsh facts, for a scenario about the local install; absent means "none here". */
+  install: Pick<DshAdapterOptions, 'resolveExecutable' | 'readExecutableVersion'> = {},
+): DshAdapter {
   const probeAware = (async (url: string, init: { method?: string; headers: Record<string, string>; body: string }) => {
     if ((init.method ?? 'POST') === 'GET') {
       return { status: url.endsWith('/api/remote.mux') ? 401 : 404, text: async () => 'unauthorized' };
@@ -335,6 +340,7 @@ function adapterOver(host: ScriptedHost, store: DshCredentialStore): DshAdapter 
     credentialStore: store,
     remoteSocketFactory: host.socketFactory,
     fetchImpl: probeAware,
+    ...install,
   });
 }
 
@@ -2257,6 +2263,44 @@ const commandPermissionCatalog = (await Bun.file(new URL('./fixtures/dsh-0.2.0-r
   host.live.item(host.stream('$events').streamId, { type: 'emit', event: 'commands/change', args: [] });
   await flush();
   check('unsubscribed attached clients receive no later command catalog notification', notifications === 1);
+  await connection.close(); link.stop();
+}
+
+{
+  // The installed dsh changes under an attached session: the operator upgrades
+  // to the published 0.2.2-rc.5, whose host keeps the 0.2 routes and auth. The
+  // qualified install's prompt goes through; after the change the next prompt is
+  // refused with the reason and never reaches the host, and so is a new attach.
+  const host = new ScriptedHost();
+  const scope = dshCredentialScope(BASE_URL, '/fixture/dsh-home');
+  let installed = '0.2.0-rc.2';
+  const adapter = adapterOver(host, memoryStore({ [scope]: COOKIE }), {
+    resolveExecutable: () => '/fixture/bin/dsh',
+    readExecutableVersion: () => installed,
+  });
+  const connection = await adapter.attach(SESSION_ID, 'live');
+  await connection.getHistory();
+  const link = (adapter as unknown as { remoteHost: DshRemoteHostLink }).remoteHost;
+  const prompts = () => host.unaryCalls.filter((call) => call.endpoint === 'session/prompt').length;
+  const rosterReads = () => host.unaryCalls.filter((call) => call.endpoint === 'session/list').length;
+  host.unaryHandlers.set('session/prompt', () => ({ value: { accepted: true } }));
+  let accepted: unknown;
+  await connection.sendPrompt({ text: 'sent while the qualified build is installed' }).catch((error) => { accepted = error; });
+  check('a session attached on the qualified 0.2.0-rc.2 install prompts normally',
+    accepted === undefined && prompts() === 1, String(accepted));
+  installed = '0.2.2-rc.5';
+  let refused: unknown;
+  await connection.sendPrompt({ text: 'must not reach the host' }).catch((error) => { refused = error; });
+  check('after the install becomes an unqualified build the next prompt is refused with the reason, before any request',
+    refused instanceof Error && refused.message.includes('0.2.2-rc.5')
+      && refused.message.includes('0.1.0-rc.6, 0.2.0-rc.2') && prompts() === 1,
+    refused instanceof Error ? refused.message : String(refused));
+  const rosterBefore = rosterReads();
+  let reattach: unknown;
+  await adapter.attach(SESSION_ID, 'live').catch((error) => { reattach = error; });
+  check('a new attach is refused for the same reason without reading the host',
+    reattach instanceof Error && reattach.message.includes('0.2.2-rc.5') && rosterReads() === rosterBefore,
+    reattach instanceof Error ? reattach.message : String(reattach));
   await connection.close(); link.stop();
 }
 

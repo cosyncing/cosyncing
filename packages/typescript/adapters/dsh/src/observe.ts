@@ -178,6 +178,15 @@ export interface DshConnectionOptions {
    * connections (tests) omit it and mutate freely.
    */
   mutationReady?: () => boolean;
+  /**
+   * Why writes are refused for a reason that waiting will not clear, checked
+   * before every mutation; undefined while writes may proceed. The adapter uses
+   * it for an installed dsh that is not a qualified version: a connection that
+   * was attached before the install changed must not keep writing to the host
+   * the new install serves, and "re-verifying; retry in a moment" would be the
+   * wrong thing to tell the user.
+   */
+  mutationRefusal?: () => string | undefined;
   /** Called once when the connection is closed, so the owner can drop its routing entry. */
   onClosed?: (sessionId: string) => void;
 }
@@ -199,6 +208,7 @@ export class DshSessionConnection implements SessionConnection {
   private readonly primingMaxFrames: number;
   private readonly primingTimeoutMs: number;
   private readonly mutationReady?: () => boolean;
+  private readonly mutationRefusal?: () => string | undefined;
   private readonly onClosed?: (sessionId: string) => void;
 
   /** Live temporal fold. History reads NEVER touch it — see getHistory. */
@@ -246,6 +256,7 @@ export class DshSessionConnection implements SessionConnection {
     this.primingMaxFrames = options.primingMaxFrames ?? DSH_PRIMING_MAX_FRAMES;
     this.primingTimeoutMs = options.primingTimeoutMs ?? DSH_PRIMING_TIMEOUT_MS;
     if (options.mutationReady) this.mutationReady = options.mutationReady;
+    if (options.mutationRefusal) this.mutationRefusal = options.mutationRefusal;
     if (options.onClosed) this.onClosed = options.onClosed;
     this.state = createDshMapState(info.id, true);
     this.assistantStream = new DshAssistantStream(info.id);
@@ -851,6 +862,8 @@ export class DshSessionConnection implements SessionConnection {
     if (this.archived || this.info.control?.drive.supported === false) {
       throw new Error(`cannot ${action}: ${this.info.control?.drive.reason ?? 'this DeepSeek Harness agent is unavailable'}`);
     }
+    const refusal = this.mutationRefusal?.();
+    if (refusal !== undefined) throw new Error(`cannot ${action}: ${refusal}`);
     if (this.mutationReady && !this.mutationReady()) {
       throw new Error(`cannot ${action}: the DeepSeek Harness host link is re-verifying; retry in a moment`);
     }

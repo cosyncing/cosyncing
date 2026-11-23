@@ -254,11 +254,12 @@ function describeProbe(probe: DshContractProbe): string {
 /**
  * Whether a locally readable version agrees with the family the probe picked.
  *
- * A version read is EVIDENCE, not a gate, on the external-host path: `dsh
- * --version` describes the binary on this machine, which need not be the process
- * serving a remote address. It gates managed launches (see
- * {@link decideManagedLaunch}) and it is reported by doctor; here it only records
- * a mismatch so a diagnosis can name it.
+ * A version read is EVIDENCE, not a gate, for an address on another machine:
+ * `dsh --version` describes the binary on this machine, which need not be the
+ * process serving a remote address. It gates managed launches (see
+ * {@link decideManagedLaunch}), it gates every use of a host at an address on
+ * THIS machine (an unqualified install is refused before any request), and it is
+ * reported by doctor; here it only records a mismatch so a diagnosis can name it.
  */
 export function versionFamilyAgreement(
   versionOutput: string | undefined,
