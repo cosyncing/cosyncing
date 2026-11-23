@@ -21,10 +21,20 @@
 export {};
 import { spawnSync } from 'node:child_process';
 import { Database } from 'bun:sqlite';
-import { mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { isSessionCreateTemporarilyUnavailableError } from '@cosyncing/adapter-api';
 import {
+  isSessionCreateTemporarilyUnavailableError,
+  type SetupCommandProbe,
+  type SetupDiagnosisContext,
+  type SetupPathInspection,
+} from '@cosyncing/adapter-api';
+import {
+  AGY_CLI_MODELS_MAX_BACKOFF_MS,
+  AGY_CLI_MODELS_TTL_MS,
+  agyCliCatalogFailure,
+  agyCliModelsBackoffMs,
+  agyProbeEnv,
   cachedAgyCliCatalog,
   ensureAgyCliCatalog,
   fetchAgyCliCatalog,
@@ -60,9 +70,69 @@ import {
   readAgySettingsModelLabel,
   readAgySummaries,
   resolveAgyModel,
+  AGY_SIGN_IN_RECORD_FILE,
+  agyCreateUnavailable,
+  classifyAgyCliLogSignIn,
+  defaultAgyRoots,
+  diagnoseAgySetup,
+  parseAgyCliLogModelAliases,
   type AgyTrace,
 } from '../src/index.ts';
 import { buildAgyFixtureTree, FIXTURE } from './fixtures/tree.ts';
+
+/** Verbatim lines from agy's own run logs — see `_provenance` in the file. */
+const CLI_LOG = await Bun.file(new URL('./fixtures/agy-cli-log.json', import.meta.url)).json() as {
+  signInNotRestored: string[];
+  signInNetworkError: string[];
+  signInRestored: string[];
+  modelAlias: string[];
+};
+
+/** Point `<appData>/cli.log` at `log/<name>` holding `lines`, the relative link agy itself writes. */
+function writeAgyCliLog(appData: string, name: string, lines: readonly string[]): void {
+  mkdirSync(join(appData, 'log'), { recursive: true });
+  writeFileSync(join(appData, 'log', name), `${lines.join('\n')}\n`);
+  rmSync(join(appData, 'cli.log'), { force: true });
+  symlinkSync(join('log', name), join(appData, 'cli.log'));
+}
+
+/**
+ * `agy models` as 1.5.14 prints it — CONSTRUCTED, and only from measured parts: the
+ * shape (a banner, then `id<TAB>displayName` rows) is the one captured on 1.1.22,
+ * and both the id and the name are string constants of the installed 1.5.14
+ * binary, the name being the one agy's own log resolves the saved label to. No
+ * 1.5.x `agy models` output was captured: this work never runs agy.
+ */
+const AGY_1_5_MODELS = 'Fetching available models...\ngemini-3.8-flash-high\tGemini 3.8 Flash (High)\n';
+
+/**
+ * A stand-in `agy` for the `models` subcommand: it appends the value it saw for
+ * agy's no-update variable to `runs` (one line per child — the spawn count), then
+ * hangs when `slow` exists, prints `serve` when that exists, and otherwise exits 1.
+ */
+function writeProbeAgy(binDir: string): { binary: string; serve: string; slow: string; runs: () => string[] } {
+  mkdirSync(binDir, { recursive: true });
+  const binary = join(binDir, 'agy');
+  const runsFile = join(binDir, 'runs');
+  const serve = join(binDir, 'serve');
+  const slow = join(binDir, 'slow');
+  writeFileSync(binary, [
+    '#!/bin/sh',
+    '[ "$1" = "models" ] || exit 64',
+    `printf '%s\\n' "\${AGY_CLI_DISABLE_AUTO_UPDATE-unset}" >> '${runsFile}'`,
+    `[ -e '${slow}' ] && exec sleep 30`,
+    `[ -e '${serve}' ] && exec cat '${serve}'`,
+    'exit 1',
+    '',
+  ].join('\n'));
+  chmodSync(binary, 0o755);
+  return {
+    binary,
+    serve,
+    slow,
+    runs: () => (existsSync(runsFile) ? readFileSync(runsFile, 'utf8').split('\n').filter(Boolean) : []),
+  };
+}
 
 const results: Array<{ name: string; ok: boolean }> = [];
 function check(name: string, ok: boolean, detail = ''): void {
@@ -1311,7 +1381,6 @@ const IDS = FIXTURE.conversationIds;
       + '  printf \'gemini-9.9-flash-low\\tGemini 9.9 Flash (Low)\\n\'\n'
       + 'fi\n'
       + 'exit 0\n');
-    const { chmodSync } = await import('node:fs');
     chmodSync(fakeAgy, 0o755);
 
     // The rotation: settings names a label the frozen file has never heard of.
@@ -1426,6 +1495,345 @@ const IDS = FIXTURE.conversationIds;
   } finally {
     tree.cleanup();
   }
+}
+
+// ── 18. A model agy renamed is still named (AG-1); a repeated miss is one line (AG-2) ──
+//
+// MEASURED 2026-11-23 on 1.5.14: `settings.json` still says "Gemini 3.7 Flash (High)" (the
+// fixture's own captured label), agy's live list knows only "Gemini 3.8 Flash (High)", and the
+// only place agy records the rename is its run log. Before this, the join missed on every sweep,
+// the row showed no model at all, and the miss was the broker log's most frequent line.
+{
+  resetAgyCliCatalogForTests();
+  const tree = buildAgyFixtureTree();
+  try {
+    const binDir = join(tree.dir, 'bin');
+    const probe = writeProbeAgy(binDir);
+    writeFileSync(probe.serve, AGY_1_5_MODELS);
+    const label = 'Gemini 3.7 Flash (High)';
+    const renamed = 'Gemini 3.8 Flash (High)';
+    check('the fixture\'s captured settings label is the one agy later renamed',
+      readAgySettingsModelLabel(tree.roots) === label, String(readAgySettingsModelLabel(tree.roots)));
+
+    const traces: AgyTrace[] = [];
+    const adapter = new AgyAdapter({ roots: tree.roots, env: { PATH: binDir }, trace: (event) => traces.push(event) });
+    await adapter.listModels();
+    check('the picker\'s awaited fetch caches the live list',
+      cachedAgyCliCatalog(probe.binary)?.byLabel.has(renamed) === true && probe.runs().length === 1,
+      String(probe.runs().length));
+
+    // No run log of agy's yet: nothing says what the saved label became.
+    const first = (await adapter.discoverSessions()).find((session) => session.id === IDS.withTranscript);
+    check('a label the live list does not know is shown as model text, with no model id invented for it',
+      first !== undefined && 'currentModel' in first && first.currentModel === undefined && first.model === label,
+      JSON.stringify({ currentModel: first?.currentModel, model: first?.model }));
+    await adapter.discoverSessions();
+    const textAttach = await adapter.attach(IDS.withTranscript, 'observe');
+    check('an attach carries the same label text',
+      textAttach.info.currentModel === undefined && textAttach.info.model === label,
+      JSON.stringify({ currentModel: textAttach.info.currentModel, model: textAttach.info.model }));
+    await textAttach.close();
+    const misses = traces.filter((event) => event.op === 'model-join');
+    check('AG-2: two sweeps and an attach missing the same way write ONE model-join line',
+      misses.length === 1 && misses[0]?.detail === `label not in catalog: ${label}`,
+      misses.map((event) => event.detail).join(' | '));
+
+    // agy's run log records the rename: the real line, from a real run.
+    writeAgyCliLog(tree.roots.appData, 'cli-20261029_165810.log', CLI_LOG.modelAlias);
+    const joined = (await adapter.discoverSessions()).find((session) => session.id === IDS.withTranscript);
+    check('AG-1: through the rename agy itself logged, the row names the model agy runs, by its catalog id',
+      joined?.currentModel?.modelID === 'gemini-3.8-flash-high'
+        && joined?.currentModel?.label === renamed
+        && joined?.model === undefined,
+      JSON.stringify({ currentModel: joined?.currentModel, model: joined?.model }));
+    const aliasAttach = await adapter.attach(IDS.withTranscript, 'observe');
+    check('an attach seeds the composer with the same aliased model',
+      aliasAttach.info.currentModel?.modelID === 'gemini-3.8-flash-high', JSON.stringify(aliasAttach.info.currentModel));
+    await aliasAttach.close();
+    await adapter.discoverSessions();
+    const aliasLines = traces.filter((event) => event.op === 'model-join' && event.detail.includes('agy\'s own alias'));
+    check('the alias join is traced once, not per sweep',
+      aliasLines.length === 1 && aliasLines[0]?.detail === `label ${label} resolved through agy's own alias to ${renamed}`,
+      aliasLines.map((event) => event.detail).join(' | '));
+
+    // A later run that never signed in resolves nothing and logs no alias line: no evidence,
+    // not a retraction.
+    writeAgyCliLog(tree.roots.appData, 'cli-20261123_115439.log', CLI_LOG.signInNotRestored);
+    const sticky = (await adapter.discoverSessions()).find((session) => session.id === IDS.withTranscript);
+    check('a newer log with no alias line keeps the rename agy recorded earlier',
+      sticky?.currentModel?.modelID === 'gemini-3.8-flash-high', JSON.stringify(sticky?.currentModel));
+
+    // An alias whose target the catalog does not list joins nothing, and says why.
+    const aliases = parseAgyCliLogModelAliases(CLI_LOG.modelAlias.join('\n'));
+    const unlistedTraces: AgyTrace[] = [];
+    const unlisted = resolveAgyModel(parseAgyCliModels(''), label, (event) => unlistedTraces.push(event), aliases);
+    check('agy\'s alias line parses to exactly its own mapping',
+      aliases.size === 1 && aliases.get(label) === renamed, JSON.stringify([...aliases]));
+    check('an alias whose target the catalog does not list joins nothing and names both labels',
+      unlisted === undefined
+        && unlistedTraces[0]?.detail === `label not in catalog: ${label} (agy aliases it to ${renamed}, which the catalog does not list)`,
+      unlistedTraces.map((event) => event.detail).join(' | '));
+
+    // `cli.log` is followed only to `log/cli-<stamp>.log`.
+    const stray = join(tree.roots.appData, 'stray');
+    mkdirSync(stray, { recursive: true });
+    writeFileSync(join(stray, 'cli-20261029_165810.log'), `${CLI_LOG.modelAlias.join('\n')}\n`);
+    rmSync(join(tree.roots.appData, 'cli.log'), { force: true });
+    symlinkSync(join('stray', 'cli-20261029_165810.log'), join(tree.roots.appData, 'cli.log'));
+    const strayTraces: AgyTrace[] = [];
+    const fresh = new AgyAdapter({ roots: tree.roots, env: { PATH: binDir }, trace: (event) => strayTraces.push(event) });
+    const refused = (await fresh.discoverSessions()).find((session) => session.id === IDS.withTranscript);
+    check('a cli.log that points anywhere but log/cli-*.log is refused, and the row falls back to the label text',
+      refused !== undefined && refused.currentModel === undefined && refused.model === label
+        && strayTraces.some((event) => event.op === 'cli-log-refused'),
+      JSON.stringify({ currentModel: refused?.currentModel, model: refused?.model }));
+    check('the cached live list served every read above: one `agy models` child in all', probe.runs().length === 1,
+      String(probe.runs().length));
+  } finally {
+    resetAgyCliCatalogForTests();
+    tree.cleanup();
+  }
+}
+
+// ── 19. A failing `agy models` backs off, and Create says why (AG-3, SP-1) ──
+//
+// MEASURED 2026-11-23 on 1.5.14: once agy's saved sign-in stopped refreshing, every
+// `agy models` the broker ran (one per 15 minutes) waited on it and was killed at the 15 s limit,
+// each leaving a run log behind: a model list frozen in the app, and a Create that offered a
+// session whose first prompt could not work. Driven here on a controlled clock: the only real
+// time spent is one short timeout at the end.
+{
+  resetAgyCliCatalogForTests();
+  const tree = buildAgyFixtureTree();
+  try {
+    const binDir = join(tree.dir, 'bin');
+    const probe = writeProbeAgy(binDir);
+    let clock = Date.UTC(2026, 10, 23, 12);
+    const traces: AgyTrace[] = [];
+    const adapter = new AgyAdapter({
+      roots: tree.roots,
+      env: { PATH: binDir },
+      trace: (event) => traces.push(event),
+      now: () => clock,
+    });
+    // Joins whatever `agy models` run is in flight, and can never start one itself (a clock at 0
+    // is inside every window), so a count read after it is settled.
+    const settle = () => ensureAgyCliCatalog(probe.binary, { now: () => 0 });
+    const refusalOf = (promise: Promise<void>) => promise.then(() => undefined, (error: unknown) => error);
+    const detailCodeOf = (error: unknown) => (error as { detailCode?: string } | undefined)?.detailCode;
+
+    const offered = adapter.canCreateSession();
+    await settle();
+    const first = agyCliCatalogFailure(probe.binary);
+    check('before any list settles Create is offered, and the readiness read starts one fetch',
+      offered === true && probe.runs().length === 1, String(probe.runs().length));
+    check('a failed list is held with its kind, its count and the end of its window',
+      first?.kind === 'exit' && first.failures === 1 && first.retryAt === clock + AGY_CLI_MODELS_TTL_MS,
+      JSON.stringify(first));
+    check('a failed list withdraws Create', adapter.canCreateSession() === false);
+    const refusal = await refusalOf(adapter.prepareCreateSession());
+    check('Create refuses with the typed, retryable reason and points at agy\'s sign-in',
+      isSessionCreateTemporarilyUnavailableError(refusal)
+        && detailCodeOf(refusal) === 'agy-model-list-unavailable'
+        && String((refusal as Error).message).includes('signed in'),
+      String(refusal));
+
+    // Inside the window: sweeps, pickers, readiness reads and Create spawn nothing.
+    for (let sweep = 0; sweep < 3; sweep += 1) await adapter.discoverSessions();
+    const fallbackOptions = await adapter.listModels();
+    adapter.canCreateSession();
+    await refusalOf(adapter.prepareCreateSession());
+    clock += AGY_CLI_MODELS_TTL_MS - 1;
+    await adapter.discoverSessions();
+    await adapter.listModels();
+    adapter.canCreateSession();
+    await refusalOf(adapter.prepareCreateSession());
+    await settle();
+    check('AG-3: inside the back-off window no read spawns another `agy models`',
+      probe.runs().length === 1 && fallbackOptions.length > 0, `${probe.runs().length} runs`);
+
+    // The window ends: Create runs the one retry, and agy's own log says the sign-in is the cause.
+    clock += 1;
+    writeAgyCliLog(tree.roots.appData, 'cli-20261123_115439.log', CLI_LOG.signInNotRestored);
+    const second = await refusalOf(adapter.prepareCreateSession());
+    const secondFailure = agyCliCatalogFailure(probe.binary);
+    check('when the window ends Create runs exactly one retry, and with agy\'s log blaming the saved sign-in it says to sign in again',
+      probe.runs().length === 2
+        && secondFailure?.signIn?.state === 'not-restored'
+        && isSessionCreateTemporarilyUnavailableError(second)
+        && detailCodeOf(second) === 'agy-sign-in-not-restored'
+        && String((second as Error).message).includes('sign in again'),
+      `${probe.runs().length} runs; ${String(second)}`);
+    check('the second failure in a row doubles the window',
+      secondFailure?.failures === 2
+        && secondFailure.retryAt === clock + 2 * AGY_CLI_MODELS_TTL_MS
+        && agyCliModelsBackoffMs(2) === 2 * AGY_CLI_MODELS_TTL_MS,
+      JSON.stringify(secondFailure));
+
+    clock += 2 * AGY_CLI_MODELS_TTL_MS - 1;
+    await adapter.discoverSessions();
+    await adapter.listModels();
+    adapter.canCreateSession();
+    await settle();
+    check('inside the doubled window nothing spawns', probe.runs().length === 2, String(probe.runs().length));
+
+    // A picker opened when a retry is due starts it, and answers without waiting for it.
+    clock += 1;
+    const pickerOptions = await adapter.listModels();
+    const failuresWhenPickerAnswered = agyCliCatalogFailure(probe.binary)?.failures;
+    await settle();
+    const thirdFailure = agyCliCatalogFailure(probe.binary);
+    check('a picker opened after a failure answers at once and leaves its retry running in the background',
+      pickerOptions.length > 0 && failuresWhenPickerAnswered === 2
+        && probe.runs().length === 3 && thirdFailure?.failures === 3,
+      `answered at ${String(failuresWhenPickerAnswered)} failures; ${probe.runs().length} runs`);
+    check('the window keeps doubling, up to its two-hour ceiling',
+      thirdFailure?.retryAt === clock + 4 * AGY_CLI_MODELS_TTL_MS
+        && agyCliModelsBackoffMs(4) === AGY_CLI_MODELS_MAX_BACKOFF_MS
+        && agyCliModelsBackoffMs(40) === AGY_CLI_MODELS_MAX_BACKOFF_MS,
+      JSON.stringify(thirdFailure));
+    check('each failure leaves one back-off trace, not one per read',
+      traces.filter((event) => event.op === 'cli-models-backoff').length === 3,
+      traces.filter((event) => event.op === 'cli-models-backoff').map((event) => event.detail).join(' | '));
+
+    // agy works again, but nothing that could have fixed it changed: the window stands.
+    writeFileSync(probe.serve, AGY_1_5_MODELS);
+    adapter.canCreateSession();
+    await adapter.discoverSessions();
+    await settle();
+    check('a recovered agy is not retried early when neither the binary nor the sign-in changed',
+      probe.runs().length === 3, String(probe.runs().length));
+
+    // A new sign-in record ends the window at the next read.
+    writeFileSync(join(tree.roots.appData, AGY_SIGN_IN_RECORD_FILE), '');
+    const stillWithdrawn = adapter.canCreateSession();
+    await settle();
+    const ready = await refusalOf(adapter.prepareCreateSession());
+    check('a new sign-in ends the window early: one retry, the live list is back and Create is offered again',
+      stillWithdrawn === false
+        && probe.runs().length === 4
+        && agyCliCatalogFailure(probe.binary) === undefined
+        && cachedAgyCliCatalog(probe.binary)?.byId.has('gemini-3.8-flash-high') === true
+        && adapter.canCreateSession() === true
+        && ready === undefined,
+      `${probe.runs().length} runs; ${String(ready)}`);
+
+    // SP-1: every child above ran with agy's self-update off, whatever the broker's env says.
+    check('SP-1: every `agy models` the adapter ran had agy\'s self-update disabled',
+      probe.runs().length === 4 && probe.runs().every((value) => value === '1'), probe.runs().join(','));
+    const overridden = agyProbeEnv({ PATH: '/fixture/bin', AGY_CLI_DISABLE_AUTO_UPDATE: '0' });
+    check('SP-1: the probe env keeps the broker\'s own and overrides an inherited opt-in to updates',
+      overridden.AGY_CLI_DISABLE_AUTO_UPDATE === '1' && overridden.PATH === '/fixture/bin');
+
+    // The measured shape: a child that never answers is killed at the limit and backs off the same way.
+    resetAgyCliCatalogForTests();
+    writeFileSync(probe.slow, '');
+    await ensureAgyCliCatalog(probe.binary, { timeoutMs: 200, now: () => clock, trace: () => {} });
+    const timedOut = agyCliCatalogFailure(probe.binary);
+    check('a list that does not answer in time is killed, held as a timeout, and backs off like any failure',
+      timedOut?.kind === 'timeout' && timedOut.failures === 1 && timedOut.retryAt === clock + AGY_CLI_MODELS_TTL_MS
+        && agyCreateUnavailable(timedOut).message.includes('did not answer in time'),
+      JSON.stringify(timedOut));
+  } finally {
+    resetAgyCliCatalogForTests();
+    tree.cleanup();
+  }
+}
+
+// ── 20. Doctor reads agy's sign-in from agy's own newest run log (AG-3, SP-1) ──
+//
+// The doctor never runs agy for this: its shell is not the service's, so a run from it could
+// succeed where the broker's fail. The fixture lines are verbatim from agy's logs.
+{
+  check('the captured runs classify as agy logged them',
+    JSON.stringify(classifyAgyCliLogSignIn(CLI_LOG.signInNotRestored.join('\n'))) === JSON.stringify({ state: 'not-restored', networkError: false })
+      && JSON.stringify(classifyAgyCliLogSignIn(CLI_LOG.signInNetworkError.join('\n'))) === JSON.stringify({ state: 'not-restored', networkError: true })
+      && classifyAgyCliLogSignIn(CLI_LOG.signInRestored.join('\n'))?.state === 'restored'
+      && classifyAgyCliLogSignIn(CLI_LOG.modelAlias.join('\n'))?.state === 'restored'
+      && classifyAgyCliLogSignIn(CLI_LOG.signInRestored[0]!) === undefined);
+
+  const home = '/fixture/home';
+  const appData = defaultAgyRoots(home).appData;
+  const logPath = join(appData, 'log', 'cli-20261123_115439.log');
+  const doctor = async (world: {
+    lines?: readonly string[];
+    linkTo?: string;
+    env?: Record<string, string | undefined>;
+    binary?: boolean;
+  }) => {
+    let probeEnv: Readonly<Record<string, string | undefined>> | undefined;
+    const linkTo = world.linkTo ?? logPath;
+    const context: SetupDiagnosisContext = {
+      effects: 'forbidden',
+      platform: 'linux',
+      arch: 'x64',
+      env: world.env ?? {},
+      homeDir: home,
+      resolveExecutable: (command) => (command === 'agy' && world.binary !== false ? '/fixture/bin/agy' : undefined),
+      inspectPath: (path): SetupPathInspection => {
+        if (path === appData) return { status: 'directory', readable: true, displayPath: path };
+        if (path === join(appData, 'cli.log') && world.lines) {
+          return { status: 'other', readable: true, displayPath: path, link: { status: 'file', readable: true, resolvedPath: linkTo } };
+        }
+        return { status: 'missing', readable: false, displayPath: path };
+      },
+      readText: () => ({ ok: false, reason: 'missing' }),
+      readTextPrefix: (path) => (world.lines && path === linkTo
+        ? { ok: true, text: `${world.lines.join('\n')}\n` }
+        : { ok: false, reason: 'missing' }),
+      readPackageVersion: () => undefined,
+      runReadOnly: async (_executable, _args, _timeoutMs, envOverrides): Promise<SetupCommandProbe> => {
+        probeEnv = envOverrides;
+        // Nothing invented: no `agy --version` output was captured, so the probe answers nothing.
+        return { status: 'unavailable', stdout: '', stderr: '' };
+      },
+      fetchJson: async () => ({ status: 'unreachable' }),
+      probeTcp: async () => 'closed',
+      listDirectory: () => ({ ok: false, reason: 'missing' }),
+      processAlive: () => false,
+      displayPath: (path) => path,
+    };
+    const diagnosis = await diagnoseAgySetup(context);
+    return { signIn: diagnosis.checks.find((entry) => entry.id === 'agy.sign-in'), probeEnv };
+  };
+
+  const expired = await doctor({ lines: CLI_LOG.signInNotRestored, env: { HTTPS_PROXY: 'http://proxy.invalid:3128' } });
+  check('doctor warns that agy could not restore its sign-in and says to sign in again',
+    expired.signIn?.status === 'warn'
+      && expired.signIn.detailCode === 'sign-in-not-restored'
+      && expired.signIn.remediation?.message.startsWith('Run `agy` in a terminal and sign in again.') === true
+      && expired.signIn.evidence?.log === logPath,
+    JSON.stringify(expired.signIn));
+  check('with a proxy in the shell, doctor says the service does not inherit it',
+    expired.signIn?.evidence?.shellProxy === true
+      && expired.signIn.remediation?.message.includes('does not inherit proxy settings') === true,
+    String(expired.signIn?.remediation?.message));
+  check('SP-1: doctor\'s `agy --version` probe runs with agy\'s self-update disabled',
+    expired.probeEnv?.AGY_CLI_DISABLE_AUTO_UPDATE === '1', JSON.stringify(expired.probeEnv));
+
+  const network = await doctor({ lines: CLI_LOG.signInNetworkError });
+  check('without a proxy, a refresh agy reported as a network error says so',
+    network.signIn?.status === 'warn'
+      && network.signIn.evidence?.networkError === true
+      && network.signIn.evidence?.shellProxy === false
+      && network.signIn.remediation?.message.includes('network error') === true,
+    JSON.stringify(network.signIn));
+
+  const restored = await doctor({ lines: CLI_LOG.signInRestored });
+  check('a run that refreshed the sign-in passes', restored.signIn?.status === 'pass'
+    && restored.signIn.detailCode === 'sign-in-restored', JSON.stringify(restored.signIn));
+
+  const noLog = await doctor({});
+  check('no run log says nothing either way: skip', noLog.signIn?.status === 'skip'
+    && noLog.signIn.detailCode === 'sign-in-unknown', JSON.stringify(noLog.signIn));
+
+  const strayLink = await doctor({ lines: CLI_LOG.signInNotRestored, linkTo: join(appData, 'settings.json') });
+  check('a cli.log that does not reach log/cli-*.log is not read', strayLink.signIn?.status === 'skip'
+    && strayLink.signIn.detailCode === 'sign-in-unknown', JSON.stringify(strayLink.signIn));
+
+  const noBinary = await doctor({ lines: CLI_LOG.signInNotRestored, binary: false });
+  check('with no agy binary the sign-in is not checked', noBinary.signIn?.status === 'skip'
+    && noBinary.signIn.detailCode === 'sign-in-not-checked', JSON.stringify(noBinary.signIn));
 }
 
 const failed = results.filter((result) => !result.ok).length;

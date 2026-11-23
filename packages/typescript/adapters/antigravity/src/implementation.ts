@@ -56,6 +56,14 @@
  *   — because picking one of four would preselect a model the session is not on.
  *   The label rides the DISCOVERY row, not only attach: an unattached roster row
  *   was the common failing case (reflection §3, claude P2).
+ *   ALIASES (AG-1, MEASURED 2026-11-23 / 1.5.14). agy renames models without
+ *   rewriting `settings.json`: the saved "Gemini 3.7 Flash (High)" is resolved
+ *   by agy itself to "Gemini 3.8 Flash (High)", and only its run LOG says so
+ *   (`model alias "…" resolved to "…"`). A label the catalog does not list is
+ *   therefore joined once more through the renames agy logged; when neither
+ *   joins, the row carries the settings label as `model` TEXT beside the
+ *   explicit `currentModel: undefined`, so the model is named without an id
+ *   being invented for it.
  *   THE PICKER (P2a, MEASURED 2026-08-25 / 1.1.20). `listModels()` publishes the
  *   catalog's 25 ids as 20 rows: a base model with two or more effort variants
  *   collapses into one row carrying `reasoningEfforts`, the rest stay flat. Every
@@ -319,7 +327,12 @@
  *  - A `truncated_fields` entry with no `transcript_full.jsonl` → the row renders
  *    with a STATED truncation, never silently short.
  *  - A model label that does not join the catalog, or joins ambiguously →
- *    `currentModel: undefined` stated on purpose, plus a trace naming the label.
+ *    `currentModel: undefined` stated on purpose, the label as `model` text, and
+ *    ONE trace naming it per adapter — not one per sweep (AG-2: 19,744 identical
+ *    lines in four weeks made it the broker log's most frequent line).
+ *  - An `agy models` run that fails or times out → a trace, and the next run
+ *    waits out a back-off that doubles per failure (AG-3); while it lasts,
+ *    Create is unavailable and says why, and pickers do not wait on a retry.
  *  - An unlisted `(source, type)` → the named neutral row AND a trace, so a
  *    post-update vocabulary change is one grep from being seen.
  *  - A tool result that finds no pending call → a SELF-CONTAINED tool block and a
@@ -339,7 +352,7 @@
  *    naming its keys, rather than a silently empty transcript.
  */
 import { randomUUID } from 'node:crypto';
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import type {
@@ -357,7 +370,14 @@ import type {
   SetupDiagnosisContext,
 } from '@cosyncing/adapter-api';
 import { SessionCreateTemporarilyUnavailableError, sessionPromptPreview, isSessionInstruction } from '@cosyncing/adapter-api';
-import { cachedAgyCliCatalog, ensureAgyCliCatalog } from './cli-catalog.ts';
+import {
+  agyCliCatalogFailure,
+  agyCliCatalogForPicker,
+  cachedAgyCliCatalog,
+  ensureAgyCliCatalog,
+  type AgyCliCatalogFailure,
+  type AgyCliCatalogOptions,
+} from './cli-catalog.ts';
 import { diagnoseAgySetup } from './diagnostics.ts';
 import { AgyObserveConnection } from './observe.ts';
 import { AgyDriveConnection } from './drive.ts';
@@ -385,12 +405,37 @@ import {
   scanAgySubagentLinks,
   defaultAgyTraceSink,
   agyTranscriptPath,
+  agyLatestCliLogPath,
+  agyRecoveryStamp,
+  agyTraceOncePerDetail,
+  classifyAgyCliLogSignIn,
+  parseAgyCliLogModelAliases,
+  readAgyLatestCliLog,
   type AgyBrainRow,
   type AgyMetadataEntry,
+  type AgyModelCatalog,
   type AgyRoots,
+  type AgySignInEvidence,
   type AgySummaryRow,
   type AgyTraceSink,
 } from './store.ts';
+
+/**
+ * The model a row reports, from the global settings label (Q1, AG-1).
+ *
+ * `currentModel` is the catalog join — directly, or through agy's own recorded
+ * alias — and is an explicit `undefined` when neither joins. `model` is then the
+ * settings label itself as TEXT: what agy will run is named, and no model id is
+ * invented for it (`currentModel.modelID` is what a Drive launch and the picker
+ * act on, so it only ever holds an id the catalog published).
+ */
+interface AgySessionModel {
+  currentModel: { providerID: string; modelID: string; label: string } | undefined;
+  model?: string;
+}
+
+/** How many aliases the adapter remembers from agy's logs. agy records one per saved model. */
+const AGY_REMEMBERED_ALIASES = 64;
 
 /**
  * One conversation, MERGED across both discovery sources, before the union is
@@ -469,6 +514,8 @@ export interface AgyAdapterOptions {
    * forgets the posture the user chose. Never written to agy's store.
    */
   resolveStoredCurrentMode?: (info: { tool: string; id: string; nativeId?: string }) => string | undefined;
+  /** Test seam: the clock the `agy models` TTL and failure back-off run on. */
+  now?: () => number;
 }
 
 export class AgyAdapter implements AgentBackend {
@@ -485,6 +532,22 @@ export class AgyAdapter implements AgentBackend {
   private readonly trace: AgyTraceSink;
   private readonly discoveryLimit: number;
   private readonly resolveStoredCurrentMode?: AgyAdapterOptions['resolveStoredCurrentMode'];
+  private readonly now?: () => number;
+  /**
+   * AG-2: the model join's traces — the join itself and the read of agy's log
+   * behind it — one line per distinct detail for the life of this adapter (one
+   * per broker process). The join runs on every sweep and attach, and an
+   * unchanged miss is not news after its first line.
+   */
+  private readonly modelJoinTrace: AgyTraceSink;
+  /**
+   * AG-1: model renames agy has recorded in the logs this adapter read, oldest
+   * first. Sticky on purpose: a later run that never signed in resolves nothing
+   * and logs no alias, and that is an absence of evidence, not a retraction.
+   */
+  private readonly modelAliases = new Map<string, string>();
+  /** The log (`path:size`) the aliases were last read from, so an unchanged log is read once. */
+  private aliasLogKey?: string;
 
   /**
    * Q9's registry: session id → the connection currently driving it.
@@ -535,6 +598,74 @@ export class AgyAdapter implements AgentBackend {
     this.trace = options.trace ?? defaultAgyTraceSink;
     this.discoveryLimit = options.discoveryLimit ?? 500;
     if (options.resolveStoredCurrentMode) this.resolveStoredCurrentMode = options.resolveStoredCurrentMode;
+    if (options.now) this.now = options.now;
+    this.modelJoinTrace = agyTraceOncePerDetail(this.trace);
+  }
+
+  /**
+   * How this adapter runs `agy models` (AG-3, SP-1): its trace and clock, the
+   * recovery stamp that ends a failure's back-off early once agy is replaced or
+   * signed in again, and the read of agy's own log that says WHY a fetch failed.
+   * Shared by discovery, the pickers and Create, so all of them see one back-off.
+   */
+  private catalogOptions(binary: string): AgyCliCatalogOptions {
+    return {
+      trace: this.trace,
+      ...(this.now ? { now: this.now } : {}),
+      recoveryStamp: () => agyRecoveryStamp(this.roots, binary),
+      diagnoseFailure: () => this.latestSignInEvidence(),
+    };
+  }
+
+  /** What agy's newest run log says about its saved sign-in, when it says anything. */
+  private latestSignInEvidence(): AgySignInEvidence | undefined {
+    const log = readAgyLatestCliLog(this.roots, this.trace);
+    return log ? classifyAgyCliLogSignIn(log.text) : undefined;
+  }
+
+  /**
+   * agy's recorded model renames (AG-1), re-read only when its newest log is a
+   * different file or has grown, and merged into what earlier logs said.
+   */
+  private recordedModelAliases(): ReadonlyMap<string, string> {
+    const path = agyLatestCliLogPath(this.roots, this.modelJoinTrace);
+    if (!path) return this.modelAliases;
+    let key: string;
+    try {
+      key = `${path}:${statSync(path).size}`;
+    } catch {
+      return this.modelAliases;
+    }
+    if (key === this.aliasLogKey) return this.modelAliases;
+    this.aliasLogKey = key;
+    const log = readAgyLatestCliLog(this.roots, this.modelJoinTrace);
+    if (!log) return this.modelAliases;
+    for (const [from, to] of parseAgyCliLogModelAliases(log.text)) {
+      this.modelAliases.delete(from);
+      this.modelAliases.set(from, to);
+      while (this.modelAliases.size > AGY_REMEMBERED_ALIASES) {
+        const oldest = this.modelAliases.keys().next().value;
+        if (oldest === undefined) break;
+        this.modelAliases.delete(oldest);
+      }
+    }
+    return this.modelAliases;
+  }
+
+  /**
+   * The model every row reports, from the global settings label (Q1, AG-1).
+   *
+   * The label joins the catalog directly, or through the rename agy itself
+   * recorded; agy's log is read only when the direct join misses, so a host
+   * whose label joins pays nothing for it. When neither joins, `currentModel` is
+   * an explicit `undefined` and the settings label rides as `model` text — the
+   * model agy will run is named, and no id is invented for it.
+   */
+  private sessionModel(catalog: AgyModelCatalog): AgySessionModel {
+    const settingsLabel = readAgySettingsModelLabel(this.roots, this.trace);
+    const aliases = settingsLabel && !catalog.byLabel.has(settingsLabel) ? this.recordedModelAliases() : undefined;
+    const currentModel = resolveAgyModel(catalog, settingsLabel, this.modelJoinTrace, aliases);
+    return { currentModel, ...(!currentModel && settingsLabel ? { model: settingsLabel } : {}) };
   }
 
   /**
@@ -581,6 +712,39 @@ export class AgyAdapter implements AgentBackend {
    */
   async diagnoseSetup(context: SetupDiagnosisContext): Promise<AgentSetupDiagnosis> {
     return diagnoseAgySetup(context);
+  }
+
+  /**
+   * Create readiness (AG-3): false while agy's latest `agy models` run failed.
+   *
+   * A new session's first prompt launches the same binary under the same
+   * sign-in, so a model list that cannot be fetched is the measured sign of a
+   * Create that cannot work (2026-11-23: every list since the saved sign-in
+   * stopped refreshing timed out). Answered from the adapter's held state, never
+   * by waiting on a spawn; a retry that is due is fired in the background, so
+   * the answer turns true on the next roster read after agy works again. Without
+   * a binary there is nothing to launch at all.
+   */
+  canCreateSession(): boolean {
+    const binary = findAgyBinary(this.env);
+    if (!binary) return false;
+    void ensureAgyCliCatalog(binary, this.catalogOptions(binary));
+    return agyCliCatalogFailure(binary) === undefined;
+  }
+
+  /**
+   * The specific refusal behind {@link canCreateSession}, which the broker reports
+   * ahead of its generic one. A retry that is due — its back-off ended, or agy
+   * was replaced or signed in again since — runs here and is awaited: Create is
+   * user-initiated, and it is the moment a fresh sign-in should count.
+   */
+  async prepareCreateSession(): Promise<void> {
+    const binary = findAgyBinary(this.env);
+    // No binary: `createSession` refuses with its own typed reason.
+    if (!binary || !agyCliCatalogFailure(binary)) return;
+    await ensureAgyCliCatalog(binary, this.catalogOptions(binary));
+    const failure = agyCliCatalogFailure(binary);
+    if (failure) throw agyCreateUnavailable(failure);
   }
 
   /**
@@ -688,10 +852,9 @@ export class AgyAdapter implements AgentBackend {
     // fires one TTL'd background refresh, so the roster converges a sweep
     // after the service starts.
     const binary = findAgyBinary(this.env);
-    if (binary) void ensureAgyCliCatalog(binary, { trace: this.trace });
+    if (binary) void ensureAgyCliCatalog(binary, this.catalogOptions(binary));
     const catalog = cachedAgyCliCatalog(binary) ?? readAgyModelCatalog(this.roots, this.trace);
-    const settingsLabel = readAgySettingsModelLabel(this.roots, this.trace);
-    const currentModel = resolveAgyModel(catalog, settingsLabel, this.trace);
+    const sessionModel = this.sessionModel(catalog);
     const lastConversations = kept.some((candidate) => candidate.summary === undefined)
       ? readAgyLastConversations(this.roots, this.trace)
       : undefined;
@@ -703,14 +866,14 @@ export class AgyAdapter implements AgentBackend {
         ? this.summaryRow(
           candidate.summary,
           metadata.get(candidate.conversationId),
-          currentModel,
+          sessionModel,
           candidate.updatedAt,
           candidate.brain?.firstUserContent,
         )
         : this.supplementaryRow(
           candidate.brain!,
           lastConversations?.get(candidate.conversationId),
-          currentModel,
+          sessionModel,
           metadata.get(candidate.conversationId),
         ));
     }
@@ -764,7 +927,7 @@ export class AgyAdapter implements AgentBackend {
   private summaryRow(
     row: AgySummaryRow,
     meta: AgyMetadataEntry | undefined,
-    currentModel: ReturnType<typeof resolveAgyModel>,
+    sessionModel: AgySessionModel,
     updatedAt: number | undefined,
     firstUserContent?: string,
   ): SessionInfo {
@@ -784,8 +947,10 @@ export class AgyAdapter implements AgentBackend {
       attachMode: 'observe',
       ...(updatedAt !== undefined ? { updatedAt } : {}),
       // Q1: the label rides the DISCOVERY row, and an unresolvable model is an
-      // explicit `undefined` rather than an omitted key (reflection §2).
-      currentModel,
+      // explicit `undefined` rather than an omitted key (reflection §2) beside
+      // the settings label as text (AG-1).
+      currentModel: sessionModel.currentModel,
+      ...(sessionModel.model ? { model: sessionModel.model } : {}),
       ...this.storedModeField(row.conversationId),
       // Q9: the posture comes from the ADAPTER's registry, so a client that is
       // merely observing still sees that this session is being driven — and can
@@ -874,7 +1039,7 @@ export class AgyAdapter implements AgentBackend {
   private supplementaryRow(
     row: AgyBrainRow,
     cwd: string | undefined,
-    currentModel: ReturnType<typeof resolveAgyModel>,
+    sessionModel: AgySessionModel,
     meta?: AgyMetadataEntry,
   ): SessionInfo {
     return {
@@ -886,7 +1051,8 @@ export class AgyAdapter implements AgentBackend {
       status: 'idle',
       attachMode: 'observe',
       updatedAt: row.updatedAt,
-      currentModel,
+      currentModel: sessionModel.currentModel,
+      ...(sessionModel.model ? { model: sessionModel.model } : {}),
       ...this.storedModeField(row.conversationId),
       control: agyControlState(this.isDriving(row.conversationId), row.conversationId),
       terminalSyncHint: {
@@ -1014,7 +1180,7 @@ export class AgyAdapter implements AgentBackend {
     // background refresh has already cached (discovery keeps it warm from the
     // first sweep after start), falling back to the frozen cockpit file.
     const catalog = cachedAgyCliCatalog(findAgyBinary(this.env)) ?? readAgyModelCatalog(this.roots, this.trace);
-    const currentModel = resolveAgyModel(catalog, readAgySettingsModelLabel(this.roots, this.trace), this.trace);
+    const sessionModel = this.sessionModel(catalog);
 
     // A row that DISCOVERED must OPEN. Discovery no longer comes from the
     // summaries table alone — the table has been frozen since Aug 15 and knows
@@ -1038,7 +1204,8 @@ export class AgyAdapter implements AgentBackend {
         status: 'idle',
         attachMode: mode === 'resume' ? 'resume' : 'observe',
         ...(row.updatedAt !== undefined ? { updatedAt: row.updatedAt } : {}),
-        currentModel,
+        currentModel: sessionModel.currentModel,
+        ...(sessionModel.model ? { model: sessionModel.model } : {}),
         ...this.storedModeField(sessionId),
         // Omitting control here left every observe attach with
         // `control: undefined` — the client fails closed on that and pinned
@@ -1079,7 +1246,8 @@ export class AgyAdapter implements AgentBackend {
         status: 'idle',
         attachMode: mode === 'resume' ? 'resume' : 'observe',
         updatedAt: scanned.updatedAt,
-        currentModel,
+        currentModel: sessionModel.currentModel,
+        ...(sessionModel.model ? { model: sessionModel.model } : {}),
         ...this.storedModeField(sessionId),
         // The connection's own state — see the row branch above.
         control: agyControlState(false, sessionId),
@@ -1120,6 +1288,7 @@ export class AgyAdapter implements AgentBackend {
         conversationId: sessionId,
         info,
         binary,
+        catalogOptions: this.catalogOptions(binary),
         trace: this.trace,
         queuedSends: () => queuedSends,
         // The mode the app last drove this conversation with: the row already says so, and the
@@ -1144,7 +1313,7 @@ export class AgyAdapter implements AgentBackend {
       info,
       trace: this.trace,
       // For the picker's live `agy models` read; absent on a binary-less host.
-      ...(observeBinary ? { binary: observeBinary } : {}),
+      ...(observeBinary ? { binary: observeBinary, catalogOptions: this.catalogOptions(observeBinary) } : {}),
       // Looked up per read, never created: a Drive opened after this reader still keys its prompts.
       queuedSends: () => this.queuedSends.get(sessionId),
     });
@@ -1176,11 +1345,12 @@ export class AgyAdapter implements AgentBackend {
   async listModels(): Promise<ModelOption[]> {
     const settingsLabel = readAgySettingsModelLabel(this.roots, this.trace);
     // The picker is user-initiated, so it waits for the live `agy models` list
-    // (once per TTL). The frozen cockpit file is only the no-binary fallback —
-    // it is where the `-tiered` placeholder rows and the effortless picker of
-    // the 2026-08-27 physical pass came from.
+    // (once per TTL) — unless the last fetch failed: then it answers at once
+    // and any due retry runs in the background (AG-3). The frozen cockpit file
+    // is only the fallback — it is where the `-tiered` placeholder rows and the
+    // effortless picker of the 2026-08-27 physical pass came from.
     const binary = findAgyBinary(this.env);
-    const catalog = (binary ? await ensureAgyCliCatalog(binary, { trace: this.trace }) : undefined)
+    const catalog = (binary ? await agyCliCatalogForPicker(binary, this.catalogOptions(binary)) : undefined)
       ?? readAgyModelCatalog(this.roots, this.trace);
     return agyModelOptions(catalog, {
       ...(settingsLabel ? { settingsLabel } : {}),
@@ -1327,6 +1497,28 @@ export function agyControlState(driving: boolean, conversationId: string): Sessi
       command: `agy --conversation ${conversationId}`,
     },
   };
+}
+
+/**
+ * Create's refusal while agy cannot list its models (AG-3): the typed, retryable
+ * 503 the broker answers. The detail code says whether agy's own log blamed the
+ * saved sign-in; the text tells the user to sign in either way, because that is
+ * the measured cause and the step that can fix it.
+ */
+export function agyCreateUnavailable(failure: AgyCliCatalogFailure): SessionCreateTemporarilyUnavailableError {
+  const what = failure.kind === 'timeout' ? 'did not answer in time' : 'failed';
+  if (failure.signIn?.state === 'not-restored') {
+    return new SessionCreateTemporarilyUnavailableError(
+      `Antigravity could not restore its saved sign-in (\`agy models\` ${what}), so a new session cannot be `
+        + 'created from the app. Run `agy` in a terminal and sign in again, then run `cosyncing doctor`.',
+      'agy-sign-in-not-restored',
+    );
+  }
+  return new SessionCreateTemporarilyUnavailableError(
+    `Antigravity could not list its models (\`agy models\` ${what}), so a new session cannot be created from `
+      + 'the app. Run `agy` in a terminal to check that it is signed in, then run `cosyncing doctor`.',
+    'agy-model-list-unavailable',
+  );
 }
 
 /** Why a subagent conversation cannot be driven from the app. */
