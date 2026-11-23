@@ -9,7 +9,7 @@
  *      version to the real broker, names it once and never retries its hello.
  *   3. TURN ATTENTION through omp's OWN shipped bridge asset (running before terminal under the
  *      `omp:run:u:remote:` key, one outcome per turn in a real AttentionPolicy, no live running
- *      from a reload re-hello's backfill).
+ *      from a reload re-hello's backfill), and a refused command poll that backs off.
  *
  *   bun run test:omp-bridge
  */
@@ -370,6 +370,10 @@ process.exit(73);
   const helloBodies: any[] = [];
   const queuedCommands: any[] = [];
   let polls = 0;
+  // The broker's runtime gate answers every `/omp/bridge/*` request at once with this 409 while
+  // its omp is not ready (asserted against the real broker above), polls included.
+  let refuseCommands = false;
+  let refusedPolls = 0;
   let subscribed = false;
   const fakeBroker = Bun.serve({
     hostname: '127.0.0.1',
@@ -403,6 +407,14 @@ process.exit(73);
       if (url.pathname === '/omp/bridge/commands') {
         if (!registry.get(url.searchParams.get('id') ?? '')) return new Response('unknown bridge', { status: 404 });
         polls += 1;
+        if (refuseCommands) {
+          refusedPolls += 1;
+          return Response.json({
+            ok: false,
+            code: 'omp-version-probe-timed-out',
+            error: 'omp did not answer a bounded version check in time.',
+          }, { status: 409 });
+        }
         await sleep(40); // stand in for the long poll so the loop doesn't spin hot
         return Response.json({ commands: queuedCommands.splice(0) });
       }
@@ -555,6 +567,27 @@ process.exit(73);
         && store.listEvents().length === eventsBefore
         && store.listObservations().length === openBefore;
       return [ok, `reset=${reset} hellos=${helloBodies.length} backfill=${JSON.stringify([...backfill])} live=${JSON.stringify(live)} events=${eventsBefore}->${store.listEvents().length} open=${openBefore}->${store.listObservations().length}`];
+    });
+
+    await test('a refused command poll backs off instead of spinning, then resumes', async () => {
+      const clock = controlledClock();
+      try {
+        refuseCommands = true;
+        // The in-flight long poll ends normally; the next one is refused, and the bridge must wait
+        // out a held backoff before it asks again.
+        const backedOff = await waitUntil(() => refusedPolls > 0 && clock.held(1500) === 1);
+        await settle();
+        const refused = refusedPolls;
+        refuseCommands = false;
+        const before = polls;
+        clock.tick();
+        const resumed = await waitUntil(() => polls > before);
+        const ok = backedOff && refused === 1 && resumed;
+        return [ok, `backedOff=${backedOff} refusedPolls=${refused} resumed=${resumed}`];
+      } finally {
+        refuseCommands = false;
+        clock.restore();
+      }
     });
   } finally {
     await fire('session_shutdown', { reason: 'quit' }).catch(() => undefined);

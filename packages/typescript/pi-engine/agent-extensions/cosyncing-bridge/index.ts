@@ -690,7 +690,13 @@ export default function (pi: ExtensionAPI) {
           setBridgeStatus('📱 re-linking…');
           return;
         }
-        if (r.ok) commands = (await r.json())?.commands ?? [];
+        if (!r.ok) {
+          // Any other refusal (an omp runtime the broker cannot use right now, a credential it no
+          // longer accepts) answers at once; without this backoff the poll spun on it.
+          await pause(1500, signal);
+          continue;
+        }
+        commands = (await r.json())?.commands ?? [];
       } catch {
         await pause(1500, signal);
         continue;
