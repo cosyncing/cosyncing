@@ -50,7 +50,7 @@ import { join } from 'node:path';
 const config = JSON.parse(readFileSync(process.env.FAKE_CLINE_CONFIG, 'utf8'));
 const record = (value) => appendFileSync(config.ledgerPath, JSON.stringify(value) + '\\n');
 if (process.argv.includes('--version')) {
-  record({ kind: 'version-probe', noAutoUpdate: process.env.CLINE_NO_AUTO_UPDATE });
+  record({ kind: 'version-probe', noAutoUpdate: process.env.CLINE_NO_AUTO_UPDATE, script: process.argv[1] });
   process.stdout.write('${CLINE_VERIFIED_VERSION}\\n');
   process.exit(0);
 }

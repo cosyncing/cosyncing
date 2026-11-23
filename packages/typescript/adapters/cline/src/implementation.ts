@@ -170,6 +170,8 @@ export interface ClineAdapterOptions {
   renameTimeoutMs?: number;
   /** Deterministic fixture override for the measured native history-update child. */
   nativeRenameTimeoutMs?: number;
+  /** Clock for the binary version-probe cache (`version.ts`); fixtures pass a controlled one. */
+  now?: () => number;
 }
 
 interface PendingCreatedOwner {
@@ -311,6 +313,7 @@ export class ClineAdapter implements AgentBackend {
   private readonly pendingCreateTimeoutMs: number;
   private readonly renameTimeoutMs: number;
   private readonly nativeRenameTimeoutMs: number;
+  private readonly now: () => number;
   private readonly resolveStoredDriveState?: ClineAdapterOptions['resolveStoredDriveState'];
   private readonly revokeStoredDriveEligibility?: ClineAdapterOptions['revokeStoredDriveEligibility'];
   private readonly recordStoredDriveBoundary?: ClineAdapterOptions['recordStoredDriveBoundary'];
@@ -361,6 +364,7 @@ export class ClineAdapter implements AgentBackend {
       && (options.nativeRenameTimeoutMs ?? 0) > 0
       ? options.nativeRenameTimeoutMs!
       : CLINE_NATIVE_RENAME_TIMEOUT_MS;
+    this.now = options.now ?? Date.now;
     this.listModels = () => this.listHubModels();
     this.listModes = () => this.listCreationModes();
     this.createSession = (value = {}) => this.createHubSession(value);
@@ -395,7 +399,7 @@ export class ClineAdapter implements AgentBackend {
     const profileRoot = clineManagedDataRoot(this.env, this.homeDir);
     const port = clineManagedHubPort(this.env);
     const discoveryPath = clineManagedHubDiscoveryPath(this.env, this.homeDir);
-    const invocation = await clineVerifiedInvocation(this.command, this.env);
+    const invocation = await clineVerifiedInvocation(this.command, this.env, this.now);
     const launchable = invocation?.kind === 'native';
     return {
       identityKey: clineManagedHubIdentity(this.env, this.homeDir),
@@ -446,7 +450,7 @@ export class ClineAdapter implements AgentBackend {
     const sessions = await this.storedSessions(options);
     const descriptor = await this.describeManagedHost();
     const writerAvailable = !!this.configuredHubModel()
-      && await clineVerifiedInvocation(this.command, this.env) !== undefined
+      && await clineVerifiedInvocation(this.command, this.env, this.now) !== undefined
       && await this.isManagedHostOwned?.(descriptor.identityKey) === true
       && await this.isManagedHostReady({ ...(options?.signal ? { signal: options.signal } : {}) });
     const modelCatalog = writerAvailable ? await this.listHubModels() : [];
@@ -530,7 +534,7 @@ export class ClineAdapter implements AgentBackend {
   }
 
   async canCreateSession(): Promise<boolean> {
-    if (!await clineVerifiedInvocation(this.command, this.env) || !this.configuredHubModel()) return false;
+    if (!await clineVerifiedInvocation(this.command, this.env, this.now) || !this.configuredHubModel()) return false;
     const descriptor = await this.describeManagedHost();
     return await this.isManagedHostOwned?.(descriptor.identityKey) === true
       && await this.isManagedHostReady();
@@ -548,7 +552,7 @@ export class ClineAdapter implements AgentBackend {
    *  "that model is no longer available", which is not what an unverified
    *  binary establishes. A configured-but-unset hub model is a genuine empty. */
   private async listHubModels(): Promise<ModelOption[]> {
-    if (!await clineVerifiedInvocation(this.command, this.env)) {
+    if (!await clineVerifiedInvocation(this.command, this.env, this.now)) {
       throw new Error(`Cline model catalog requires a ${CLINE_MINIMUM_SUPPORTED_VERSION}-or-newer binary.`);
     }
     const model = this.configuredHubModel();
@@ -882,7 +886,7 @@ export class ClineAdapter implements AgentBackend {
   }
 
   private async runNativeHistoryRename(session: ClineStoredSession, title: string): Promise<boolean> {
-    const invocation = await clineVerifiedInvocation(this.command, this.env);
+    const invocation = await clineVerifiedInvocation(this.command, this.env, this.now);
     if (!invocation) {
       throw new NativeSessionUnresumableError(
         `Cline native rename requires a ${CLINE_MINIMUM_SUPPORTED_VERSION}-or-newer binary.`);
@@ -993,7 +997,7 @@ export class ClineAdapter implements AgentBackend {
     }
     const descriptor = await this.describeManagedHost();
     const writerReady = managed && !!this.configuredHubModel()
-      && await clineVerifiedInvocation(this.command, this.env) !== undefined
+      && await clineVerifiedInvocation(this.command, this.env, this.now) !== undefined
       && await this.isManagedHostOwned?.(descriptor.identityKey) === true
       && await this.isManagedHostReady();
     const eligible = (writerReady || activeDriving)
