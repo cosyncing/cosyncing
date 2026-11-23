@@ -560,6 +560,21 @@ try {
       && ownershipUnknown.summary.includes(ownershipDetail)
       && ownershipUnknown.remediation?.command === 'codex app-server daemon restart'
       && ownershipUnknown.remediation.message.includes('While nothing is running'));
+  const ownershipStaleReceipt = checkById(await diagnoseCodexSetup(codexSocketContext('linux'), {
+    readDaemonProcess: () => ({ state: 'absent', staleReceipts: ['app-server.pid'] }),
+  }), 'codex.daemon-ownership');
+  check('Codex doctor says a receipt exists but names no running daemon, with the idle-only restart',
+    ownershipStaleReceipt.status === 'skip' && ownershipStaleReceipt.detailCode === 'daemon-ownership-receipt-stale'
+      && ownershipStaleReceipt.summary.includes('PID receipt (app-server.pid) exists but names no running daemon process')
+      && ownershipStaleReceipt.evidence?.receiptLayouts === 'app-server.pid'
+      && ownershipStaleReceipt.remediation?.command === 'codex app-server daemon restart',
+    ownershipStaleReceipt.summary);
+  const ownershipAbsent = checkById(await diagnoseCodexSetup(codexSocketContext('linux'), {
+    readDaemonProcess: () => ({ state: 'absent' }),
+  }), 'codex.daemon-ownership');
+  check('Codex doctor reports no recorded daemon only when no receipt exists',
+    ownershipAbsent.status === 'skip' && ownershipAbsent.detailCode === 'daemon-ownership-absent'
+      && ownershipAbsent.summary === 'No managed Codex daemon process is recorded.');
   const modernArguments = ['app-server', '--remote-control', '--listen', 'unix://', '--analytics-default-enabled', '--managed-daemon'];
   const parsedArguments = parseManagedCodexDaemonArguments(modernArguments);
   const ownershipVerified = checkById(await diagnoseCodexSetup(codexSocketContext('linux'), {
