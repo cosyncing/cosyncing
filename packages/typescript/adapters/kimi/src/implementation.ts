@@ -86,6 +86,7 @@ import {
   type AvailabilityOptions,
   type ManagedHostDescriptor,
   type ManagedHostIdentityInputs,
+  type ManagedHostReadinessFault,
   type ModelOption,
   type PromptInput,
   type SessionConnection,
@@ -95,7 +96,7 @@ import {
 } from '@cosyncing/adapter-api';
 import { basename, join } from 'node:path';
 import { homedir } from 'node:os';
-import { diagnoseKimiSetup } from './diagnostics.ts';
+import { diagnoseKimiSetup, KIMI_SUPPORTED_RANGE } from './diagnostics.ts';
 import {
   KIMI_INSTANCE_SCAN_MAX_FILES,
   KimiReadOnlyHttp,
@@ -287,6 +288,30 @@ export const KIMI_TAKEOVER_IN_FLIGHT_REFUSAL =
  */
 const KIMI_HOST_UNAVAILABLE_REMEDIATION = 'retry shortly, or run `cosyncing doctor`';
 
+/**
+ * The same pointer for a host this adapter will not speak, minus "retry
+ * shortly": a version does not change by waiting. Doctor names the running and
+ * the installed version and the supported range.
+ */
+const KIMI_UNSUPPORTED_HOST_REMEDIATION = 'run `cosyncing doctor`';
+
+function isUnsupportedHost(reason: KimiInstanceRefusal): boolean {
+  return reason === 'unsupported-version' || reason === 'unsupported-protocol';
+}
+
+/**
+ * The typed 503 every create-side refusal raises, from one place, so the
+ * readiness boundary and the create itself cannot disagree about a host's
+ * standing.
+ */
+function createRefusal(reason: KimiInstanceRefusal): SessionCreateTemporarilyUnavailableError {
+  const unsupported = isUnsupportedHost(reason);
+  return new SessionCreateTemporarilyUnavailableError(
+    `${ATTACH_REFUSAL[reason]} — ${unsupported ? KIMI_UNSUPPORTED_HOST_REMEDIATION : KIMI_HOST_UNAVAILABLE_REMEDIATION}`,
+    unsupported ? 'kimi-version-unsupported' : 'kimi-server-unavailable',
+  );
+}
+
 const ATTACH_REFUSAL: Record<KimiInstanceRefusal, string> = {
   none: 'no local Kimi server is running',
   ambiguous: 'several Kimi servers are running on this home; cosyncing will not guess which one owns the session',
@@ -297,6 +322,8 @@ const ATTACH_REFUSAL: Record<KimiInstanceRefusal, string> = {
   'startup-mismatch': 'the Kimi server on this port did not start when its registry record says it did',
   'version-mismatch': 'the Kimi server on this port reports a different version from the one its registry record records',
   incomplete: 'the Kimi instance registry holds more records than the bounded scan examines; cosyncing will not pick a server from a partial view',
+  'unsupported-version': `the running Kimi Code server is a version cosyncing does not support yet: it supports Kimi Code ${KIMI_SUPPORTED_RANGE}, and Kimi Code 2.x replaced the local server protocol`,
+  'unsupported-protocol': `the running Kimi Code server speaks the Kimi Agent Protocol, which cosyncing does not support yet: it supports Kimi Code ${KIMI_SUPPORTED_RANGE}`,
 };
 
 /**
@@ -791,6 +818,30 @@ export class KimiAdapter implements AgentBackend {
     if (!resolved.ok) return false;
     const health = await resolved.http.getJson<{ ok?: unknown }>('/api/v1/healthz');
     return health.ok && health.data?.ok === true;
+  }
+
+  /**
+   * WHY the managed host failed readiness, asked by supervision before it acts.
+   *
+   * Claimed as the adapter's fault for exactly one finding: the identity gate
+   * refused the running host as a version or protocol this adapter does not
+   * speak. That host may be perfectly healthy, and restarting it cannot help —
+   * the same binary comes back as the same version — while a host the operator
+   * started is not cosyncing's to cycle at all. So recovery is told to leave it
+   * alone, and the operator is told why, once.
+   *
+   * Everything else answers `host`, which keeps recovery exactly as it was
+   * before this hook existed. The gate is the same one every other path runs, so
+   * an unsupported registry record is still refused before anything is sent.
+   */
+  async managedHostReadinessFault(options?: AvailabilityOptions): Promise<ManagedHostReadinessFault> {
+    const { resolved } = await this.verifiedInstance(options?.signal);
+    if (resolved.ok || !isUnsupportedHost(resolved.reason)) return { kind: 'host' };
+    return {
+      kind: 'adapter',
+      remedy: 'contract',
+      detail: `${ATTACH_REFUSAL[resolved.reason]}. Run \`cosyncing doctor\` for the running and installed versions.`,
+    };
   }
 
   /**
@@ -1511,10 +1562,7 @@ export class KimiAdapter implements AgentBackend {
   private async readyToCreateSession(): Promise<void> {
     const { resolved } = await this.verifiedInstance();
     if (resolved.ok) return;
-    throw new SessionCreateTemporarilyUnavailableError(
-      `${ATTACH_REFUSAL[resolved.reason]} — ${KIMI_HOST_UNAVAILABLE_REMEDIATION}`,
-      'kimi-server-unavailable',
-    );
+    throw createRefusal(resolved.reason);
   }
 
   /**
@@ -1556,12 +1604,7 @@ export class KimiAdapter implements AgentBackend {
       throw new Error('kimi needs an existing working directory to create a session in');
     }
     const { resolved, token } = await this.verifiedInstance();
-    if (!resolved.ok) {
-      throw new SessionCreateTemporarilyUnavailableError(
-        `${ATTACH_REFUSAL[resolved.reason]} — ${KIMI_HOST_UNAVAILABLE_REMEDIATION}`,
-        'kimi-server-unavailable',
-      );
-    }
+    if (!resolved.ok) throw createRefusal(resolved.reason);
     const title = opts?.title?.trim();
     const outcome = await this.driveClient(resolved.instance, token).createSession({
       ...(title ? { title } : {}),
