@@ -349,7 +349,7 @@ const ZH_HUMAN_TEXT: Readonly<Record<string, string>> = Object.freeze({
   'Repair broker-owned diagnostic state.': '请修复 broker 自有的诊断状态。',
   'Retry the managed runtime check and inspect the recorded failure.': '请重试托管运行时检查，并查看已记录的失败。',
   'Install the official Codex CLI, then rerun doctor.': '请安装官方 Codex CLI，然后重新运行 doctor。',
-  'Install the official OpenCode CLI, then rerun doctor.': '请安装官方 OpenCode CLI，然后重新运行 doctor。',
+  'Install OpenCode 1 with `curl -fsSL https://opencode.ai/install | bash` or `npm install --global opencode-ai`, then rerun doctor. OpenCode 2 is not yet supported.': '请运行 `curl -fsSL https://opencode.ai/install | bash` 或 `npm install --global opencode-ai` 安装 OpenCode 1，然后重新运行 doctor。尚不支持 OpenCode 2。',
   'Install the supported Pi coding-agent package, then rerun doctor.': '请安装受支持的 Pi coding-agent 软件包，然后重新运行 doctor。',
   'Install the official Claude Code CLI, then rerun doctor.': '请安装官方 Claude Code CLI，然后重新运行 doctor。',
   'Run setup or repair after installing Codex.': '安装 Codex 后，请运行 setup 或 repair。',
