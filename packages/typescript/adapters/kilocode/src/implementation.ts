@@ -682,15 +682,44 @@ function requestFromEvent(raw: unknown, sessionId: string): AgentMessage | undef
  * every open request it withdraws (a reconnect that no longer lists it, a lost or demoted Drive, a
  * close) as `permission-resolved`; for one of these that is restated as the `question-resolved` a
  * question card and its attention item close on.
+ *
+ * It also keeps the cards Kilo has not settled yet, as last announced or read, for a `GET /question`
+ * that fails: those stand unchanged rather than being withdrawn by a read that established nothing.
  */
 class KiloQuestionLedger {
   private readonly ids = new Set<string>();
+  private readonly open = new Map<string, KiloQuestionRequest>();
 
   note(message: AgentMessage | undefined): void {
+    if (message?.type === 'question-resolved') {
+      this.open.delete(message.requestId);
+      return;
+    }
     if (message?.type !== 'question-request') return;
     this.ids.delete(message.requestId);
     this.ids.add(message.requestId);
-    while (this.ids.size > KILO_LIVE_MAX_QUESTION_IDS) this.ids.delete(this.ids.values().next().value!);
+    this.open.set(message.requestId, message);
+    while (this.ids.size > KILO_LIVE_MAX_QUESTION_IDS) {
+      const oldest = this.ids.values().next().value!;
+      this.ids.delete(oldest);
+      this.open.delete(oldest);
+    }
+  }
+
+  /** A `GET /question` that answered: exactly these are open now. */
+  reread(requests: readonly KiloQuestionRequest[]): void {
+    this.open.clear();
+    for (const request of requests) this.note(request);
+  }
+
+  /** Kilo answered that it no longer holds this question. */
+  settle(requestId: string): void {
+    this.open.delete(requestId);
+  }
+
+  /** The cards a failed `GET /question` leaves standing: those already shown and not yet settled. */
+  stillOpen(): KiloQuestionRequest[] {
+    return [...this.open.values()];
   }
 
   surfaced(requestId: string): boolean {
@@ -726,35 +755,61 @@ async function readPendingList(
 }
 
 /** Permissions and questions for one live connection; questions it surfaces go in `questions`. */
-function kiloRequestDialect(questions: KiloQuestionLedger): OpenCodeLivePermissionDialect {
+function kiloRequestDialect(
+  questions: KiloQuestionLedger,
+  trace?: (detail: string) => void,
+): OpenCodeLivePermissionDialect {
+  let questionReadFailureTraced = false;
+  /**
+   * `GET /question`, settled on its own and never thrown. The wire reads the pending list together
+   * with the session status, and one throw discards both, so a serve that refuses this route (a
+   * build without it, a transient error) would otherwise cost the permission cards and the status
+   * seed that read fine. A failed read establishes nothing: the cards this connection already shows
+   * stand unchanged (none, on a serve that never offered the route) and nothing new is claimed.
+   */
+  const readQuestions = async (context: OpenCodeLiveRequestContext): Promise<KiloQuestionRequest[]> => {
+    let rows: unknown[];
+    try {
+      rows = await readPendingList(context, '/question', 'pending-question');
+    } catch (error) {
+      if (!questionReadFailureTraced) {
+        questionReadFailureTraced = true;
+        const detail = error instanceof Error ? error.message : String(error);
+        trace?.(`Kilo questions could not be read (${detail}); questions already shown are kept, and permissions and status are read as usual.`);
+      }
+      return questions.stillOpen();
+    }
+    const read = rows.flatMap((row) => {
+      const message = questionRequestFrom(row, context.sessionId);
+      return message ? [message] : [];
+    });
+    questions.reread(read);
+    return read;
+  };
   return {
     /**
-     * THROWS when `/permission` or `/question` refuses. Answering `[]` is a claim
-     * that nothing is pending, and every consumer treats it as one: `seedLiveState`
-     * runs on EVERY SSE reconnect and emits `permission-resolved decision:'external'`
-     * for each id that has disappeared, so a session genuinely blocked on a
-     * permission or a question would have its card dismissed by a 503 during a
-     * reconnect — status re-derived as Working, the agent blocked forever, nothing
-     * left to click.
+     * THROWS when `/permission` refuses. Answering `[]` is a claim that nothing is
+     * pending, and every consumer treats it as one: `seedLiveState` runs on EVERY
+     * SSE reconnect and emits `permission-resolved decision:'external'` for each id
+     * that has disappeared, so a session genuinely blocked on a permission would
+     * have its card dismissed by a 503 during a reconnect — status re-derived as
+     * Working, the agent blocked forever, nothing left to click.
      *
      * A throw is the "unknown" the three call sites already handle: two trace and
-     * carry on, and the broker's `getPending` keeps its existing map.
+     * carry on, and the broker's `getPending` keeps its existing map. Questions
+     * never throw here (see `readQuestions`).
      */
     async loadPending(context): Promise<AgentMessage[]> {
       const [permissions, pendingQuestions] = await Promise.all([
         readPendingList(context, '/permission', 'pending-permission'),
-        readPendingList(context, '/question', 'pending-question'),
+        readQuestions(context),
       ]);
       return [
         ...permissions.flatMap((permission) => {
           const message = permissionFromEvent({ type: 'permission.asked', properties: permission }, context.sessionId);
           return message?.type === 'permission-request' ? [message] : [];
         }),
-        ...pendingQuestions.flatMap((request) => {
-          const message = questionRequestFrom(request, context.sessionId);
-          questions.note(message);
-          return message ? [message] : [];
-        }),
+        ...pendingQuestions,
       ];
     },
     mapEvent(event, sessionId) {
@@ -786,7 +841,7 @@ class KiloLiveConnection extends OpenCodeLiveConnection {
   constructor(options: Omit<OpenCodeLiveConnectionOptions, 'dialect'>, questions = new KiloQuestionLedger()) {
     super({
       ...options,
-      dialect: { productId: 'kilo', displayName: KILO_DISPLAY_NAME, permissions: kiloRequestDialect(questions) },
+      dialect: { productId: 'kilo', displayName: KILO_DISPLAY_NAME, permissions: kiloRequestDialect(questions, options.trace) },
     });
     this.questions = questions;
     this.writer = options.ownership;
@@ -859,6 +914,7 @@ class KiloLiveConnection extends OpenCodeLiveConnection {
     // Kilo's QuestionNotFoundError: already answered or dismissed (from another client or Kilo's own
     // terminal), or withdrawn. Refused, never acked as delivered.
     if (response.status === 404) {
+      this.questions.settle(requestId);
       throw new ControlRefusedError(`${KILO_DISPLAY_NAME} no longer holds this question open.`, 'request-not-pending');
     }
     if (response.status === 401 || response.status === 403 || response.status >= 500) {

@@ -37,6 +37,9 @@ const capturedFor = <T>(value: T, sessionId: string): T =>
   JSON.parse(JSON.stringify(value).replaceAll(questionCapture.sessionID, sessionId)) as T;
 /** What the fixture serve lists on GET /question; a reply or reject removes its row, as Kilo does. */
 let pendingQuestionRows: Array<{ id: string }> = [];
+/** How GET /question fails, when it does: a serve without the route (404), or no answer at all. */
+let questionListFailure: 'none' | 'not-found' | 'network' = 'none';
+let questionListRefusals = 0;
 
 const root = mkdtempSync(join(tmpdir(), 'cosyncing-kilo-live-'));
 // Waits are on conditions, never on durations. `flush` yields the event loop so every synchronously
@@ -195,7 +198,14 @@ const fakeFetch = (async (input: string | URL | Request, init: RequestInit = {})
         : []),
     ]);
   }
-  if (parsed.pathname === '/question' && method === 'GET') return json(pendingQuestionRows);
+  if (parsed.pathname === '/question' && method === 'GET') {
+    if (questionListFailure === 'network') throw new TypeError('fixture question endpoint unavailable');
+    if (questionListFailure === 'not-found') {
+      questionListRefusals += 1;
+      return new Response('Not Found', { status: 404 });
+    }
+    return json(pendingQuestionRows);
+  }
   const questionRoute = /^\/question\/([^/]+)\/(reply|reject)$/u.exec(parsed.pathname);
   if (questionRoute && method === 'POST') {
     const index = pendingQuestionRows.findIndex((row) => row.id === decodeURIComponent(questionRoute[1]!));
@@ -431,6 +441,7 @@ try {
     revokeStoredDriveEligibility: (info: { id: string }) => { boundaries.delete(info.id); reconciliations += 1; },
     storeWatch: manualStoreWatch,
   };
+  const observeTraces: string[] = [];
   const adapter = new KiloAdapter({
     command: fakeKilo,
     env: { PATH: '', KILO_DATA_DIR: root },
@@ -439,6 +450,7 @@ try {
     serverPassword: 'fixture-password',
     testOnlyEnableUnverifiedDrive: true,
     fetch: fakeFetch,
+    trace: (event) => { if (event.op === 'observe') observeTraces.push(event.detail); },
     ...ownershipOptions,
   });
   const roster = await adapter.discoverSessions();
@@ -910,12 +922,23 @@ try {
   // KL-1: a question already waiting when this Drive attaches (the captured GET /question row).
   const firstQuestionId = questionCapture.answered.asked.payload.properties.id as string;
   pendingQuestionRows = capturedFor(questionCapture.answered.pendingAtAsk, 'ses_child');
+  // The list is refused at attach, the way a serve without the route answers it (404). The wire reads
+  // the pending lists together with the status, so the question list must not take the rest down.
+  questionListFailure = 'not-found';
   const conn = await adapter.attach('ses_child', 'live');
   const live: AgentMessage[] = [];
   conn.subscribe((message) => live.push(message));
   await until('late attach seeding', () => conn.info.status === 'needs-input');
+  const pendingWithoutQuestions = await conn.getPending!();
   check('late attach seeds needs-input from point-in-time busy and pending state',
-    conn.info.status === 'needs-input' && (await conn.getPending!()).some((row) => row.type === 'permission-request'));
+    conn.info.status === 'needs-input' && pendingWithoutQuestions.some((row) => row.type === 'permission-request'));
+  check('a serve that answers 404 for GET /question still seeds the status and shows the permission card',
+    questionListRefusals >= 2 && conn.info.status === 'needs-input'
+      && pendingWithoutQuestions.some((row) => row.type === 'permission-request' && row.requestId === 'perm-existing')
+      && !pendingWithoutQuestions.some((row) => row.type === 'question-request')
+      && !live.some((row) => row.type === 'permission-resolved' && row.requestId === 'perm-existing'),
+    `refusals=${questionListRefusals} pending=${JSON.stringify(pendingWithoutQuestions.map((row) => [row.type, 'requestId' in row ? row.requestId : undefined]))}`);
+  questionListFailure = 'none';
   // Every (re)opened event stream re-reads the pending list. A card this connection already sent is not
   // sent again: each client holds it, and a reconnect used to put it in every tab once more.
   const pendingCards = () => live.filter((row) => row.type === 'permission-request' && row.requestId === 'perm-existing').length;
@@ -931,8 +954,23 @@ try {
   await reopenEventStream('the event stream to reopen and re-read the pending list');
   const cardsAfterFirstReopen = pendingCards();
   const questionCardsAfterFirstReopen = questionCards();
+  // The question list answers again, then fails on the next two reopens: no answer at all, then 404.
+  questionListFailure = 'network';
   await reopenEventStream('the event stream to reopen once more');
+  questionListFailure = 'not-found';
   await reopenEventStream('and once more');
+  const pendingDuringRefusal = await conn.getPending!();
+  questionListFailure = 'none';
+  check('a question list that fails on a reopen withdraws neither the question card already shown nor the permission card',
+    questionCardsAfterFirstReopen === 1
+      && !live.some((row) => (row.type === 'question-resolved' || row.type === 'permission-resolved')
+        && (row.requestId === firstQuestionId || row.requestId === 'perm-existing'))
+      && pendingDuringRefusal.some((row) => row.type === 'question-request' && row.requestId === firstQuestionId)
+      && pendingDuringRefusal.some((row) => row.type === 'permission-request' && row.requestId === 'perm-existing'),
+    `questionCards=${questionCardsAfterFirstReopen} pending=${JSON.stringify(pendingDuringRefusal.map((row) => [row.type, 'requestId' in row ? row.requestId : undefined]))}`);
+  const questionReadTraces = observeTraces.filter((detail) => /Kilo questions could not be read/u.test(detail));
+  check('...and the refused question list is traced once for the connection', questionReadTraces.length === 1,
+    JSON.stringify(questionReadTraces));
   check('a reopened event stream re-sends no pending card this connection already sent',
     cardsAfterFirstReopen <= 1 && pendingCards() === cardsAfterFirstReopen && conn.info.status === 'needs-input'
       && questionCardsAfterFirstReopen <= 1 && questionCards() === questionCardsAfterFirstReopen,
