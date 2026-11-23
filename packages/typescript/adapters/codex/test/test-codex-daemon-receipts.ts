@@ -4,11 +4,16 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spyOn } from 'bun:test';
 import { HostProcessProvider } from '@cosyncing/adapter-api';
-import { readCodexDaemonProcess, type CodexDaemonProcessRead, type CodexDaemonReceiptLayout } from '../src/daemon-process.ts';
+import { readCodexDaemonProcess, type CodexDaemonProcess, type CodexDaemonProcessRead, type CodexDaemonReceiptLayout } from '../src/daemon-process.ts';
 import { restartCodexDaemonVerified } from '../src/daemon-restart.ts';
 
 // Real scratch receipt/package files, with kernel process observations supplied by a fixture.
 // Every refusal also exercises the restart boundary and proves no lifecycle action occurs.
+// `captured()` receipts follow a real Linux Codex 0.165.0 receipt (pid, boot id and digests scrubbed):
+// the legacy start text written at launch plus the native identity, read here after a host suspend
+// had moved `ps -o lstart` by 36 minutes while the boot id and start ticks still matched.
+const CAPTURED_BOOT = '11111111-2222-4333-8444-555555555555';
+const CAPTURED_TICKS = 36211;
 if (process.platform !== 'win32') {
   const cases: Record<string, (f: Fixture) => void> = {
     'legacy-layout': (f) => { f.layout = 'app-server.pid'; f.executable = f.cli; },
@@ -30,7 +35,13 @@ if (process.platform !== 'win32') {
       f.refused = 'unknown';
     },
     'stale-pid': (f) => { f.receiptPid++; f.refused = 'absent'; },
-    'stale-start': (f) => { f.receiptStart = 'old generation'; f.refused = 'absent'; },
+    // Without a native identity a changed start time may be a clock change or a reused PID.
+    'stale-start': (f) => { f.receiptStart = 'old generation'; f.refused = 'unknown'; f.detail = /start time no longer matches process 12345/; },
+    'identity-after-clock-change': (f) => { f.captured(); f.restarts = true; },
+    'identity-earlier-field-name': (f) => { f.captured(); f.identityField = 'linuxProcessIdentity'; },
+    'identity-other-start': (f) => { f.captured({ startTicks: CAPTURED_TICKS + 1 }); f.refused = 'absent'; },
+    'identity-other-boot': (f) => { f.captured({ bootId: '66666666-7777-4888-8999-000000000000' }); f.refused = 'absent'; },
+    'malformed-identity': (f) => { f.captured({ startTicks: String(CAPTURED_TICKS) }); f.refused = 'unknown'; },
     'invalid-pid': (f) => { f.receiptPid = -1; f.refused = 'unknown'; },
     'unsafe-mode': (f) => { f.mode = 0o622; f.refused = 'unknown'; },
     'unsafe-owner': (f) => { f.receiptOwner++; f.refused = 'unknown'; },
@@ -50,7 +61,14 @@ if (process.platform !== 'win32') {
     },
     'two-live-distinct-pids': (f) => { f.addSecondProcess(); f.refused = 'unknown'; },
     'two-live-distinct-starts': (f) => { f.addSecondProcess('second start'); f.refused = 'unknown'; },
-    'two-stale-receipts': (f) => { f.receiptPid++; f.extra = { pid: f.pid, processStartTime: 'old generation' }; f.refused = 'absent'; },
+    'two-stale-receipts': (f) => {
+      f.captured();
+      f.receiptPid++;
+      f.extra = { pid: f.pid, processStartTime: f.receiptStart, processIdentity: { bootId: CAPTURED_BOOT, startTicks: CAPTURED_TICKS - 1 } };
+      f.refused = 'absent';
+      f.staleReceipts = ['app-server.pid', 'daemon.pid'];
+    },
+    'unverifiable-plus-stale-pid': (f) => { f.receiptPid++; f.extra = { pid: f.pid, processStartTime: 'old generation' }; f.refused = 'unknown'; },
     'unreadable-process-start': (f) => { f.unreadableStart = true; f.refused = 'unknown'; },
     'unsafe-second-receipt': (f) => { f.layout = 'app-server.pid'; f.extra = { pid: f.pid, processStartTime: f.receiptStart }; f.extraMode = 0o666; f.refused = 'unknown'; },
     'malformed-first-receipt': (f) => { f.extra = { pid: f.pid }; f.refused = 'unknown'; },
@@ -66,6 +84,10 @@ if (process.platform !== 'win32') {
     pid = 12345;
     receiptPid = this.pid;
     receiptStart = 'fixture start';
+    liveStart = 'fixture start';
+    liveBoot = 'fixture boot';
+    identity?: unknown;
+    identityField = 'processIdentity';
     receiptOwner = process.getuid!();
     processOwner = process.getuid!();
     processHome = this.home;
@@ -88,6 +110,16 @@ if (process.platform !== 'win32') {
     changeBoot = false;
     missing = false;
     refused?: 'absent' | 'unknown';
+    detail?: RegExp;
+    staleReceipts?: CodexDaemonReceiptLayout[];
+    restarts = false;
+    /** The live process carries kernel start ticks; `ps -o lstart` (here the same value) no longer matches. */
+    captured(identity: Record<string, unknown> = {}) {
+      this.liveStart = String(CAPTURED_TICKS);
+      this.liveBoot = CAPTURED_BOOT;
+      this.receiptStart = 'Sat Nov 21 23:33:57 2026';
+      this.identity = { bootId: CAPTURED_BOOT, startTicks: CAPTURED_TICKS, ...identity };
+    }
     addSecondProcess(start = 'fixture start', executable = this.executable) {
       this.secondProcess = { pid: this.pid + 1, start, executable };
       this.extra = { pid: this.secondProcess.pid, processStartTime: start };
@@ -117,7 +149,14 @@ if (process.platform !== 'win32') {
       fs.mkdirSync(receipts);
       const receipt = join(receipts, f.layout);
       if (!f.missing) {
-        const text = f.invalidJson ? '{' : JSON.stringify({ pid: f.receiptPid, processStartTime: f.receiptStart, padding: f.padding });
+        const text = f.invalidJson ? '{' : JSON.stringify({
+          pid: f.receiptPid, processStartTime: f.receiptStart,
+          ...(f.identity === undefined ? {} : {
+            [f.identityField]: f.identity,
+            executableIdentity: { digest: Array(32).fill(0), path_digest: Array(32).fill(0) },
+          }),
+          padding: f.padding,
+        });
         if (f.directoryReceipt) fs.mkdirSync(receipt);
         else if (f.linkReceipt) {
           const target = join(f.home, 'linked-receipt');
@@ -131,7 +170,7 @@ if (process.platform !== 'win32') {
         fs.chmodSync(extra, f.extraMode);
       }
       Object.defineProperty(process, 'platform', { ...platform, value: 'linux' });
-      const liveProcesses = new Map([[f.pid, { start: 'fixture start', executable: f.executable }]]);
+      const liveProcesses = new Map([[f.pid, { start: f.liveStart, executable: f.executable }]]);
       if (f.secondProcess) liveProcesses.set(f.secondProcess.pid, f.secondProcess);
       const inspections = new Map<number, number>();
       HostProcessProvider.prototype.liveProcess = (pid) => {
@@ -141,7 +180,7 @@ if (process.platform !== 'win32') {
         inspections.set(pid, count);
         return { state: 'running', identity: {
           pid, start: count > 1 && f.changeStart ? 'new start' : native.start,
-          boot: count > 1 && f.changeBoot ? 'new boot' : 'fixture boot', comm: native.executable,
+          boot: count > 1 && f.changeBoot ? 'new boot' : f.liveBoot, comm: native.executable,
         } };
       };
       spies.push(spyOn(fs, 'readFileSync').mockImplementation(((path: fs.PathOrFileDescriptor, ...rest: unknown[]) => {
@@ -176,6 +215,7 @@ if (process.platform !== 'win32') {
         assert.equal(read.process.pid, f.pid, 'the live receipt selects the daemon');
         assert.equal(read.process.executable, originalRealpath(f.executable));
         assert.deepEqual(read.process.unknownFlags, ['--analytics-default-enabled']);
+        if (f.restarts) await restartProceeds(read.process);
       } else {
         if (name.startsWith('two-live-')) {
           assert.equal(read.state, 'unknown');
@@ -183,6 +223,10 @@ if (process.platform !== 'win32') {
           for (const pid of liveProcesses.keys()) assert.equal(inspections.get(pid), 2, 'each conflicting process passes stable identity inspection');
         }
         if (read.state === 'unknown' && name.startsWith('malformed-')) assert.match(read.detail, /receipt .* is malformed/);
+        if (read.state === 'unknown' && f.detail) assert.match(read.detail, f.detail);
+        if (read.state === 'absent') {
+          assert.deepEqual(read.staleReceipts, f.staleReceipts ?? (f.missing ? undefined : [f.layout]), 'stale receipts are named, never invented');
+        }
         await refusesRestartWithoutMutation(read);
       }
       console.log(`PASS receipt ${name}`);
@@ -195,6 +239,25 @@ if (process.platform !== 'win32') {
       fs.rmSync(f.home, { recursive: true, force: true });
     }
   }
+}
+
+/** A verified daemon is stopped by its captured identity and replaced; nothing else is signalled. */
+async function restartProceeds(daemon: CodexDaemonProcess) {
+  const actions: string[] = [];
+  let stopped = false;
+  let started = false;
+  await restartCodexDaemonVerified({
+    captureProcess: () => stopped ? { state: 'absent' } : { state: 'running', process: daemon },
+    readVersion: async () => !stopped
+      ? { status: 'running', backend: 'pid', cliVersion: '0.171.0', appServerVersion: '0.165.0' }
+      : started ? { status: 'running', backend: 'pid', cliVersion: '0.171.0', appServerVersion: '0.171.0' } : undefined,
+    processState: (expected) => { assert.equal(expected, daemon); return stopped ? 'exited' : 'running'; },
+    gracefulStop: (expected) => { assert.equal(expected, daemon); actions.push('graceful'); stopped = true; },
+    forceStop: () => { actions.push('force'); },
+    run: async (command) => { actions.push(command); started = true; return { code: 0, stdout: '', stderr: '' }; },
+    now: () => 0, sleep: async () => {}, gracefulMs: 0, verifyMs: 0,
+  });
+  assert.deepEqual(actions, ['graceful', 'start'], 'an automatic restart proceeds without force');
 }
 
 async function refusesRestartWithoutMutation(read: CodexDaemonProcessRead) {

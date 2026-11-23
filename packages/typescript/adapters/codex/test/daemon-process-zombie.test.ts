@@ -36,7 +36,8 @@ describe.skipIf(process.platform !== 'linux')('a Codex daemon that is a zombie i
   test('a daemon receipt naming a zombie reads as no daemon', () => {
     const daemon = zombie();
     const { home, cli } = receiptHome(daemon.pid);
-    expect(readCodexDaemonProcess(home, cli)).toEqual({ state: 'absent' });
+    // The receipt is still on disk; it names no running process.
+    expect(readCodexDaemonProcess(home, cli)).toEqual({ state: 'absent', staleReceipts: ['daemon.pid'] });
   });
 
   test('a daemon reaped while its identity is being read has exited, not become unverifiable', () => {
@@ -50,7 +51,7 @@ describe.skipIf(process.platform !== 'linux')('a Codex daemon that is a zombie i
         return lstart(pid);
       },
     });
-    expect(read).toEqual({ state: 'absent' });
+    expect(read).toEqual({ state: 'absent', staleReceipts: ['daemon.pid'] });
   });
 
   test('a captured daemon that has become a zombie has exited', () => {
