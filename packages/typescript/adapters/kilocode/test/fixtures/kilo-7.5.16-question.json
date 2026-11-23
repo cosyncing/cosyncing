@@ -1,0 +1,445 @@
+{
+  "nativeEvidenceVersion": "7.5.16",
+  "capture": "kilo serve (7.5.16) in an isolated home on a spare loopback port, 2026-11-23; one OpenAI-compatible provider; the model was asked to call the question tool. Frames are /global/event frames in arrival order, verbatim except for the scrubbed fields.",
+  "scrubbed": [
+    "frame envelope `directory` (an absolute local path) -> /fixture/workspace",
+    "frame envelope `project` (a local project id) -> 40 zeros"
+  ],
+  "sessionID": "ses_df9694eeeffeX9DrqaL4ZX3Wmb",
+  "answered": {
+    "pendingAtAsk": [
+      {
+        "id": "que_20696db1e001NjW7Q68ZZV7klz",
+        "sessionID": "ses_df9694eeeffeX9DrqaL4ZX3Wmb",
+        "questions": [
+          {
+            "question": "Which colour do you prefer?",
+            "header": "Colour",
+            "options": [
+              {
+                "label": "Red",
+                "description": "Prefer the colour red"
+              },
+              {
+                "label": "Blue",
+                "description": "Prefer the colour blue"
+              }
+            ]
+          }
+        ],
+        "blocking": null,
+        "tool": {
+          "messageID": "msg_20696b554001hA0xrl6gGXU7Gr",
+          "callID": "chatcmpl-tool-aa52983ed1bf571f"
+        }
+      }
+    ],
+    "asked": {
+      "directory": "/fixture/workspace",
+      "project": "0000000000000000000000000000000000000000",
+      "payload": {
+        "id": "evt_20696db1f001GhS3RLz9NvIaQD",
+        "type": "question.asked",
+        "properties": {
+          "id": "que_20696db1e001NjW7Q68ZZV7klz",
+          "sessionID": "ses_df9694eeeffeX9DrqaL4ZX3Wmb",
+          "questions": [
+            {
+              "question": "Which colour do you prefer?",
+              "header": "Colour",
+              "options": [
+                {
+                  "label": "Red",
+                  "description": "Prefer the colour red"
+                },
+                {
+                  "label": "Blue",
+                  "description": "Prefer the colour blue"
+                }
+              ]
+            }
+          ],
+          "tool": {
+            "messageID": "msg_20696b554001hA0xrl6gGXU7Gr",
+            "callID": "chatcmpl-tool-aa52983ed1bf571f"
+          }
+        }
+      }
+    },
+    "toolRunning": {
+      "directory": "/fixture/workspace",
+      "project": "0000000000000000000000000000000000000000",
+      "payload": {
+        "id": "evt_20696db21001BNUQXDvV2sD9ex",
+        "type": "message.part.updated",
+        "properties": {
+          "sessionID": "ses_df9694eeeffeX9DrqaL4ZX3Wmb",
+          "part": {
+            "id": "prt_20696d4f2001auv50elBIORLsP",
+            "sessionID": "ses_df9694eeeffeX9DrqaL4ZX3Wmb",
+            "messageID": "msg_20696b554001hA0xrl6gGXU7Gr",
+            "type": "tool",
+            "callID": "chatcmpl-tool-aa52983ed1bf571f",
+            "tool": "question",
+            "state": {
+              "status": "running",
+              "input": {
+                "questions": [
+                  {
+                    "question": "Which colour do you prefer?",
+                    "header": "Colour",
+                    "options": [
+                      {
+                        "label": "Red",
+                        "description": "Prefer the colour red"
+                      },
+                      {
+                        "label": "Blue",
+                        "description": "Prefer the colour blue"
+                      }
+                    ]
+                  }
+                ]
+              },
+              "time": {
+                "start": 1795406879521
+              }
+            }
+          },
+          "time": 1795406879521
+        }
+      }
+    },
+    "reply": {
+      "path": "/question/que_20696db1e001NjW7Q68ZZV7klz/reply",
+      "body": {
+        "answers": [
+          [
+            "Red"
+          ]
+        ]
+      },
+      "status": 200,
+      "response": true
+    },
+    "replied": {
+      "directory": "/fixture/workspace",
+      "project": "0000000000000000000000000000000000000000",
+      "payload": {
+        "id": "evt_20696db74001aki45o0pxAsWEA",
+        "type": "question.replied",
+        "properties": {
+          "sessionID": "ses_df9694eeeffeX9DrqaL4ZX3Wmb",
+          "requestID": "que_20696db1e001NjW7Q68ZZV7klz",
+          "answers": [
+            [
+              "Red"
+            ]
+          ]
+        }
+      }
+    },
+    "toolCompleted": {
+      "directory": "/fixture/workspace",
+      "project": "0000000000000000000000000000000000000000",
+      "payload": {
+        "id": "evt_20696db920018Klhamfy9Ge8LP",
+        "type": "message.part.updated",
+        "properties": {
+          "sessionID": "ses_df9694eeeffeX9DrqaL4ZX3Wmb",
+          "part": {
+            "id": "prt_20696d4f2001auv50elBIORLsP",
+            "sessionID": "ses_df9694eeeffeX9DrqaL4ZX3Wmb",
+            "messageID": "msg_20696b554001hA0xrl6gGXU7Gr",
+            "type": "tool",
+            "callID": "chatcmpl-tool-aa52983ed1bf571f",
+            "tool": "question",
+            "state": {
+              "status": "completed",
+              "input": {
+                "questions": [
+                  {
+                    "question": "Which colour do you prefer?",
+                    "header": "Colour",
+                    "options": [
+                      {
+                        "label": "Red",
+                        "description": "Prefer the colour red"
+                      },
+                      {
+                        "label": "Blue",
+                        "description": "Prefer the colour blue"
+                      }
+                    ]
+                  }
+                ]
+              },
+              "output": "User has answered your questions: \"Which colour do you prefer?\"=\"Red\". You can now continue with the user's answers in mind.",
+              "title": "Asked 1 question",
+              "metadata": {
+                "answers": [
+                  [
+                    "Red"
+                  ]
+                ],
+                "truncated": false
+              },
+              "time": {
+                "start": 1795406879521,
+                "end": 1795406879634
+              }
+            }
+          },
+          "time": 1795406879634
+        }
+      }
+    },
+    "busy": {
+      "directory": "/fixture/workspace",
+      "project": "0000000000000000000000000000000000000000",
+      "payload": {
+        "id": "evt_20696dc43001JezWXbHLxBNHZM",
+        "type": "session.status",
+        "properties": {
+          "sessionID": "ses_df9694eeeffeX9DrqaL4ZX3Wmb",
+          "status": {
+            "type": "busy"
+          }
+        }
+      }
+    },
+    "answerText": {
+      "directory": "/fixture/workspace",
+      "project": "0000000000000000000000000000000000000000",
+      "payload": {
+        "id": "evt_20696e95b001RKURbt9p0TKnu6",
+        "type": "message.part.updated",
+        "properties": {
+          "sessionID": "ses_df9694eeeffeX9DrqaL4ZX3Wmb",
+          "part": {
+            "id": "prt_20696e955001KCNbAheEI5DTav",
+            "sessionID": "ses_df9694eeeffeX9DrqaL4ZX3Wmb",
+            "messageID": "msg_20696dc47001O9ichbUGFoCjZ0",
+            "type": "text",
+            "text": "\n\nYou prefer Red.",
+            "time": {
+              "start": 1795406883157,
+              "end": 1795406883163
+            }
+          },
+          "time": 1795406883163
+        }
+      }
+    },
+    "pendingAfter": []
+  },
+  "rejected": {
+    "pendingAtAsk": [
+      {
+        "id": "que_20696f816001kJ3k584KlUCgDm",
+        "sessionID": "ses_df9694eeeffeX9DrqaL4ZX3Wmb",
+        "questions": [
+          {
+            "question": "Do you want a haiku?",
+            "header": "Haiku",
+            "options": [
+              {
+                "label": "Yes",
+                "description": "I'd like a haiku"
+              },
+              {
+                "label": "No",
+                "description": "No haiku needed"
+              }
+            ]
+          }
+        ],
+        "blocking": null,
+        "tool": {
+          "messageID": "msg_20696ea25001oid4ViJPPGA57v",
+          "callID": "chatcmpl-tool-854f863850553f0c"
+        }
+      }
+    ],
+    "asked": {
+      "directory": "/fixture/workspace",
+      "project": "0000000000000000000000000000000000000000",
+      "payload": {
+        "id": "evt_20696f816002kJDk4K1NFe2WuR",
+        "type": "question.asked",
+        "properties": {
+          "id": "que_20696f816001kJ3k584KlUCgDm",
+          "sessionID": "ses_df9694eeeffeX9DrqaL4ZX3Wmb",
+          "questions": [
+            {
+              "question": "Do you want a haiku?",
+              "header": "Haiku",
+              "options": [
+                {
+                  "label": "Yes",
+                  "description": "I'd like a haiku"
+                },
+                {
+                  "label": "No",
+                  "description": "No haiku needed"
+                }
+              ]
+            }
+          ],
+          "tool": {
+            "messageID": "msg_20696ea25001oid4ViJPPGA57v",
+            "callID": "chatcmpl-tool-854f863850553f0c"
+          }
+        }
+      }
+    },
+    "toolRunning": {
+      "directory": "/fixture/workspace",
+      "project": "0000000000000000000000000000000000000000",
+      "payload": {
+        "id": "evt_20696f8190018fxbiNcsqBpz2i",
+        "type": "message.part.updated",
+        "properties": {
+          "sessionID": "ses_df9694eeeffeX9DrqaL4ZX3Wmb",
+          "part": {
+            "id": "prt_20696f29d001f4oTxKP3CIVok3",
+            "sessionID": "ses_df9694eeeffeX9DrqaL4ZX3Wmb",
+            "messageID": "msg_20696ea25001oid4ViJPPGA57v",
+            "type": "tool",
+            "callID": "chatcmpl-tool-854f863850553f0c",
+            "tool": "question",
+            "state": {
+              "status": "running",
+              "input": {
+                "questions": [
+                  {
+                    "header": "Haiku",
+                    "options": [
+                      {
+                        "description": "I'd like a haiku",
+                        "label": "Yes"
+                      },
+                      {
+                        "description": "No haiku needed",
+                        "label": "No"
+                      }
+                    ],
+                    "question": "Do you want a haiku?"
+                  }
+                ]
+              },
+              "time": {
+                "start": 1795406886937
+              }
+            }
+          },
+          "time": 1795406886937
+        }
+      }
+    },
+    "reject": {
+      "path": "/question/que_20696f816001kJ3k584KlUCgDm/reject",
+      "hasBody": false,
+      "status": 200,
+      "response": true
+    },
+    "rejected": {
+      "directory": "/fixture/workspace",
+      "project": "0000000000000000000000000000000000000000",
+      "payload": {
+        "id": "evt_20696f840001SsyFpQfnMAxuO5",
+        "type": "question.rejected",
+        "properties": {
+          "sessionID": "ses_df9694eeeffeX9DrqaL4ZX3Wmb",
+          "requestID": "que_20696f816001kJ3k584KlUCgDm"
+        }
+      }
+    },
+    "toolDismissed": {
+      "directory": "/fixture/workspace",
+      "project": "0000000000000000000000000000000000000000",
+      "payload": {
+        "id": "evt_20696f846001d2iIDuhhXLYTxU",
+        "type": "message.part.updated",
+        "properties": {
+          "sessionID": "ses_df9694eeeffeX9DrqaL4ZX3Wmb",
+          "part": {
+            "id": "prt_20696f29d001f4oTxKP3CIVok3",
+            "sessionID": "ses_df9694eeeffeX9DrqaL4ZX3Wmb",
+            "messageID": "msg_20696ea25001oid4ViJPPGA57v",
+            "type": "tool",
+            "callID": "chatcmpl-tool-854f863850553f0c",
+            "tool": "question",
+            "state": {
+              "status": "completed",
+              "input": {
+                "questions": [
+                  {
+                    "header": "Haiku",
+                    "options": [
+                      {
+                        "description": "I'd like a haiku",
+                        "label": "Yes"
+                      },
+                      {
+                        "description": "No haiku needed",
+                        "label": "No"
+                      }
+                    ],
+                    "question": "Do you want a haiku?"
+                  }
+                ]
+              },
+              "output": "User dismissed the question.",
+              "title": "Question dismissed",
+              "metadata": {
+                "answers": [],
+                "dismissed": true,
+                "truncated": false
+              },
+              "time": {
+                "start": 1795406886937,
+                "end": 1795406886981
+              }
+            }
+          },
+          "time": 1795406886982
+        }
+      }
+    },
+    "idleStatus": {
+      "directory": "/fixture/workspace",
+      "project": "0000000000000000000000000000000000000000",
+      "payload": {
+        "id": "evt_20696f8d6001dFNfLYc2hCPGYT",
+        "type": "session.status",
+        "properties": {
+          "sessionID": "ses_df9694eeeffeX9DrqaL4ZX3Wmb",
+          "status": {
+            "type": "idle"
+          }
+        }
+      }
+    },
+    "idle": {
+      "directory": "/fixture/workspace",
+      "project": "0000000000000000000000000000000000000000",
+      "payload": {
+        "id": "evt_20696f8d6002pzjQ1TiLNlVIe7",
+        "type": "session.idle",
+        "properties": {
+          "sessionID": "ses_df9694eeeffeX9DrqaL4ZX3Wmb"
+        }
+      }
+    }
+  },
+  "notPending": {
+    "status": 404,
+    "response": {
+      "_tag": "QuestionNotFoundError",
+      "requestID": "que_not_pending_capture",
+      "message": "Question request not found: que_not_pending_capture"
+    }
+  },
+  "undirectedPendingList": []
+}

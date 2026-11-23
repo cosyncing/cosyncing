@@ -318,15 +318,20 @@ export interface LifecycleStatusReport {
     /** Persisted/effective sync configuration where the adapter exposes it (currently Codex). */
     syncEnabled?: boolean;
   }>;
-  /** `null` means nothing answered; unreadable means a broker response could not be decoded. */
-  agentsRead: 'ok' | 'unreadable' | null;
+  /**
+   * `null` means nothing answered; unreadable means a broker response could not be decoded; busy means the
+   * request was held for its whole time budget without an answer.
+   */
+  agentsRead: 'ok' | 'unreadable' | 'busy' | null;
   /**
    * Counts, or why there are none. `'unreadable'` means the broker answered and the answer could not be
-   * used; `null` means nothing answered. A reader that treats both as "broker unavailable" reports the
-   * wrong cause — the roster outgrowing a read ceiling is not an unreachable broker.
+   * used; `'busy'` means the broker held the request past its time budget (a cold roster sweep does
+   * this); `null` means nothing answered. A reader that treats any of them as "broker unavailable"
+   * reports the wrong cause — the roster outgrowing a read ceiling, or taking longer than the read
+   * allows, is not an unreachable broker.
    */
-  sessions: { total: number; active: number } | 'unreadable' | null;
-  updates: { pending: number } | 'unreadable' | null;
+  sessions: { total: number; active: number } | 'unreadable' | 'busy' | null;
+  updates: { pending: number } | 'unreadable' | 'busy' | null;
   detailCodes: string[];
 }
 
@@ -843,18 +848,40 @@ const AGENT_ROSTER_TIMEOUT_MS = 15_000;
 const SESSION_ROSTER_TIMEOUT_MS = 30_000;
 
 /**
+ * The shared probe deadline `fetchJson` applies to a read that names none (the update feed here). Spelled
+ * out only so that read can tell whether it ran its whole deadline; see {@link authenticatedJson}.
+ */
+const STATUS_PROBE_DEFAULT_TIMEOUT_MS = 3_000;
+
+/**
+ * How close to its deadline a failed read must have run to count as held rather than refused. Timers can
+ * fire a moment early and the wall clock reads whole milliseconds; a refused loopback connection fails
+ * within a few milliseconds, so this margin cannot file one as busy.
+ */
+const STATUS_DEADLINE_SLACK_MS = 100;
+
+/**
  * One authenticated status read.
  *
  * `unavailable` and `unreadable` are kept apart on purpose. Collapsing them is what produced the defect
  * this type exists to prevent: an oversized body was reported as an unavailable broker, which points the
- * operator at restarting a service that is running correctly.
+ * operator at restarting a service that is running correctly. `busy` is kept apart from `unavailable` for
+ * the same reason: a broker still answering a slow read is running.
  */
 type StatusRead =
   | { readonly outcome: 'ok'; readonly json: unknown }
   /** Nothing answered: no config, no usable token, or nothing on the socket. */
   | { readonly outcome: 'unavailable' }
   /** The broker answered and the answer could not be used — too large, malformed, or an HTTP error. */
-  | { readonly outcome: 'unreadable' };
+  | { readonly outcome: 'unreadable' }
+  /**
+   * The request was accepted and held until the read's deadline ran out. The transport reports that
+   * exactly as it reports a refused connection (`unreachable` for both), so elapsed time separates them:
+   * a refused loopback connection fails at once, and only a broker still working on the request uses the
+   * whole deadline up. A cold all-history roster sweep took 44.6 s on a real host, past the 30 s roster
+   * read, and status used to call that broker unavailable.
+   */
+  | { readonly outcome: 'busy' };
 
 /**
  * How much one status endpoint is allowed to cost. Omitted fields take the shared probe defaults.
@@ -873,10 +900,12 @@ async function authenticatedJson(
   env: LifecycleEnvironment,
   path: string,
   budget: StatusReadBudget = {},
+  clock: () => number = () => Date.now(),
 ): Promise<StatusRead> {
   if (!env.config) return { outcome: 'unavailable' };
   const tokenInspection = inspectBrokerToken(brokerTokenPath(env.home));
   if (tokenInspection.status !== 'ok') return { outcome: 'unavailable' };
+  const startedAt = clock();
   const response = await env.context.fetchJson(
     new URL(path, env.config.broker.internalUrl).toString(),
     { [PRODUCT_IDENTITY.tokenHeader]: readBrokerToken(tokenInspection.path) },
@@ -884,7 +913,15 @@ async function authenticatedJson(
     budget.maxBytes,
   );
   if (response.status === 'ok') return { outcome: 'ok', json: response.json };
-  return { outcome: response.status === 'unreachable' ? 'unavailable' : 'unreadable' };
+  if (response.status !== 'unreachable') return { outcome: 'unreadable' };
+  const deadlineMs = budget.timeoutMs ?? STATUS_PROBE_DEFAULT_TIMEOUT_MS;
+  return { outcome: clock() - startedAt >= deadlineMs - STATUS_DEADLINE_SLACK_MS ? 'busy' : 'unavailable' };
+}
+
+/** What a status read that produced no usable rows says about the broker. */
+function unansweredStatusRead(read: StatusRead): 'unreadable' | 'busy' | null {
+  if (read.outcome === 'unavailable') return null;
+  return read.outcome === 'busy' ? 'busy' : 'unreadable';
 }
 
 export async function collectLifecycleStatus(options: LifecycleBaseOptions): Promise<LifecycleStatusReport> {
@@ -894,6 +931,9 @@ export async function collectLifecycleStatus(options: LifecycleBaseOptions): Pro
   const healthHeaders = brokerToken.status === 'ok'
     ? { [PRODUCT_IDENTITY.tokenHeader]: readBrokerToken(brokerToken.path) }
     : undefined;
+  // Whether a failed read was refused or held for its whole deadline is decided by elapsed time; the
+  // injected `now` lets a suite drive that without waiting the deadlines out.
+  const clock = (): number => (options.now?.() ?? new Date()).getTime();
   const [internal, agentsRaw, sessionsRaw, updatesRaw] = await Promise.all([
     endpointIdentity(
       env.context,
@@ -903,14 +943,14 @@ export async function collectLifecycleStatus(options: LifecycleBaseOptions): Pro
     ),
     authenticatedJson(env, INTERNAL_AGENT_ROSTER_PATH, {
       timeoutMs: AGENT_ROSTER_TIMEOUT_MS,
-    }),
+    }, clock),
     // The only endpoint here whose response size follows the operator's data rather than the
     // protocol, and so the only one that gets the larger allowance.
     authenticatedJson(env, '/api/sessions', {
       timeoutMs: SESSION_ROSTER_TIMEOUT_MS,
       maxBytes: SESSION_ROSTER_BODY_LIMIT,
-    }),
-    authenticatedJson(env, '/api/agent-runtime-updates'),
+    }, clock),
+    authenticatedJson(env, '/api/agent-runtime-updates', {}, clock),
   ]);
   // Agents stays a bare array: its size follows the number of INSTALLED adapters, so unlike the roster it
   // cannot outgrow the read ceiling and has no oversized case to distinguish.
@@ -934,7 +974,7 @@ export async function collectLifecycleStatus(options: LifecycleBaseOptions): Pro
     : [];
   const agentsRead: LifecycleStatusReport['agentsRead'] = Array.isArray(agentRows)
     ? 'ok'
-    : agentsRaw.outcome === 'unavailable' ? null : 'unreadable';
+    : unansweredStatusRead(agentsRaw);
   const sessionsBody = sessionsRaw.outcome === 'ok' ? sessionsRaw.json : undefined;
   const sessionsArray = Array.isArray(sessionsBody)
     ? sessionsBody
@@ -948,7 +988,7 @@ export async function collectLifecycleStatus(options: LifecycleBaseOptions): Pro
         active: sessionsArray.filter((candidate) => candidate && typeof candidate === 'object'
           && ['active', 'working', 'waiting'].includes(String((candidate as Record<string, unknown>).status))).length,
       }
-    : sessionsRaw.outcome === 'unavailable' ? null : 'unreadable';
+    : unansweredStatusRead(sessionsRaw);
   const updatesBody = updatesRaw.outcome === 'ok' ? updatesRaw.json : undefined;
   const updateRows = Array.isArray(updatesBody)
     ? updatesBody
@@ -959,7 +999,7 @@ export async function collectLifecycleStatus(options: LifecycleBaseOptions): Pro
     ? { pending: updateRows.filter((candidate) => candidate && typeof candidate === 'object'
       && ((candidate as Record<string, unknown>).updateAvailable === true
         || (candidate as Record<string, unknown>).state === 'pending')).length }
-    : updatesRaw.outcome === 'unavailable' ? null : 'unreadable';
+    : unansweredStatusRead(updatesRaw);
   const detailCodes: string[] = [];
   if (!env.install.committed) detailCodes.push(`installation-${env.install.reason}`);
   if (!env.config) detailCodes.push('broker-config-invalid');
@@ -1657,6 +1697,195 @@ function mergeResources(state: CommittedInstallState, incoming: readonly Install
   return { ...state, resources: [...resources.values()].sort((left, right) => left.id.localeCompare(right.id)) };
 }
 
+const PACKAGED_BRIDGE_ACTIONS = [
+  'pi-bridge.install',
+  'pi-bridge.refresh',
+  'pi-bridge.replace-legacy',
+  'omp-bridge.install',
+  'omp-bridge.refresh',
+] as const;
+type PackagedBridgeAction = typeof PACKAGED_BRIDGE_ACTIONS[number];
+
+function isPackagedBridgeAction(id: string): id is PackagedBridgeAction {
+  return (PACKAGED_BRIDGE_ACTIONS as readonly string[]).includes(id);
+}
+
+/**
+ * Write this build's packaged Pi or omp bridge for one repair action, and return the receipt to commit.
+ *
+ * Repair and the update-time refresh both go through here, so the refresh `cosy update` asks for is the
+ * same step as `cosy repair`'s rather than a second copy of it. The ownership state the plan recorded is
+ * re-read twice -- before the snapshot, and again inside the atomic replace -- so a file that changed after
+ * planning is never written over. The snapshot goes on the caller's rollback list before anything is
+ * written, and the receipt is returned rather than written: the caller commits the ledger once, after
+ * every step it took has succeeded.
+ */
+function writePackagedBridge(options: {
+  env: LifecycleEnvironment;
+  actionId: PackagedBridgeAction;
+  precondition: string | undefined;
+  snapshots: FileSnapshot[];
+  /** Runs after the snapshot and before the write. */
+  beforeWrite?: (target: string) => void;
+}): InstalledResourceRecord {
+  const { env, actionId } = options;
+  const omp = actionId.startsWith('omp-');
+  const family = omp ? 'omp' : 'pi';
+  const inspectReplacement = () => omp
+    ? inspectOmpBridgeOwnership(inspectInstallState(env.home), env.ompAgentDir)
+    : inspectPiBridgeOwnership(inspectInstallState(env.home), env.piAgentDir);
+  const assertReplacementPrecondition = () => {
+    const current = inspectReplacement();
+    const allowed = actionId.endsWith('.install')
+      ? current.status === 'missing' && current.receiptMatchesCurrentPackage
+      : actionId.endsWith('.refresh')
+        ? current.status === 'owned-stale'
+        : current.status === 'legacy-unreceipted';
+    if (!allowed || !options.precondition
+        || piBridgeOwnershipPrecondition(current) !== options.precondition) {
+      throw new Error(`${family}-bridge-repair-precondition-changed`);
+    }
+  };
+  assertReplacementPrecondition();
+  const target = inspectReplacement().bridge.path;
+  options.snapshots.push(snapshot(target));
+  options.beforeWrite?.(target);
+  atomicWriteOwnerOnly(target, omp ? OMP_BRIDGE_EMBEDDED_SOURCE : PI_BRIDGE_EMBEDDED_SOURCE, {
+    mode: 0o600,
+    beforeReplace: assertReplacementPrecondition,
+  });
+  const written = omp ? inspectOmpBridgeAsset(env.ompAgentDir) : inspectPiBridgeAsset(env.piAgentDir);
+  if (written.status !== 'owned') throw new Error(`${family}-bridge-repair-verify-failed`);
+  return {
+    id: omp ? 'omp-bridge' : 'pi-bridge',
+    kind: 'agent-integration',
+    target,
+    ownership: {
+      proof: 'package-hash',
+      installedSha256: omp ? OMP_BRIDGE_EMBEDDED_SHA256 : PI_BRIDGE_EMBEDDED_SHA256,
+    },
+  };
+}
+
+export interface BridgeRefreshOutcome {
+  status: 'refreshed' | 'current' | 'skipped' | 'refused' | 'failed';
+  detailCode: string;
+  summary: string;
+  /** The receipt ids this run rewrote (`pi-bridge`, `omp-bridge`), in the order it wrote them. */
+  refreshed: string[];
+}
+
+/**
+ * Refresh the receipt-owned Pi and omp bridges to what THIS build ships, without a full repair.
+ *
+ * It exists for the reason `refreshClaudeMod` does. Each agent loads its bridge from a file setup copied
+ * out of the build that ran it, `cosy update` swaps the binary without touching that file, and the OLD
+ * process running the update cannot write the new bytes because the bridge embedded in it IS the old one.
+ * So the update asks the NEW binary, and this is what the new binary runs.
+ *
+ * It is exactly repair's `pi-bridge.refresh` / `omp-bridge.refresh` step and nothing more: only a bridge
+ * whose receipt proves the exact older bytes on disk (`owned-stale`) is rewritten. A missing, current,
+ * unreceipted, edited, legacy or unsafe bridge is left as it is, for doctor to name and for setup or
+ * repair to decide. A Pi or omp terminal that already loaded the old module keeps running it until it is
+ * restarted or reloaded with `/reload`.
+ */
+export async function refreshPackagedBridges(options: LifecycleBaseOptions & {
+  acquireLock?: (options: { command: InstallationMutation; home: string }) => InstallationLockHandle;
+}): Promise<BridgeRefreshOutcome> {
+  const home = options.home ?? setupStateHome();
+  // Locked first and decided under the lock, like the mod refresh: the upgrade released its own lock
+  // before spawning this child, and a decision taken before the lock describes a disk setup may be writing.
+  const acquire = options.acquireLock ?? ((input) => acquireInstallationLock(input));
+  let lock: InstallationLockHandle;
+  try {
+    lock = acquire({ command: 'bridge-refresh', home });
+  } catch {
+    return {
+      status: 'refused',
+      detailCode: 'bridge-refresh-lock-unavailable',
+      summary: 'Another installation mutation is active or the lock is unsafe; the Pi and omp bridges were not refreshed.',
+      refreshed: [],
+    };
+  }
+  const snapshots: FileSnapshot[] = [];
+  try {
+    // An interrupted setup's recovery restores the bridge files it snapshotted, and would undo this.
+    let pending = false;
+    try {
+      pending = readSetupTransactionJournal(home) !== undefined;
+    } catch {
+      pending = true;
+    }
+    if (pending) {
+      return {
+        status: 'refused',
+        detailCode: 'bridge-refresh-setup-pending',
+        summary: 'An interrupted setup is waiting to be rolled back; run `cosyncing setup`, which also refreshes the bridges.',
+        refreshed: [],
+      };
+    }
+    const env = await environment({ ...options, home });
+    if (!env.install.committed) {
+      return {
+        status: 'skipped',
+        detailCode: 'bridge-refresh-skipped-uncommitted',
+        summary: 'No committed installation owns a bridge on this host; nothing was changed.',
+        refreshed: [],
+      };
+    }
+    const due: Array<{ id: PackagedBridgeAction; precondition: string }> = [];
+    const pi = inspectPiBridgeOwnership(env.install, env.piAgentDir);
+    if (pi.status === 'owned-stale') due.push({ id: 'pi-bridge.refresh', precondition: piBridgeOwnershipPrecondition(pi) });
+    // `owned-stale` already requires the receipt to name this exact target, so an omp bridge whose agent
+    // directory moved is never refreshed here: that is setup's migration to make.
+    const omp = inspectOmpBridgeOwnership(env.install, env.ompAgentDir);
+    if (omp.status === 'owned-stale') due.push({ id: 'omp-bridge.refresh', precondition: piBridgeOwnershipPrecondition(omp) });
+    if (due.length === 0) {
+      return {
+        status: 'current',
+        detailCode: 'bridge-refresh-current',
+        summary: 'No receipt-owned Pi or omp bridge is behind this build; nothing was changed.',
+        refreshed: [],
+      };
+    }
+    let nextState = env.install.state;
+    const refreshed: string[] = [];
+    for (const step of due) {
+      const receipt = writePackagedBridge({ env, actionId: step.id, precondition: step.precondition, snapshots });
+      nextState = mergeResources(nextState, [receipt]);
+      refreshed.push(receipt.id);
+    }
+    writeInstallState(nextState, env.home);
+    const names = refreshed.map((id) => id === 'pi-bridge' ? 'Pi' : 'omp').join(' and ');
+    return {
+      status: 'refreshed',
+      detailCode: 'bridge-refreshed',
+      summary: `Refreshed the cosyncing ${names} bridge${refreshed.length > 1 ? 's' : ''} to ${options.buildInfo.version}.`,
+      refreshed,
+    };
+  } catch {
+    let restored = true;
+    for (const item of [...snapshots].reverse()) {
+      try { restore(item); } catch { restored = false; }
+    }
+    return restored
+      ? {
+          status: 'failed',
+          detailCode: 'bridge-refresh-rolled-back',
+          summary: 'The bridges could not be refreshed and were put back as they were; run `cosy repair`.',
+          refreshed: [],
+        }
+      : {
+          status: 'failed',
+          detailCode: 'bridge-refresh-rollback-incomplete',
+          summary: 'The bridge refresh failed and could not put every file back; run `cosy doctor`, then `cosy repair`.',
+          refreshed: [],
+        };
+  } finally {
+    lock.release();
+  }
+}
+
 /**
  * Refresh cosyncing's Claude mod to what THIS build ships, without a full setup run.
  *
@@ -1971,73 +2200,24 @@ export async function runRepair(options: RepairOptions): Promise<LifecycleComman
       } else if (action.id === 'credentials.reconcile') {
         snapshots.push(snapshot(brokerTokenPath(env.home)), snapshot(piIntegrationPath(env.home)), snapshot(ompIntegrationPath(env.home)));
         ensureInstallationCredentials({ home: env.home, internalUrl: env.config.broker.internalUrl });
-      } else if (action.id === 'pi-bridge.install'
-          || action.id === 'pi-bridge.refresh'
-          || action.id === 'pi-bridge.replace-legacy') {
-        const inspectReplacement = () => inspectPiBridgeOwnership(inspectInstallState(env.home), env.piAgentDir);
-        const assertReplacementPrecondition = () => {
-          const current = inspectReplacement();
-          const allowed = action.id === 'pi-bridge.install'
-            ? current.status === 'missing' && current.receiptMatchesCurrentPackage
-            : action.id === 'pi-bridge.refresh'
-              ? current.status === 'owned-stale'
-              : current.status === 'legacy-unreceipted';
-          if (!allowed || !action.precondition
-              || piBridgeOwnershipPrecondition(current) !== action.precondition) {
-            throw new Error('pi-bridge-repair-precondition-changed');
-          }
-        };
-        assertReplacementPrecondition();
-        const before = inspectReplacement();
-        const target = before.bridge.path;
-        snapshots.push(snapshot(target));
-        const legacyMayContainSharedCredential = action.id.endsWith('legacy')
-          && /(?:COSYNCING_TOKEN|x-cosyncing-token)/i.test(readFileSync(target, 'utf8'));
-        if (legacyMayContainSharedCredential) {
-          if (!snapshots.some((item) => item.path === brokerTokenPath(env.home))) snapshots.push(snapshot(brokerTokenPath(env.home)));
-          ensureInstallationCredentials({
-            home: env.home,
-            internalUrl: env.config.broker.internalUrl,
-            rotateBrokerToken: true,
-          });
-        }
-        atomicWriteOwnerOnly(target, PI_BRIDGE_EMBEDDED_SOURCE, {
-          mode: 0o600,
-          beforeReplace: assertReplacementPrecondition,
-        });
-        if (inspectPiBridgeAsset(env.piAgentDir).status !== 'owned') {
-          throw new Error('pi-bridge-repair-verify-failed');
-        }
-        nextState = mergeResources(nextState, [{
-          id: 'pi-bridge', kind: 'agent-integration', target,
-          ownership: { proof: 'package-hash', installedSha256: PI_BRIDGE_EMBEDDED_SHA256 },
-        }]);
-      } else if (action.id === 'omp-bridge.install' || action.id === 'omp-bridge.refresh') {
-        const inspectReplacement = () => inspectOmpBridgeOwnership(inspectInstallState(env.home), env.ompAgentDir);
-        const assertReplacementPrecondition = () => {
-          const current = inspectReplacement();
-          const allowed = action.id === 'omp-bridge.install'
-            ? current.status === 'missing' && current.receiptMatchesCurrentPackage
-            : current.status === 'owned-stale';
-          if (!allowed || !action.precondition
-              || piBridgeOwnershipPrecondition(current) !== action.precondition) {
-            throw new Error('omp-bridge-repair-precondition-changed');
-          }
-        };
-        assertReplacementPrecondition();
-        const target = inspectReplacement().bridge.path;
-        snapshots.push(snapshot(target));
-        atomicWriteOwnerOnly(target, OMP_BRIDGE_EMBEDDED_SOURCE, {
-          mode: 0o600,
-          beforeReplace: assertReplacementPrecondition,
-        });
-        if (inspectOmpBridgeAsset(env.ompAgentDir).status !== 'owned') {
-          throw new Error('omp-bridge-repair-verify-failed');
-        }
-        nextState = mergeResources(nextState, [{
-          id: 'omp-bridge', kind: 'agent-integration', target,
-          ownership: { proof: 'package-hash', installedSha256: OMP_BRIDGE_EMBEDDED_SHA256 },
-        }]);
+      } else if (isPackagedBridgeAction(action.id)) {
+        const legacy = action.id === 'pi-bridge.replace-legacy';
+        const internalUrl = env.config.broker.internalUrl;
+        const lockedEnv = env;
+        nextState = mergeResources(nextState, [writePackagedBridge({
+          env: lockedEnv,
+          actionId: action.id,
+          precondition: action.precondition,
+          snapshots,
+          // A repo-era bridge may have carried the shared broker token inline, so replacing one rotates it.
+          beforeWrite: (target) => {
+            if (!legacy || !/(?:COSYNCING_TOKEN|x-cosyncing-token)/i.test(readFileSync(target, 'utf8'))) return;
+            if (!snapshots.some((item) => item.path === brokerTokenPath(lockedEnv.home))) {
+              snapshots.push(snapshot(brokerTokenPath(lockedEnv.home)));
+            }
+            ensureInstallationCredentials({ home: lockedEnv.home, internalUrl, rotateBrokerToken: true });
+          },
+        })]);
       } else if (action.id.startsWith('agent-skill.restore.')) {
         const targetId = action.id.slice('agent-skill.restore.'.length);
         const target = env.agentSkills.find((candidate) => candidate.id === targetId);

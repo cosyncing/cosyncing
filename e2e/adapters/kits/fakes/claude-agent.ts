@@ -37,7 +37,8 @@
  * CLI's `/model` command rows; `set_permission_mode` and `apply_flag_settings` are accepted.
  *
  * Everything observable is appended to the ledger (JSONL): every start with its argv, cwd and the
- * credential variables it inherited, every version and `agents` probe, every stdin frame (`recv`),
+ * credential variables it inherited, every version and `agents` probe (with the `DISABLE_AUTOUPDATER`
+ * value it inherited, as `autoUpdateDisabled`), every stdin frame (`recv`),
  * every turn start (`turn`) and end (`turn-end`), every interrupt, every signal, and every exit. Tests read the
  * ledger; they never patch the fake.
  */
@@ -219,13 +220,15 @@ function runFakeClaude(): void {
   };
 
   // ---------------------------------------------------------- one-shot commands
+  // Probes record whether they arrived with Claude's background auto-updater switched off.
+  const autoUpdateDisabled = process.env.DISABLE_AUTOUPDATER ?? null;
   if (argv.includes('--version') || argv[0] === '-v') {
-    record({ kind: 'version-probe', argv });
+    record({ kind: 'version-probe', argv, autoUpdateDisabled });
     process.stdout.write(config.versionOutput ?? `${config.version} (Claude Code)\n`);
     process.exit(0);
   }
   if (argv[0] === 'agents') {
-    record({ kind: 'agents', argv });
+    record({ kind: 'agents', argv, autoUpdateDisabled });
     process.stdout.write(`${JSON.stringify(config.agents ?? [])}\n`);
     process.exit(0);
   }

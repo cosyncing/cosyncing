@@ -1,5 +1,16 @@
 import { strict as assert } from 'node:assert';
-import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import type { AgentMessage, AttachMode, HistorySourceIdentity, SessionConnection } from '@cosyncing/adapter-api';
 import { AgentRegistry, isNativeSessionRenameUnsupportedError } from '@cosyncing/adapter-api';
@@ -32,6 +43,7 @@ import {
   clineVersionAllowsDrive,
 } from '../src/store.ts';
 import type { ClineNativeMessage, ClinePromptCorrelation } from '../src/store.ts';
+import { CLINE_VERSION_SUCCESS_TTL_MS } from '../src/version.ts';
 import { buildFakeClineAcp } from './fixtures/fake-acp.ts';
 
 // Waits are on conditions, never durations: poll `condition` until it clears, failing loudly (not silently
@@ -1168,6 +1180,58 @@ try {
       && descriptor.launch?.env?.CLINE_DATA_DIR === profile
       && descriptor.launch?.env?.CLINE_SESSION_DATA_DIR === join(profile, 'sessions')
       && descriptor.launch?.env?.CLINE_HUB_DISCOVERY_PATH === discoveryPath);
+
+  // The roster leg's `cline --version` is cached per executable IDENTITY. Sweeps
+  // land every 5m05-5m20 and each probe cost 1.65-2.06 s on the owner's host,
+  // so a five-minute cache re-probed on nearly every sweep. A private copy of
+  // the fake keeps this cache entry apart from every other adapter in this
+  // file, and the clock is the adapter's own.
+  {
+    const probeTarget = join(fake.root, 'cline-version-cache.mjs');
+    // A whole-second mtime, as an installer that keeps file times leaves it.
+    // The replacement below has the same bytes and the same mtime, so only its
+    // inode and ctime can tell it apart.
+    const installedAt = new Date('2026-11-23T00:15:41.000Z');
+    const install = (path: string): void => {
+      writeFileSync(path, readFileSync(fake.path));
+      chmodSync(path, 0o755);
+      utimesSync(path, installedAt, installedAt);
+    };
+    install(probeTarget);
+    const probedPath = realpathSync(probeTarget);
+    let clock = Date.parse('2026-11-23T01:00:00.000Z');
+    const sweeper = new ClineAdapter({ command: probeTarget, env, homeDir: fake.root, fetcher, now: () => clock });
+    const probes = () => fake.ledger().filter((entry) =>
+      entry.kind === 'version-probe' && entry.script === probedPath);
+    const sweep = async (): Promise<number> => {
+      await sweeper.discoverSessions();
+      return probes().length;
+    };
+    const first = await sweep();
+    clock += 5 * 60_000 + 5_000;
+    const second = await sweep();
+    clock += 5 * 60_000 + 20_000;
+    const third = await sweep();
+    check('an unchanged binary is probed once across sweeps that cross the old five-minute expiry',
+      first === 1 && second === 1 && third === 1,
+      JSON.stringify({ first, second, third }));
+    const before = statSync(probeTarget);
+    install(`${probeTarget}.next`);
+    renameSync(`${probeTarget}.next`, probeTarget);
+    const after = statSync(probeTarget);
+    check('the replacement matches the probed file in path, size and mtime, and differs in inode',
+      after.size === before.size && after.mtimeMs === before.mtimeMs && after.ino !== before.ino,
+      JSON.stringify({ before: [before.size, before.mtimeMs, before.ino], after: [after.size, after.mtimeMs, after.ino] }));
+    const replaced = await sweep();
+    check('a binary replaced in place is probed again on the next sweep', replaced === 2, String(replaced));
+    clock += CLINE_VERSION_SUCCESS_TTL_MS;
+    const expired = await sweep();
+    check('the success cache still expires, so the TTL bounds what the identity cannot see',
+      expired === 3, String(expired));
+    check('every roster version probe runs with Cline self-update disabled',
+      probes().every((entry) => entry.noAutoUpdate === '1'),
+      JSON.stringify(probes()));
+  }
 
   const createOptions = {
     directory: fake.cwd,

@@ -28,6 +28,7 @@ import {
   CLIENT_REVISION_WITH_TOLERANT_INTEGRATION_KIND_DECODE,
   EXTERNAL_HOST_DISCOVERY_BUDGET_MS,
   PRODUCT_IDENTITY,
+  SessionCreateTemporarilyUnavailableError,
   type AgentBackend,
   type AgentCapabilities,
   type AgentSetupDiagnosis,
@@ -44,7 +45,15 @@ import {
   type SetupDiagnosisContext,
 } from '@cosyncing/adapter-api';
 import { diagnoseDshSetup, DSH_AGENT_ID, DSH_DISPLAY_NAME, resolveDshHome } from './diagnostics.ts';
-import { DSH_CURRENT_VERSION, parseDshVersion, decideManagedLaunch, type DshContractFamily, type DshProbeFetch } from './compatibility.ts';
+import {
+  DSH_CURRENT_VERSION,
+  classifyDshVersion,
+  decideManagedLaunch,
+  dshVersionRefusal,
+  parseDshVersion,
+  type DshContractFamily,
+  type DshProbeFetch,
+} from './compatibility.ts';
 import {
   DshAuthSession,
   dshCredentialScope,
@@ -56,7 +65,9 @@ import { DshRemoteArgs, DshRemoteClient } from './remote.ts';
 import { DshRemoteHostLink } from './remote-host.ts';
 import { describeDshFailure, type DshOutcome } from './envelope.ts';
 import { selectDshProtocol } from './protocol.ts';
+import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { DshDriver, dshModelDisplayName, dshModelOptions } from './drive.ts';
 import { mapDshSession, type DshSessionSummary, type DshWorkspaceSummary } from './mapping.ts';
 import { DshSessionConnection, type DshConnectionOptions } from './observe.ts';
@@ -130,6 +141,62 @@ const DSH_VERIFY_MAX_BUFFERED_BYTES = 4 * 1_048_576;
  */
 function envFlagEnabled(value: string | undefined): boolean {
   return /^(1|true|yes|on)$/i.test(value?.trim() ?? '');
+}
+
+/** The hostnames that name this machine. `URL.hostname` keeps IPv6 brackets, so both spellings are listed. */
+function isLoopbackHostname(hostname: string): boolean {
+  return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '::1' || hostname === '[::1]';
+}
+
+/** The npm package whose manifest names the installed dsh version. */
+const DSH_PACKAGE_NAME = '@deepseek-ai/dsh';
+/** A manifest larger than this is not dsh's; reading it would only cost memory. */
+const DSH_PACKAGE_MANIFEST_MAX_BYTES = 256 * 1024;
+
+/**
+ * The installed dsh version, read from its package manifest WITHOUT running dsh.
+ *
+ * This is the readiness path's evidence, and it runs on every roster sweep, so
+ * it must not execute the agent CLI: a version probe is an execution, and the
+ * package-wide rule is to read the manifest instead. The manifest is the same
+ * fact the CLI prints — `dsh --version` reports the version of
+ * `@deepseek-ai/dsh-app-boot`, which each release pins to its own number — and
+ * it is what doctor already reads first.
+ *
+ * Two layouts are covered. A POSIX global install puts a symlink on PATH that
+ * resolves into the package (`…/node_modules/@deepseek-ai/dsh/lib/bin.js`), so
+ * the manifest is found walking up from the resolved file. npm on Windows puts
+ * a `dsh.cmd` shim BESIDE `node_modules`, so the package is a child of the
+ * shim's directory rather than a parent. Anything else — npx, a different
+ * program called `dsh` — answers undefined, which is "no evidence", never a
+ * guessed version.
+ */
+function readDshPackageVersion(executable: string): string | undefined {
+  let start: string;
+  try {
+    start = dirname(realpathSync(executable));
+  } catch {
+    start = dirname(executable);
+  }
+  const candidates: string[] = [];
+  for (let current = start, depth = 0; depth < 8; depth += 1) {
+    candidates.push(join(current, 'package.json'));
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  candidates.push(join(dirname(executable), 'node_modules', '@deepseek-ai', 'dsh', 'package.json'));
+  for (const candidate of candidates) {
+    try {
+      const stat = statSync(candidate);
+      if (!stat.isFile() || stat.size > DSH_PACKAGE_MANIFEST_MAX_BYTES) continue;
+      const manifest = JSON.parse(readFileSync(candidate, 'utf8')) as { name?: unknown; version?: unknown };
+      if (manifest.name === DSH_PACKAGE_NAME && typeof manifest.version === 'string') return manifest.version;
+    } catch {
+      // Absent, unreadable, or not JSON: an unrelated directory on the way up.
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -209,8 +276,11 @@ export interface DshAdapterOptions {
    * What the installed executable says about its own version.
    *
    * Injected so a suite can describe a machine with or without a given dsh
-   * installed. The default reads `<executable> --version`, which the installed
-   * host answers with a bare version and nothing else.
+   * installed; when injected it is the answer for both checks below. Without it
+   * the managed-launch preflight reads `<executable> --version`, which the
+   * installed host answers with a bare version and nothing else, and the
+   * readiness check reads the package manifest beside the executable and never
+   * runs dsh (it is asked on every roster sweep).
    */
   readExecutableVersion?: (command: string) => string | undefined;
   /** The user's home directory; injected so a suite never depends on the real one. */
@@ -233,10 +303,11 @@ export interface DshAdapterOptions {
   dshHome?: string;
   /**
    * Test seams for the session connection. The verification guard
-   * (`mutationReady`), the rpc/driver wiring, and the close hook are NOT
-   * overridable: they are the authority boundary, applied after this spread.
+   * (`mutationReady`), the version refusal (`mutationRefusal`), the rpc/driver
+   * wiring, and the close hook are NOT overridable: they are the authority
+   * boundary, applied after this spread.
    */
-  connection?: Omit<DshConnectionOptions, 'rpc' | 'driver' | 'channel' | 'onClosed' | 'mutationReady'>;
+  connection?: Omit<DshConnectionOptions, 'rpc' | 'driver' | 'channel' | 'onClosed' | 'mutationReady' | 'mutationRefusal'>;
 }
 
 /**
@@ -658,8 +729,7 @@ export class DshAdapter implements AgentBackend {
     } catch {
       return null;
     }
-    const loopback = url.hostname === '127.0.0.1' || url.hostname === 'localhost'
-      || url.hostname === '::1' || url.hostname === '[::1]';
+    const loopback = isLoopbackHostname(url.hostname);
     const port = Number(url.port || (url.protocol === 'https:' ? 443 : 80));
     // The launch NAMES the port it was described for.
     //
@@ -687,15 +757,18 @@ export class DshAdapter implements AgentBackend {
     const launchableHost = url.hostname === '127.0.0.1' || url.hostname === 'localhost';
     const launchable = loopback && launchableHost && url.protocol === 'http:'
       && Number.isInteger(port) && port > 0 && port <= 65_535;
-    const resolve = this.options.resolveExecutable ?? ((command: string) => Bun.which(command) ?? undefined);
-    const executable = launchable ? resolve('dsh') : undefined;
+    const executable = launchable ? this.resolveDshExecutable() : undefined;
     // A binary on PATH is not yet a binary that may be started. The invocation
     // comes from the compatibility module's plan, which is the only place the
     // per-family launch flags are verified, so the no-browser guard cannot be
     // bypassed by a caller that builds its own argv. An executable whose family
     // has no verified unattended launch describes itself as startable-but-not-
     // launchable (launch: null) and stays connectable, which is the same shape
-    // the adapter already uses for a host on an address it does not own.
+    // the adapter already uses for a host on an address it does not own. A
+    // version that is not on the qualified list is not started either, and the
+    // readiness check refuses a host at this address for the same version (see
+    // `installedVersionRefusal`) rather than connecting to one somebody else
+    // started.
     const readVersion = this.options.readExecutableVersion ?? ((command: string) => {
       // A missing or unusable executable is an absent fact, not an exception:
       // the describe path runs during discovery, where a throw would surface as
@@ -780,6 +853,87 @@ export class DshAdapter implements AgentBackend {
       return this.baseUrl();
     } catch {
       return undefined;
+    }
+  }
+
+  // ── Whether the dsh installed here may be used at all ───────────────────────
+
+  /**
+   * Where `dsh` is, by the one rule the managed launch and the readiness check
+   * share.
+   *
+   * From the adapter's OWN environment when it was given one, as `DSH_HOME` is:
+   * an adapter built for another environment (a suite's `env: {}`, a probe's
+   * prepared environment) describes that machine, not whichever machine runs
+   * it. With no environment injected it is this process's PATH, exactly as the
+   * broker has always resolved it.
+   */
+  private resolveDshExecutable(): string | undefined {
+    if (this.options.resolveExecutable) return this.options.resolveExecutable('dsh');
+    if (this.options.env === undefined) return Bun.which('dsh') ?? undefined;
+    const path = Object.entries(this.env).find(([name]) => name.toUpperCase() === 'PATH')?.[1];
+    return path ? Bun.which('dsh', { PATH: path }) ?? undefined : undefined;
+  }
+
+  /**
+   * Why the host at the configured address may not be used, or undefined.
+   *
+   * The refusal covers exactly what the evidence covers. The configured address
+   * must be on THIS machine, because the installed binary says nothing about a
+   * process elsewhere; dsh must be installed where this adapter looks; and its
+   * version must be readable. Then anything but a qualified version is refused,
+   * by the same rule and in the same words as the managed launch. Missing
+   * evidence (npx, another machine, a `dsh` that is some other program) is not
+   * a refusal: the contract probe decides, as it always has.
+   *
+   * Asked before every use rather than cached, and cheap enough to be: one PATH
+   * lookup and a few small file reads, never a process. An operator who
+   * reinstalls a qualified build is admitted on the next sweep.
+   */
+  private installedVersionRefusal(): string | undefined {
+    const baseUrl = this.baseUrlOrUndefined();
+    if (baseUrl === undefined) return undefined;
+    let url: URL;
+    try {
+      url = new URL(baseUrl);
+    } catch {
+      return undefined;
+    }
+    if (!isLoopbackHostname(url.hostname)) return undefined;
+    const executable = this.resolveDshExecutable();
+    if (executable === undefined) return undefined;
+    let installed: string | undefined;
+    try {
+      installed = this.options.readExecutableVersion
+        ? this.options.readExecutableVersion(executable)
+        : readDshPackageVersion(executable);
+    } catch {
+      return undefined;
+    }
+    const verdict = classifyDshVersion(installed);
+    return verdict.status === 'unsupported' ? dshVersionRefusal(verdict.version.raw) : undefined;
+  }
+
+  /** Every product path that would talk to the host asks this first, before any request. */
+  private assertInstalledVersionAccepted(): void {
+    const refusal = this.installedVersionRefusal();
+    if (refusal !== undefined) throw new Error(refusal);
+  }
+
+  /**
+   * Create's readiness boundary, asked by the broker BEFORE `canCreateSession`.
+   *
+   * A refused version also makes `canCreateSession` false, but the broker can
+   * only turn a `false` into its generic "temporarily unavailable" sentence. The
+   * reason reaches the app only as this typed refusal, which the broker answers
+   * with a 503 carrying the message and `dsh-version-unsupported`. Nothing is
+   * sent to the host. A qualified version, or no local evidence, returns, and
+   * the broker's readiness check decides as before.
+   */
+  async prepareCreateSession(): Promise<void> {
+    const refusal = this.installedVersionRefusal();
+    if (refusal !== undefined) {
+      throw new SessionCreateTemporarilyUnavailableError(refusal, 'dsh-version-unsupported');
     }
   }
 
@@ -933,7 +1087,13 @@ export class DshAdapter implements AgentBackend {
         : {}),
     });
     if (decision.family !== 'remote-0.2') return { kind: 'host' };
-    // Something is answering the 0.2 contract. Now: can WE talk to it?
+    // Something is answering the 0.2 contract. An installed version this build
+    // has not qualified is the reason readiness said no, and it is OUR refusal:
+    // restarting the host would start the same unqualified build, or nothing at
+    // all, since the launch is refused for the same version.
+    const refusal = this.installedVersionRefusal();
+    if (refusal !== undefined) return { kind: 'adapter', remedy: 'contract', detail: refusal };
+    // Now: can WE talk to it?
     const auth = this.authSession(baseUrl);
     if (auth.reason === 'host-or-origin-refused') {
       return {
@@ -1046,6 +1206,10 @@ export class DshAdapter implements AgentBackend {
 
   async isAvailable(options?: AvailabilityOptions): Promise<boolean> {
     this.remoteReadiness = undefined;
+    // Before any request. An unqualified install is unavailable however well its
+    // host answers: the 0.2 routes and auth survived the upgrade that broke live
+    // updates, so a host that answers is exactly the case that half-works.
+    if (this.installedVersionRefusal() !== undefined) return false;
     let rpc: DshRpcClient;
     try {
       rpc = this.rpc();
@@ -1092,6 +1256,8 @@ export class DshAdapter implements AgentBackend {
    * user sees after creating a session in the host's own UI and not yet typing.
    */
   async discoverSessions(options?: SessionDiscoveryOptions): Promise<SessionInfo[]> {
+    // The registry asks `isAvailable` first; attach and create call this directly.
+    if (this.installedVersionRefusal() !== undefined) return [];
     if (await this.usingRemoteHost(options?.signal)) return this.discoverRemoteSessions(options);
     const cancel = options?.signal ? { signal: options.signal } : {};
     const list = await this.rpc().call<{ items?: unknown }>('session.list', {}, cancel);
@@ -1334,6 +1500,9 @@ export class DshAdapter implements AgentBackend {
         + 'full-authority owner on the bare session key and silently take over live frame delivery',
       );
     }
+    // After the mode checks, which must stay first (they refuse with no host
+    // contact at all), and before anything that reads the host.
+    this.assertInstalledVersionAccepted();
     const known = (await this.discoverSessions()).find((session) => session.id === sessionId);
     const info: SessionInfo = known ?? {
       id: sessionId,
@@ -1373,6 +1542,7 @@ export class DshAdapter implements AgentBackend {
       // (first probe, or re-verifying after a generation loss) the host state a
       // write would act on has not been proven, so the connection refuses.
       mutationReady: () => link.isReady,
+      mutationRefusal: () => this.installedVersionRefusal(),
       // Pass the connection's own identity so a close arriving after a
       // replacement attach cannot unregister the replacement.
       onClosed: (id) => link.unregister(id, connection),
@@ -1401,6 +1571,10 @@ export class DshAdapter implements AgentBackend {
       ...(this.options.connection ?? {}),
       channel,
       mutationReady: () => host.isReady,
+      // Re-asked per write: an install that changes under an attached session
+      // stops its writes with the reason, instead of letting them reach a host
+      // this build was never qualified against.
+      mutationRefusal: () => this.installedVersionRefusal(),
       onClosed: (id) => host.unregister(id, connection),
     });
     host.register(connection, channel);
@@ -1440,6 +1614,7 @@ export class DshAdapter implements AgentBackend {
    * or worse, a misleading 409 "no longer available" for a valid selection.
    */
   async listModels(): Promise<ModelOption[]> {
+    this.assertInstalledVersionAccepted();
     if (await this.usingRemoteHost()) return dshModelOptions(await this.remote().modelCatalog());
     return dshModelOptions(await new DshDriver(this.rpc()).catalog());
   }
@@ -1451,6 +1626,7 @@ export class DshAdapter implements AgentBackend {
    * itself rather than trusting an earlier sweep.
    */
   private async requireVerifiedHost(): Promise<void> {
+    this.assertInstalledVersionAccepted();
     if (await this.usingRemoteHost()) {
       // Authenticated AND holding a current event generation. A 0.2 host has no
       // `describe` to ask, and a cookie alone would let a write through while the
@@ -1495,6 +1671,10 @@ export class DshAdapter implements AgentBackend {
     title?: string;
     model?: PromptInput['model'];
   }): Promise<SessionInfo> {
+    // The same typed refusal as the readiness boundary, so a caller that skips
+    // it is told the same thing; before the workspace read below, which would
+    // otherwise reach the host first.
+    await this.prepareCreateSession();
     const remoteHost = await this.usingRemoteHost();
     const directory = opts?.directory?.replace(/\/+$/, '');
     // Which workspace the session lands in is decided in two steps, and the

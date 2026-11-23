@@ -93,11 +93,11 @@ function serviceStateTone(value: DurableServiceStatus['active'] | DurableService
 
 /**
  * A roster line with no answer is a warning, never the error itself: the listener and service lines are
- * the ones that say whether the broker is down, and a roster read that timed out on a starting broker
- * lands here too.
+ * the ones that say whether the broker is down. A read the broker held past its deadline (a starting
+ * broker, or a cold roster sweep) is `busy`, not unavailable, and is a warning too.
  */
 function rosterReadTone(value: unknown): CliTone | undefined {
-  return value === null || value === 'unreadable' ? 'warn' : undefined;
+  return value === null || value === 'unreadable' || value === 'busy' ? 'warn' : undefined;
 }
 
 export interface UninstallRenderFacts {
@@ -349,7 +349,7 @@ const ZH_HUMAN_TEXT: Readonly<Record<string, string>> = Object.freeze({
   'Repair broker-owned diagnostic state.': '请修复 broker 自有的诊断状态。',
   'Retry the managed runtime check and inspect the recorded failure.': '请重试托管运行时检查，并查看已记录的失败。',
   'Install the official Codex CLI, then rerun doctor.': '请安装官方 Codex CLI，然后重新运行 doctor。',
-  'Install the official OpenCode CLI, then rerun doctor.': '请安装官方 OpenCode CLI，然后重新运行 doctor。',
+  'Install OpenCode 1 with `curl -fsSL https://opencode.ai/install | bash` or `npm install --global opencode-ai`, then rerun doctor. OpenCode 2 is not yet supported.': '请运行 `curl -fsSL https://opencode.ai/install | bash` 或 `npm install --global opencode-ai` 安装 OpenCode 1，然后重新运行 doctor。尚不支持 OpenCode 2。',
   'Install the supported Pi coding-agent package, then rerun doctor.': '请安装受支持的 Pi coding-agent 软件包，然后重新运行 doctor。',
   'Install the official Claude Code CLI, then rerun doctor.': '请安装官方 Claude Code CLI，然后重新运行 doctor。',
   'Run setup or repair after installing Codex.': '安装 Codex 后，请运行 setup 或 repair。',
@@ -569,6 +569,8 @@ const en: CliMessages = {
     connectivity: () => 'Connectivity: managed externally by the operator',
     agents: (report, paint) => `Agents (registered): ${report.agentsRead === null
       ? paint(rosterReadTone(null), 'broker unavailable')
+      : report.agentsRead === 'busy'
+        ? paint(rosterReadTone('busy'), `broker busy, still checking agents; run ${PRODUCT_IDENTITY.primaryBinary} status again shortly`)
       : report.agentsRead === 'unreadable'
         ? paint(rosterReadTone('unreadable'), `broker answered but the agent roster could not be read; run ${PRODUCT_IDENTITY.primaryBinary} logs`)
         : report.agents.length ? report.agents.map((agent) => {
@@ -584,20 +586,25 @@ const en: CliMessages = {
       ? `; run ${PRODUCT_IDENTITY.primaryBinary} doctor for creation setup guidance`
       : ''}`,
     // "unreadable" is never folded into "broker unavailable": the broker answered, and telling the
-    // operator it is unavailable sends them to restart a service that is running correctly.
+    // operator it is unavailable sends them to restart a service that is running correctly. "busy" is kept
+    // apart for the same reason: the broker held the read past its deadline because it is still working.
     //
     // It points at `logs`, not at `doctor`. Doctor reads fixed-size documents; nothing it does looks
     // at the roster, so it would report a healthy broker and leave this line unexplained. The broker's
     // own log covers the request that produced the response, which is where the answer actually is.
     sessions: (report, paint) => `Sessions: ${paint(rosterReadTone(report.sessions), report.sessions === null
       ? 'broker unavailable'
+      : report.sessions === 'busy'
+        ? `broker busy, still loading sessions; run ${PRODUCT_IDENTITY.primaryBinary} status again shortly`
       : report.sessions === 'unreadable'
         ? `broker answered but the roster could not be read; run ${PRODUCT_IDENTITY.primaryBinary} logs`
         : `${report.sessions.active} active / ${report.sessions.total} total`)}`,
-    updates: (report, paint) => `Updates: ${report.updates === null || report.updates === 'unreadable'
+    updates: (report, paint) => `Updates: ${report.updates === null || report.updates === 'unreadable' || report.updates === 'busy'
       ? paint(rosterReadTone(report.updates), report.updates === null
         ? 'broker unavailable'
-        : `broker answered but the update list could not be read; run ${PRODUCT_IDENTITY.primaryBinary} doctor`)
+        : report.updates === 'busy'
+          ? `broker busy, still checking updates; run ${PRODUCT_IDENTITY.primaryBinary} status again shortly`
+          : `broker answered but the update list could not be read; run ${PRODUCT_IDENTITY.primaryBinary} doctor`)
       : paint(report.updates.pending > 0 ? 'warn' : undefined, `${report.updates.pending} pending`)}`,
     fix: (detailCodes, paint) => `Fix: ${paint('fail', detailCodes.join(', '))}; run ${PRODUCT_IDENTITY.primaryBinary} doctor.`,
   },
@@ -731,6 +738,8 @@ const zhHans: CliMessages = {
     connectivity: () => '连接：由操作者在 cosyncing 外部管理',
     agents: (report, paint) => `已注册智能体：${report.agentsRead === null
       ? paint(rosterReadTone(null), 'broker 不可用')
+      : report.agentsRead === 'busy'
+        ? paint(rosterReadTone('busy'), `broker 繁忙，仍在检查智能体；请稍后再次运行 ${PRODUCT_IDENTITY.primaryBinary} status`)
       : report.agentsRead === 'unreadable'
         ? paint(rosterReadTone('unreadable'), `broker 有响应，但智能体列表无法读取；请运行 ${PRODUCT_IDENTITY.primaryBinary} logs`)
         : report.agents.length ? report.agents.map((agent) => {
@@ -747,13 +756,17 @@ const zhHans: CliMessages = {
       : ''}`,
     sessions: (report, paint) => `会话：${paint(rosterReadTone(report.sessions), report.sessions === null
       ? 'broker 不可用'
+      : report.sessions === 'busy'
+        ? `broker 繁忙，仍在加载会话；请稍后再次运行 ${PRODUCT_IDENTITY.primaryBinary} status`
       : report.sessions === 'unreadable'
         ? `broker 有响应，但会话列表无法读取；请运行 ${PRODUCT_IDENTITY.primaryBinary} logs`
         : `${report.sessions.active} 个活跃 / 共 ${report.sessions.total} 个`)}`,
-    updates: (report, paint) => `更新：${report.updates === null || report.updates === 'unreadable'
+    updates: (report, paint) => `更新：${report.updates === null || report.updates === 'unreadable' || report.updates === 'busy'
       ? paint(rosterReadTone(report.updates), report.updates === null
         ? 'broker 不可用'
-        : `broker 有响应，但更新列表无法读取；请运行 ${PRODUCT_IDENTITY.primaryBinary} doctor`)
+        : report.updates === 'busy'
+          ? `broker 繁忙，仍在检查更新；请稍后再次运行 ${PRODUCT_IDENTITY.primaryBinary} status`
+          : `broker 有响应，但更新列表无法读取；请运行 ${PRODUCT_IDENTITY.primaryBinary} doctor`)
       : paint(report.updates.pending > 0 ? 'warn' : undefined, `${report.updates.pending} 个待处理`)}`,
     fix: (detailCodes, paint) => `处理：${paint('fail', detailCodes.join(', '))}；请运行 ${PRODUCT_IDENTITY.primaryBinary} doctor。`,
   },

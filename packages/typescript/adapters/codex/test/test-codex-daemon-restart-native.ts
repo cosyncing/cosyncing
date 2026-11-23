@@ -46,8 +46,14 @@ try {
   const receipt = join(fixtureHome, 'app-server-daemon', 'app-server.pid');
   const originalReceipt = readFileSync(receipt, 'utf8');
   try {
-    writeFileSync(receipt, JSON.stringify({ ...JSON.parse(originalReceipt), processStartTime: 'different process generation' }));
-    assert.equal(readCodexDaemonProcess(fixtureHome, fixtureCli).state, 'unknown');
+    // Newer receipts carry a native identity, which outranks the start text: forge both.
+    const original = JSON.parse(originalReceipt);
+    writeFileSync(receipt, JSON.stringify({
+      ...original,
+      processStartTime: 'different process generation',
+      ...(original.processIdentity ? { processIdentity: { ...original.processIdentity, startTicks: Number(original.processIdentity.startTicks) + 1 } } : {}),
+    }));
+    assert.notEqual(readCodexDaemonProcess(fixtureHome, fixtureCli).state, 'running');
     await assert.rejects(adapter.restartCodexDaemon({ confirmed: true }), /receipt|not managed/);
     assert.equal(codexDaemonProcessState(initial.process), 'running');
   } finally { writeFileSync(receipt, originalReceipt); }

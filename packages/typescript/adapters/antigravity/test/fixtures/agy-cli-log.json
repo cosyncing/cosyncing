@@ -1,0 +1,31 @@
+{
+  "_provenance": {
+    "capturedOn": "2026-11-23",
+    "source": "agy's own run logs, ~/.gemini/antigravity-cli/log/cli-<stamp>.log, on a WSL host, read without running agy",
+    "versions": "signInNotRestored: agy 1.5.14 (2026-11-23). signInNetworkError, signInRestored, modelAlias: agy 1.4.10 (2026-11-20, 2026-10-29). Every message text used here is also present in the installed 1.5.14 binary's string table.",
+    "sanitized": false,
+    "note": "Each string is ONE log line copied verbatim; nothing is substituted or invented. Only lines that carry no path, account, token or prompt were taken, so none needed sanitizing. signInNotRestored is a broker `agy models` run that the broker killed at its 15 s timeout after agy's saved sign-in stopped refreshing; signInNetworkError is such a run that also logged why; signInRestored and modelAlias are runs from before the sign-in expired. The `You are not logged into Antigravity.` line is kept in the healthy runs on purpose: agy logs it during startup even when the sign-in is then restored, so it is not a signal."
+  },
+  "signInNotRestored": [
+    "W1123 11:54:40.058957      98 cache.go:169] Cache(loadCodeAssistResponse): Singleflight refresh failed: error getting token source: You are not logged into Antigravity.",
+    "I1123 11:54:40.097203     404 keyring.go:64] keyringAuth: loaded token, expiry=2026-10-29 17:36:04.89125019 +0000 UTC expired=true",
+    "W1123 11:54:50.097373       1 keyring.go:111] keyringAuth: timed out after 10s, skipping keyring auth",
+    "I1123 11:54:50.097520     430 server.go:4514] Language server shutting down"
+  ],
+  "signInNetworkError": [
+    "I1120 12:20:15.199711     324 keyring.go:64] keyringAuth: loaded token, expiry=2026-10-29 17:36:04.89125019 +0000 UTC expired=true",
+    "W1120 12:20:25.200606       1 keyring.go:111] keyringAuth: timed out after 10s, skipping keyring auth",
+    "W1120 12:20:25.585291     324 browser.go:256] token refresh failed due to network error: Post \"https://oauth2.googleapis.com/token\": net/http: TLS handshake timeout",
+    "W1120 12:20:25.585447     324 keyring.go:74] keyringAuth: token validation failed due to network error (token may still be valid): Post \"https://oauth2.googleapis.com/token\": net/http: TLS handshake timeout"
+  ],
+  "signInRestored": [
+    "W1029 14:28:09.176168     102 cache.go:135] Cache(loadCodeAssistResponse): Singleflight refresh failed: error getting token source: You are not logged into Antigravity.",
+    "I1029 14:28:09.224217     254 keyring.go:64] keyringAuth: loaded token, expiry=2026-10-29 14:27:03.769938867 +0000 UTC expired=true",
+    "I1029 14:28:09.306722     254 browser.go:265] token refreshed, new expiry=2026-10-29 15:28:08.30670595 +0000 GMT m=+3599.358929851"
+  ],
+  "modelAlias": [
+    "W1029 16:58:10.596903     104 cache.go:135] Cache(loadCodeAssistResponse): Singleflight refresh failed: error getting token source: You are not logged into Antigravity.",
+    "I1029 16:58:10.728331     271 keyring.go:64] keyringAuth: loaded token, expiry=2026-10-29 17:36:04.89125019 +0000 UTC expired=false",
+    "I1029 16:58:11.931200       1 model_resolver.go:155] model alias \"Gemini 3.7 Flash (High)\" resolved to \"Gemini 3.8 Flash (High)\""
+  ]
+}

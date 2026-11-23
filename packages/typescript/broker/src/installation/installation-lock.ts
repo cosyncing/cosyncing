@@ -22,9 +22,13 @@ export const INSTALLATION_LOCK_FILENAME = 'installation.lock';
  *
  * `claude-mod-refresh` is its own member rather than a reuse of `upgrade`, because the lock record is
  * the audit trail for who was mutating the installation: the upgrade's own lock is released before it
- * delegates the mod refresh, so the file that exists during the refresh names the refresh.
+ * delegates the mod refresh, so the file that exists during the refresh names the refresh. The same holds
+ * for `bridge-refresh`, the Pi/omp bridge refresh the upgrade delegates, and for `bridge-autoinstall`, the
+ * running broker recording the receipt for a bridge its engine has just created.
  */
-export const INSTALLATION_MUTATIONS = ['setup', 'repair', 'upgrade', 'uninstall', 'claude-mod-refresh'] as const;
+export const INSTALLATION_MUTATIONS = [
+  'setup', 'repair', 'upgrade', 'uninstall', 'claude-mod-refresh', 'bridge-refresh', 'bridge-autoinstall',
+] as const;
 export type InstallationMutation = typeof INSTALLATION_MUTATIONS[number];
 
 interface InstallationLockRecord {

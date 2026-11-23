@@ -185,6 +185,39 @@ async function main(): Promise<void> {
   const rel = w3.slice(b3).map((s) => JSON.parse(s)).find((o) => o?.type === 'control_response');
   check('reject → plain-allow release (no answers key), not a tool_result, resolved', !!rel && rel.response?.request_id === 'ctrl_q2' && rel.response?.response?.behavior === 'allow' && !('answers' in (rel.response?.response?.updatedInput ?? {})) && m3.some((m: any) => m.type === 'question-resolved' && m.requestId === 'toolu_q2'));
 
+  // `afkTimeoutMs` is Claude's own idle-timeout field on the AskUserQuestion input (declared in the
+  // 2.1.330 build). From 2.1.321 Claude refuses a host answer whose updatedInput carries that key at all,
+  // so neither the answer nor the dismissal may echo it, while every other asked field goes back
+  // unchanged. The asked input is the shape 2.1.330 transcripts record (questions → question, header,
+  // multiSelect, options {label, description}) with that field added.
+  const afkInput = { ...ASK.message.content[0]!.input, afkTimeoutMs: 60_000 };
+  const gateWithAfk = (gate: string, toolUseId: string): void => (conn3 as any).handleEvent({
+    type: 'control_request',
+    request_id: gate,
+    request: { subtype: 'can_use_tool', tool_name: 'AskUserQuestion', input: afkInput, tool_use_id: toolUseId, requires_user_interaction: true },
+  });
+  const replyAfter = (from: number): any => w3.slice(from).map((s) => JSON.parse(s)).find((o) => o?.type === 'control_response');
+  gateWithAfk('ctrl_q4', 'toolu_q4');
+  const b4 = w3.length;
+  await conn3.answerQuestion('toolu_q4', [['MVP first']]);
+  const afkAnswer = replyAfter(b4)?.response;
+  check('answer to a question asked with afkTimeoutMs → updatedInput carries the answers and the asked questions, never afkTimeoutMs',
+    afkAnswer?.request_id === 'ctrl_q4' && afkAnswer?.response?.behavior === 'allow'
+    && !('afkTimeoutMs' in (afkAnswer?.response?.updatedInput ?? { afkTimeoutMs: 'no reply' }))
+    && afkAnswer?.response?.updatedInput?.answers?.['Which approach?'] === 'MVP first'
+    && JSON.stringify(afkAnswer?.response?.updatedInput?.questions) === JSON.stringify(afkInput.questions),
+    JSON.stringify(afkAnswer));
+  gateWithAfk('ctrl_q5', 'toolu_q5');
+  const b5 = w3.length;
+  await conn3.rejectQuestion('toolu_q5');
+  const afkDismissal = replyAfter(b5)?.response;
+  check('dismissal of a question asked with afkTimeoutMs → plain allow with the asked questions, never afkTimeoutMs',
+    afkDismissal?.request_id === 'ctrl_q5' && afkDismissal?.response?.behavior === 'allow'
+    && !('afkTimeoutMs' in (afkDismissal?.response?.updatedInput ?? { afkTimeoutMs: 'no reply' }))
+    && !('answers' in (afkDismissal?.response?.updatedInput ?? {}))
+    && JSON.stringify(afkDismissal?.response?.updatedInput?.questions) === JSON.stringify(afkInput.questions),
+    JSON.stringify(afkDismissal));
+
   // A result while the question is open (interrupt while gated) resolves the card + drops the stale gate.
   (conn3 as any).handleEvent({
     type: 'control_request',

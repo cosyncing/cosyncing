@@ -505,6 +505,7 @@ async function main(): Promise<void> {
     const table: [string, string | undefined][] = [
       ['claude-opus-4-8-20260701', 'Opus 4.8'],
       ['claude-fable-5', 'Fable 5'],
+      ['claude-fable-5-2', 'Fable 5.2'], // the id Claude Code 2.1.330 records for the `fable` alias
       ['claude-sonnet-4-6', 'Sonnet 4.6'],
       ['claude-3-7-sonnet-20250219', 'Sonnet 3.7'],
       ['claude-haiku-4-5-20251001', 'Haiku 4.5'],
@@ -530,12 +531,23 @@ async function main(): Promise<void> {
     check('P2: the label rides the metadata-update the client roster reads',
       h.msgs.some((m: any) => m.type === 'metadata-update' && m.value?.currentModel?.label === 'Fable 5'),
       JSON.stringify(h.msgs.filter((m: any) => m.type === 'metadata-update')));
+    // The model picker preselects Claude's own default effort for the alias. Claude Code 2.1.321+
+    // resolves `fable` to claude-fable-5-2, whose registry default is `medium`; the "Claude's default"
+    // note sits on that one rung, not on `high`.
+    const fable = (await h.conn.listModels()).find((m) => m.modelID === 'fable');
+    const noted = (fable?.reasoningEfforts ?? []).filter((e) => e.description === "Claude's default").map((e) => e.effort);
+    check('P2: the fable picker preselects medium and names it as Claude\'s default',
+      fable?.defaultReasoningEffort === 'medium' && JSON.stringify(noted) === JSON.stringify(['medium']),
+      JSON.stringify(fable));
     await h.conn.close();
   }
 
   // ── Drive context usage comes from init model + authoritative result usage ─────────────────────
   for (const fixture of [
     { label: '200K', model: 'claude-opus-4-6', used: 175_010, max: 200_000, history: [] },
+    // Fable 5.2 (the `fable` alias since Claude Code 2.1.321) has a native 1M window and carries no
+    // `[1m]` marker; the meter divided by 200k until the id joined the native-1M set.
+    { label: 'native 1M (Fable 5.2)', model: 'claude-fable-5-2', used: 175_010, max: 1_000_000, history: [] },
     {
       label: '1M',
       model: 'claude-opus-4-6[1m]',

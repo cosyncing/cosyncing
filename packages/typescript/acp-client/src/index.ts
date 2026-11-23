@@ -7,6 +7,7 @@ export {
   AcpRequestTimeoutError,
   AcpRpcError,
   type AcpClientOptions,
+  type AcpCloseEscalation,
 } from './client.ts';
 export {
   AcpDispatcher,

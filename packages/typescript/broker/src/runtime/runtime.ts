@@ -55,8 +55,15 @@ import {
   type SessionOwnerRevision,
 } from '@cosyncing/adapter-api';
 import { OpenCodeAdapter } from '@cosyncing/adapter-opencode';
-import { PiAdapter } from '@cosyncing/adapter-pi';
-import { currentOmpRuntimeReadiness, inspectOmpPathCollision, OmpAdapter, OMP_DIALECT, OMP_VERIFIED_VERSION } from '@cosyncing/adapter-omp';
+import { inspectPiBridgeAsset, PiAdapter, type PiBridgeAssetInspection } from '@cosyncing/adapter-pi';
+import {
+  currentOmpRuntimeReadiness,
+  inspectOmpBridgeAsset,
+  inspectOmpPathCollision,
+  OmpAdapter,
+  OMP_DIALECT,
+  OMP_VERIFIED_VERSION,
+} from '@cosyncing/adapter-omp';
 import { ReasonixAdapter } from '@cosyncing/adapter-reasonix';
 import { GrokAdapter } from '@cosyncing/adapter-grok';
 import { ClineAdapter, clineManagedHubPort } from '@cosyncing/adapter-cline';
@@ -67,6 +74,7 @@ import {
   createCodexConfigFreshnessProbe,
   queryCodexLoadedThreadActivitiesStrict,
   readCodexDaemonVersion,
+  readCodexDaemonReceiptFingerprint,
   restartCodexDaemon,
   inspectCodexDaemonHealth,
   stopCodexDaemonEnsureProcess,
@@ -342,6 +350,12 @@ import {
   releaseManagedHost,
 } from './managed-host.ts';
 import { dshAdapterOptions } from '../installation/shipped-adapters.ts';
+import {
+  OMP_BRIDGE_OWNERSHIP_SPEC,
+  PI_BRIDGE_OWNERSHIP_SPEC,
+  recordAutoInstalledBridge,
+  type BridgeOwnershipSpec,
+} from '../installation/pi-bridge-ownership.ts';
 import {
   mutationFingerprint,
   ProtocolJournal,
@@ -989,6 +1003,15 @@ const registry = new AgentRegistry(
 // This gate is shared by adapter readiness and the broker-owned bridge route. Without the broker
 // check, a blocked disk/RPC adapter could still adopt an omp bridge for a file Pi also discovers.
 const ompPathCollision = inspectOmpPathCollision(process.env);
+// A bridge the engine auto-installs gets the receipt setup would have written, so the next update can
+// refresh it instead of finding a file nobody can prove they wrote. Only an installed (packaged) broker
+// writes the installation ledger; a source run against the same state home must not.
+const recordBridgeInstall = (spec: BridgeOwnershipSpec, inspect: () => PiBridgeAssetInspection) =>
+  (installed: { path: string; sha256: string }): void => {
+    if (!BUILD_INFO.packaged) return;
+    const outcome = recordAutoInstalledBridge({ spec, home: setupStateHome(), ...installed, inspect });
+    if (outcome !== 'recorded') console.warn(`${LOG_PREFIX} ${spec.resourceId} auto-installed without a receipt: ${outcome}`);
+  };
 registry.register(new OpenCodeAdapter({
   waitForManagedCreateReadiness: waitForManagedOpencodeCreateReadiness,
   resolveStoredCurrentModel: (info) => sessionMetadata.currentModelHint(info),
@@ -996,6 +1019,7 @@ registry.register(new OpenCodeAdapter({
 registry.register(new PiAdapter({
   brokerUrl: BROKER_URL,
   bridgeUsesIntegrationFile: RUNTIME_CREDENTIALS.piIntegrationSource === 'file',
+  onBridgeInstalled: recordBridgeInstall(PI_BRIDGE_OWNERSHIP_SPEC, () => inspectPiBridgeAsset()),
 }));
 // omp (oh-my-pi) — the shared Pi engine bound to the omp dialect: own binary, own sessions root,
 // own bridge route family and scoped integration credential, no RPC fork/clone. Registered
@@ -1004,6 +1028,7 @@ registry.register(new PiAdapter({
 registry.register(new OmpAdapter({
   brokerUrl: BROKER_URL,
   bridgeUsesIntegrationFile: RUNTIME_CREDENTIALS.ompIntegrationSource === 'file',
+  onBridgeInstalled: recordBridgeInstall(OMP_BRIDGE_OWNERSHIP_SPEC, () => inspectOmpBridgeAsset()),
 }));
 // Reasonix — file-backed Observe plus an explicit Resume that loads the same
 // native session through one broker-owned ACP stdio child. There is no daemon
@@ -1361,6 +1386,7 @@ const runtimeUpdates = new RuntimeUpdateCoordinator([
     loadedThreads: queryCodexLoadedThreadActivitiesStrict,
     policy: getCodexUpdatePolicy,
     restart: restartCodexDaemon,
+    readRestartInput: readCodexDaemonReceiptFingerprint,
   }),
   createOpencodeRuntimeUpdateProvider({
     readVersions: readManagedOpencodeVersions,
@@ -7813,13 +7839,17 @@ server = Bun.serve<WsData>({
     // ── omp live bridge (Mode A): the in-session omp extension relays here ──
     // Same contract as the Pi family above, keyed by tool 'omp' with omp terminal-sync labels and
     // the omp bridge registry (OMP_DIALECT connections, omp:run: keys, omp-bridge sources).
-    if (path.startsWith('/omp/bridge/')) {
+    // Every route needs a ready omp runtime. A hello answers its own native attestation first: that
+    // omp process can never register with an unverified version, so its bridge stops on that code,
+    // while a runtime refusal (the broker's configured omp) can clear without restarting the terminal.
+    const ompHello = path === '/omp/bridge/hello' && req.method === 'POST';
+    if (path.startsWith('/omp/bridge/') && !ompHello) {
       const readiness = currentOmpRuntimeReadiness();
       if (!readiness.ready) {
         return json({ ok: false, code: readiness.detailCode, error: readiness.message }, 409);
       }
     }
-    if (path === '/omp/bridge/hello' && req.method === 'POST') {
+    if (ompHello) {
       const b: any = decodedBridgeBody ?? await req.json().catch(() => ({}));
       if (b?.epoch !== undefined && (typeof b.epoch !== 'string' || !/^[A-Za-z0-9-]{1,80}$/.test(b.epoch))) return json({ error: 'invalid bridge generation' }, 400);
       if (ompBridge.isClosed(b?.epoch)) return json({ error: 'closed bridge generation' }, 410);
@@ -7829,6 +7859,10 @@ server = Bun.serve<WsData>({
           code: 'OMP_BRIDGE_NATIVE_VERSION_UNVERIFIED',
           error: `OMP bridge registration requires native version ${OMP_VERIFIED_VERSION}.`,
         }, 409);
+      }
+      const readiness = currentOmpRuntimeReadiness();
+      if (!readiness.ready) {
+        return json({ ok: false, code: readiness.detailCode, error: readiness.message }, 409);
       }
       const sessionFile = String(b?.sessionFile ?? '');
       if (!sessionFile) return new Response('missing sessionFile', { status: 400 });

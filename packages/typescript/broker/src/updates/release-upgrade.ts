@@ -111,6 +111,9 @@ const BUN_RUNTIME_DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
  */
 const CLAUDE_MOD_REFRESH_TIMEOUT_MS = 60_000;
 
+/** Ceiling on the delegated Pi/omp bridge refresh: at most two small owner-only files and the ledger. */
+const BRIDGE_REFRESH_TIMEOUT_MS = 60_000;
+
 /** Every host target a signed manifest may name. A binary only ever selects the one matching its own build
  *  target, so a mixed linux+darwin manifest verifies unchanged on both and each host ignores the others. */
 export const RELEASE_ARTIFACT_TARGETS = Object.freeze(['linux-x64', 'linux-arm64', 'darwin-arm64'] as const);
@@ -313,6 +316,12 @@ export interface UpgradeCommandResult {
    * Includes stated skips when the mod was declined, disabled, unavailable or unsafe.
    */
   claudeMod?: { status: 'installed' | 'refreshed' | 'current' | 'skipped' | 'failed'; detailCode: string };
+  /**
+   * What happened to the receipt-owned Pi and omp bridges, when the ledger names one. Recorded beside
+   * `status` for the mod's reason: a bridge left behind is a note on a committed upgrade, which the
+   * installed doctor then repeats under `setupCheck`.
+   */
+  bridges?: { status: 'refreshed' | 'current' | 'skipped' | 'failed'; detailCode: string };
   /** Independent desktop reconciliation, after the broker is committed and healthy. CLI only. */
   desktopClient?: { status: DesktopClientOutcome['status']; detailCode: string };
   /**
@@ -1794,6 +1803,86 @@ async function refreshInstalledClaudeMod(options: {
   };
 }
 
+/**
+ * Bring the receipt-owned Pi and omp bridges along with the broker, by asking the NEW binary to do it.
+ *
+ * Same shape and same reason as the Claude mod: each agent loads its bridge from a file setup copied out
+ * of the build that ran it, and only the freshly switched binary carries this release's bytes. Its
+ * `bridge refresh` rewrites only a bridge whose receipt proves the older packaged copy on disk -- repair's
+ * own refresh step -- and leaves every other state to doctor, setup and repair.
+ *
+ * Asked only when the ledger names a bridge at all, so a host that never had one spawns nothing. The
+ * child gets the operator's environment, as the installed doctor does, because that environment decides
+ * which agent directory holds the bridge. Never throws and never fails the update: a refresh that did not
+ * happen leaves `bridge-owned-stale` for the installed doctor to report under "Setup recommended".
+ */
+async function refreshInstalledBridges(options: {
+  home: string;
+  targetPath: string;
+  toVersion: string;
+  javaScriptCandidate: boolean;
+  runtimePath?: string;
+  runBinary: NonNullable<UpgradeDependencies['runBinary']>;
+  env: Readonly<Record<string, string | undefined>>;
+  progress?: UpgradeDependencies['progress'];
+}): Promise<{ status: 'refreshed' | 'current' | 'skipped' | 'failed'; detailCode: string; clause: string } | undefined> {
+  let owned = false;
+  try {
+    const install = inspectInstallState(options.home);
+    owned = install.committed
+      && install.state.resources.some((resource) => resource.id === 'pi-bridge' || resource.id === 'omp-bridge');
+  } catch { /* an unreadable ledger is the installed doctor's to report */ }
+  if (!owned) return undefined;
+  options.progress?.({ step: 'refreshing-bridges' });
+  const launch = options.javaScriptCandidate && options.runtimePath
+    ? [options.runtimePath, options.targetPath]
+    : [options.targetPath];
+  const env: Record<string, string> = {};
+  for (const [name, value] of Object.entries(options.env)) if (typeof value === 'string') env[name] = value;
+  let ran: UpgradeBinaryResult;
+  try {
+    ran = await options.runBinary(
+      launch[0] as string,
+      [...launch.slice(1), 'bridge', 'refresh', '--json', '--home', options.home],
+      BRIDGE_REFRESH_TIMEOUT_MS,
+      env,
+    );
+  } catch {
+    return { status: 'failed', detailCode: 'bridge-refresh-launch-failed', clause: '' };
+  }
+  let parsed: { status?: unknown; detailCode?: unknown; refreshed?: unknown } | undefined;
+  try {
+    parsed = JSON.parse(ran.stdout) as { status?: unknown; detailCode?: unknown; refreshed?: unknown };
+  } catch { /* a child that printed nothing parseable answered nothing */ }
+  const reported = typeof parsed?.detailCode === 'string' ? parsed.detailCode : undefined;
+  const raw = parsed?.status;
+  if (ran.status === 'ok' && raw === 'refreshed') {
+    const refreshedIds = parsed?.refreshed;
+    const ids: unknown[] = Array.isArray(refreshedIds) ? refreshedIds : [];
+    const names = [
+      ...(ids.includes('pi-bridge') ? ['Pi'] : []),
+      ...(ids.includes('omp-bridge') ? ['omp'] : []),
+    ].join(' and ') || 'Pi and omp';
+    const plural = ids.length > 1;
+    return {
+      status: 'refreshed',
+      detailCode: reported ?? 'bridge-refreshed',
+      // A terminal that already loaded the bridge keeps the old module, and nothing else says so.
+      clause: ` The cosyncing ${names} bridge${plural ? 's were' : ' was'} refreshed to ${options.toVersion};`
+        + ` restart or /reload open ${names} terminals to load ${plural ? 'them' : 'it'}.`,
+    };
+  }
+  if (ran.status === 'ok' && (raw === 'current' || raw === 'skipped')) {
+    return { status: raw, detailCode: reported ?? `bridge-refresh-${raw}`, clause: '' };
+  }
+  // Refused, failed, or an older child without the verb. The installed doctor names whatever is still behind.
+  return {
+    status: 'failed',
+    detailCode: reported ?? (ran.status === 'ok' ? 'bridge-refresh-unparsable' : `bridge-refresh-${ran.status}`),
+    clause: '',
+  };
+}
+
 /** Signed-manifest, checksum-first, rollback-capable binary upgrade. */
 export async function runUpgrade(dependencies: UpgradeDependencies): Promise<UpgradeCommandResult> {
   const fromVersion = dependencies.buildInfo.version;
@@ -2396,19 +2485,35 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
         env: dependencies.env ?? process.env,
         progress,
       });
-      // A service that was stopped before the update was switched but never started; the checks start it,
-      // through the new build's own `start`, and confirm it answers.
-      return await withInstalledChecks(result(
+      // Before the installed checks, so the doctor they run sees the refreshed bridges and recommends setup
+      // only for what is still behind.
+      const bridgeOutcome = await refreshInstalledBridges({
+        home: dependencies.home,
+        targetPath,
+        toVersion,
+        javaScriptCandidate,
+        ...(effectiveRuntimePath ? { runtimePath: effectiveRuntimePath } : {}),
+        runBinary: dependencies.runBinary ?? defaultRunBinary,
+        env: dependencies.env ?? process.env,
+        progress,
+      }).catch(() => ({ status: 'failed' as const, detailCode: 'bridge-refresh-launch-failed', clause: '' }));
+      const completed = result(
         'complete',
         0,
         'upgrade-complete',
-        `Upgraded cosyncing from ${fromVersion} to ${toVersion}.${clientOutcome.clause}${modOutcome.clause}`,
+        `Upgraded cosyncing from ${fromVersion} to ${toVersion}.${clientOutcome.clause}${modOutcome.clause}${bridgeOutcome?.clause ?? ''}`,
         fromVersion,
         recovered,
         toVersion,
         modOutcome,
         clientOutcome,
-      ), { ...(effectiveRuntimePath ? { runtimePath: effectiveRuntimePath } : {}),
+      );
+      // A service that was stopped before the update was switched but never started; the checks start it,
+      // through the new build's own `start`, and confirm it answers.
+      const reported: UpgradeCommandResult = bridgeOutcome
+        ? { ...completed, bridges: { status: bridgeOutcome.status, detailCode: bridgeOutcome.detailCode } }
+        : completed;
+      return await withInstalledChecks(reported, { ...(effectiveRuntimePath ? { runtimePath: effectiveRuntimePath } : {}),
         version: toVersion, healthVerified: serviceWasActive });
     } catch (error) {
       if (!authorizationFenceWasActive

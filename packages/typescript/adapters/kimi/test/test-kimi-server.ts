@@ -52,7 +52,7 @@ import {
   KimiDriveHttp,
   isKimiIdempotentWriteCode,
 } from '../src/drive-http.ts';
-import { isOwnershipConflictError } from '@cosyncing/adapter-api';
+import { isOwnershipConflictError, isSessionCreateTemporarilyUnavailableError } from '@cosyncing/adapter-api';
 import {
   KIMI_ACTIVE_GAP_CAP_MS,
   KIMI_ACTIVE_TIME_METHOD,
@@ -257,6 +257,15 @@ function boundMeta(extra: Record<string, unknown> = {}): Record<string, unknown>
       described?.identityKey === '/custom/home'
         && described?.launch?.env?.KIMI_CODE_HOME === '/custom/home',
       `${described?.identityKey} | ${described?.launch?.env?.KIMI_CODE_HOME}`,
+    );
+    // A native Kimi Code swaps in an automatically staged update at the start of
+    // EVERY invocation, `kimi web` included. Without its own opt-out, the
+    // broker's start would be the step that moves the managed host to 2.x.
+    check(
+      'the managed-host launch carries Kimi Code\'s own update opt-out',
+      described?.launch?.env?.KIMI_CODE_NO_AUTO_UPDATE === '1'
+        && described.launch.args.join(' ') === 'web --no-open',
+      JSON.stringify(described?.launch),
     );
   }
 
@@ -530,6 +539,42 @@ function boundMeta(extra: Record<string, unknown> = {}): Record<string, unknown>
   check('a non-boolean dangerous_bypass_auth refuses rather than being coerced',
     !bypassNonBoolean.ok && bypassNonBoolean.reason === 'metadata-invalid');
 
+  // THE TOP OF THE SUPPORTED RANGE, decided from the registry record alone.
+  // Kimi Code 2.x replaced the local server protocol, yet its `/api/v1/meta`
+  // still carries every field the binding reads, so a 2.x host would pass the
+  // checks above and fail on everything after them. The record here is the
+  // captured one with only `host_version` moved (upstream 2.7.2 still writes
+  // that field, `kap-server/src/instanceRegistry.ts`), and the versions are
+  // ones the npm registry lists, the canaries included. No client is built for
+  // any of them: nothing, not even the token, is sent.
+  for (const hostVersion of [
+    '2.0.0',
+    '2.7.2',
+    '2.7.0-canary.20261120021741-0947717',
+    '3.0.0-canary.20261109125038-713a200',
+    'not-a-version',
+  ]) {
+    let clients = 0;
+    const refused = await resolveVerifiedInstance(
+      { live: [{ ...instance, hostVersion }], stale: 0, invalid: 0, truncated: false },
+      () => {
+        clients += 1;
+        return gateClient()();
+      },
+    );
+    check(`a ${hostVersion} registry record refuses before any client exists — nothing is sent`,
+      !refused.ok && refused.reason === 'unsupported-version' && clients === 0,
+      refused.ok ? 'resolved' : `${refused.reason} clients=${clients}`);
+  }
+
+  // The second line: metadata that announces the Kimi Agent Protocol, whatever
+  // version the record claims. The captured meta plus the one field upstream
+  // 2.7.2 adds (`kap-server/src/routes/meta.ts`).
+  const agentProtocol = await resolveVerifiedInstance(one,
+    gateClient((data) => ({ ...data, kimi_agent_protocol_version: '1.0.0' })));
+  check('metadata announcing the Kimi Agent Protocol refuses, ahead of the binding',
+    !agentProtocol.ok && agentProtocol.reason === 'unsupported-protocol',
+    agentProtocol.ok ? 'resolved' : agentProtocol.reason);
 }
 
 // ── 4. The response-body ceiling ────────────────────────────────────────────
@@ -1634,6 +1679,65 @@ try {
   metaPatch = undefined;
   check('the verified path still works once the captured record and metadata bind',
     (await verified.isAvailable()) && (await verified.discoverSessions()).length > 0);
+  check('a healthy, supported host is never claimed as the adapter\'s readiness fault',
+    (await verified.managedHostReadinessFault()).kind === 'host');
+
+  // ── The supported range, on every consuming path ───────────────────────────
+  //
+  // A host whose registry record names Kimi Code 2.x (the captured record with
+  // only `host_version` moved) is refused on every path from the record alone:
+  // the fake server must see NO request at all, not even the identity probe.
+  {
+    const beyond = new KimiAdapter({
+      env: {}, homeDir: '/fixture/home',
+      instanceScan: () => ({ live: [{ ...fixtureInstance, hostVersion: '2.7.2' }], stale: 0, invalid: 0, truncated: false }),
+      readToken: () => 'fixture-token',
+    });
+    const before = requests.length;
+    check('a 2.x host makes the adapter unavailable', !(await beyond.isAvailable()));
+    check('a 2.x host yields no sessions', (await beyond.discoverSessions()).length === 0);
+    check('a 2.x host cannot create', (await beyond.canCreateSession?.()) === false);
+    const createRefused = await beyond.prepareCreateSession?.().then(() => undefined, (error: unknown) => error);
+    check('a 2.x host fails the create boundary with the typed 503, naming the range and doctor, not a retry',
+      isSessionCreateTemporarilyUnavailableError(createRefused)
+        && createRefused.detailCode === 'kimi-version-unsupported'
+        && createRefused.message.includes('>= 0.35.0 and < 2.0.0')
+        && /cosyncing doctor/.test(createRefused.message)
+        && !/retry shortly/.test(createRefused.message),
+      String((createRefused as Error | undefined)?.message));
+    check('a 2.x host refuses attach with the supported range',
+      await beyond.attach(FIXTURE.sessionId).then(() => false, (error: Error) =>
+        /does not support yet/.test(error.message) && error.message.includes('>= 0.35.0 and < 2.0.0')));
+    check('a 2.x host offers no model catalog', (await beyond.listModels?.())?.length === 0);
+    check('a 2.x host refuses a native rename',
+      await beyond.renameSession(FIXTURE.sessionId, 'renamed').then(() => false, (error: Error) => /does not support yet/.test(error.message)));
+    // Supervision is told the host is not the problem, so it neither stops a
+    // host the operator runs nor cycles the same binary back up as 2.x.
+    const fault = await beyond.managedHostReadinessFault();
+    check('a 2.x host is claimed as a contract fault, so supervision leaves it alone',
+      fault.kind === 'adapter' && fault.remedy === 'contract' && fault.detail.includes('>= 0.35.0 and < 2.0.0'),
+      JSON.stringify(fault));
+    check('nothing at all reached the 2.x host on any of those paths',
+      requests.length === before, requests.slice(before).map((entry) => `${entry.method} ${entry.path}`).join(','));
+  }
+
+  // A host that announces the Kimi Agent Protocol in its metadata is refused
+  // after that one read and before anything else.
+  {
+    metaPatch = (data) => ({ ...data, kimi_agent_protocol_version: '1.0.0' });
+    const before = requests.length;
+    check('a host announcing the Kimi Agent Protocol is unavailable', !(await verified.isAvailable()));
+    check('...yields no sessions', (await verified.discoverSessions()).length === 0);
+    check('...refuses attach, naming the protocol',
+      await verified.attach(FIXTURE.sessionId).then(() => false, (error: Error) => /Kimi Agent Protocol/.test(error.message)));
+    const fault = await verified.managedHostReadinessFault();
+    check('...and is claimed as a contract fault',
+      fault.kind === 'adapter' && fault.remedy === 'contract', JSON.stringify(fault));
+    const reached = requests.slice(before).map((entry) => `${entry.method} ${entry.path}`);
+    check('...after its metadata, nothing else was sent',
+      reached.length > 0 && reached.every((entry) => entry === 'GET /api/v1/meta'), reached.join(','));
+    metaPatch = undefined;
+  }
 
   // A `kimi web` restarted under a live adapter. Every operation verifies the
   // answering server against the registry record on its own, so the new

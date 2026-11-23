@@ -251,6 +251,21 @@ function daemonOwnershipCheck(
       },
     };
   }
+  if (daemon.state === 'absent' && daemon.staleReceipts?.length) {
+    // A receipt is on disk but names no running process of its generation: a daemon that exited
+    // uncleanly or before a reboot, or one answering now without a receipt cosyncing can verify.
+    const layouts = daemon.staleReceipts.join(', ');
+    return {
+      id, status: 'skip', detailCode: 'daemon-ownership-receipt-stale',
+      summary: `cosyncing could not confirm it manages the Codex daemon: its PID receipt (${layouts}) exists but names no running daemon process.`,
+      evidence: { receiptLayouts: layouts },
+      remediation: {
+        kind: 'command',
+        message: 'While nothing is running, restart Codex yourself, then rerun `cosy doctor`.',
+        command: 'codex app-server daemon restart',
+      },
+    };
+  }
   if (daemon.state === 'absent') {
     return {
       id, status: 'skip', detailCode: 'daemon-ownership-absent',

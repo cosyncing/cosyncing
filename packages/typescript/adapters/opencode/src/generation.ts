@@ -7,8 +7,9 @@ export interface OpencodeGeneration {
   executable?: string;
 }
 
+/** OpenCode 1 prints a bare `1.18.16`; the installed OpenCode 2 binary prints `opencode v2.1.4`. */
 export function normalizeOpencodeVersion(raw: string): string {
-  return raw.match(/\b\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\b/)?.[0] ?? raw.trim().split(/\s+/)[0] ?? '';
+  return raw.match(/\b[vV]?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\b/)?.[1] ?? raw.trim().split(/\s+/)[0] ?? '';
 }
 
 /** Disable in-place updates only for children cosyncing starts. */

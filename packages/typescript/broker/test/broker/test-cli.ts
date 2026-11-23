@@ -214,6 +214,38 @@ process.env.COSYNCING_HOME = pureCliHome;
     check('the help lists claude-mod refresh next to the commands the upgrade chain uses',
       help.stdout.includes('claude-mod refresh'), '');
   }
+  // `cosyncing bridge refresh` is the Pi/omp counterpart the self-upgrade runs on the same binary, so it
+  // takes the same two options and must not be confused with the mod's verb.
+  {
+    const seen: Array<{ json: boolean; home?: string }> = [];
+    let modCalls = 0;
+    const refreshed = await callCli(['bridge', 'refresh', '--json', '--home', '/tmp/state-home'], {
+      runBridgeRefresh: async (options) => {
+        seen.push({ json: options.json, ...(options.home ? { home: options.home } : {}) });
+        options.stdout.write('{"status":"refreshed","detailCode":"bridge-refreshed","refreshed":["pi-bridge"]}\n');
+        return { exitCode: 0 };
+      },
+      runClaudeModRefresh: async () => {
+        modCalls += 1;
+        return { exitCode: 0 };
+      },
+    });
+    const badVerb = await callCli(['bridge', 'install']);
+    const relativeHome = await callCli(['bridge', 'refresh', '--home', 'state-home']);
+    const unknown = await callCli(['bridge', 'refresh', '--yes']);
+    check('bridge refresh takes --json and an absolute --home and runs only the bridge refresh',
+      refreshed.code === 0 && modCalls === 0 && seen.length === 1
+        && seen[0]!.json === true && seen[0]!.home === '/tmp/state-home'
+        && refreshed.stdout.includes('"bridge-refreshed"'),
+      JSON.stringify({ code: refreshed.code, seen, modCalls }));
+    check('bridge rejects a verb it does not have and refresh refuses a relative home or an unknown option',
+      badVerb.code === 2 && badVerb.stderr.includes("bridge: expected 'refresh'")
+        && relativeHome.code === 2 && relativeHome.stderr.includes('bridge refresh: --home must be an absolute path')
+        && unknown.code === 2 && unknown.stderr.includes('bridge refresh: unknown or duplicate option'),
+      `${badVerb.code}/${badVerb.stderr}/${relativeHome.stderr}/${unknown.stderr}`);
+    check('the help lists bridge refresh beside claude-mod refresh',
+      help.stdout.includes('bridge refresh [--json] [--home <state-dir>]'), '');
+  }
 
   const cliSource = readFileSync(join(ROOT, 'packages/typescript/broker/src/cli/cli.ts'), 'utf8');
   const upgradeConfirmation = cliSource.match(

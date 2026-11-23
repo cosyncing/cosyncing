@@ -1615,9 +1615,13 @@ export function buildSetupPlan(options: {
     options.inspection.installState,
     options.inspection.piBridge,
   );
+  // A current bridge with no receipt is adopted, as omp's is below: the bytes are exactly this build's, so
+  // writing them again changes nothing on disk and gives the file the receipt that lets a later build
+  // refresh it. The broker's own auto-install creates such files when it cannot take the lock to record one.
   const installPiBridge = options.inspection.agents.some((agent) => agent.id === 'pi' && agent.state === 'supported')
     && (piBridgeOwnership.status === 'missing'
       || piBridgeOwnership.status === 'owned-stale'
+      || (piBridgeOwnership.status === 'owned-current' && !piBridgeOwnership.receiptMatchesCurrentPackage)
       || (piBridgeOwnership.status === 'legacy-unreceipted' && options.choices.replaceLegacyPiBridge === true));
   if (installPiBridge) {
     const replacingLegacy = piBridgeOwnership.status === 'legacy-unreceipted';

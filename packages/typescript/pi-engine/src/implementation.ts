@@ -113,6 +113,13 @@ export interface PiAdapterOptions {
   brokerUrl?: string;
   /** Packaged setup wrote the owner-only scoped integration file, so terminal commands need no URL env. */
   bridgeUsesIntegrationFile?: boolean;
+  /**
+   * Told once the auto-install has CREATED the bridge file, with its path and the digest of the bytes
+   * written. The broker records the ownership receipt setup would have written, so a bridge this engine
+   * created is one a later build can prove it owns and refresh. Never told about a file that was already
+   * there. A throw is ignored: the receipt is bookkeeping, and the bridge is installed either way.
+   */
+  onBridgeInstalled?: (installed: { path: string; sha256: string }) => void;
 }
 
 export interface PiBridgeAssetInspection {
@@ -285,6 +292,7 @@ export class PiEngineAdapter implements AgentBackend {
   protected readonly rt: PiDialectRuntime;
   protected readonly brokerUrl: string;
   protected readonly bridgeUsesIntegrationFile: boolean;
+  private readonly onBridgeInstalled: PiAdapterOptions['onBridgeInstalled'];
   /** Runs the bridge auto-install at most once per adapter instance (historically per broker). */
   private bridgeEnsured = false;
   /** Per session file: the echo keys of upstream Pi Drive prompts. Held here, not by a connection,
@@ -297,6 +305,7 @@ export class PiEngineAdapter implements AgentBackend {
     this.displayName = rt.dialect.displayName;
     this.brokerUrl = (opts.brokerUrl ?? process.env.COSYNCING_BROKER ?? 'http://127.0.0.1:7734').replace(/\/$/, '');
     this.bridgeUsesIntegrationFile = opts.bridgeUsesIntegrationFile === true;
+    this.onBridgeInstalled = opts.onBridgeInstalled;
   }
 
   private terminalSyncCommand(file: string): string {
@@ -309,7 +318,7 @@ export class PiEngineAdapter implements AgentBackend {
     // unverified mutable runtime.
     if (!this.rt.hooks.readiness().ready) return;
     this.bridgeEnsured = true;
-    ensurePiBridgeExtension(this.rt);
+    ensurePiBridgeExtension(this.rt, this.onBridgeInstalled);
   }
 
   private sessionAccessBlock(): PiEngineReadiness | undefined {
@@ -3926,18 +3935,30 @@ function piBridgeExtensionInstalled(rt: PiDialectRuntime): boolean {
 // Exact current content is idempotent. Exact known legacy or unrelated content is preserved until the
 // transactional setup flow obtains confirmation; marker-only evidence never authorizes an overwrite.
 // Runs once per adapter instance (see PiEngineAdapter.bridgeEnsured); the dialect's autoinstall env
-// override opts out.
-function ensurePiBridgeExtension(rt: PiDialectRuntime): void {
+// override opts out. A file this call created is reported to `onInstalled` so the broker can receipt it.
+function ensurePiBridgeExtension(
+  rt: PiDialectRuntime,
+  onInstalled?: PiAdapterOptions['onBridgeInstalled'],
+): void {
   if (!rt.hooks.readiness().ready) return;
   if (/^(0|false|no|off)$/i.test((process.env[rt.dialect.bridgeAutoinstallEnvOverride] ?? '').trim())) return;
+  let created: string | undefined;
   try {
     const inspection = inspectDialectBridgeAsset(rt);
     if (inspection.status !== 'missing') return;
     const dstDir = dirname(inspection.path);
     mkdirSync(dstDir, { recursive: true });
+    // `wx`: a file that appeared since the inspection is someone else's and is left alone.
     writeFileSync(inspection.path, rt.bridgeAsset.source, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    created = inspection.path;
   } catch {
     /* best-effort — doctor/setup owns the visible remediation path */
+  }
+  if (created === undefined || !onInstalled) return;
+  try {
+    onInstalled({ path: created, sha256: rt.bridgeAsset.sha256 });
+  } catch {
+    /* an unrecorded bridge is still current; setup adopts it on its next run */
   }
 }
 

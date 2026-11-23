@@ -6,12 +6,15 @@ import {
   type SetupCheck,
   type SetupDiagnosisContext,
 } from '@cosyncing/adapter-api';
-import { KILO_MAX_DATA_ROOT_ENTRIES, kiloDataRoot } from './store.ts';
+import { KILO_MAX_DATA_ROOT_ENTRIES, kiloDataRoot, kiloV2DataRoot } from './store.ts';
 import {
   KILO_MEASURED_VERSIONS,
   KILO_MINIMUM_SUPPORTED_VERSION,
+  KILO_V2_COMMAND,
   kiloVersionStanding,
 } from './version.ts';
+
+const KILO_V2_UNSUPPORTED = 'cosyncing does not support Kilo v2 yet';
 
 function preferredDatabaseName(names: readonly string[]): string | undefined {
   const kilo = names.filter((name) => name === 'kilo.db' || /^kilo-[a-z0-9._-]+\.db$/iu.test(name));
@@ -80,6 +83,17 @@ function storageCheck(context: SetupDiagnosisContext, binaryPresent: boolean): S
   };
 }
 
+/** A Kilo v2 data directory beside the 7.x one is named, so its missing sessions are not a mystery. */
+function withKiloV2Storage(context: SetupDiagnosisContext, check: SetupCheck): SetupCheck {
+  if (check.status === 'fail') return check;
+  const inspected = context.inspectPath(kiloV2DataRoot(context.env, context.homeDir));
+  if (inspected.status !== 'directory') return check;
+  return {
+    ...check,
+    summary: `${check.summary} Kilo v2 sessions under ${inspected.displayPath} are not shown: ${KILO_V2_UNSUPPORTED}.`,
+  };
+}
+
 export async function diagnoseKiloSetup(context: SetupDiagnosisContext): Promise<AgentSetupDiagnosis> {
   const command = context.env.COSYNCING_KILO_BIN?.trim() || 'kilo';
   const binary = await diagnoseBinaryVersion({
@@ -94,6 +108,21 @@ export async function diagnoseKiloSetup(context: SetupDiagnosisContext): Promise
     installMessage: `Install Kilo Code CLI ${KILO_MINIMUM_SUPPORTED_VERSION} or newer, then rerun doctor.`,
     upgradeCommand: 'npm install -g @kilocode/cli',
   });
+  // `kilo` gone with `kilo2` on PATH is what installing Kilo v2 over 7.x in the same npm prefix
+  // leaves behind (the v2 package ships `kilo2` only). Found by PATH lookup; kilo2 is never run.
+  const kiloV2Executable = binary.executable ? undefined : context.resolveExecutable(KILO_V2_COMMAND);
+  const binaryIndex = binary.checks.findIndex((check) => check.id === 'kilo.binary');
+  if (kiloV2Executable && binaryIndex >= 0) {
+    binary.checks[binaryIndex] = {
+      ...binary.checks[binaryIndex]!,
+      summary: `Kilo Code 7.x (\`kilo\`) is not on PATH. \`${KILO_V2_COMMAND}\` (Kilo v2) is installed, and ${KILO_V2_UNSUPPORTED}.`,
+      evidence: { kiloV2Executable: context.displayPath(kiloV2Executable) },
+      remediation: {
+        kind: 'manual',
+        message: `Kilo v2 is not supported yet. For Create and Drive, install Kilo Code CLI ${KILO_MINIMUM_SUPPORTED_VERSION} or a newer 7.x release as \`kilo\`, then rerun doctor.`,
+      },
+    };
+  }
   const standing = kiloVersionStanding(binary.installedVersion);
   // A newer build passes rather than warning. Kilo ships through npm, so an
   // ordinary `npm update -g` would otherwise raise a warning the operator can
@@ -105,6 +134,17 @@ export async function diagnoseKiloSetup(context: SetupDiagnosisContext): Promise
         id: 'kilo.version', status: 'pass', detailCode: 'version-newer-than-measured',
         summary: `Kilo Code CLI ${binary.installedVersion} is newer than the measured baseline (${KILO_MEASURED_VERSIONS.join(', ')}); Observe, Create and Drive remain available, and the SQLite schema and server health are checked at use.`,
         evidence: { installedVersion: binary.installedVersion, measuredVersions: KILO_MEASURED_VERSIONS.join(', ') },
+      }
+      // Kilo v2 sorts below the floor (`0.0.0-v2-…`), but it is a different product, not an old
+      // build: telling the operator to update would point at the remedy that cannot help.
+      : standing === 'kilo-v2' ? {
+        id: 'kilo.version', status: 'warn', detailCode: 'version-kilo-v2-unsupported',
+        summary: `Kilo Code CLI ${binary.installedVersion} is Kilo v2, and ${KILO_V2_UNSUPPORTED}; compatible Kilo 7.x SQLite sessions remain observable, but managed Create and Drive stay disabled.`,
+        evidence: { installedVersion: binary.installedVersion, minimumVersion: KILO_MINIMUM_SUPPORTED_VERSION },
+        remediation: {
+          kind: 'manual',
+          message: `Kilo v2 is not supported yet. For Create and Drive, install Kilo Code CLI ${KILO_MINIMUM_SUPPORTED_VERSION} or a newer 7.x release as \`kilo\`.`,
+        },
       }
       // `unreadable` is refused like `below-floor` but is a different fact: a
       // version this reader cannot compare may well be NEWER, so reporting it
@@ -142,6 +182,6 @@ export async function diagnoseKiloSetup(context: SetupDiagnosisContext): Promise
       };
   return {
     agent: 'kilo', displayName: 'Kilo Code', minimumVersion: KILO_MINIMUM_VERSION,
-    checks: [...binary.checks, storageCheck(context, !!binary.executable), port],
+    checks: [...binary.checks, withKiloV2Storage(context, storageCheck(context, !!binary.executable)), port],
   };
 }

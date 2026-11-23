@@ -3449,6 +3449,30 @@ try {
         && readFileSync(bridge, 'utf8') === modified,
       `${blocked.status}:${blocked.issueCodes?.join(',')}`);
   }
+  // The broker's auto-install writes this build's exact bridge before setup has ever run, and records no
+  // receipt when it cannot take the installation lock. Setup adopts that file, as it does omp's: the bytes
+  // are unchanged and gain the receipt a later update refreshes by. Bytes that differ from the packaged
+  // build stay foreign without a receipt -- the modified and missing-receipt cases around this one.
+  {
+    const machine = join(root, 'pi-current-unreceipted');
+    const { context, bridge } = supportedPiFixture(machine);
+    mkdirSync(dirname(bridge), { recursive: true });
+    atomicWriteOwnerOnly(bridge, PI_BRIDGE_EMBEDDED_SOURCE, { mode: 0o600 });
+    const presenter = new ScriptedPresenter();
+    const adopted = await runSetup(setupOptions(machine, presenter, { context }));
+    const install = inspectInstallState(join(machine, '.cosyncing'));
+    check('setup adopts a current unreceipted Pi bridge without a prompt and receipts its exact bytes',
+      adopted.status === 'complete'
+        && adopted.actions.includes('pi-bridge.install')
+        && !presenter.calls.includes('legacy-pi')
+        && readFileSync(bridge, 'utf8') === PI_BRIDGE_EMBEDDED_SOURCE
+        && install.committed
+        && install.state.resources.some((item) => item.id === 'pi-bridge'
+          && item.target === bridge
+          && item.ownership.proof === 'package-hash'
+          && item.ownership.installedSha256 === PI_BRIDGE_EMBEDDED_SHA256),
+      `${adopted.status}:${adopted.actions.join(',')}:${presenter.calls.join(',')}`);
+  }
 
   // A committed package-hash receipt upgrades the prior packaged bridge automatically. The receipt, safe
   // file bytes, and canonical target form one ownership proof; any missing or mismatched part fails closed.

@@ -9,10 +9,18 @@ import {
 import { inspectOmpBridgeAsset } from '@cosyncing/adapter-omp';
 import { OMP_BRIDGE_EMBEDDED_SHA256 } from '@cosyncing/adapter-omp/bridge-asset';
 import { inspectOwnerOnlyFile } from '../security/secure-files.ts';
-import type {
-  InstalledResourceRecord,
-  InstallStateInspection,
+import {
+  inspectInstallState,
+  writeInstallState,
+  type InstalledResourceRecord,
+  type InstallStateInspection,
 } from './install-state.ts';
+import {
+  acquireInstallationLock,
+  type InstallationLockHandle,
+  type InstallationMutation,
+} from './installation-lock.ts';
+import { readSetupTransactionJournal } from './setup-transaction.ts';
 
 export const PI_BRIDGE_RESOURCE_ID = 'pi-bridge';
 export const OMP_BRIDGE_RESOURCE_ID = 'omp-bridge';
@@ -350,4 +358,83 @@ export function piBridgeReplaceable(decision: PiBridgeOwnershipDecision): boolea
   return decision.status === 'missing'
     || decision.status === 'owned-stale'
     || decision.status === 'legacy-unreceipted';
+}
+
+export type AutoInstalledBridgeRecord =
+  | 'recorded'
+  | 'not-packaged'
+  | 'lock-unavailable'
+  | 'setup-pending'
+  | 'uncommitted'
+  | 'receipted'
+  | 'not-current'
+  | 'write-failed';
+
+/**
+ * Give a bridge the broker's own auto-install has just created the receipt setup would have written.
+ *
+ * The engine installs this build's bridge into a missing target on first discovery, so terminal sync works
+ * before anyone runs setup. Without a receipt that file is `owned-current` only until an update changes the
+ * packaged bytes; after that nothing can prove cosyncing wrote it, doctor calls it an unowned collision,
+ * and setup, repair and `cosy update` all have to leave it behind. Recorded at creation, it is ordinary
+ * owned state instead: `owned-stale` after an update, which the update then refreshes.
+ *
+ * Narrow on purpose. It records only this build's exact bytes at the target the decision inspects, only
+ * when the committed ledger has no receipt for that bridge at all, and only under the installation lock
+ * with no interrupted setup pending. Anything else leaves the ledger alone and says why: a busy lock or an
+ * installation not yet committed is not an error, because setup adopts a current unreceipted bridge.
+ * Never throws.
+ */
+export function recordAutoInstalledBridge(options: {
+  spec: BridgeOwnershipSpec;
+  home: string;
+  /** The file the engine created, and the digest of the bytes it wrote there. */
+  path: string;
+  sha256: string;
+  /** Re-reads the bridge through the dialect's own inspection, once the lock is held. */
+  inspect: () => PiBridgeAssetInspection;
+  acquireLock?: (options: { command: InstallationMutation; home: string }) => InstallationLockHandle;
+}): AutoInstalledBridgeRecord {
+  const currentSha256 = options.spec.currentSha256;
+  if (!currentSha256 || options.sha256 !== currentSha256) return 'not-packaged';
+  const acquire = options.acquireLock ?? ((input) => acquireInstallationLock(input));
+  let lock: InstallationLockHandle;
+  try {
+    lock = acquire({ command: 'bridge-autoinstall', home: options.home });
+  } catch {
+    return 'lock-unavailable';
+  }
+  try {
+    let pending: boolean;
+    try {
+      pending = readSetupTransactionJournal(options.home) !== undefined;
+    } catch {
+      pending = true;
+    }
+    // A pending journal's rollback owns the bridge target until setup runs again.
+    if (pending) return 'setup-pending';
+    const install = inspectInstallState(options.home);
+    if (!install.committed) return 'uncommitted';
+    const decision = decideBridgeOwnership(options.spec, install, options.inspect());
+    if (decision.receipt) return 'receipted';
+    if (decision.status !== 'owned-current' || !sameCanonicalPath(decision.bridge.path, options.path)) {
+      return 'not-current';
+    }
+    writeInstallState({
+      ...install.state,
+      resources: [...install.state.resources, {
+        id: options.spec.resourceId,
+        kind: 'agent-integration',
+        target: decision.bridge.path,
+        ownership: { proof: 'package-hash', installedSha256: currentSha256 },
+      }],
+    }, options.home);
+    return 'recorded';
+  } catch {
+    return 'write-failed';
+  } finally {
+    try {
+      lock.release();
+    } catch { /* a lock record someone else replaced is theirs to release */ }
+  }
 }

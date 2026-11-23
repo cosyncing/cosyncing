@@ -9,6 +9,23 @@ The adapter is registered for every broker. Clients built before the contract
 revision that added tolerant agent decoding are not shown it — one row they
 cannot decode would cost them their whole agent list.
 
+## Supported versions
+
+cosyncing supports Kimi Code 0.35.0 and newer, below 2.0.0. Kimi Code 2.x
+replaced the local server protocol with the Kimi Agent Protocol, which cosyncing
+does not speak yet. When the running `kimi web` reports 2.0.0 or newer
+(prereleases included), cosyncing sends it nothing; when a server's metadata
+announces the Kimi Agent Protocol, cosyncing stops after reading it. Either way,
+Kimi shows as unavailable, its sessions are not listed, new sessions cannot be
+created, and `cosyncing doctor` names the version it found and the supported
+range.
+
+Kimi Code 0.43 can update itself to the newest release, which is 2.x, when you
+start it interactively, and `kimi update` installs 2.x as well. To stay on a
+supported version, set `KIMI_CODE_NO_AUTO_UPDATE=1` in the environment you
+start Kimi Code from. cosyncing sets that variable itself when it starts
+`kimi web` and when doctor reads the installed version.
+
 ## Current behavior
 
 - Every session on the server is discovered and observable read-only, whoever

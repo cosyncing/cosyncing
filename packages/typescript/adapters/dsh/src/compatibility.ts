@@ -11,10 +11,14 @@
  *
  * Two rules are enforced here rather than by review:
  *
- *  1. NO INFERIOR-FLOOR ACCEPTANCE. Support is a set of qualified versions plus
- *     a recognised contract family, never "anything at or above X". An
- *     unrecognised version — newer, older, or simply unexpected — is reported
- *     as unrecognised, which is a diagnosis, not a licence to try.
+ *  1. NO INFERIOR-FLOOR ACCEPTANCE, AND NO FAMILY ACCEPTANCE. Support is the
+ *     list of qualified versions and nothing else — never "anything at or above
+ *     X", and never "any build of the same minor". Every other version — newer,
+ *     older, or another build of a qualified minor — is refused, which is a
+ *     diagnosis, not a licence to try. The family rule was tried and broke:
+ *     0.2.2 kept the 0.2 routes and auth while changing live control frames and
+ *     the image readback request, so a family match admitted a host that then
+ *     silently lost live updates.
  *  2. NO MUTATING PROBE. Family selection reads only. A route that answers is
  *     enough; nothing here opens a session, prompts, or selects a model, and an
  *     authentication refusal never becomes a reason to try the older contract.
@@ -135,9 +139,7 @@ export function compareDshVersions(left: DshVersion, right: DshVersion): number 
 /** Why a version does or does not grant a launch or a protocol. */
 export type DshVersionVerdict =
   | { status: 'qualified'; version: DshVersion; family: DshContractFamily }
-  /** Recognised contract family, version not on the qualified list. Usable, but reported as unverified. */
-  | { status: 'family-recognised'; version: DshVersion; family: DshContractFamily }
-  /** Readable version that no contract family this build speaks claims. */
+  /** Readable version that is not on the qualified list, in any family. Refused. */
   | { status: 'unsupported'; version: DshVersion }
   /** No version could be read: no binary, or a binary that is not this dsh. */
   | { status: 'unavailable'; detail: string };
@@ -145,13 +147,15 @@ export type DshVersionVerdict =
 /**
  * Classify a locally installed `dsh`.
  *
- * The family boundary is the contract change itself, not a guess about it:
- * anything before 0.2 is the dot-named legacy surface, 0.2.x is the Remote
- * surface, and 0.3+ is unknown because nothing has been captured for it. A
- * 0.2.x host is recognised as a family even when the exact rc has never been
- * exercised — same route shapes, same auth model — while an unexercised 0.3
- * gets no benefit of the doubt, because the same rc train has already moved the
- * wire once inside 0.2.
+ * Exact membership in {@link DSH_QUALIFIED_VERSIONS}, and nothing looser. A
+ * 0.2.x build that was never captured used to be admitted as "the same family"
+ * on the grounds that its routes and auth model matched; the rc train then
+ * changed the live `session/control` frames (0.2.2-alpha.3) and the
+ * `session/attachment` request (0.2.2-alpha.2) without touching either, so the
+ * family match let a host through that lost every live title, model and
+ * context update and every image readback while looking healthy. The same rule
+ * applies to 0.1: only the captured 0.1.0-rc.6 qualifies, and the later 0.1
+ * builds are refused like any other unlisted version.
  */
 export function classifyDshVersion(value: string | undefined | null): DshVersionVerdict {
   const version = parseDshVersion(value);
@@ -160,9 +164,24 @@ export function classifyDshVersion(value: string | undefined | null): DshVersion
     ? 'legacy-0.1'
     : (DSH_QUALIFIED_VERSIONS['remote-0.2'] as readonly string[]).includes(version.raw) ? 'remote-0.2' : null;
   if (exact) return { status: 'qualified', version, family: exact };
-  if (version.major === 0 && version.minor === 1) return { status: 'family-recognised', version, family: 'legacy-0.1' };
-  if (version.major === 0 && version.minor === 2) return { status: 'family-recognised', version, family: 'remote-0.2' };
   return { status: 'unsupported', version };
+}
+
+/**
+ * The one sentence every consumer gives for a readable version that is not on
+ * the qualified list: the managed launch, readiness, every write, and doctor.
+ *
+ * It names the qualified versions and the install that clears it, because "not
+ * supported" on its own sends an operator to `npm i -g @deepseek-ai/dsh@latest`,
+ * which is the upgrade that produced the refusal in the first place. `version`
+ * is a parsed version literal, so the sentence carries no path or environment
+ * value.
+ */
+export function dshVersionRefusal(version: string): string {
+  return `DeepSeek Harness ${version} is not a version this cosyncing build has qualified `
+    + `(qualified: ${DSH_QUALIFIED_VERSION_LIST}), so cosyncing does not start it or connect to a host `
+    + `it serves on this machine. Install @deepseek-ai/dsh@${DSH_CURRENT_VERSION}, or wait for a `
+    + `cosyncing release that qualifies ${version}.`;
 }
 
 /**
@@ -229,12 +248,7 @@ export function decideManagedLaunch(
     return { allowed: false, code: 'version-unavailable', detail: verdict.detail };
   }
   if (verdict.status === 'unsupported') {
-    return {
-      allowed: false,
-      code: 'version-unsupported',
-      detail: `dsh ${verdict.version.raw} speaks a web contract this cosyncing build does not implement. `
-        + `Verified contracts: ${DSH_QUALIFIED_VERSIONS['legacy-0.1'].join(', ')} and ${DSH_QUALIFIED_VERSIONS['remote-0.2'].join(', ')}.`,
-    };
+    return { allowed: false, code: 'version-unsupported', detail: dshVersionRefusal(verdict.version.raw) };
   }
   const plan = planDshLaunch(verdict.family, port);
   if (!plan.browserSuppressed) {

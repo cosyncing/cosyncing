@@ -22,6 +22,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
+  inspectPiBridgeAsset,
   PI_BRIDGE_EMBEDDED_SHA256,
   PI_BRIDGE_EMBEDDED_SOURCE,
 } from '../../../adapters/pi/src/index.ts';
@@ -41,6 +42,7 @@ import {
   inspectUninstall,
   readServiceLogs,
   refreshClaudeMod,
+  refreshPackagedBridges,
   runRepair,
   runServiceCommand,
   runUninstall,
@@ -155,6 +157,7 @@ import {
   CLAUDE_MOD_RESOURCE_ID,
 } from '../../src/installation/claude-mod-ownership.ts';
 import { acquireInstallationLock, installationLockPath } from '../../src/installation/installation-lock.ts';
+import { PI_BRIDGE_OWNERSHIP_SPEC, recordAutoInstalledBridge } from '../../src/installation/pi-bridge-ownership.ts';
 import { fakeClaude } from '../helpers/fake-claude-cli.ts';
 
 function readFrozenTextFixture(path: string): string {
@@ -645,6 +648,90 @@ console.log(JSON.stringify({status:result.status, rows:JSON.parse(result.stdout)
           && unavailable.ok === false
           && renderLifecycleStatus(unavailable, 'en').includes('Agents (registered): broker unavailable'),
         renderLifecycleStatus(unavailable, 'en').split('\n').find((line) => line.startsWith('Agents')));
+    }
+
+    // A busy broker is not an unavailable one either. A cold all-history roster sweep (44.6 s on a real
+    // host) held `/api/sessions` past its 30 s read, and status printed "Sessions: broker unavailable" about
+    // a broker that was running. The transport reports a held read exactly as it reports a refused
+    // connection, so the premise comes first, against the shipped transport and real sockets: both come
+    // back `unreachable`, and only the time they took tells them apart.
+    {
+      // Long enough that a refused loopback connect, which can take about a second on Windows, still lands
+      // well inside it. The collector files a failed read as held when it ran within 100 ms of its deadline.
+      const DEADLINE_MS = 2_000;
+      const HELD_BOUNDARY_MS = DEADLINE_MS - 100;
+      // Accepts the read and never answers it; `stop(true)` below drops the held connection.
+      const holding = Bun.serve({ port: 0, fetch: () => new Promise<Response>(() => undefined) });
+      const vacated = await reserveLoopbackFixturePort();
+      await vacated.release();
+      try {
+        const real = createSetupDiagnosisContext();
+        const timed = async (url: string) => {
+          const started = Bun.nanoseconds();
+          const probe = await real.fetchJson(url, {}, DEADLINE_MS);
+          return { status: probe.status, elapsedMs: Math.round((Bun.nanoseconds() - started) / 1e6) };
+        };
+        const heldRead = await timed(`http://127.0.0.1:${holding.port}/api/sessions`);
+        const refusedRead = await timed(`http://127.0.0.1:${vacated.port}/api/sessions`);
+        check('the transport reports a held read and a refused connection alike; only the elapsed deadline differs',
+          heldRead.status === 'unreachable' && heldRead.elapsedMs >= HELD_BOUNDARY_MS
+            && refusedRead.status === 'unreachable' && refusedRead.elapsedMs < HELD_BOUNDARY_MS,
+          `held=${JSON.stringify(heldRead)} refused=${JSON.stringify(refusedRead)}`);
+      } finally {
+        holding.stop(true);
+      }
+    }
+    // Then the collector. A read that used its whole deadline reads busy on its own line, while an
+    // immediate `unreachable` (the silent-broker checks above) still reads unavailable. The injected clock
+    // stands in for the deadlines, so nothing here waits 30 s.
+    {
+      const exhausting = async (pathname: string) => {
+        let clockMs = Date.parse('2026-11-23T00:00:00.000Z');
+        return collectLifecycleStatus({
+          ...baseOptions(m),
+          now: () => new Date(clockMs),
+          context: {
+            ...m.context,
+            async fetchJson(
+              url: string,
+              headers?: Readonly<Record<string, string>>,
+              timeoutMs?: number,
+              maxBytes?: number,
+            ): Promise<SetupHttpProbe> {
+              if (new URL(url).pathname !== pathname) return m.context.fetchJson(url, headers, timeoutMs, maxBytes);
+              // Held until the reader gave up: its whole deadline passes, then the transport says unreachable.
+              clockMs += timeoutMs ?? 3_000;
+              return { status: 'unreachable' };
+            },
+          },
+        });
+      };
+      const bin = PRODUCT_IDENTITY.primaryBinary;
+      const line = (report: LifecycleStatusReport, language: 'en' | 'zh-Hans', prefix: string) =>
+        renderLifecycleStatus(report, language).split('\n').find((candidate) => candidate.startsWith(prefix));
+      const slowSessions = await exhausting('/api/sessions');
+      check('a session roster held past its deadline reads as a busy broker, not an unavailable one',
+        slowSessions.sessions === 'busy'
+          && slowSessions.ok === true
+          && line(slowSessions, 'en', 'Sessions:')
+            === `Sessions: broker busy, still loading sessions; run ${bin} status again shortly`
+          && line(slowSessions, 'zh-Hans', '会话：')
+            === `会话：broker 繁忙，仍在加载会话；请稍后再次运行 ${bin} status`,
+        `${line(slowSessions, 'en', 'Sessions:')} | ${line(slowSessions, 'zh-Hans', '会话：')}`);
+      const slowAgents = await exhausting('/api/agents');
+      check('an agent roster held past its deadline reads busy and says so in its detail code',
+        slowAgents.agentsRead === 'busy'
+          && slowAgents.agents.length === 0
+          && slowAgents.detailCodes.includes('agent-roster-busy')
+          && line(slowAgents, 'en', 'Agents')
+            === `Agents (registered): broker busy, still checking agents; run ${bin} status again shortly`,
+        `${line(slowAgents, 'en', 'Agents')} codes=${slowAgents.detailCodes.join(',')}`);
+      const slowUpdates = await exhausting('/api/agent-runtime-updates');
+      check('an update feed held past its deadline reads busy',
+        slowUpdates.updates === 'busy'
+          && line(slowUpdates, 'en', 'Updates:')
+            === `Updates: broker busy, still checking updates; run ${bin} status again shortly`,
+        line(slowUpdates, 'en', 'Updates:'));
     }
 
     // The raised ceiling is production wiring, not a default. Without it a real roster fails the moment it
@@ -1249,6 +1336,104 @@ console.log(JSON.stringify({status:result.status, rows:JSON.parse(result.stdout)
         && after.state.resources.some((item) => item.id === 'omp-bridge'
           && item.ownership.installedSha256 === OMP_BRIDGE_EMBEDDED_SHA256),
       `${repaired.exitCode}:${repaired.detailCode}`);
+  }
+
+  // `cosy update` has the NEW binary run `bridge refresh`, which is repair's refresh step and nothing else:
+  // a receipt-proven stale bridge is rewritten with its receipt, and a bridge without one is left alone.
+  {
+    const m = machine({ binaryHash: true }); cleanup.push(m.root);
+    const piPath = join(m.piAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts');
+    const ompPath = join(m.userHome, '.omp', 'agent', 'extensions', 'cosyncing-bridge', 'index.ts');
+    const priorPackaged = `${PI_BRIDGE_EMBEDDED_SOURCE}\n// prior packaged bridge comment\n`;
+    const unreceiptedOmp = `${OMP_BRIDGE_EMBEDDED_SOURCE}\n// an older omp bridge nothing receipted\n`;
+    atomicWriteOwnerOnly(piPath, priorPackaged, { mode: 0o600 });
+    atomicWriteOwnerOnly(ompPath, unreceiptedOmp, { mode: 0o600 });
+    const install = inspectInstallState(m.home);
+    if (!install.committed) throw new Error('fixture install missing');
+    install.state.resources.push({
+      id: 'pi-bridge',
+      kind: 'agent-integration',
+      target: piPath,
+      ownership: { proof: 'package-hash', installedSha256: hash(priorPackaged) },
+    });
+    writeInstallState(install.state, m.home);
+    const busy = await refreshPackagedBridges({
+      ...baseOptions(m),
+      acquireLock: () => { throw new Error('fixture: another mutation holds the lock'); },
+    });
+    check('a bridge refresh that cannot take the installation lock changes nothing and says so',
+      busy.status === 'refused' && busy.detailCode === 'bridge-refresh-lock-unavailable'
+        && readFileSync(piPath, 'utf8') === priorPackaged,
+      `${busy.status}/${busy.detailCode}`);
+    const refreshed = await refreshPackagedBridges(baseOptions(m));
+    const after = inspectInstallState(m.home);
+    check('the update-time bridge refresh rewrites only the receipt-proven stale bridge, with its receipt',
+      refreshed.status === 'refreshed' && refreshed.detailCode === 'bridge-refreshed'
+        && JSON.stringify(refreshed.refreshed) === JSON.stringify(['pi-bridge'])
+        && readFileSync(piPath, 'utf8') === PI_BRIDGE_EMBEDDED_SOURCE
+        && readFileSync(ompPath, 'utf8') === unreceiptedOmp
+        && after.committed
+        && after.state.resources.some((item) => item.id === 'pi-bridge' && item.target === piPath
+          && item.ownership.installedSha256 === PI_BRIDGE_EMBEDDED_SHA256)
+        && !after.state.resources.some((item) => item.id === 'omp-bridge')
+        && !existsSync(installationLockPath(m.home)),
+      `${refreshed.status}/${refreshed.detailCode}/${JSON.stringify(refreshed.refreshed)}`);
+    const again = await refreshPackagedBridges(baseOptions(m));
+    check('a second bridge refresh finds nothing behind and writes nothing',
+      again.status === 'current' && again.refreshed.length === 0
+        && readFileSync(ompPath, 'utf8') === unreceiptedOmp,
+      `${again.status}/${again.detailCode}`);
+  }
+
+  // The engine's auto-install reports the bridge file it created, and the broker records the receipt setup
+  // would have written: under the lock, for this build's exact bytes at that target, and only once.
+  {
+    const m = machine({ binaryHash: true }); cleanup.push(m.root);
+    const piPath = join(m.piAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts');
+    atomicWriteOwnerOnly(piPath, PI_BRIDGE_EMBEDDED_SOURCE, { mode: 0o600 });
+    const record = (acquireLock?: Parameters<typeof recordAutoInstalledBridge>[0]['acquireLock']) =>
+      recordAutoInstalledBridge({
+        spec: PI_BRIDGE_OWNERSHIP_SPEC,
+        home: m.home,
+        path: piPath,
+        sha256: PI_BRIDGE_EMBEDDED_SHA256,
+        inspect: () => inspectPiBridgeAsset(m.piAgentDir),
+        ...(acquireLock ? { acquireLock } : {}),
+      });
+    const receipts = () => {
+      const current = inspectInstallState(m.home);
+      return current.committed ? current.state.resources.filter((item) => item.id === 'pi-bridge') : [];
+    };
+    const busy = record(() => { throw new Error('fixture: setup holds the lock'); });
+    const afterBusy = receipts().length;
+    const recorded = record();
+    const afterRecord = receipts();
+    const repeated = record();
+    check('an auto-installed bridge gets exactly one package-hash receipt, and a busy lock defers it to setup',
+      busy === 'lock-unavailable' && afterBusy === 0
+        && recorded === 'recorded' && repeated === 'receipted'
+        && afterRecord.length === 1 && receipts().length === 1
+        && afterRecord[0]!.target === piPath
+        && afterRecord[0]!.kind === 'agent-integration'
+        && afterRecord[0]!.ownership.proof === 'package-hash'
+        && afterRecord[0]!.ownership.installedSha256 === PI_BRIDGE_EMBEDDED_SHA256
+        && !existsSync(installationLockPath(m.home)),
+      `${busy}/${afterBusy}/${recorded}/${repeated}/${JSON.stringify(afterRecord)}`);
+    const other = machine({ binaryHash: true }); cleanup.push(other.root);
+    const otherPath = join(other.piAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts');
+    atomicWriteOwnerOnly(otherPath, '// a user extension that appeared at the bridge path\n', { mode: 0o600 });
+    const foreign = recordAutoInstalledBridge({
+      spec: PI_BRIDGE_OWNERSHIP_SPEC,
+      home: other.home,
+      path: otherPath,
+      sha256: PI_BRIDGE_EMBEDDED_SHA256,
+      inspect: () => inspectPiBridgeAsset(other.piAgentDir),
+    });
+    const otherInstall = inspectInstallState(other.home);
+    check('a file whose bytes are not this build\'s bridge is never receipted, even at the bridge path',
+      foreign === 'not-current'
+        && otherInstall.committed && !otherInstall.state.resources.some((item) => item.id === 'pi-bridge'),
+      foreign);
   }
 
   {
@@ -3048,15 +3233,23 @@ console.log(JSON.stringify({status:result.status, rows:JSON.parse(result.stdout)
 
   // `cosy update` closes by asking the INSTALLED build whether its broker is up and whether setup has anything
   // to refresh. The fake below answers as that build would: its own `doctor`, `start` and `status --readiness`.
-  const installedChild = (answers: { start?: Record<string, unknown>; ready?: boolean; doctor?: object[] } = {}) => {
+  const installedChild = (answers: {
+    start?: Record<string, unknown>; ready?: boolean; doctor?: object[]; bridge?: Record<string, unknown>;
+  } = {}) => {
     const launches: Array<{ verb: string | undefined; env: Readonly<Record<string, string>> | undefined }> = [];
     const reply = (value: unknown, exitCode = 0) => ({
       status: exitCode === 0 ? 'ok' as const : 'error' as const, exitCode, stdout: JSON.stringify(value), stderr: '',
     });
     const runBinary = async (_executable: string, args: readonly string[], _timeoutMs?: number,
       env?: Readonly<Record<string, string>>) => {
-      const verb = args.find((arg) => ['version', 'claude-mod', 'doctor', 'start', 'status'].includes(arg));
+      const verb = args.find((arg) => ['version', 'claude-mod', 'bridge', 'doctor', 'start', 'status'].includes(arg));
       launches.push({ verb, env });
+      if (verb === 'bridge') {
+        // The shape `bridge refresh --json` prints, with its exit status: 0 unless refused or failed.
+        const bridge = answers.bridge ?? { status: 'refreshed', detailCode: 'bridge-refreshed',
+          summary: 'Refreshed the cosyncing Pi bridge to 2.0.0.', refreshed: ['pi-bridge'] };
+        return reply(bridge, ['refreshed', 'current', 'skipped'].includes(String(bridge.status)) ? 0 : 1);
+      }
       if (verb === 'doctor') {
         // Doctor exits 1 whenever any check fails, so a real report arrives with a failing exit status.
         return reply({ schemaVersion: 1, product: 'cosyncing', version: '2.0.0', effects: 'forbidden', ok: false,
@@ -3192,6 +3385,66 @@ console.log(JSON.stringify({status:result.status, rows:JSON.parse(result.stdout)
           === JSON.stringify(['cosyncing 2.0.0 is running and answering at http://127.0.0.1:7734.']),
       JSON.stringify(renderPostUpgradeChecks(quiet, cliPaint(false))));
   }
+  {
+    // A ledger that names a bridge: the update asks the installed build's `bridge refresh` -- after the mod,
+    // before the doctor that decides the setup notice -- with the operator's environment, which is what
+    // decides the agent directory the bridge lives in.
+    const withPiBridgeReceipt = (fixture: ReturnType<typeof upgradeMachine>) => {
+      const install = inspectInstallState(fixture.m.home);
+      if (!install.committed) throw new Error('upgrade fixture is not committed');
+      writeInstallState({ ...install.state, resources: [...install.state.resources, {
+        id: 'pi-bridge',
+        kind: 'agent-integration',
+        target: join(fixture.m.piAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts'),
+        ownership: { proof: 'package-hash', installedSha256: hash('a bridge an older build installed') },
+      }] }, fixture.m.home);
+      return fixture;
+    };
+    const child = installedChild();
+    const steps: string[] = [];
+    const upgraded = await runUpgrade({
+      ...upgradeOptions(withPiBridgeReceipt(upgradeMachine())), runBinary: child.runBinary, env: childEnv,
+      progress: (event) => steps.push(event.step),
+    });
+    const bridgeLaunch = child.launches.find((launch) => launch.verb === 'bridge');
+    check('an update refreshes receipt-owned bridges through the installed build before its doctor runs',
+      upgraded.status === 'complete' && upgraded.exitCode === 0
+        && upgraded.bridges?.status === 'refreshed' && upgraded.bridges.detailCode === 'bridge-refreshed'
+        && JSON.stringify(child.verbs()) === JSON.stringify(['version', 'claude-mod', 'bridge', 'doctor'])
+        && JSON.stringify(steps)
+          === JSON.stringify(['downloading', 'restarting', 'verifying', 'refreshing-bridges', 'checking-setup'])
+        && JSON.stringify(bridgeLaunch?.env) === JSON.stringify(childEnv),
+      `${JSON.stringify(upgraded.bridges)}/${JSON.stringify(child.verbs())}/${JSON.stringify(steps)}`);
+    check('the update says an open terminal keeps the old bridge until it is restarted or reloaded',
+      upgraded.summary.endsWith(' The cosyncing Pi bridge was refreshed to 2.0.0; restart or /reload open Pi terminals to load it.'),
+      upgraded.summary);
+    // The fallback is the notice that existed before: a refresh the installed build refuses leaves the bridge
+    // stale, and that build's doctor names it under "Setup recommended".
+    const stale = { id: 'pi.bridge-asset', status: 'warn', detailCode: 'bridge-owned-stale',
+      summary: 'The installed Pi bridge is a receipt-proven older packaged version.',
+      remediation: { command: 'cosyncing setup', message: 'Run setup or repair to refresh the package-owned Pi bridge.' } };
+    const refusing = installedChild({
+      bridge: { status: 'refused', detailCode: 'bridge-refresh-lock-unavailable',
+        summary: 'Another installation mutation is active or the lock is unsafe; the Pi and omp bridges were not refreshed.',
+        refreshed: [] },
+      doctor: [stale],
+    });
+    const refused = await runUpgrade({ ...upgradeOptions(withPiBridgeReceipt(upgradeMachine())), runBinary: refusing.runBinary });
+    const lines = renderPostUpgradeChecks(refused, cliPaint(false));
+    check('a bridge refresh the installed build refuses never fails the update, and the setup notice still names it',
+      refused.status === 'complete' && refused.exitCode === 0
+        && refused.bridges?.status === 'failed' && refused.bridges.detailCode === 'bridge-refresh-lock-unavailable'
+        && !refused.summary.includes('/reload')
+        && refused.setupCheck?.status === 'recommended'
+        && JSON.stringify(refused.setupCheck.items.map((item) => item.detailCode)) === JSON.stringify(['bridge-owned-stale'])
+        && lines.includes('Setup recommended: this update left these out of date.'),
+      `${JSON.stringify(refused.bridges)}/${JSON.stringify(lines)}`);
+    const unreceipted = installedChild();
+    const plain = await runUpgrade({ ...upgradeOptions(upgradeMachine()), runBinary: unreceipted.runBinary });
+    check('a host whose ledger names no bridge spawns no bridge refresh and reports none',
+      plain.status === 'complete' && plain.bridges === undefined && !unreceipted.verbs().includes('bridge'),
+      JSON.stringify(unreceipted.verbs()));
+  }
 
   if (process.platform === 'linux' || process.platform === 'darwin') {
     // SU1, SU2, SU4 through the REAL upgrade and a REAL child: the built CLI runs `claude-mod refresh` as a
@@ -3206,11 +3459,21 @@ console.log(JSON.stringify({status:result.status, rows:JSON.parse(result.stdout)
     const dir = claudeModMarketplaceDir(home);
     const socket = claudeModStampedSocketPath(home);
     const older = writeClaudeModMarketplace(dir, '0.6.0', socket);
+    // A Pi bridge an older build installed, with the receipt that proves it. The real `bridge refresh` child
+    // must replace it with the bytes this tree builds, taking the lock the mod child has just released.
+    const piBridge = join(fixture.m.piAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts');
+    const priorPiBridge = `${PI_BRIDGE_EMBEDDED_SOURCE}\n// prior packaged bridge comment\n`;
+    atomicWriteOwnerOnly(piBridge, priorPiBridge, { mode: 0o600 });
     const install = inspectInstallState(home);
     if (!install.committed) throw new Error('upgrade fixture is not committed');
     writeInstallState({
       ...install.state,
-      resources: [...install.state.resources, claudeModReceiptFor(dir, older.sha256, older.files)],
+      resources: [...install.state.resources, claudeModReceiptFor(dir, older.sha256, older.files), {
+        id: 'pi-bridge',
+        kind: 'agent-integration',
+        target: piBridge,
+        ownership: { proof: 'package-hash', installedSha256: hash(priorPiBridge) },
+      }],
     }, home);
     // Claude's own two entries, written by the fake exactly as the vendor writes them.
     const claudeEnv = { CLAUDE_CONFIG_DIR: fake.configDir };
@@ -3240,10 +3503,10 @@ console.log(JSON.stringify({status:result.status, rows:JSON.parse(result.stdout)
       ...upgradeOptions(fixture),
       env: operatorEnv,
       runBinary: async (executable, args, timeoutMs, env) => {
-        if (!args.includes('claude-mod')) {
+        if (!args.includes('claude-mod') && !args.includes('bridge')) {
           return { status: 'ok' as const, exitCode: 0, stdout: JSON.stringify(CANDIDATE_SELF_CHECK), stderr: '' };
         }
-        childEnvironments.push(env ?? {});
+        if (args.includes('claude-mod')) childEnvironments.push(env ?? {});
         void executable;
         // The production runner, the environment the upgrade chose, and the built CLI.
         return defaultRunBinary(process.execPath, [bundle, ...args], timeoutMs, env);
@@ -3256,6 +3519,15 @@ console.log(JSON.stringify({status:result.status, rows:JSON.parse(result.stdout)
       built.exitCode === 0 && upgraded.exitCode === 0 && upgraded.claudeMod?.status === 'refreshed'
         && copy.status === 'owned' && receipt?.ownership.installedSha256 === copy.actualSha256,
       `${built.exitCode} ${upgraded.detailCode} ${JSON.stringify(upgraded.claudeMod)} copy=${copy.status}`);
+    const bridgeLedger = inspectInstallState(home);
+    check('SU5 cosy update refreshes a receipt-owned stale Pi bridge through the new binary\'s own bytes',
+      built.exitCode === 0 && upgraded.bridges?.status === 'refreshed'
+        && readFileSync(piBridge, 'utf8') === PI_BRIDGE_EMBEDDED_SOURCE
+        && bridgeLedger.committed
+        && bridgeLedger.state.resources.some((resource) => resource.id === 'pi-bridge' && resource.target === piBridge
+          && resource.ownership.installedSha256 === PI_BRIDGE_EMBEDDED_SHA256)
+        && upgraded.summary.includes('restart or /reload open Pi terminals'),
+      `${built.exitCode} ${JSON.stringify(upgraded.bridges)} bridge=${readFileSync(piBridge, 'utf8') === priorPiBridge ? 'unchanged' : 'changed'}`);
     check('SU2 the refresh child released its own lock: no lock file is left and the next mutation can start',
       !existsSync(installationLockPath(home)) && (() => {
         try {

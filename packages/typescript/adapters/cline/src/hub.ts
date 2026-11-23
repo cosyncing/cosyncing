@@ -205,6 +205,39 @@ export function clineManagedHubPort(
     : CLINE_MANAGED_HUB_PORT;
 }
 
+/** The service variables that name the managed profile's provider and model. Create needs both. */
+export const CLINE_MANAGED_MODEL_VARIABLES = Object.freeze([
+  'COSYNCING_CLINE_PROVIDER',
+  'COSYNCING_CLINE_MODEL',
+] as const);
+
+/** Same bound setup applies before it persists a value (`serviceAgentConfigurationOverrides`), so a
+ *  value refused here never reached the service either. */
+function managedModelSetting(value: string | undefined): string | undefined {
+  const normalized = value?.trim();
+  return normalized && normalized.length <= 512 && !/[\0\r\n]/u.test(normalized)
+    ? normalized
+    : undefined;
+}
+
+/** The provider/model pair managed sessions are created with, or `undefined` unless BOTH are set.
+ *  One definition for `canCreateSession` and doctor, so doctor cannot call Create configured while
+ *  the adapter refuses it, or the other way round. */
+export function clineManagedHubModel(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): { providerID: string; modelID: string } | undefined {
+  const providerID = managedModelSetting(env.COSYNCING_CLINE_PROVIDER);
+  const modelID = managedModelSetting(env.COSYNCING_CLINE_MODEL);
+  return providerID && modelID ? { providerID, modelID } : undefined;
+}
+
+/** Which of {@link CLINE_MANAGED_MODEL_VARIABLES} are unset (or unusable), in that order. */
+export function clineManagedHubModelUnset(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): string[] {
+  return CLINE_MANAGED_MODEL_VARIABLES.filter((name) => managedModelSetting(env[name]) === undefined);
+}
+
 export function clineManagedHubIdentity(
   env: Readonly<Record<string, string | undefined>> = process.env,
   userHome = homedir(),

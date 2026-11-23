@@ -5,10 +5,11 @@
  *   1. DISCOVERY identity through a symlinked omp agent dir: one canonical id for the discovered
  *      row and a bridge hello for the realpath.
  *   2. A newer omp than verified rejects every bridge route and the native rename advertisement
- *      (the e2e gate asserts hello/events/bye only).
+ *      (the e2e gate asserts hello/events/bye only); omp's shipped asset, attesting that unverified
+ *      version to the real broker, names it once and never retries its hello.
  *   3. TURN ATTENTION through omp's OWN shipped bridge asset (running before terminal under the
  *      `omp:run:u:remote:` key, one outcome per turn in a real AttentionPolicy, no live running
- *      from a reload re-hello's backfill).
+ *      from a reload re-hello's backfill), and a refused command poll that backs off.
  *
  *   bun run test:omp-bridge
  */
@@ -31,6 +32,49 @@ const portLease = await reserveLoopbackFixturePort();
 const PORT = Number(process.env.COSYNCING_TEST_PORT ?? portLease.port);
 const BROKER = `http://127.0.0.1:${PORT}`;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Controlled clock for the bridge's long waits (its hello retry and poll backoff pauses): a timer of
+ * a second or more is held until `tick()`, so a scenario decides "never retried" or "backed off"
+ * without waiting the pause out. Shorter timers (event batching, the stand-in long poll, these
+ * scenarios' own bounded waits) still run on the real clock.
+ */
+function controlledClock() {
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  const held = new Map<unknown, { ms: number; run: () => void }>();
+  globalThis.setTimeout = ((callback: (...args: any[]) => void, ms?: number, ...args: any[]) => {
+    if (!(Number(ms) >= 1000)) return realSetTimeout(callback, ms, ...args);
+    const handle = realSetTimeout(() => {}, 2_147_483_647);
+    held.set(handle, { ms: Number(ms), run: () => callback(...args) });
+    return handle;
+  }) as unknown as typeof setTimeout;
+  globalThis.clearTimeout = ((handle?: unknown) => {
+    held.delete(handle);
+    realClearTimeout(handle as any);
+  }) as unknown as typeof clearTimeout;
+  return {
+    /** Held timers of exactly `ms`. */
+    held: (ms: number) => [...held.values()].filter((timer) => timer.ms === ms).length,
+    /** Fire every held timer now. */
+    tick() {
+      const due = [...held];
+      held.clear();
+      for (const [handle, timer] of due) {
+        realClearTimeout(handle as any);
+        timer.run();
+      }
+    },
+    restore() {
+      globalThis.setTimeout = realSetTimeout;
+      globalThis.clearTimeout = realClearTimeout;
+      for (const handle of held.keys()) realClearTimeout(handle as any);
+      held.clear();
+    },
+  };
+}
+/** Lets every pending microtask run, so any request the bridge would start has been issued. */
+const settle = () => new Promise<void>((resolve) => setImmediate(() => resolve()));
 const ROOT = join('/tmp', `cosyncing-omp-bridge-${PORT}`);
 const DISCOVERY_CWD = join(ROOT, 'work');
 const DISCOVERY_AGENT = join(ROOT, 'agent');
@@ -219,6 +263,78 @@ process.exit(73);
         && omp?.canRenameNative === false;
       return [ok, `hello=${helloResponse.status}/${helloBody.code} others=${otherStatuses.join(',')} create=${omp?.canCreateSession} rename=${omp?.canRenameNative}`];
     });
+
+    // The shipped omp asset, loaded by an omp attesting that same unverified version, meets this
+    // broker's refusal: it names the version once and stops. Its clock is advanced past the 5 s
+    // hello retry and the native start repeated, and still no second hello is sent.
+    await test('an unsupported omp terminal names its version once and stops retrying', async () => {
+      const { OMP_BRIDGE_EMBEDDED_SOURCE } = await import('../../../adapters/omp/src/bridge-asset.ts');
+      const extensionDir = join(futureRoot, 'extension');
+      const nativeUtils = join(extensionDir, 'node_modules', '@oh-my-pi', 'pi-utils');
+      mkdirSync(nativeUtils, { recursive: true });
+      writeFileSync(join(nativeUtils, 'package.json'), JSON.stringify({ name: '@oh-my-pi/pi-utils', version: '17.4.3', type: 'module' }));
+      writeFileSync(join(nativeUtils, 'dirs.js'), "export const VERSION = '17.4.3';\n");
+      const modulePath = join(extensionDir, 'index.ts');
+      writeFileSync(modulePath, OMP_BRIDGE_EMBEDDED_SOURCE);
+      const sessionFile = join(futureRoot, '2026-11-23T00-00-00-000Z_omp-unsupported.jsonl');
+      const envKeys = ['COSYNCING_BROKER', 'COSYNCING_BRIDGE_CONFIG', 'COSYNCING_OMP_INTEGRATION_FILE', 'COSYNCING_OMP_INTEGRATION_TOKEN', 'COSYNCING_NO_BRIDGE'];
+      const savedEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+      // Read once at module load: the asset must reach this broker and no host config.
+      process.env.COSYNCING_BROKER = futureOrigin;
+      process.env.COSYNCING_BRIDGE_CONFIG = join(futureRoot, 'absent-config.json');
+      process.env.COSYNCING_OMP_INTEGRATION_FILE = join(futureRoot, 'absent-integration.json');
+      delete process.env.COSYNCING_OMP_INTEGRATION_TOKEN;
+      delete process.env.COSYNCING_NO_BRIDGE;
+      // Observed, not answered: every request still reaches the real broker.
+      const originalFetch = globalThis.fetch;
+      const hellos: any[] = [];
+      globalThis.fetch = (async (input: any, init?: RequestInit) => {
+        if (new URL(String(input)).pathname === '/omp/bridge/hello') hellos.push(JSON.parse(String(init?.body ?? '{}')));
+        return originalFetch(input, init);
+      }) as typeof fetch;
+      const statuses: string[] = [];
+      const handlers = new Map<string, (event: any, c: any) => unknown>();
+      const ctx = {
+        cwd: futureRoot,
+        sessionManager: { getSessionFile: () => sessionFile, getSessionId: () => 'omp-unsupported', getEntries: () => [] },
+        ui: { setStatus(_key: string, value: string) { statuses.push(value); } },
+        isIdle: () => true,
+      };
+      const clock = controlledClock();
+      try {
+        const ext = (await import(modulePath)).default;
+        ext({
+          on: (name: string, fn: (event: any, c: any) => unknown) => { handlers.set(name, fn); },
+          registerTool() {},
+          sendMessage() {},
+          getThinkingLevel: () => undefined,
+          setModel: async () => true,
+          setThinkingLevel() {},
+        } as any);
+        await handlers.get('session_start')?.({}, ctx);
+        const end = Date.now() + 10_000;
+        while (Date.now() < end && !statuses.some((value) => value.includes('17.4.3'))) await sleep(25);
+        // Past the retry pause: a retry the bridge had scheduled would issue its hello now.
+        clock.tick();
+        await settle();
+        await handlers.get('session_start')?.({}, ctx);
+        await settle();
+        const last = statuses.at(-1) ?? '';
+        const ok = hellos.length === 1
+          && hellos[0]?.prepare === true
+          && hellos[0]?.nativeVersion === '17.4.3'
+          && last.startsWith('📱 not synced: omp 17.4.3 is not supported');
+        return [ok, `hellos=${hellos.length} admission=${hellos[0]?.prepare} attested=${hellos[0]?.nativeVersion} status=${last}`];
+      } finally {
+        await Promise.resolve(handlers.get('session_shutdown')?.({ reason: 'quit' }, ctx)).catch(() => undefined);
+        clock.restore();
+        globalThis.fetch = originalFetch;
+        for (const [key, value] of Object.entries(savedEnv)) {
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
+      }
+    });
   } finally {
     futureBroker.kill();
     await futureBroker.exited;
@@ -254,6 +370,10 @@ process.exit(73);
   const helloBodies: any[] = [];
   const queuedCommands: any[] = [];
   let polls = 0;
+  // The broker's runtime gate answers every `/omp/bridge/*` request at once with this 409 while
+  // its omp is not ready (asserted against the real broker above), polls included.
+  let refuseCommands = false;
+  let refusedPolls = 0;
   let subscribed = false;
   const fakeBroker = Bun.serve({
     hostname: '127.0.0.1',
@@ -287,6 +407,14 @@ process.exit(73);
       if (url.pathname === '/omp/bridge/commands') {
         if (!registry.get(url.searchParams.get('id') ?? '')) return new Response('unknown bridge', { status: 404 });
         polls += 1;
+        if (refuseCommands) {
+          refusedPolls += 1;
+          return Response.json({
+            ok: false,
+            code: 'omp-version-probe-timed-out',
+            error: 'omp did not answer a bounded version check in time.',
+          }, { status: 409 });
+        }
         await sleep(40); // stand in for the long poll so the loop doesn't spin hot
         return Response.json({ commands: queuedCommands.splice(0) });
       }
@@ -439,6 +567,27 @@ process.exit(73);
         && store.listEvents().length === eventsBefore
         && store.listObservations().length === openBefore;
       return [ok, `reset=${reset} hellos=${helloBodies.length} backfill=${JSON.stringify([...backfill])} live=${JSON.stringify(live)} events=${eventsBefore}->${store.listEvents().length} open=${openBefore}->${store.listObservations().length}`];
+    });
+
+    await test('a refused command poll backs off instead of spinning, then resumes', async () => {
+      const clock = controlledClock();
+      try {
+        refuseCommands = true;
+        // The in-flight long poll ends normally; the next one is refused, and the bridge must wait
+        // out a held backoff before it asks again.
+        const backedOff = await waitUntil(() => refusedPolls > 0 && clock.held(1500) === 1);
+        await settle();
+        const refused = refusedPolls;
+        refuseCommands = false;
+        const before = polls;
+        clock.tick();
+        const resumed = await waitUntil(() => polls > before);
+        const ok = backedOff && refused === 1 && resumed;
+        return [ok, `backedOff=${backedOff} refusedPolls=${refused} resumed=${resumed}`];
+      } finally {
+        refuseCommands = false;
+        clock.restore();
+      }
     });
   } finally {
     await fire('session_shutdown', { reason: 'quit' }).catch(() => undefined);

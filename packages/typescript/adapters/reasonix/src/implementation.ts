@@ -54,7 +54,11 @@ import {
   type SessionInfo,
   type SetupDiagnosisContext,
 } from '@cosyncing/adapter-api';
-import { diagnoseReasonixSetup, REASONIX_VERIFIED_VERSION } from './diagnostics.ts';
+import {
+  diagnoseReasonixSetup,
+  REASONIX_NEWER_VERSIONS_NOTE,
+  REASONIX_VERIFIED_VERSION,
+} from './diagnostics.ts';
 import { ReasonixCorrelationRegistry } from './correlation.ts';
 import { ReasonixDriveConnection } from './drive.ts';
 import { ReasonixObserveConnection } from './observe.ts';
@@ -122,7 +126,8 @@ function control(driving: boolean, writerAvailable: boolean): SessionInfo['contr
           state: 'observing',
           supported: writerAvailable,
           ...(writerAvailable ? { takeoverAvailable: true } : {
-            reason: `Reasonix Drive requires the exactly-verified ${REASONIX_VERIFIED_VERSION} binary on this host.`,
+            reason: `Reasonix Drive needs Reasonix ${REASONIX_VERIFIED_VERSION}, the only supported version, `
+              + `on this host. ${REASONIX_NEWER_VERSIONS_NOTE}`,
           }),
         },
     terminalSync: {
@@ -295,7 +300,7 @@ export class ReasonixAdapter implements AgentBackend {
     // (`collectSessionOptions` softens it to `[]`, `client-message-policy`
     // reports MODEL_UNSUPPORTED), so the honest channel is reachable at last.
     if (!await this.hasPinnedBinaryVersion()) {
-      throw new Error(`Reasonix model catalog requires the exactly-verified ${REASONIX_VERIFIED_VERSION} binary.`);
+      throw new Error(`Reasonix model catalog needs Reasonix ${REASONIX_VERIFIED_VERSION}, the only supported version.`);
     }
     const invocation = resolveInvocation(this.command, { env: this.env });
     if (!invocation) throw new Error('Reasonix is not installed or is not visible to the broker.');
@@ -366,7 +371,8 @@ export class ReasonixAdapter implements AgentBackend {
   } = {}): Promise<SessionInfo> {
     if (!await this.hasPinnedBinaryVersion()) {
       throw new NativeSessionUnresumableError(
-        'Reasonix create is enabled only for the native-contract-measured 1.25.2 binary.',
+        `Reasonix Create needs Reasonix ${REASONIX_VERIFIED_VERSION}, the only supported version. `
+          + REASONIX_NEWER_VERSIONS_NOTE,
       );
     }
     const cwd = options.directory ?? process.cwd();
@@ -501,7 +507,8 @@ export class ReasonixAdapter implements AgentBackend {
     }
     if (!await this.hasPinnedBinaryVersion()) {
       throw new NativeSessionUnresumableError(
-        'Reasonix Resume is enabled only for the native-contract-measured 1.25.2 binary; Observe remains available.',
+        `Reasonix Resume needs Reasonix ${REASONIX_VERIFIED_VERSION}, the only supported version; `
+          + `Observe remains available. ${REASONIX_NEWER_VERSIONS_NOTE}`,
       );
     }
     if (this.drivenSessions.get(sessionId)?.driving || this.pendingDriveOpens.has(sessionId)) {

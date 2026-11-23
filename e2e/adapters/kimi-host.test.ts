@@ -145,6 +145,12 @@ describe('K3 server-identity gate', () => {
       });
       return () => fake.host.overrideMeta(undefined);
     }],
+    // The one field Kimi Code 2.7.2 adds to meta (`kap-server/src/routes/meta.ts`), announcing a protocol
+    // this adapter does not speak, whatever version the record claims.
+    ['meta announcing the Kimi Agent Protocol (unsupported protocol)', () => {
+      fake.host.overrideMeta((meta) => ({ ...meta, kimi_agent_protocol_version: '1.0.0' }));
+      return () => fake.host.overrideMeta(undefined);
+    }],
   ];
 
   for (const [name, arrange] of cases) {
@@ -161,6 +167,40 @@ describe('K3 server-identity gate', () => {
       await expectAdopted(session.id);
     });
   }
+
+  test('a host past the supported range is unavailable with the range named, and is sent nothing at all', async () => {
+    const session = seeded();
+    await expectAdopted(session.id);
+    // Kimi Code 2.x replaced the local server protocol. The record keeps its `host_version` field there
+    // (`kap-server/src/instanceRegistry.ts`); the versions are ones npm lists, a canary among them.
+    for (const version of ['2.7.2', '3.0.0-canary.20261109125038-713a200']) {
+      fake.host.register({ ...fake.host.registryRecord(), host_version: version });
+      fake.host.setApiVersion(version);
+      try {
+        await expectRefused(version, session.id);
+        // From here on every operation is on the refused host: none of them may reach it.
+        const mark = fake.ledger.mark();
+        const kimi = (await client.agents()).find((agent) => agent.id === 'kimi');
+        expect(kimi?.canCreateSession, version).toBe(false);
+        fake.prepareCreate();
+        const created = await client.post('/api/sessions/kimi', { directory: fake.workspace('range') });
+        expect(created.status, created.text).toBe(503);
+        expect(created.body.detailCode).toBe('kimi-version-unsupported');
+        expect(created.body.error).toContain('>= 0.35.0 and < 2.0.0');
+        expect((await kimiRows()).some((row) => row.id === session.id)).toBe(false);
+        const attach = await client.attach('kimi', session.id);
+        expect((await attach.waitForFrame((frame) => frame.kind === 'error' || frame.kind === 'history')).kind).toBe('error');
+        attach.close();
+        const reached = fake.ledger.paths(mark)
+          .filter((path) => /^(GET \/api\/v1\/(meta|healthz)|GET \/api\/v2\/sessions|POST \/api\/v1\/sessions)$/.test(path));
+        expect(reached, version).toEqual([]);
+      } finally {
+        fake.host.register();
+        fake.host.setApiVersion(fake.host.version);
+      }
+    }
+    await expectAdopted(session.id);
+  });
 
   test('a registry holding more records than one scan examines is refused whole', async () => {
     const session = seeded();

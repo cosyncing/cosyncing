@@ -32,6 +32,22 @@ async function updates(client: BrokerClient, options: { fresh?: boolean } = {}):
   return Object.fromEntries(response.body.updates.map((status: any) => [status.agent, status]));
 }
 
+/** Replace a PID receipt whole, as Codex does. */
+function forgeReceipt(path: string, record: unknown): void {
+  const forged = `${path}.forged`;
+  writeFileSync(forged, JSON.stringify(record), { mode: 0o600 });
+  renameSync(forged, path);
+}
+
+/** The native identity Codex records on Linux: the boot id and the kernel start ticks of the process. */
+function linuxProcessIdentity(pid: number): { bootId: string; startTicks: number } {
+  const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+  return {
+    bootId: readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(),
+    startTicks: Number(stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\s+/)[19]),
+  };
+}
+
 async function runtimeEvents(client: BrokerClient, agent: string): Promise<any[]> {
   const page = await client.get('/api/attention-events?clientId=e2e-runtime&limit=200');
   expect(page.status).toBe(200);
@@ -265,24 +281,48 @@ describe('the Codex daemon', () => {
       expect(codex.runningDaemon()).toMatchObject({ version: '0.145.0' });
     });
 
-    test('a receipt naming another process generation proves nothing: the restart is refused and the daemon left running', async () => {
+    test('a receipt that cannot prove its process refuses the restart, says how to recover, and leaves the daemon running', async () => {
       const running = codex.runningDaemon()!;
       const receipt = readFileSync(codex.receiptPath, 'utf8');
       const since = codex.ledger().length;
       try {
-        const forged = `${codex.receiptPath}.forged`;
-        writeFileSync(forged, JSON.stringify({ ...JSON.parse(receipt), processStartTime: 'Thu Jan  1 00:00:00 1970' }), { mode: 0o600 });
-        renameSync(forged, codex.receiptPath);
-        const refused = await client.post('/api/agent-runtime-updates/codex/restart', RESTART_CONFIRMED);
-        expect(refused.status).toBe(502);
-        expect(refused.body.error).toMatch(/without a verified daemon PID receipt/);
+        // No native identity, and a start time that no longer matches: a clock change and a reused
+        // PID look the same, so the receipt proves nothing either way.
+        forgeReceipt(codex.receiptPath, { ...JSON.parse(receipt), processStartTime: 'Thu Jan  1 00:00:00 1970' });
+        const unverifiable = await client.post('/api/agent-runtime-updates/codex/restart', RESTART_CONFIRMED);
+        expect(unverifiable.status).toBe(502);
+        expect(unverifiable.body.error).toMatch(/could not confirm it manages the Codex daemon: .*start time no longer matches/);
+        expect(unverifiable.body.error).toMatch(/codex app-server daemon restart/);
+        if (process.platform === 'linux') {
+          // A native identity of another process generation proves the receipt stale.
+          const identity = linuxProcessIdentity(running.pid);
+          forgeReceipt(codex.receiptPath, { ...JSON.parse(receipt), processIdentity: { ...identity, startTicks: identity.startTicks + 1 } });
+          const stale = await client.post('/api/agent-runtime-updates/codex/restart', RESTART_CONFIRMED);
+          expect(stale.status).toBe(502);
+          expect(stale.body.error).toMatch(/without a verified daemon PID receipt/);
+        }
       } finally {
-        const pending = `${codex.receiptPath}.restore`;
-        writeFileSync(pending, receipt, { mode: 0o600 });
-        renameSync(pending, codex.receiptPath);
+        forgeReceipt(codex.receiptPath, JSON.parse(receipt));
       }
       expect(codex.isAlive(running.pid)).toBe(true);
       expect(codex.ledger().slice(since).some((entry) => entry.kind === 'daemon-sigterm')).toBe(false);
+    });
+
+    test.skipIf(process.platform !== 'linux')('a receipt whose native identity still matches is trusted after the clock moved, and the restart proceeds', async () => {
+      const running = codex.runningDaemon()!;
+      // As Codex writes it on Linux: the start text from launch beside the boot id and start ticks.
+      // After a host suspend only the text stops matching `ps -o lstart`.
+      forgeReceipt(codex.receiptPath, {
+        ...JSON.parse(readFileSync(codex.receiptPath, 'utf8')),
+        processStartTime: 'Thu Jan  1 00:00:00 1970',
+        processIdentity: linuxProcessIdentity(running.pid),
+      });
+      const restarted = await client.post('/api/agent-runtime-updates/codex/restart', RESTART_CONFIRMED);
+      expect(restarted.status).toBe(200);
+      expect(restarted.body.update).toMatchObject({ state: 'current', runningVersion: '0.145.0' });
+      expect(codex.isAlive(running.pid)).toBe(false);
+      expect(codex.ledger().some((entry) => entry.kind === 'daemon-sigterm' && entry.pid === running.pid)).toBe(true);
+      expect(codex.runningDaemon()?.pid).not.toBe(running.pid);
     });
 
     test('a daemon that stopped answering is never restarted by itself, and a confirmed restart recovers it', async () => {

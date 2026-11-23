@@ -475,9 +475,9 @@
       },
       "canCreateSession": {
         "createSessionPresent": true,
-        "dynamicHook": false,
-        "hookReads": null,
-        "reason": "No canCreateSession hook exists, so the /api/agents derivation is constant true while createSession is present; createSession itself refuses at call time when the agy binary is missing."
+        "dynamicHook": true,
+        "hookReads": "local-installation",
+        "reason": "canCreateSession() is false without the agy binary and while agy's latest `agy models` run failed or timed out (the measured expired-sign-in state), and true once a retry succeeds or before any has settled; it answers from the adapter's held state without waiting on a spawn, so the resolved value is host-dependent and only the structure is pinned."
       },
       "terminalSyncHint": {
         "status": "supported",

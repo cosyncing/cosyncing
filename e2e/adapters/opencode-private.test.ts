@@ -341,7 +341,9 @@ describe.each(['sqlite', 'json'] as StoreLayout[])('OpenCode without a serve, %s
     const resumed = await client.attach('opencode', id, { mode: 'resume' });
     await resumed.waitForKind('session');
     const config = cli.readConfig<FakeOpencodeCliConfig>();
-    cli.writeConfig({ ...config, version: '2.1.4' });
+    // The banner the installed OpenCode 2.1.4 binary prints, v prefix included (a bare `2.1.4` hid
+    // that released brokers parsed it as unknown and kept the V1 path).
+    cli.writeConfig({ ...config, version: '2.1.4', versionOutput: 'opencode v2.1.4\n' });
     const stamp = new Date(Math.max(Date.now(), statSync(cli.path).mtimeMs + 1));
     utimesSync(cli.path, stamp, stamp);
     const mark = ledger.mark();
@@ -363,6 +365,10 @@ describe.each(['sqlite', 'json'] as StoreLayout[])('OpenCode without a serve, %s
     expect(exported.body.code).toBe('EXPORT_FAILED');
     expect(treeSnapshot(store.dataDir)).toEqual(before);
     expect(ledger.entries().slice(mark).filter((entry) => entry.kind !== 'version-probe')).toEqual([]);
+    // Every version probe the broker ran, before and after the upgrade, disabled OpenCode's in-place updater.
+    const probes = ledger.entries().filter((entry) => entry.kind === 'version-probe');
+    expect(probes.length).toBeGreaterThan(0);
+    expect(probes.map((entry) => entry.autoUpdateDisabled)).toEqual(probes.map(() => '1'));
     resumed.close();
     refusedResume.close();
 

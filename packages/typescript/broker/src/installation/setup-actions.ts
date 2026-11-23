@@ -749,7 +749,7 @@ export function createPiBridgeSetupAction(inputs: SetupActionInputs): SetupTrans
     agentDir: inputs.piAgentDir,
     precondition: inputs.piBridgePrecondition,
     allowLegacy: inputs.replaceLegacyPiBridge === true,
-    allowCurrentUnreceipted: false,
+    allowCurrentUnreceipted: true,
     source: PI_BRIDGE_EMBEDDED_SOURCE,
     sha256: PI_BRIDGE_EMBEDDED_SHA256,
     resourceId: 'pi-bridge',

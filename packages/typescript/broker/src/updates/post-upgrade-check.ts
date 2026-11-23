@@ -13,6 +13,8 @@ import type { CliPaint } from '../cli/cli-i18n.ts';
  * Nothing here re-runs setup. Setup asks for consent (managed runtimes, the Claude mod, the opencode route,
  * Tokdash), and an update that replayed those answers or asked them again would be a different command.
  * Starting the service the operator already installed needs no new answer, so that much an update does.
+ * (The receipt-owned Claude mod and Pi/omp bridges are refreshed before these checks run, by the installed
+ * binary's own `claude-mod refresh` and `bridge refresh`; what those leave behind is what doctor reports.)
  */
 
 export type UpgradeProgressStep =
@@ -20,6 +22,7 @@ export type UpgradeProgressStep =
   | 'restarting'
   | 'verifying'
   | 'refreshing-claude-mod'
+  | 'refreshing-bridges'
   | 'checking-service'
   | 'starting-service'
   | 'waiting-for-broker'
@@ -214,6 +217,7 @@ export function upgradeProgressText(event: UpgradeProgressEvent): string {
     case 'restarting': return `Switching the broker service to${version}…`;
     case 'verifying': return `Waiting for cosyncing${version} to answer…`;
     case 'refreshing-claude-mod': return 'Refreshing the cosyncing Claude mod…';
+    case 'refreshing-bridges': return 'Refreshing the cosyncing Pi and omp bridges…';
     case 'checking-service': return 'Checking the broker service…';
     case 'starting-service': return 'The broker service is stopped; starting it…';
     case 'waiting-for-broker': return `Waiting for cosyncing${version} to answer…`;

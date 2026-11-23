@@ -284,6 +284,17 @@ export function kiloDataRoot(
   return resolve(env.KILO_DATA_DIR?.trim() || join(xdg, 'kilo'));
 }
 
+/**
+ * Where Kilo v2 keeps its sessions (`kilo2.db`, a `session_v2` schema). Kilo v2 is not supported:
+ * nothing here is ever read, and doctor names the directory only to say its sessions are not shown.
+ */
+export function kiloV2DataRoot(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  userHome = homedir(),
+): string {
+  return resolve(env.XDG_DATA_HOME?.trim() || join(userHome, '.local', 'share'), 'kilo2');
+}
+
 function pathHasSymlinkComponent(path: string): boolean {
   const absolute = resolve(path);
   const parts = absolute.split('/').filter(Boolean);

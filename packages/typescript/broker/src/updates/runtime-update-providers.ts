@@ -8,6 +8,7 @@ import {
 import type { CodexUpdatePolicy } from '../installation/setup-state.ts';
 import {
   RUNTIME_UPDATE_OCCURRENCE_FINGERPRINT,
+  RUNTIME_UPDATE_RESTART_INPUT_FINGERPRINT,
   type RuntimeUpdateInspection,
   type RuntimeUpdateProvider,
 } from './runtime-update.ts';
@@ -73,10 +74,12 @@ export interface CodexRuntimeDependencies {
   loadedThreads(): Promise<CodexLoadedThreadActivity[]>;
   policy(): CodexUpdatePolicy;
   restart(options?: { confirmed?: boolean }): Promise<void>;
+  /** The daemon PID receipts as the restart will read them; a new receipt re-arms a paused restart. */
+  readRestartInput?(): string | undefined;
 }
 
 export function createCodexRuntimeUpdateProvider(deps: CodexRuntimeDependencies): RuntimeUpdateProvider {
-  return {
+  const daemon: RuntimeUpdateProvider = {
     agent: 'codex',
     async inspect() {
       let version: CodexDaemonVersion | undefined;
@@ -203,6 +206,23 @@ export function createCodexRuntimeUpdateProvider(deps: CodexRuntimeDependencies)
           detail: `${configFreshness.changed ? `${configFreshness.detail} ` : ''}Loaded-thread safety probe failed: ${error instanceof Error ? error.message : String(error)}`,
         });
       }
+    },
+    restart: deps.restart,
+  };
+  return {
+    agent: 'codex',
+    async inspect() {
+      const inspection = await daemon.inspect();
+      // Read after the probe and in every state: a daemon writes its receipt before it answers, so
+      // this is the receipt behind what was just observed, including one a failed restart left.
+      let restartInput: string | undefined;
+      try {
+        restartInput = deps.readRestartInput?.();
+      } catch {
+        restartInput = undefined;
+      }
+      if (restartInput) inspection[RUNTIME_UPDATE_RESTART_INPUT_FINGERPRINT] = restartInput;
+      return inspection;
     },
     restart: deps.restart,
   };

@@ -19,9 +19,9 @@
  * against the developer's live install.
  */
 import { Database, constants as sqliteConstants } from 'bun:sqlite';
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, readlinkSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { delimiter, isAbsolute, join, resolve, sep } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { isRegularSqliteStoreSync, type ModeOption, type ModelOption } from '@cosyncing/adapter-api';
 import {
   AGY_METADATA_MAX_BYTES,
@@ -534,11 +534,22 @@ export function readAgySettingsModelLabel(roots: AgyRoots, trace?: AgyTraceSink)
  * session is not on. Reflection §2's corollary is that clearing must be
  * explicit, so the caller publishes `currentModel: undefined` rather than
  * omitting the key.
+ *
+ * ALIASES (AG-1, MEASURED 2026-11-23 on 1.5.14). The label `settings.json`
+ * keeps is the one the user picked, and agy later RENAMES models without
+ * rewriting it: the host's own log records `model alias "Gemini 3.7 Flash
+ * (High)" resolved to "Gemini 3.8 Flash (High)"` on every run, while the live
+ * catalog lists only the new name. So a label the catalog does not know is
+ * looked up once more through `aliases` — agy's OWN recorded mapping, read from
+ * its log by {@link parseAgyCliLogModelAliases}, never one derived here — and
+ * the row then names the model agy actually runs. With no recorded alias the
+ * join still refuses; the caller shows the settings label as text instead.
  */
 export function resolveAgyModel(
   catalog: AgyModelCatalog,
   label: string | undefined,
   trace?: AgyTraceSink,
+  aliases?: ReadonlyMap<string, string>,
 ): { providerID: string; modelID: string; label: string } | undefined {
   if (!label) {
     trace?.({ op: 'model-join', detail: 'settings.json records no model label' });
@@ -546,6 +557,20 @@ export function resolveAgyModel(
   }
   const ids = catalog.byLabel.get(label);
   if (!ids || ids.length === 0) {
+    const aliased = aliases?.get(label);
+    if (aliased !== undefined && aliased !== label) {
+      const aliasIds = catalog.byLabel.get(aliased);
+      if (aliasIds?.length === 1) {
+        trace?.({ op: 'model-join', detail: `label ${label} resolved through agy's own alias to ${aliased}` });
+        return agyCatalogModel(catalog, aliasIds[0]!);
+      }
+      trace?.({
+        op: 'model-join',
+        detail: `label not in catalog: ${label} (agy aliases it to ${aliased}, which the catalog `
+          + `${aliasIds && aliasIds.length > 1 ? `names ${aliasIds.length} times` : 'does not list'})`,
+      });
+      return undefined;
+    }
     trace?.({ op: 'model-join', detail: `label not in catalog: ${label}` });
     return undefined;
   }
@@ -553,15 +578,184 @@ export function resolveAgyModel(
     trace?.({ op: 'model-join', detail: `label is ambiguous across ${ids.length} ids: ${label}` });
     return undefined;
   }
-  const id = ids[0]!;
+  return agyCatalogModel(catalog, ids[0]!);
+}
+
+function agyCatalogModel(catalog: AgyModelCatalog, id: string): { providerID: string; modelID: string; label: string } {
   // The label comes back out of the catalog entry, not out of `settings.json`:
   // the catalog is the publisher of record, and reading it back keeps this the
   // only place a display name can originate.
   return { providerID: AGY_PROVIDER_ID, modelID: id, label: catalog.byId.get(id)!.displayName };
 }
 
+/**
+ * A sink that passes each distinct `(op, detail)` through ONCE (AG-2).
+ *
+ * The model join runs on every roster sweep and every attach, and a miss is a
+ * property of the host's settings rather than of the sweep: MEASURED 2026-11-23,
+ * one unchanged `label not in catalog` line was written 19,744 times in four
+ * weeks, the most frequent line in the broker log. The first occurrence is the
+ * whole signal, so repeats are dropped. Bounded: past `limit` distinct details
+ * the memory is cleared, which at worst repeats a line once per `limit` new ones.
+ */
+export function agyTraceOncePerDetail(sink: AgyTraceSink, limit = 256): AgyTraceSink {
+  const seen = new Set<string>();
+  return (trace) => {
+    const key = `${trace.op}\u0000${trace.detail}`;
+    if (seen.has(key)) return;
+    if (seen.size >= limit) seen.clear();
+    seen.add(key);
+    sink(trace);
+  };
+}
+
 /** Provider id for every agy model row. One product, one provider namespace. */
 export const AGY_PROVIDER_ID = 'google-antigravity';
+
+// ── agy's own run log (AG-1 aliases, AG-3 sign-in) ──────────────────────────
+
+/**
+ * How much of one run log is read. MEASURED 2026-11-23 (agy 1.5.14, 3,749 logs):
+ * median 21.8 KB, largest 963 KB (a long interactive session). Every line read
+ * here is written during startup — the alias line sat at byte 19,571 of a
+ * 20,497-byte `agy models` log — so a 256 KiB prefix holds it with a wide
+ * margin, and a longer log is read as that prefix rather than whole.
+ */
+export const AGY_CLI_LOG_MAX_BYTES = 256 * 1024;
+
+/** The only name a run log may have: `log/cli-<YYYYMMDD>_<HHMMSS>.log` (MEASURED 1.5.14). */
+export const AGY_CLI_LOG_NAME = /^cli-\d{8}_\d{6}\.log$/;
+
+/**
+ * agy's sign-in record ON A HOST THAT STORES IT IN A FILE. MEASURED 2026-11-23 on
+ * WSL (1.5.14 logs "Using file-based token storage because WSL environment
+ * detected"); agy rewrites it on every sign-in and every token refresh. Other
+ * hosts keep the token in the system keyring and have no such file. Only its
+ * MTIME is ever read — never its contents, which are credentials.
+ */
+export const AGY_SIGN_IN_RECORD_FILE = 'antigravity-oauth-token';
+
+/**
+ * The newest run's log: `<appData>/cli.log` is a RELATIVE symlink agy repoints
+ * at `log/cli-<stamp>.log` on every invocation (MEASURED 1.5.14). Only that
+ * shape is followed — a link anywhere else is refused with a trace — and the
+ * target is then read through the same contained, symlink-refusing, bounded
+ * reader as everything else, so the link can point only at a regular file under
+ * the app-data root.
+ */
+export function agyLatestCliLogPath(roots: AgyRoots, trace?: AgyTraceSink): string | undefined {
+  let target: string;
+  try {
+    target = readlinkSync(join(roots.appData, 'cli.log'));
+  } catch {
+    // No link (agy never ran) or not a link: there is no newest log to read.
+    return undefined;
+  }
+  const full = resolve(roots.appData, target);
+  if (dirname(full) !== resolve(roots.appData, 'log') || !AGY_CLI_LOG_NAME.test(basename(full))) {
+    trace?.({ op: 'cli-log-refused', detail: `cli.log points outside log/cli-*.log: ${target}` });
+    return undefined;
+  }
+  return full;
+}
+
+/** The newest run log's text (a bounded prefix), or undefined when there is none to read. */
+export function readAgyLatestCliLog(
+  roots: AgyRoots,
+  trace?: AgyTraceSink,
+): { path: string; size: number; text: string } | undefined {
+  const path = agyLatestCliLogPath(roots, trace);
+  if (!path) return undefined;
+  const read = readContainedText(roots.appData, path, AGY_CLI_LOG_MAX_BYTES, trace);
+  if (isAgyReadRefusal(read)) return undefined;
+  return { path, size: read.size, text: read.text };
+}
+
+/** `model alias "<from>" resolved to "<to>"`: Go `%q` strings, which JSON reads for every label seen. */
+const AGY_LOG_MODEL_ALIAS = /\] model alias ("(?:[^"\\\n]|\\.){1,256}") resolved to ("(?:[^"\\\n]|\\.){1,256}")/g;
+
+/** Most aliases one log may contribute. agy resolves one saved model per run. */
+const AGY_LOG_MODEL_ALIAS_MAX = 64;
+
+/**
+ * agy's own model renames, as its log records them (AG-1).
+ *
+ * MEASURED 2026-11-23: agy exposes the mapping NOWHERE else. `settings.json`
+ * keeps only the label the user picked; `agy models` prints `id<TAB>name` rows
+ * with no alias column; the frozen cockpit catalog has no alias field; the
+ * binary holds the names only as loose string constants. Since 1.1.28 the CLI log
+ * "records whenever a model name you specify resolves to a different model, such
+ * as alias resolution … or replacement of a deprecated saved model" (agy's own
+ * changelog), as `model_resolver.go] model alias "Gemini 3.7 Flash (High)"
+ * resolved to "Gemini 3.8 Flash (High)"` — written by every run that resolves
+ * the saved model, including the broker's own `agy models`. A run that never
+ * signs in never resolves, so its log carries no such line; that is "no
+ * evidence", never "no alias".
+ */
+export function parseAgyCliLogModelAliases(text: string): Map<string, string> {
+  const aliases = new Map<string, string>();
+  for (const match of text.matchAll(AGY_LOG_MODEL_ALIAS)) {
+    let from: unknown;
+    let to: unknown;
+    try {
+      from = JSON.parse(match[1]!);
+      to = JSON.parse(match[2]!);
+    } catch {
+      continue;
+    }
+    if (typeof from !== 'string' || typeof to !== 'string' || !from.trim() || !to.trim()) continue;
+    aliases.set(from.trim(), to.trim());
+    if (aliases.size >= AGY_LOG_MODEL_ALIAS_MAX) break;
+  }
+  return aliases;
+}
+
+/**
+ * What agy's own run log says about its saved sign-in (AG-3).
+ *
+ * MEASURED 2026-11-23 on 1.5.14, over every log since 2026-10-28:
+ *  - RESTORED: `token refreshed, new expiry=…`, or `keyringAuth: loaded token,
+ *    … expired=false`.
+ *  - NOT RESTORED: `keyringAuth: timed out after 10s, skipping keyring auth` —
+ *    on 182 of the 186 runs since 2026-11-20 (3 more ended before either line).
+ *    4 of them also log `token refresh failed due to network error` / `token
+ *    validation failed due to network error`, which names the cause: the
+ *    refresh POST to Google's token endpoint never completed.
+ * `You are not logged into Antigravity.` is deliberately NOT a signal: healthy
+ * runs log it too, during startup, before the saved token has loaded.
+ * Anything else is undefined: no claim either way.
+ */
+export interface AgySignInEvidence {
+  state: 'restored' | 'not-restored';
+  /** agy said the refresh failed on the network, not on the credential. */
+  networkError: boolean;
+}
+
+export function classifyAgyCliLogSignIn(text: string): AgySignInEvidence | undefined {
+  if (/\] token refreshed, new expiry=/.test(text) || /\] keyringAuth: loaded token, [^\n]*expired=false/.test(text)) {
+    return { state: 'restored', networkError: false };
+  }
+  const networkError = /\] (?:token refresh|keyringAuth: token validation) failed due to network error/.test(text);
+  if (networkError || /\] keyringAuth: timed out after /.test(text)) return { state: 'not-restored', networkError };
+  return undefined;
+}
+
+/**
+ * A cheap fingerprint of what could END a failed model list (AG-3): the binary
+ * (agy replaces itself) and, where it is a file, the sign-in record. Two
+ * `stat`s; contents are never read. A missing file contributes `-`, so a first
+ * sign-in changes the stamp too.
+ */
+export function agyRecoveryStamp(roots: AgyRoots, binary: string): string {
+  const mtime = (path: string): string => {
+    try {
+      return String(statSync(path).mtimeMs);
+    } catch {
+      return '-';
+    }
+  };
+  return `${mtime(binary)}|${mtime(join(roots.appData, AGY_SIGN_IN_RECORD_FILE))}`;
+}
 
 // ── Subagent lineage (P2d) ───────────────────────────────────────────────────
 

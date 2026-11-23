@@ -39,11 +39,11 @@ shared `.cosyncing/outbox` path is still not supported. Codex writes through
 
 | Agent | Verified upstream version | Activation | Current surface |
 | --- | ---: | --- | --- |
-| [Kimi Code](kimi.md) | 0.38.0 | Registered by default; uses a `kimi web` host cosyncing can start | Discovery, observe, Drive and takeover, create/rename, prompts, file and image attachments, slash commands, model selection |
-| [DeepSeek Harness](dsh.md) | 0.1.0-rc.6 | Registered by default; uses a `dsh web` host cosyncing can start | Discovery, history, shared live control, create/rename, prompts, models, permission presets, native commands, image input, reconnect, and removal |
+| [Kimi Code](kimi.md) | 0.38.0; supported range 0.35.0 to below 2.0.0 (2.x refused until ported) | Registered by default; uses a `kimi web` host cosyncing can start | Discovery, observe, Drive and takeover, create/rename, prompts, file and image attachments, slash commands, model selection |
+| [DeepSeek Harness](dsh.md) | 0.2.0-rc.2; 0.1.0-rc.6 (legacy contract); other versions refused | Registered by default; uses a `dsh web` host cosyncing can start | Discovery, history, shared live control, create/rename, prompts, models, permission presets, native commands, image input, reconnect, and removal |
 | [Antigravity](antigravity.md) | 1.1.22 | Registered by default; reads the `agy` CLI's own store and drives through a broker-owned `agy` child | Discovery, observe, Drive with cross-client join and terminal handback, create, prompts, model and reasoning-effort selection |
 | [omp](omp.md) | 17.4.2 | Registered by default; setup installs its packaged in-session bridge after the CLI passes preflight | Discovery, replay, Resume/live bridge, prompts, approvals, commands, models, file input, create/name |
-| [Reasonix](reasonix.md) | 1.25.2 | Registered by default; reads the local store and lazily starts a broker-owned `reasonix acp` child | Discovery, observe, ACP Resume, create, queued prompts, answer/reasoning stream, approvals, cross-client Drive |
+| [Reasonix](reasonix.md) | 1.25.2 only; 2.x and later 1.x are Observe-only until 2.61.0 (final upstream release) support lands | Registered by default; reads the local store and lazily starts a broker-owned `reasonix acp` child | Discovery, observe, ACP Resume, create, queued prompts, answer/reasoning stream, approvals, cross-client Drive |
 | [Grok Build](grok-build.md) | 1.0.13 floor; measured on 1.0.13 and 1.0.24 | Registered by default; Observe plus authenticated Create/Resume on 1.0.13 or newer | Discovery, history replay/tail, answer/reasoning/tool/task display, model/effort controls, permissions, Stop, context usage |
 | [Cline](cline.md) | 3.0.61 Drive floor (Hub core 0.0.82) + 3.0.60 Observe | Registered by default; default-profile Observe plus an isolated broker-owned Hub on dedicated port 25464 | Parent/subagent discovery, replay/rewrite tail, managed Create/Resume, prompts, Stop, approvals, create-time model/mode, rename, token/cost/status display |
 | [Kilo Code](kilocode.md) | 7.4.23 floor; CLI/serve/store contract | Registered by default; Observe plus an authenticated broker-owned host on dedicated port 4097 | Discovery, replay/live Drive, create/rename, prompts, approvals, model selection, token/cost/status display; native tool display pending capture |
@@ -66,7 +66,7 @@ cosyncing never stops or reconfigures a host you started yourself; see
 [managed hosts](kimi.md#managed-hosts) for what ownership means.
 
 Install each host you intend to use; install DeepSeek Harness globally with npm
-(`npm install -g @deepseek-ai/dsh`). cosyncing locates a host binary on your
+(`npm install -g @deepseek-ai/dsh@0.2.0-rc.2`). cosyncing locates a host binary on your
 PATH, so an `npx`-only DeepSeek Harness install can be talked to but never
 started, restarted, or version-checked — see
 [installing the host](dsh.md#install-the-host). Clients older

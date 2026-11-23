@@ -56,7 +56,7 @@ import {
   type AgyFrame,
   type AgyTailReadResult,
 } from './safe-read.ts';
-import { ensureAgyCliCatalog } from './cli-catalog.ts';
+import { agyCliCatalogForPicker, type AgyCliCatalogOptions } from './cli-catalog.ts';
 import {
   AGY_MODES,
   AGY_TASK_ID_SEGMENT,
@@ -110,6 +110,11 @@ export interface AgyObserveOptions {
    */
   binary?: string;
   /**
+   * How the adapter runs `agy models` — its trace, back-off clock and recovery
+   * stamp — so a picker opened here shares the adapter's back-off (AG-3).
+   */
+  catalogOptions?: AgyCliCatalogOptions;
+  /**
    * The adapter's queued-send state for this conversation, when a Drive connection made one.
    * Looked up, never created: an Observe of a conversation nobody drives must not evict a driven
    * one's correlations. The line that delivers a Drive prompt is keyed through it, so a fresh
@@ -125,6 +130,7 @@ export class AgyObserveConnection implements SessionConnection {
   protected readonly conversationId: string;
   protected readonly trace?: AgyTraceSink;
   private readonly catalogBinary?: string;
+  private readonly catalogOptions?: AgyCliCatalogOptions;
   private readonly queuedSendsLookup?: () => AgyQueuedSends | undefined;
   private readonly handlers = new Set<AgentMessageHandler>();
   protected readonly path: string;
@@ -163,6 +169,7 @@ export class AgyObserveConnection implements SessionConnection {
     this.info = options.info;
     if (options.trace) this.trace = options.trace;
     if (options.binary) this.catalogBinary = options.binary;
+    if (options.catalogOptions) this.catalogOptions = options.catalogOptions;
     if (options.queuedSends) this.queuedSendsLookup = options.queuedSends;
     this.tailReadMaxBytes = options.tailReadMaxBytes ?? AGY_TAIL_READ_MAX_BYTES;
     this.path = agyTranscriptPath(options.roots, options.conversationId);
@@ -781,12 +788,16 @@ export class AgyObserveConnection implements SessionConnection {
    *
    * Read per call rather than cached at attach: a picker opened an hour into a
    * session should show what is installed now. The LIVE `agy models` list is
-   * preferred (awaited, once per TTL — the picker open is user-initiated); the
-   * cockpit file froze on 2026-08-15 and is only the no-binary fallback.
+   * preferred (awaited, once per TTL — the picker open is user-initiated —
+   * unless the last fetch failed, when it answers at once; AG-3); the cockpit
+   * file froze on 2026-08-15 and is only the fallback.
    */
   async listModels(): Promise<ModelOption[]> {
     const catalog = (this.catalogBinary
-      ? await ensureAgyCliCatalog(this.catalogBinary, { ...(this.trace ? { trace: this.trace } : {}) })
+      ? await agyCliCatalogForPicker(
+        this.catalogBinary,
+        this.catalogOptions ?? { ...(this.trace ? { trace: this.trace } : {}) },
+      )
       : undefined)
       ?? readAgyModelCatalog(this.roots, this.trace);
     const settingsLabel = readAgySettingsModelLabel(this.roots, this.trace);

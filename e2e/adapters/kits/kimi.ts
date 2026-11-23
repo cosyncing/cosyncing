@@ -116,8 +116,10 @@ export const kimiProfile: ConformanceProfile = {
         + 'and the host\'s own restart is the generation-replacement scenario in kimi-host.',
     },
     C16: {
-      skip: 'Kimi has no runtime version gate on Create or Drive: the host identity gate compares the registry '
-        + 'record\'s version with the host\'s own (kimi-host, K3 gate table); C22 asserts the doctor verdict per version.',
+      skip: 'Kimi\'s runtime version gate reads the HOST, never the `kimi` CLI this scenario re-versions: the registry '
+        + 'record\'s version (2.0.0 and newer refused before any request), meta\'s protocol field, and the record\'s '
+        + 'version against the host\'s own (kimi-host, K3 gate table and the supported-range test); C22 asserts the '
+        + 'doctor verdict per CLI version.',
     },
     C19: {
       skip: 'Kimi\'s commands are the stop and goal actions and the host\'s skills, which are activated through '

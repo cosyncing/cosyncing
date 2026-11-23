@@ -111,7 +111,7 @@ sync와 파일 입력은 지원하지 않습니다. [Grok Build](docs/supported_
 호스트가 실행 중이 아니면 시작하고, 죽으면 다시 시작하며, 자신이 시작한 것만 중지합니다.
 사용자가 직접 시작한 호스트는 중지되거나 교체되거나 재설정되지 않으며, 설정 과정에서 관리에
 동의하기 전에 두 호스트의 이름을 모두 알려 줍니다. DeepSeek Harness는
-`npm install -g @deepseek-ai/dsh`로 전역 설치하세요. cosyncing은 PATH에서 `dsh`를 찾기 때문에,
+`npm install -g @deepseek-ai/dsh@0.2.0-rc.2`로 전역 설치하세요. cosyncing은 PATH에서 `dsh`를 찾기 때문에,
 `npx`로만 설치하면 통신은 되지만 시작이나 버전 확인은 할 수 없습니다. 두 호스트 모두
 [지원 에이전트 설정](docs/supported_agents/README.md)을 참고하세요.
 

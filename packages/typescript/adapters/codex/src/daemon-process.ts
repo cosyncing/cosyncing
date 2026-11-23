@@ -17,12 +17,55 @@ export type CodexDaemonReceiptLayout = 'app-server.pid' | 'daemon.pid';
 
 export type CodexDaemonProcessRead =
   | { state: 'running'; process: CodexDaemonProcess }
-  | { state: 'absent' }
+  /** `staleReceipts`: receipts that exist but name no running process of their own generation. */
+  | { state: 'absent'; staleReceipts?: CodexDaemonReceiptLayout[] }
   | { state: 'unknown'; detail: string };
+
+/** One receipt's inspection. `unverifiable`: the receipt neither proves nor disproves the live process. */
+type CodexDaemonInspection = CodexDaemonProcessRead | { state: 'unverifiable'; detail: string };
+
+/**
+ * Codex's native process identity from the PID receipt (`processIdentity`, earlier
+ * `linuxProcessIdentity`). Linux records the boot id and kernel start ticks, the same token
+ * HostProcessProvider reads; a host suspend or clock change moves neither. macOS records ids this
+ * reader does not take (boot session, unique id), so those receipts keep the start-time check.
+ */
+type CodexDaemonReceiptIdentity =
+  | { kind: 'linux'; bootId: string; startTicks: string }
+  | { kind: 'macos' };
+
+interface CodexDaemonReceipt {
+  layout: CodexDaemonReceiptLayout;
+  pid: number;
+  processStartTime: string;
+  processIdentity?: CodexDaemonReceiptIdentity;
+}
 
 const processes = new HostProcessProvider();
 const unknown = (detail: string): CodexDaemonProcessRead => ({ state: 'unknown', detail });
 const normalizeStart = (value: string) => value.trim().replace(/\s+/g, ' ');
+const unsignedInteger = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+
+/**
+ * Codex decodes the identity as an untagged union, first match wins: Linux `{bootId, startTicks}`,
+ * then macOS `{bootId, uniqueId, startSeconds, startMicroseconds}` or `{startSeconds,
+ * startMicroseconds}`. A missing or null field is no identity; anything else is malformed.
+ */
+function parseReceiptIdentity(record: Record<string, unknown>): CodexDaemonReceiptIdentity | undefined | 'malformed' {
+  const current = record.processIdentity ?? undefined;
+  const earlier = record.linuxProcessIdentity ?? undefined;
+  if (current !== undefined && earlier !== undefined) return 'malformed';
+  const value = current ?? earlier;
+  if (value === undefined) return undefined;
+  if (typeof value !== 'object' || Array.isArray(value)) return 'malformed';
+  const identity = value as Record<string, unknown>;
+  if (typeof identity.bootId === 'string' && unsignedInteger(identity.startTicks)) {
+    return { kind: 'linux', bootId: identity.bootId, startTicks: String(identity.startTicks) };
+  }
+  if (unsignedInteger(identity.startSeconds) && unsignedInteger(identity.startMicroseconds)) return { kind: 'macos' };
+  return 'malformed';
+}
 
 /** The receipt selects the proven daemon PID, never the broker's or a terminal's folder. */
 export async function readCodexDaemonCwd(home: string, cli: string, dependencies: {
@@ -168,13 +211,13 @@ export function sameCodexInstallation(executable: string, cli: string, home?: st
   return packageBinary(cli, 'standalone') && packageBinary(executable, 'app-server-daemon');
 }
 
-/** How the receipt's start time is checked against the process: `ps -o lstart`. */
+/** How a receipt without a comparable native identity is checked against the process: `ps -o lstart`. */
 export type CodexDaemonStartTimeReader = (pid: number) => string | undefined;
 
 function inspectProcess(
-  pid: number, home: string, cli: string, receiptStart?: string,
+  pid: number, home: string, cli: string, receipt?: CodexDaemonReceipt,
   readStartTime: CodexDaemonStartTimeReader = (target) => psField(target, 'lstart'),
-): CodexDaemonProcessRead {
+): CodexDaemonInspection {
   if (pid === process.pid || !Number.isSafeInteger(pid) || pid <= 0) return unknown('Invalid Codex daemon PID.');
   const live = processes.liveProcess(pid, { fresh: true });
   if (live.state !== 'running') return live.state === 'absent' ? live : unknown('Codex process identity is unreadable.');
@@ -183,11 +226,24 @@ function inspectProcess(
   // mid-inspection, and a daemon that exited then is gone, not unverifiable.
   const exited = (): boolean => processes.liveProcess(pid, { fresh: true }).state === 'absent';
   try {
-    if (receiptStart !== undefined) {
+    const identity = receipt?.processIdentity;
+    if (identity?.kind === 'linux' && process.platform === 'linux') {
+      // Boot id and kernel start ticks, as Codex itself prefers. `ps -o lstart` is derived from a
+      // boot time that moves after a host suspend, so it is not compared at all here. A different
+      // identity proves the receipt names another process generation; it never authorizes this one.
+      if (live.identity.boot !== identity.bootId || live.identity.start !== identity.startTicks) return { state: 'absent' };
+    } else if (receipt) {
       const start = readStartTime(pid);
       if (!start) return exited() ? { state: 'absent' } : unknown('Codex daemon process start time could not be read.');
-      // A reused PID does not make an old receipt authoritative for the replacement process.
-      if (normalizeStart(start) !== receiptStart) return { state: 'absent' };
+      // Without a comparable identity a start-time mismatch cannot tell a reused PID from a clock or
+      // time-zone change, so the receipt proves nothing either way, as in Codex: never authoritative
+      // for this process, and never proof that the recorded daemon has gone.
+      if (normalizeStart(start) !== receipt.processStartTime) {
+        return exited() ? { state: 'absent' } : {
+          state: 'unverifiable',
+          detail: `Codex daemon PID receipt ${receipt.layout} exists, but its recorded start time no longer matches process ${pid}, so it cannot prove which process it names (the clock or time zone may have changed since the daemon started).`,
+        };
+      }
     }
     let executable: string;
     let argv: string[];
@@ -226,15 +282,31 @@ function inspectProcess(
   }
 }
 
+/**
+ * The PID receipts as a restart would read them, without inspecting any process. Only a change
+ * marker for restart inputs (a new daemon generation or a rewritten receipt); never ownership proof.
+ */
+export function codexDaemonReceiptFingerprint(home: string): string {
+  return JSON.stringify((['app-server.pid', 'daemon.pid'] as const).map((layout) => {
+    const path = join(home, 'app-server-daemon', layout);
+    try {
+      const stat = lstatSync(path);
+      return stat.isFile() && stat.size <= 4096 ? readFileSync(path, 'utf8') : 'unsafe';
+    } catch (error) {
+      return (error as NodeJS.ErrnoException)?.code === 'ENOENT' ? null : 'unreadable';
+    }
+  }));
+}
+
 /** The native PID receipt survives a lost control socket. Never infer process exit from an RPC failure. */
 export function readCodexDaemonProcess(home: string, cli: string, dependencies: {
   /** Test seam: the receipt start-time read, where a reap can land mid-inspection. */
   readStartTime?: CodexDaemonStartTimeReader;
 } = {}): CodexDaemonProcessRead {
-  const records: { layout: CodexDaemonReceiptLayout; pid: number; processStartTime: string }[] = [];
+  const records: CodexDaemonReceipt[] = [];
   for (const layout of ['app-server.pid', 'daemon.pid'] as const) {
     const path = join(home, 'app-server-daemon', layout);
-    let record: { pid?: unknown; processStartTime?: unknown };
+    let record: Record<string, unknown> | null;
     try {
       const stat = lstatSync(path);
       if (!stat.isFile() || stat.size > 4096 || stat.uid !== process.getuid?.() || (stat.mode & 0o022) !== 0) {
@@ -245,20 +317,33 @@ export function readCodexDaemonProcess(home: string, cli: string, dependencies: 
       if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') continue;
       return unknown(`Codex daemon PID receipt ${layout} is unreadable.`);
     }
-    if (!record || typeof record.pid !== 'number' || typeof record.processStartTime !== 'string' || !record.processStartTime.trim()) {
+    if (!record || typeof record !== 'object' || typeof record.pid !== 'number'
+        || typeof record.processStartTime !== 'string' || !record.processStartTime.trim()) {
       return unknown(`Codex daemon PID receipt ${layout} is malformed.`);
     }
-    records.push({ layout, pid: record.pid, processStartTime: normalizeStart(record.processStartTime) });
+    const processIdentity = parseReceiptIdentity(record);
+    if (processIdentity === 'malformed') return unknown(`Codex daemon PID receipt ${layout} is malformed.`);
+    records.push({
+      layout, pid: record.pid, processStartTime: normalizeStart(record.processStartTime),
+      ...(processIdentity ? { processIdentity } : {}),
+    });
   }
   const verified: { layout: CodexDaemonReceiptLayout; process: CodexDaemonProcess }[] = [];
+  const stale: CodexDaemonReceiptLayout[] = [];
+  let unverifiable: string | undefined;
   for (const record of records) {
-    const inspected = inspectProcess(record.pid, home, cli, record.processStartTime, dependencies.readStartTime);
-    if (inspected.state === 'absent') continue;
+    const inspected = inspectProcess(record.pid, home, cli, record, dependencies.readStartTime);
+    if (inspected.state === 'absent') { stale.push(record.layout); continue; }
     if (inspected.state === 'unknown') return inspected;
+    // Another receipt may still verify the daemon; this one is never authoritative either way.
+    if (inspected.state === 'unverifiable') { unverifiable ??= inspected.detail; continue; }
     verified.push({ layout: record.layout, process: inspected.process });
   }
   const daemon = verified[0]?.process;
-  if (!daemon) return { state: 'absent' };
+  if (!daemon) {
+    if (unverifiable) return unknown(unverifiable);
+    return stale.length ? { state: 'absent', staleReceipts: stale } : { state: 'absent' };
+  }
   if (verified.some(({ process: other }) => other.pid !== daemon.pid || other.start !== daemon.start || other.boot !== daemon.boot)) {
     return unknown('Codex daemon PID receipts app-server.pid and daemon.pid conflict.');
   }

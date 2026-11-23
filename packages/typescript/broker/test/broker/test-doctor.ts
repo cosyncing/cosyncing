@@ -560,6 +560,21 @@ try {
       && ownershipUnknown.summary.includes(ownershipDetail)
       && ownershipUnknown.remediation?.command === 'codex app-server daemon restart'
       && ownershipUnknown.remediation.message.includes('While nothing is running'));
+  const ownershipStaleReceipt = checkById(await diagnoseCodexSetup(codexSocketContext('linux'), {
+    readDaemonProcess: () => ({ state: 'absent', staleReceipts: ['app-server.pid'] }),
+  }), 'codex.daemon-ownership');
+  check('Codex doctor says a receipt exists but names no running daemon, with the idle-only restart',
+    ownershipStaleReceipt.status === 'skip' && ownershipStaleReceipt.detailCode === 'daemon-ownership-receipt-stale'
+      && ownershipStaleReceipt.summary.includes('PID receipt (app-server.pid) exists but names no running daemon process')
+      && ownershipStaleReceipt.evidence?.receiptLayouts === 'app-server.pid'
+      && ownershipStaleReceipt.remediation?.command === 'codex app-server daemon restart',
+    ownershipStaleReceipt.summary);
+  const ownershipAbsent = checkById(await diagnoseCodexSetup(codexSocketContext('linux'), {
+    readDaemonProcess: () => ({ state: 'absent' }),
+  }), 'codex.daemon-ownership');
+  check('Codex doctor reports no recorded daemon only when no receipt exists',
+    ownershipAbsent.status === 'skip' && ownershipAbsent.detailCode === 'daemon-ownership-absent'
+      && ownershipAbsent.summary === 'No managed Codex daemon process is recorded.');
   const modernArguments = ['app-server', '--remote-control', '--listen', 'unix://', '--analytics-default-enabled', '--managed-daemon'];
   const parsedArguments = parseManagedCodexDaemonArguments(modernArguments);
   const ownershipVerified = checkById(await diagnoseCodexSetup(codexSocketContext('linux'), {
@@ -1075,9 +1090,13 @@ try {
       JSON.stringify(handed));
   }
 
+  let claudeProbeEnv: Readonly<Record<string, string | undefined>> | undefined;
   const claudeLegacy = await diagnoseClaudeSetup(fakeContext({
     executables: { claude: '/fixture/bin/claude' },
-    runReadOnly: async () => ({ status: 'ok', stdout: '2.1.207', stderr: '' }),
+    runReadOnly: async (_executable, _args, _timeoutMs, envOverrides) => {
+      claudeProbeEnv = envOverrides;
+      return { status: 'ok', stdout: '2.1.207', stderr: '' };
+    },
   }), {
     inspectLegacyHooks: (path) => ({ status: 'legacy-marker', path, entryCount: 2, requiresConfirmation: true }),
   });
@@ -1086,6 +1105,10 @@ try {
     legacyHook.status === 'warn' && legacyHook.detailCode === 'legacy-hooks-marked' &&
       legacyHook.evidence?.entryCount === 2 && !!legacyHook.remediation &&
       !('commandText' in (legacyHook.evidence ?? {})));
+  // Running the user's `claude --version` must not let that install update itself.
+  check('the Claude version probe runs with Claude\'s auto-updater off',
+    checkById(claudeLegacy, 'claude.version').status === 'pass' && claudeProbeEnv?.DISABLE_AUTOUPDATER === '1',
+    JSON.stringify(claudeProbeEnv ?? null));
 
   const journalHome = join(testRoot, 'journal-home');
   makeOwnerOnlyDirectory(journalHome);
