@@ -142,6 +142,14 @@ export interface CliDependencies {
     stdout: CliWriter;
     stderr: CliWriter;
   }) => Promise<{ exitCode: number }>;
+  /** `cosyncing bridge refresh`, the Pi/omp bridge counterpart of `runClaudeModRefresh`. */
+  runBridgeRefresh?: (options: {
+    json: boolean;
+    home?: string;
+    invocation: string;
+    stdout: CliWriter;
+    stderr: CliWriter;
+  }) => Promise<{ exitCode: number }>;
   runUpgrade?: (options: {
     yes: boolean;
     json: boolean;
@@ -223,6 +231,7 @@ Usage:
   ${command} upgrade [--yes] [--manifest <url>] [--json]
   ${command} uninstall [--yes] [--accept-legacy-integrations] [--purge-data --confirm-purge-data] [--json]
   ${command} claude-mod refresh [--json] [--home <state-dir>]
+  ${command} bridge refresh [--json] [--home <state-dir>]
   ${command} version [--json]
   ${command} doctor [--json]
   ${command} help
@@ -243,6 +252,7 @@ Commands:
   uninstall Remove only receipt/hash/marker-owned resources; preserve data by default
   version  Print immutable build metadata
   claude-mod  refresh  Bring the installed Claude mod up to this build's copy (the self-upgrade runs it)
+  bridge   refresh  Bring receipt-owned Pi and omp bridges up to this build's copy (the self-upgrade runs it)
   doctor   Diagnose the package, agents, state, service, and local broker without changing the machine
   help     Show this help
 
@@ -572,6 +582,75 @@ async function defaultRunClaudeModRefresh(options: {
     (ok ? options.stdout : options.stderr).write(`${outcome.summary}\n`);
   }
   return { exitCode: ok ? 0 : 1 };
+}
+
+/**
+ * `cosyncing bridge refresh`, the Pi/omp bridge counterpart of `claude-mod refresh` that the self-upgrade
+ * runs on the binary it just installed.
+ *
+ * It rewrites only a bridge whose receipt proves the older packaged copy on disk, which is why it asks for
+ * nothing. Exit codes: 0 for refreshed, current and skipped; 1 for refused or failed.
+ */
+async function defaultRunBridgeRefresh(options: {
+  json: boolean;
+  home?: string;
+  stdout: CliWriter;
+  stderr: CliWriter;
+  buildInfo: Readonly<BuildInfo>;
+}): Promise<{ exitCode: number }> {
+  const lifecycle = await import('../installation/broker-lifecycle.ts');
+  const outcome = await lifecycle.refreshPackagedBridges({
+    buildInfo: options.buildInfo,
+    ...applicationLaunchInputs(options.buildInfo),
+    ...(options.home ? { home: options.home } : {}),
+  });
+  const ok = outcome.status === 'refreshed' || outcome.status === 'current' || outcome.status === 'skipped';
+  if (options.json) {
+    options.stdout.write(`${JSON.stringify(outcome)}\n`);
+  } else {
+    (ok ? options.stdout : options.stderr).write(`${outcome.summary}\n`);
+  }
+  return { exitCode: ok ? 0 : 1 };
+}
+
+/**
+ * The options both `refresh` verbs take: `--json`, and an absolute `--home`, which the upgrade passes because
+ * the state home it resolved is the one to refresh. A number is the exit code of a refused argument list.
+ */
+function parseRefreshOptions(
+  label: string,
+  args: readonly string[],
+  stderr: CliWriter,
+): { json: boolean; home?: string } | number {
+  let json = false;
+  let home: string | undefined;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === '--json') {
+      if (json) {
+        stderr.write(`${label}: unknown or duplicate option\n`);
+        return 2;
+      }
+      json = true;
+      continue;
+    }
+    if (arg === '--home') {
+      const value = args[++index];
+      if (!value || home !== undefined) {
+        stderr.write(`${label}: --home requires a path\n`);
+        return 2;
+      }
+      home = value;
+      continue;
+    }
+    stderr.write(`${label}: unknown or duplicate option\n`);
+    return 2;
+  }
+  if (home !== undefined && (!isAbsolute(home) || home.includes('\0'))) {
+    stderr.write(`${label}: --home must be an absolute path\n`);
+    return 2;
+  }
+  return { json, ...(home ? { home } : {}) };
 }
 
 /** Parse `--components`, refusing anything that is not a component this product has. */
@@ -1186,47 +1265,21 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     )).exitCode;
   }
 
-  if (requested === 'claude-mod') {
-    const [claudeModSubcommand, ...claudeModArgs] = args;
-    if (claudeModSubcommand !== 'refresh') {
-      stderr.write(`${command} claude-mod: expected 'refresh'\n`);
+  if (requested === 'claude-mod' || requested === 'bridge') {
+    const [refreshSubcommand, ...refreshArgs] = args;
+    if (refreshSubcommand !== 'refresh') {
+      stderr.write(`${command} ${requested}: expected 'refresh'\n`);
       return 2;
     }
-    let json = false;
     // The upgrade passes the state home it already resolved, because the child it spawns gets a
     // minimal environment and a lost COSYNCING_HOME would mean refreshing a copy on another
     // machine's default path. An explicit flag is also easier to audit than an inherited variable.
-    let home: string | undefined;
-    for (let index = 0; index < claudeModArgs.length; index += 1) {
-      const arg = claudeModArgs[index];
-      if (arg === '--json') {
-        if (json) {
-          stderr.write(`${command} claude-mod refresh: unknown or duplicate option\n`);
-          return 2;
-        }
-        json = true;
-        continue;
-      }
-      if (arg === '--home') {
-        const value = claudeModArgs[++index];
-        if (!value || home !== undefined) {
-          stderr.write(`${command} claude-mod refresh: --home requires a path\n`);
-          return 2;
-        }
-        home = value;
-        continue;
-      }
-      stderr.write(`${command} claude-mod refresh: unknown or duplicate option\n`);
-      return 2;
-    }
-    if (home !== undefined && (!isAbsolute(home) || home.includes('\0'))) {
-      stderr.write(`${command} claude-mod refresh: --home must be an absolute path\n`);
-      return 2;
-    }
-    return (await (dependencies.runClaudeModRefresh
-      ?? ((options) => defaultRunClaudeModRefresh({ ...options, buildInfo })))(
-      { json, ...(home ? { home } : {}), invocation: command, stdout, stderr },
-    )).exitCode;
+    const parsed = parseRefreshOptions(`${command} ${requested} refresh`, refreshArgs, stderr);
+    if (typeof parsed === 'number') return parsed;
+    const refresh: NonNullable<CliDependencies['runBridgeRefresh']> = requested === 'claude-mod'
+      ? dependencies.runClaudeModRefresh ?? ((options) => defaultRunClaudeModRefresh({ ...options, buildInfo }))
+      : dependencies.runBridgeRefresh ?? ((options) => defaultRunBridgeRefresh({ ...options, buildInfo }));
+    return (await refresh({ ...parsed, invocation: command, stdout, stderr })).exitCode;
   }
 
   if (requested === 'upgrade') {
