@@ -341,7 +341,9 @@ describe.each(['sqlite', 'json'] as StoreLayout[])('OpenCode without a serve, %s
     const resumed = await client.attach('opencode', id, { mode: 'resume' });
     await resumed.waitForKind('session');
     const config = cli.readConfig<FakeOpencodeCliConfig>();
-    cli.writeConfig({ ...config, version: '2.1.4' });
+    // The banner the installed OpenCode 2.1.4 binary prints, v prefix included (a bare `2.1.4` hid
+    // that released brokers parsed it as unknown and kept the V1 path).
+    cli.writeConfig({ ...config, version: '2.1.4', versionOutput: 'opencode v2.1.4\n' });
     const stamp = new Date(Math.max(Date.now(), statSync(cli.path).mtimeMs + 1));
     utimesSync(cli.path, stamp, stamp);
     const mark = ledger.mark();

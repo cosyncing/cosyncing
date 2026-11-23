@@ -104,7 +104,9 @@ if (args[0] === '--version') {
     writeFileSync(failedProbe, 'failed');
     process.exit(1);
   }
-  process.stdout.write(`${versionConfig.installed}\n`);
+  // OpenCode 1 prints a bare version. The installed OpenCode 2 binary prints a banner with a
+  // v prefix (captured from 2.1.4: `opencode v2.1.4`), which the generation guard must recognize.
+  process.stdout.write(`${versionConfig.installed.startsWith('2.') ? 'opencode v' : ''}${versionConfig.installed}\n`);
   process.exit(0);
 }
 if (args[0] === 'serve') {
