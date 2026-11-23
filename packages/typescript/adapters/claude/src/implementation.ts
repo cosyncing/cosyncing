@@ -3083,7 +3083,7 @@ export const CLAUDE_PERMISSION_MODES: ModeOption[] = [
 type Effort = { effort: string; label: string; description?: string };
 const E_LOW: Effort = { effort: 'low', label: 'Low', description: 'Fastest, least thinking' };
 const E_MEDIUM: Effort = { effort: 'medium', label: 'Medium' };
-const E_HIGH: Effort = { effort: 'high', label: 'High', description: "Claude's default" };
+const E_HIGH: Effort = { effort: 'high', label: 'High' };
 const E_XHIGH: Effort = { effort: 'xhigh', label: 'Extra high' };
 const E_MAX: Effort = { effort: 'max', label: 'Max', description: 'Most thinking, slowest' };
 const EFFORTS_FULL: Effort[] = [E_LOW, E_MEDIUM, E_HIGH, E_XHIGH, E_MAX]; // Opus 4.8/4.7, Fable 5
@@ -3100,15 +3100,25 @@ const EFFORTS_NONE: Effort[] = []; //                                         Ha
 const E_ULTRACODE: Effort = { effort: 'ultracode', label: 'Ultracode', description: 'xhigh + auto workflow orchestration · session only' };
 const EFFORTS_FULL_ULTRA: Effort[] = [...EFFORTS_FULL, E_ULTRACODE]; // xhigh-capable models that also allow ultracode
 
+/** The picker names Claude's own default on the rung a model preselects. Defaults differ per model
+ *  (Fable 5.2 defaults to `medium`, Opus 4.8 to `high`), so the note follows the entry's default
+ *  instead of sitting on one shared rung. */
+const CLAUDE_DEFAULT_EFFORT_NOTE = "Claude's default";
+function effortsWithDefaultNote(efforts: Effort[], defaultEffort: string | undefined): Effort[] {
+  return efforts.map((e) => (e.effort === defaultEffort ? { ...e, description: CLAUDE_DEFAULT_EFFORT_NOTE } : e));
+}
+
 /** Curated, user-selectable Claude alias catalog. There is no complete zero-turn list command. Concrete ids
  *  below are matching keys for account gating only; they are not presented as verified alias resolutions.
- *  A model this list lacks still renders as the exact live current value from transcript/init. */
+ *  A model this list lacks still renders as the exact live current value from transcript/init.
+ *  Fable: Claude Code 2.1.321+ resolves `fable` to `claude-fable-5-2`, whose registry `default_effort` is
+ *  `medium` (read from the 2.1.330 build; an account-level server override can still change it). */
 type CatalogEntry = { alias: string; fullId: string; label: string; efforts: Effort[]; defaultEffort?: string };
 const CURATED_CLAUDE_CATALOG: CatalogEntry[] = [
   { alias: 'opus', fullId: 'claude-opus-4-8', label: 'Opus', efforts: EFFORTS_FULL_ULTRA, defaultEffort: 'high' },
   { alias: 'sonnet', fullId: 'claude-sonnet-4-6', label: 'Sonnet', efforts: EFFORTS_NO_XHIGH, defaultEffort: 'high' },
   { alias: 'haiku', fullId: 'claude-haiku-4-5', label: 'Haiku', efforts: EFFORTS_NONE },
-  { alias: 'fable', fullId: 'claude-fable-5', label: 'Fable', efforts: EFFORTS_FULL_ULTRA, defaultEffort: 'high' },
+  { alias: 'fable', fullId: 'claude-fable-5-2', label: 'Fable', efforts: EFFORTS_FULL_ULTRA, defaultEffort: 'medium' },
 ];
 /** Roster display label for a resolved model id, authored HERE because the adapter is the only party
  *  that knows Claude's tiers: the client's family table has no `fable` entry, so `claude-fable-5` showed
@@ -3226,7 +3236,7 @@ export function claudeModelOptions(store: ClaudeStore): ModelOption[] {
     // {ultracode:true}` are accepted with no warning. So expose the full ladder incl. ultracode; an endpoint
     // that ignores a level just runs its default (graceful, no error). Falls back to the single primary model.
     const list = (store.models?.length ? store.models : [store.model || 'model']).slice(0, CLAUDE_MAX_MODEL_OPTIONS);
-    return list.map((id) => ({ providerID: 'wrapper', modelID: id, label: id, reasoningEfforts: EFFORTS_FULL_ULTRA, defaultReasoningEffort: 'high' }));
+    return list.map((id) => ({ providerID: 'wrapper', modelID: id, label: id, reasoningEfforts: effortsWithDefaultNote(EFFORTS_FULL_ULTRA, 'high'), defaultReasoningEffort: 'high' }));
   }
   const blocked = readModelGating(store);
   const out: ModelOption[] = [];
@@ -3236,7 +3246,7 @@ export function claudeModelOptions(store: ClaudeStore): ModelOption[] {
       providerID: 'anthropic',
       modelID: e.alias,
       label: e.label,
-      ...(e.efforts.length ? { reasoningEfforts: e.efforts } : {}),
+      ...(e.efforts.length ? { reasoningEfforts: effortsWithDefaultNote(e.efforts, e.defaultEffort) } : {}),
       ...(e.defaultEffort ? { defaultReasoningEffort: e.defaultEffort } : {}),
     });
   }
@@ -5242,13 +5252,15 @@ const CLAUDE_DEFAULT_CONTEXT_MAX = 200_000;
 const CLAUDE_EXTENDED_CONTEXT_MAX = 1_000_000;
 
 /** Models whose window is 1M natively, as Claude Code's own model registry declares them
- *  (`context: { window: 1e6, native_1m: true }`, read from the 2.1.296 and 2.1.302 builds). From
- *  2.1.300 Claude sends no 1M beta for these and writes no `[1m]` suffix into cost-state, so the
- *  transcript carries no other evidence of the window until a reading passes 200k. */
+ *  (`context: { window: 1e6, native_1m: true }`, read from the 2.1.296, 2.1.302 and 2.1.330 builds;
+ *  2.1.321 added Fable 5.2 and Mythos 5.2 and points the `fable` alias at 5.2). From 2.1.300 Claude
+ *  sends no 1M beta for these and writes no `[1m]` suffix into cost-state, so the transcript carries
+ *  no other evidence of the window until a reading passes 200k. */
 const CLAUDE_NATIVE_1M_MODELS: ReadonlySet<string> = new Set([
   'claude-opus-4-7', 'claude-opus-4-8', 'claude-opus-5', 'claude-opus-5-5',
   'claude-sonnet-5', 'claude-sonnet-5-5', 'claude-haiku-5-5',
-  'claude-fable-5', 'claude-fable-5-1', 'claude-mythos-5', 'claude-mythos-5-1',
+  'claude-fable-5', 'claude-fable-5-1', 'claude-fable-5-2',
+  'claude-mythos-5', 'claude-mythos-5-1', 'claude-mythos-5-2',
 ]);
 
 /** A dated id (`claude-opus-4-8-20260101`) has its base id's window. */

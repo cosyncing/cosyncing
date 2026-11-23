@@ -9,7 +9,9 @@
     {"type":"token-count","input":250001},
     {"type":"metadata-update","key":"contextUsage","value":{"used":250001,"max":1000000}},
     {"type":"token-count","input":6,"cacheRead":146000},
-    {"type":"metadata-update","key":"contextUsage","value":{"used":146006,"max":1000000}}
+    {"type":"metadata-update","key":"contextUsage","value":{"used":146006,"max":1000000}},
+    {"type":"token-count","input":2,"output":1238,"cacheRead":21531,"cacheWrite":31253},
+    {"type":"metadata-update","key":"contextUsage","value":{"used":52786,"max":1000000}}
   ],
   "live": [
     {"type":"metadata-update","key":"sessionInfo","value":{"model":"vendor-mystery","currentModel":{"providerID":"anthropic","modelID":"vendor-mystery"}}},
@@ -26,6 +28,8 @@
     {"type":"metadata-update","key":"contextUsage","value":{"used":250001,"max":1000000}},
     {"type":"token-count","input":6,"cacheRead":146000},
     {"type":"metadata-update","key":"contextUsage","value":{"used":146006,"max":1000000}},
+    {"type":"token-count","input":2,"output":1238,"cacheRead":21531,"cacheWrite":31253},
+    {"type":"metadata-update","key":"contextUsage","value":{"used":52786,"max":1000000}},
     {"type":"token-count","input":10}
   ]
 }

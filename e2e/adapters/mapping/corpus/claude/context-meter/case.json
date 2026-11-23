@@ -1,6 +1,6 @@
 {
-  "provenance": "synthetic, derived from packages/typescript/adapters/claude/test/test-claude-jsonl.ts",
-  "description": "context usage from input plus disjoint cache buckets at the 200k default, cost-state [1m] corrects to a 1M window without feeding token-count, a >200k reading self-corrects, a natively 1M model reads 1M with no [1m] evidence (Claude 2.1.300+ writes none), an unknown model draws no guess",
+  "provenance": "synthetic, derived from packages/typescript/adapters/claude/test/test-claude-jsonl.ts; the claude-fable-5-2 row copies the model id and usage shape of a Claude Code 2.1.330 transcript row (read 2026-11-23)",
+  "description": "context usage from input plus disjoint cache buckets at the 200k default, cost-state [1m] corrects to a 1M window without feeding token-count, a >200k reading self-corrects, a natively 1M model reads 1M with no [1m] evidence (Claude 2.1.300+ writes none), including Fable 5.2 (the fable alias since Claude 2.1.321), an unknown model draws no guess",
   "userTexts": [
     "meter"
   ],
