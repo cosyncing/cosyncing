@@ -55,8 +55,15 @@ import {
   type SessionOwnerRevision,
 } from '@cosyncing/adapter-api';
 import { OpenCodeAdapter } from '@cosyncing/adapter-opencode';
-import { PiAdapter } from '@cosyncing/adapter-pi';
-import { currentOmpRuntimeReadiness, inspectOmpPathCollision, OmpAdapter, OMP_DIALECT, OMP_VERIFIED_VERSION } from '@cosyncing/adapter-omp';
+import { inspectPiBridgeAsset, PiAdapter, type PiBridgeAssetInspection } from '@cosyncing/adapter-pi';
+import {
+  currentOmpRuntimeReadiness,
+  inspectOmpBridgeAsset,
+  inspectOmpPathCollision,
+  OmpAdapter,
+  OMP_DIALECT,
+  OMP_VERIFIED_VERSION,
+} from '@cosyncing/adapter-omp';
 import { ReasonixAdapter } from '@cosyncing/adapter-reasonix';
 import { GrokAdapter } from '@cosyncing/adapter-grok';
 import { ClineAdapter, clineManagedHubPort } from '@cosyncing/adapter-cline';
@@ -343,6 +350,12 @@ import {
   releaseManagedHost,
 } from './managed-host.ts';
 import { dshAdapterOptions } from '../installation/shipped-adapters.ts';
+import {
+  OMP_BRIDGE_OWNERSHIP_SPEC,
+  PI_BRIDGE_OWNERSHIP_SPEC,
+  recordAutoInstalledBridge,
+  type BridgeOwnershipSpec,
+} from '../installation/pi-bridge-ownership.ts';
 import {
   mutationFingerprint,
   ProtocolJournal,
@@ -990,6 +1003,15 @@ const registry = new AgentRegistry(
 // This gate is shared by adapter readiness and the broker-owned bridge route. Without the broker
 // check, a blocked disk/RPC adapter could still adopt an omp bridge for a file Pi also discovers.
 const ompPathCollision = inspectOmpPathCollision(process.env);
+// A bridge the engine auto-installs gets the receipt setup would have written, so the next update can
+// refresh it instead of finding a file nobody can prove they wrote. Only an installed (packaged) broker
+// writes the installation ledger; a source run against the same state home must not.
+const recordBridgeInstall = (spec: BridgeOwnershipSpec, inspect: () => PiBridgeAssetInspection) =>
+  (installed: { path: string; sha256: string }): void => {
+    if (!BUILD_INFO.packaged) return;
+    const outcome = recordAutoInstalledBridge({ spec, home: setupStateHome(), ...installed, inspect });
+    if (outcome !== 'recorded') console.warn(`${LOG_PREFIX} ${spec.resourceId} auto-installed without a receipt: ${outcome}`);
+  };
 registry.register(new OpenCodeAdapter({
   waitForManagedCreateReadiness: waitForManagedOpencodeCreateReadiness,
   resolveStoredCurrentModel: (info) => sessionMetadata.currentModelHint(info),
@@ -997,6 +1019,7 @@ registry.register(new OpenCodeAdapter({
 registry.register(new PiAdapter({
   brokerUrl: BROKER_URL,
   bridgeUsesIntegrationFile: RUNTIME_CREDENTIALS.piIntegrationSource === 'file',
+  onBridgeInstalled: recordBridgeInstall(PI_BRIDGE_OWNERSHIP_SPEC, () => inspectPiBridgeAsset()),
 }));
 // omp (oh-my-pi) — the shared Pi engine bound to the omp dialect: own binary, own sessions root,
 // own bridge route family and scoped integration credential, no RPC fork/clone. Registered
@@ -1005,6 +1028,7 @@ registry.register(new PiAdapter({
 registry.register(new OmpAdapter({
   brokerUrl: BROKER_URL,
   bridgeUsesIntegrationFile: RUNTIME_CREDENTIALS.ompIntegrationSource === 'file',
+  onBridgeInstalled: recordBridgeInstall(OMP_BRIDGE_OWNERSHIP_SPEC, () => inspectOmpBridgeAsset()),
 }));
 // Reasonix — file-backed Observe plus an explicit Resume that loads the same
 // native session through one broker-owned ACP stdio child. There is no daemon

@@ -33,6 +33,7 @@ import { runCli } from '../../src/cli/cli.ts';
 import { createSetupDiagnosisContext } from '../../src/installation/diagnosis-context.ts';
 import {
   committedInstallState,
+  inspectInstallState,
   serviceExecutablePath,
 } from '../../src/installation/install-state.ts';
 import { defaultBrokerConfig, writeBrokerConfig } from '../../src/runtime/configuration.ts';
@@ -712,6 +713,24 @@ try {
       bridgeInstalled &&
         sha256(readFileSync(installFixture.piBridge, 'utf8')) === PI_BRIDGE_EMBEDDED_SHA256 &&
         (statSync(installFixture.piBridge).mode & 0o777) === 0o600);
+    // The receipt setup would have written, so the next update can prove this bridge is cosyncing's and
+    // refresh it, instead of finding an unreceipted file it has to leave behind.
+    const bridgeReceipt = () => {
+      const install = inspectInstallState(installFixture.stateHome);
+      return install.committed
+        ? install.state.resources.filter((resource) => resource.id === 'pi-bridge')
+        : [];
+    };
+    const receipted = await waitUntil(() => bridgeReceipt().length > 0);
+    const receipts = bridgeReceipt();
+    check('the packaged broker receipts the Pi bridge its auto-install created, exactly as setup would',
+      receipted && receipts.length === 1
+        && receipts[0]!.target === installFixture.piBridge
+        && receipts[0]!.kind === 'agent-integration'
+        && receipts[0]!.ownership.proof === 'package-hash'
+        && receipts[0]!.ownership.installedSha256 === PI_BRIDGE_EMBEDDED_SHA256
+        && !existsSync(join(installFixture.stateHome, 'installation.lock')),
+      JSON.stringify(receipts));
 
     const hookGet = await fetch(`${base}/api/claude/hooks`);
     const hookPost = await fetch(`${base}/api/claude/hooks`, {
@@ -834,6 +853,9 @@ try {
     await delay(100);
     check('packaged auto-install preserves an unrelated Pi extension',
       readFileSync(preserveFixture.piBridge, 'utf8') === userBridge);
+    const preserved = inspectInstallState(preserveFixture.stateHome);
+    check('packaged auto-install records no receipt for a bridge path it did not write',
+      preserved.committed && !preserved.state.resources.some((resource) => resource.id === 'pi-bridge'));
   });
 } finally {
   rmSync(packageRoot, { recursive: true, force: true });

@@ -22,6 +22,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
+  inspectPiBridgeAsset,
   PI_BRIDGE_EMBEDDED_SHA256,
   PI_BRIDGE_EMBEDDED_SOURCE,
 } from '../../../adapters/pi/src/index.ts';
@@ -156,6 +157,7 @@ import {
   CLAUDE_MOD_RESOURCE_ID,
 } from '../../src/installation/claude-mod-ownership.ts';
 import { acquireInstallationLock, installationLockPath } from '../../src/installation/installation-lock.ts';
+import { PI_BRIDGE_OWNERSHIP_SPEC, recordAutoInstalledBridge } from '../../src/installation/pi-bridge-ownership.ts';
 import { fakeClaude } from '../helpers/fake-claude-cli.ts';
 
 function readFrozenTextFixture(path: string): string {
@@ -1381,6 +1383,57 @@ console.log(JSON.stringify({status:result.status, rows:JSON.parse(result.stdout)
       again.status === 'current' && again.refreshed.length === 0
         && readFileSync(ompPath, 'utf8') === unreceiptedOmp,
       `${again.status}/${again.detailCode}`);
+  }
+
+  // The engine's auto-install reports the bridge file it created, and the broker records the receipt setup
+  // would have written: under the lock, for this build's exact bytes at that target, and only once.
+  {
+    const m = machine({ binaryHash: true }); cleanup.push(m.root);
+    const piPath = join(m.piAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts');
+    atomicWriteOwnerOnly(piPath, PI_BRIDGE_EMBEDDED_SOURCE, { mode: 0o600 });
+    const record = (acquireLock?: Parameters<typeof recordAutoInstalledBridge>[0]['acquireLock']) =>
+      recordAutoInstalledBridge({
+        spec: PI_BRIDGE_OWNERSHIP_SPEC,
+        home: m.home,
+        path: piPath,
+        sha256: PI_BRIDGE_EMBEDDED_SHA256,
+        inspect: () => inspectPiBridgeAsset(m.piAgentDir),
+        ...(acquireLock ? { acquireLock } : {}),
+      });
+    const receipts = () => {
+      const current = inspectInstallState(m.home);
+      return current.committed ? current.state.resources.filter((item) => item.id === 'pi-bridge') : [];
+    };
+    const busy = record(() => { throw new Error('fixture: setup holds the lock'); });
+    const afterBusy = receipts().length;
+    const recorded = record();
+    const afterRecord = receipts();
+    const repeated = record();
+    check('an auto-installed bridge gets exactly one package-hash receipt, and a busy lock defers it to setup',
+      busy === 'lock-unavailable' && afterBusy === 0
+        && recorded === 'recorded' && repeated === 'receipted'
+        && afterRecord.length === 1 && receipts().length === 1
+        && afterRecord[0]!.target === piPath
+        && afterRecord[0]!.kind === 'agent-integration'
+        && afterRecord[0]!.ownership.proof === 'package-hash'
+        && afterRecord[0]!.ownership.installedSha256 === PI_BRIDGE_EMBEDDED_SHA256
+        && !existsSync(installationLockPath(m.home)),
+      `${busy}/${afterBusy}/${recorded}/${repeated}/${JSON.stringify(afterRecord)}`);
+    const other = machine({ binaryHash: true }); cleanup.push(other.root);
+    const otherPath = join(other.piAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts');
+    atomicWriteOwnerOnly(otherPath, '// a user extension that appeared at the bridge path\n', { mode: 0o600 });
+    const foreign = recordAutoInstalledBridge({
+      spec: PI_BRIDGE_OWNERSHIP_SPEC,
+      home: other.home,
+      path: otherPath,
+      sha256: PI_BRIDGE_EMBEDDED_SHA256,
+      inspect: () => inspectPiBridgeAsset(other.piAgentDir),
+    });
+    const otherInstall = inspectInstallState(other.home);
+    check('a file whose bytes are not this build\'s bridge is never receipted, even at the bridge path',
+      foreign === 'not-current'
+        && otherInstall.committed && !otherInstall.state.resources.some((item) => item.id === 'pi-bridge'),
+      foreign);
   }
 
   {
