@@ -35,8 +35,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - Kimi Code 2.x replaced the local server protocol cosyncing uses, so cosyncing
   supports Kimi Code 0.35.0 and newer, below 2.0.0. A running Kimi Code 2.x server,
   or one that announces the Kimi Agent Protocol, shows Kimi Code as unavailable
-  instead of failing on every step; cosyncing sends it no requests and refuses new
-  sessions with a reason. `cosy doctor` names the version it found and the
+  instead of failing on every step. cosyncing sends a registered 2.x server no
+  requests, stops after the metadata read for a server announcing that protocol,
+  and refuses new sessions with a reason. `cosy doctor` names the version it found and the
   supported range, and no longer suggests `kimi update`, which installs 2.x.
 
 ### Fixed
