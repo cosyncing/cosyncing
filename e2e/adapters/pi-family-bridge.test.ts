@@ -744,6 +744,13 @@ describe('omp bridge gates', () => {
       const cwd = fake.workspace('future');
       const hello = await owner.post('/omp/bridge/hello', { sessionFile: join(cwd, 'f.jsonl'), cwd, nativeVersion: OMP_DIALECT_FACTS.version.newer });
       expect(hello.status).toBe(409);
+      // The terminal's own unverified version is answered first: its bridge stops on this code.
+      expect(hello.body.code).toBe('OMP_BRIDGE_NATIVE_VERSION_UNVERIFIED');
+      // A verified terminal meets this broker's newer omp as a runtime refusal instead, which can
+      // clear while that terminal runs, so its bridge keeps retrying.
+      const verified = await owner.post('/omp/bridge/hello', { sessionFile: join(cwd, 'v.jsonl'), cwd, nativeVersion: OMP_DIALECT_FACTS.version.current });
+      expect(verified.status).toBe(409);
+      expect(verified.body.code).toMatch(/^omp-[a-z]+-version-above-verified$/);
       for (const path of ['events', 'bye']) {
         expect((await owner.post(`/omp/bridge/${path}`, { id: 'x', events: [], reason: 'quit' })).status).toBe(409);
       }

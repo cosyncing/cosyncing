@@ -7815,13 +7815,17 @@ server = Bun.serve<WsData>({
     // ── omp live bridge (Mode A): the in-session omp extension relays here ──
     // Same contract as the Pi family above, keyed by tool 'omp' with omp terminal-sync labels and
     // the omp bridge registry (OMP_DIALECT connections, omp:run: keys, omp-bridge sources).
-    if (path.startsWith('/omp/bridge/')) {
+    // Every route needs a ready omp runtime. A hello answers its own native attestation first: that
+    // omp process can never register with an unverified version, so its bridge stops on that code,
+    // while a runtime refusal (the broker's configured omp) can clear without restarting the terminal.
+    const ompHello = path === '/omp/bridge/hello' && req.method === 'POST';
+    if (path.startsWith('/omp/bridge/') && !ompHello) {
       const readiness = currentOmpRuntimeReadiness();
       if (!readiness.ready) {
         return json({ ok: false, code: readiness.detailCode, error: readiness.message }, 409);
       }
     }
-    if (path === '/omp/bridge/hello' && req.method === 'POST') {
+    if (ompHello) {
       const b: any = decodedBridgeBody ?? await req.json().catch(() => ({}));
       if (b?.epoch !== undefined && (typeof b.epoch !== 'string' || !/^[A-Za-z0-9-]{1,80}$/.test(b.epoch))) return json({ error: 'invalid bridge generation' }, 400);
       if (ompBridge.isClosed(b?.epoch)) return json({ error: 'closed bridge generation' }, 410);
@@ -7831,6 +7835,10 @@ server = Bun.serve<WsData>({
           code: 'OMP_BRIDGE_NATIVE_VERSION_UNVERIFIED',
           error: `OMP bridge registration requires native version ${OMP_VERIFIED_VERSION}.`,
         }, 409);
+      }
+      const readiness = currentOmpRuntimeReadiness();
+      if (!readiness.ready) {
+        return json({ ok: false, code: readiness.detailCode, error: readiness.message }, 409);
       }
       const sessionFile = String(b?.sessionFile ?? '');
       if (!sessionFile) return new Response('missing sessionFile', { status: 400 });

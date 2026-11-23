@@ -37,6 +37,11 @@ const INTEGRATION = readPiIntegration();
 const BROKER = (process.env.COSYNCING_BROKER ?? INTEGRATION.internalUrl ?? 'http://127.0.0.1:7734').replace(/\/$/, '');
 const TOKEN = (process.env.COSYNCING_PI_INTEGRATION_TOKEN ?? INTEGRATION.credential ?? '').trim();
 const authHeaders = (): Record<string, string> => (TOKEN ? { 'x-cosyncing-integration-token': TOKEN } : {});
+// The dialect rewrite stamps route literals, so the asset reads its own tool id from one.
+const BRIDGE_TOOL = '/pi/bridge'.split('/')[1]!;
+// The broker's answer to a hello whose attested native version it has not verified. This process's
+// version cannot change while it runs, so that refusal is final; the other hello 409s are not.
+const NATIVE_VERSION_REFUSED = 'OMP_BRIDGE_NATIVE_VERSION_UNVERIFIED';
 const APPROVAL_MODE = (process.env.COSYNCING_BRIDGE_APPROVALS ?? CONFIG.approvalMode ?? 'dangerous').toLowerCase();
 const CONFIGURED_APPROVAL_TIMEOUT_MS = Number(process.env.COSYNCING_BRIDGE_APPROVAL_TIMEOUT_MS ?? CONFIG.approvalTimeoutMs ?? 300_000);
 // The host bounds `tool_call` handlers and fails them CLOSED, so a permission
@@ -551,6 +556,7 @@ export default function (pi: ExtensionAPI) {
     const requestEpoch = body?.epoch;
     let responseStatus: number | undefined;
     let rejectedOwner = false;
+    let unsupportedVersion = false;
     const controller = new AbortController();
     const abort = () => controller.abort();
     if (signal?.aborted) abort();
@@ -578,6 +584,9 @@ export default function (pi: ExtensionAPI) {
           if (r.status === 409 && path.endsWith('/hello')) {
             const rejection: any = await r.json().catch(() => ({}));
             rejectedOwner = typeof rejection?.error === 'string' && rejection.error.startsWith('session already bridged by another terminal');
+            // Keyed on the broker's code, never the bare status: another terminal owning the session,
+            // a runtime the broker cannot use yet, or a store collision can all clear while this runs.
+            unsupportedVersion = rejection?.code === NATIVE_VERSION_REFUSED;
           }
           throw new Error(`HTTP ${r.status}`);
         }
@@ -591,12 +600,17 @@ export default function (pi: ExtensionAPI) {
       return value;
     } catch (error) {
       if (requestEpoch === epoch && !ended && !signal?.aborted) {
-        const detail = rejectedOwner ? 'another terminal is bridged; close it or /reload after it exits' : error instanceof Error && /^(HTTP \d+|bridge payload exceeds 32 MiB|broker does not support bridge transfers)$/.test(error.message)
-          ? error.message : 'network request failed';
+        const version = unsupportedVersion ? boundedString(body?.nativeVersion, 64) : undefined;
+        const detail = unsupportedVersion
+          ? `${version ? `${BRIDGE_TOOL} ${version}` : `this ${BRIDGE_TOOL} version`} is not supported`
+          : rejectedOwner ? 'another terminal is bridged; close it or /reload after it exits'
+          : error instanceof Error && /^(HTTP \d+|bridge payload exceeds 32 MiB|broker does not support bridge transfers)$/.test(error.message)
+            ? error.message : 'network request failed';
         lastPostError = `${path}: ${detail}`;
-        setBridgeStatus(`📱 disconnected: ${detail}`);
-        if (path.endsWith('/hello') && body?.prepare !== true
-          && (detail === 'bridge payload exceeds 32 MiB' || [400, 401, 403, 405, 410, 413, 415, 422].includes(responseStatus ?? 0))) helloRejected = true;
+        setBridgeStatus(unsupportedVersion ? `📱 not synced: ${detail}` : `📱 disconnected: ${detail}`);
+        // A version refusal answers the small admission hello, so it ends the loop there too.
+        if (path.endsWith('/hello') && (unsupportedVersion || (body?.prepare !== true
+          && (detail === 'bridge payload exceeds 32 MiB' || [400, 401, 403, 405, 410, 413, 415, 422].includes(responseStatus ?? 0))))) helloRejected = true;
       }
       return undefined;
     } finally {
