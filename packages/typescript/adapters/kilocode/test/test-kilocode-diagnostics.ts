@@ -17,6 +17,8 @@ interface FakeWorld {
   listLimits?: number[];
   portOpen?: boolean;
   portUnknown?: boolean;
+  /** Every version probe doctor started: its arguments and the environment it added. */
+  probes?: Array<{ args: readonly string[]; env?: Readonly<Record<string, string | undefined>> }>;
 }
 const HOME = '/fixture/home';
 const results: Array<{ name: string; ok: boolean; detail: string }> = [];
@@ -34,7 +36,10 @@ function context(world: FakeWorld): SetupDiagnosisContext {
     },
     readText: () => ({ ok: false, reason: 'missing' }),
     readPackageVersion: () => world.version,
-    runReadOnly: async (): Promise<SetupCommandProbe> => ({ status: 'unavailable', stdout: '', stderr: '' }),
+    runReadOnly: async (_executable, args, _timeoutMs, env): Promise<SetupCommandProbe> => {
+      world.probes?.push({ args, ...(env ? { env } : {}) });
+      return { status: 'unavailable', stdout: '', stderr: '' };
+    },
     fetchJson: async (): Promise<SetupHttpProbe> => ({ status: 'unreachable' }),
     probeTcp: async () => world.portUnknown ? 'unknown' : world.portOpen ? 'open' : 'closed',
     listDirectory: (path, limit) => {
@@ -121,9 +126,16 @@ const dataRoot = `${HOME}/.local/share/kilo`;
     JSON.stringify(checkOf(diagnosis, 'kilo.version')));
 }
 {
-  const diagnosis = await diagnoseKiloSetup(context({ executable: '/fixture/bin/kilo', version: '7.4.23' }));
+  const probes: NonNullable<FakeWorld['probes']> = [];
+  const diagnosis = await diagnoseKiloSetup(context({ executable: '/fixture/bin/kilo', version: '7.4.23', probes }));
   check('the exact measured CLI version passes the full-sync version gate',
     checkOf(diagnosis, 'kilo.version')?.status === 'pass');
+  // SP-1: running a coding-agent CLI is not read-only; doctor's `kilo --version` must not let Kilo
+  // update itself.
+  check('doctor starts its kilo version probe with the in-place updater disabled',
+    probes.length === 1 && probes[0]!.args.join(' ') === '--version'
+      && probes[0]!.env?.KILO_DISABLE_AUTOUPDATE === '1',
+    JSON.stringify(probes));
 }
 
 const failed = results.filter((result) => !result.ok);

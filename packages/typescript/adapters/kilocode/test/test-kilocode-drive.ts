@@ -1592,6 +1592,17 @@ try {
     check('the kilo version probe starts its child with the in-place updater disabled',
       readFileSync(envLog, 'utf8') === '1',
       `KILO_DISABLE_AUTOUPDATE=${readFileSync(envLog, 'utf8')}`);
+    // SP-1: the other kilo child, the managed serve the broker launches from this descriptor (its
+    // environment is the broker's plus `launch.env`).
+    const managed = new KiloAdapter({
+      command: fakeKilo, env: process.env, homeDir: probeRoot,
+      baseUrl: 'http://127.0.0.1:4097', serverPassword: 'fixture-password', fetch: fakeFetch,
+    });
+    const launch = (await managed.describeManagedHost())?.launch;
+    check('the managed kilo serve starts with the in-place updater disabled too',
+      launch?.args.join(' ') === 'serve --hostname 127.0.0.1 --port 4097'
+        && launch.env?.KILO_DISABLE_AUTOUPDATE === '1',
+      JSON.stringify(launch?.env && { ...launch.env, KILO_SERVER_PASSWORD: '<redacted>' }));
   } finally {
     rmSync(probeRoot, { recursive: true, force: true });
   }
