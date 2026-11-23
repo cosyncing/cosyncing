@@ -66,7 +66,7 @@ cosyncing never stops or reconfigures a host you started yourself; see
 [managed hosts](kimi.md#managed-hosts) for what ownership means.
 
 Install each host you intend to use; install DeepSeek Harness globally with npm
-(`npm install -g @deepseek-ai/dsh`). cosyncing locates a host binary on your
+(`npm install -g @deepseek-ai/dsh@0.2.0-rc.2`). cosyncing locates a host binary on your
 PATH, so an `npx`-only DeepSeek Harness install can be talked to but never
 started, restarted, or version-checked — see
 [installing the host](dsh.md#install-the-host). Clients older
