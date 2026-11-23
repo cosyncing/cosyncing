@@ -11,6 +11,97 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Added
+
+- Kilo Code questions from Kilo's question tool appear as question cards,
+  including one already waiting when you open the session. Answering or
+  dismissing from the app continues the Kilo turn. Before, the turn waited with no
+  card and the session stayed Working.
+
+### Changed
+
+- Reasonix: 1.25.2 is the only supported version. Reasonix development has ended
+  (2.61.0 is the final release), and `npm install --global reasonix` now installs
+  2.x. Reasonix 2.x and 1.x releases after 1.25.2 keep opening sessions in Observe
+  mode only until support for 2.61.0 lands. `cosy doctor`, the read-only session
+  reason and the setup guide say so and give the pinned install command.
+- DeepSeek Harness: cosyncing refuses any `dsh` version other than the two it
+  supports, 0.2.0-rc.2 and 0.1.0-rc.6, instead of accepting every 0.2 or 0.1
+  build. Newer 0.2 builds such as 0.2.2-rc.5 changed messages that live updates
+  and image previews depend on, and were accepted with those features silently
+  missing. With an unsupported version installed, cosyncing does not start or use
+  a `dsh web` host on this machine, opening or creating a session reports the
+  supported versions, and `cosy doctor` gives the install command for 0.2.0-rc.2.
+- Kimi Code 2.x replaced the local server protocol cosyncing uses, so cosyncing
+  supports Kimi Code 0.35.0 and newer, below 2.0.0. A running Kimi Code 2.x server,
+  or one that announces the Kimi Agent Protocol, shows Kimi Code as unavailable
+  instead of failing on every step; cosyncing sends it no requests and refuses new
+  sessions with a reason. `cosy doctor` names the version it found and the
+  supported range, and no longer suggests `kimi update`, which installs 2.x.
+
+### Fixed
+
+- OpenCode 2 is recognized from its `opencode v2.x.y` version banner. Before, the
+  broker read it as an unknown version and kept its OpenCode 1 behavior, so it
+  could start its managed OpenCode server with the OpenCode 2 binary. Now OpenCode
+  shows as unavailable, the broker's idle OpenCode 1 server is retired, and
+  existing OpenCode 1 sessions stay read-only until OpenCode 2 is supported.
+- With OpenCode 1.19.1 or newer, which discontinued session sharing, `/share` and
+  `/unshare` are no longer offered and are refused before they reach OpenCode.
+- When OpenCode is not installed, `cosy doctor` names the installs that stay on
+  OpenCode 1 (`curl -fsSL https://opencode.ai/install | bash` or
+  `npm install --global opencode-ai`), because the opencode.ai website and
+  Homebrew now install OpenCode 2.
+- Codex: after the computer slept or its clock changed, cosyncing could no longer
+  confirm it manages the Codex daemon, so Restart failed and a pending Codex
+  update was retried every minute without ever applying. cosyncing now identifies
+  the daemon by the process identity Codex records, where Codex provides one. When
+  the daemon still cannot be verified, the restart is refused with the reason and
+  how to restart Codex yourself.
+- Automatic managed-runtime restarts pause after three identical failures instead
+  of retrying every minute. They resume when the runtime or its configuration
+  changes, and **Restart** still tries immediately.
+- `cosy doctor` says when a Codex daemon PID receipt exists but names no running
+  daemon, instead of reporting that no daemon is recorded.
+- The context meter for Claude Code sessions on Fable 5.2 or Mythos 5.2 shows a 1M
+  limit; it showed 200k until the context passed 200k. The Fable model picker
+  preselects Medium effort, Claude Code's default for Fable 5.2.
+- Answering or dismissing a Claude Code question from the app no longer sends back
+  the idle-timeout field that Claude Code 2.1.321 and later refuse in an answer.
+- When omp is a version cosyncing does not support, its terminal bridge shows which
+  omp version is unsupported and stops, instead of retrying every five seconds
+  with "disconnected: HTTP 409". A synced omp terminal no longer floods the broker
+  with requests while the broker cannot use its omp installation.
+- Kilo Code: if Kilo v2 (`kilo2`) is installed, `cosy doctor` and New Session say
+  Kilo v2 is not supported yet instead of reporting an old or missing Kilo.
+- Antigravity sessions show their model again after agy renames the model saved in
+  its settings. When agy cannot list its models, for example after its saved
+  sign-in expires, the broker retries less and less often instead of every few
+  minutes, the model picker no longer waits on it, and creating a session from the
+  app says agy needs you to sign in again. `cosy doctor` reports whether agy
+  restored its sign-in and notes when a proxy in your shell is not available to
+  the service. A repeated model-name miss is logged once instead of on every scan.
+- When Cline's New Session is unavailable only because `COSYNCING_CLINE_PROVIDER`
+  and `COSYNCING_CLINE_MODEL` are not set for the service, `cosy doctor` names the
+  missing variables and says to rerun `cosyncing setup` from a shell that sets
+  both, instead of suggesting a restart. The broker checks the installed Cline
+  version about once an hour instead of on almost every session-list refresh; a
+  reinstalled or replaced Cline is still checked on the next refresh.
+- Grok Build sign-in checks start far fewer background Grok processes: a
+  successful check is reused for 10 minutes and a failed one for 1 minute, so
+  Create still appears within about a minute of `grok login`. The checking process
+  is asked to exit instead of being killed, and Grok's own status notices no
+  longer add broker log lines.
+- `cosy status` no longer reports "broker unavailable" while the broker is busy.
+  When the session list, agent list or update feed takes longer than the status
+  read allows, for example during the first full session scan after a restart, the
+  line says the broker is busy and to run `cosy status` again shortly. A broker
+  that refuses the connection is still reported as unavailable.
+- Version, model-list and readiness checks that run Claude Code, Kimi Code or agy
+  turn off that agent's self-update, so a check can no longer update the
+  installed agent. The managed `kimi web` host also starts with Kimi's self-update
+  turned off.
+
 ## 0.8.5 — 2026-10-26
 
 ### Added

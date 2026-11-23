@@ -36,7 +36,7 @@ export const legacyTasks: Record<LegacyJob, Task[]> = {
     { id: "zero-agent-doctor", run: ["bun", "run", "packages/typescript/broker/test/broker/test-doctor.ts"], serial: true, estimateMs: 409 },
   ],
   adapters: [
-    { id: "acp-client", run: ["bun", "run", "packages/typescript/acp-client/test/test-acp-client.ts"], estimateMs: 2470 },
+    { id: "acp-client", run: ["bun", "run", "packages/typescript/acp-client/test/test-acp-client.ts"], estimateMs: 5000 },
     { id: "adapter-capability-contract", run: ["bun", "run", "packages/typescript/broker/test/broker/test-adapter-capability-contract.ts"], estimateMs: 99 },
     { id: "adapter-path-stamps", run: ["bun", "run", "packages/typescript/broker/test/broker/test-adapter-path-stamps.ts"], estimateMs: 109 },
     { id: "agy-drive", run: ["bun", "run", "packages/typescript/adapters/antigravity/test/test-agy-drive.ts"], estimateMs: 2200 },
@@ -117,7 +117,7 @@ export const legacyTasks: Record<LegacyJob, Task[]> = {
     { id: "dsh-remote-host", run: ["bun", "run", "packages/typescript/adapters/dsh/test/test-dsh-remote-host.ts"], estimateMs: 8038 },
     { id: "dsh-server", run: ["bun", "run", "packages/typescript/adapters/dsh/test/test-dsh-server.ts"], estimateMs: 84 },
     { id: "grok-drive", run: ["bun", "run", "packages/typescript/adapters/grok/test/test-grok-drive.ts"], estimateMs: 1354 },
-    { id: "grok-identity", run: ["bun", "run", "packages/typescript/adapters/grok/test/test-grok-identity.ts"], estimateMs: 1578 },
+    { id: "grok-identity", run: ["bun", "run", "packages/typescript/adapters/grok/test/test-grok-identity.ts"], estimateMs: 4500 },
     { id: "grok-mapping", run: ["bun", "run", "packages/typescript/adapters/grok/test/test-grok-mapping.ts"], estimateMs: 36 },
     { id: "grok-store", run: ["bun", "run", "packages/typescript/adapters/grok/test/test-grok-store.ts"], estimateMs: 73 },
     { id: "kilocode-diagnostics", run: ["bun", "run", "packages/typescript/adapters/kilocode/test/test-kilocode-diagnostics.ts"], estimateMs: 37 },

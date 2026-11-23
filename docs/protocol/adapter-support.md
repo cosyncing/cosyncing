@@ -269,6 +269,13 @@ process identity. A missing control socket never proves that the old process
 exited or released its thread writer locks. Concurrent restart requests share
 one operation, and failed replacement verification remains an error.
 
+Identical automatic restart failures (the same error for the same restart input:
+pending changes, versions, configuration occurrence and any provider runtime
+input, such as the Codex PID receipts) pause automatic restarts after three
+attempts. The status then reports `error` with the failure and the pause. A
+`current` probe, a changed restart input or a confirmed manual restart re-arms
+them; the runtime-update attention item stays the one occurrence.
+
 The manual restart is a recovery control, not an update control. It stays
 offered when the provider reports no pending change, because a wedged runtime
 reports none: a terminal that will not start or a session create that fails is

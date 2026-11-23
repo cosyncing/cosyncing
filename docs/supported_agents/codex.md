@@ -341,6 +341,14 @@ and never escalate a stalled shutdown to forced termination. An unreadable or
 changed process identity also prevents forced recovery. Restart failures appear
 in the runtime status and broker logs.
 
+After three identical automatic failures, automatic restarts pause until the
+installed Codex version, the daemon or its configuration changes; **Restart**
+still tries immediately. On Linux, cosyncing identifies the daemon by the boot ID
+and start time that Codex 0.156 and later record, so a host suspend or clock
+change does not block a restart. Older receipts record only a start time; when it
+no longer matches, cosyncing refuses to restart until you restart Codex yourself
+while nothing is running.
+
 Direct agent-to-user file delivery is not currently available in Codex. The
 installed skill leaves generated files in the workspace because Codex has no
 safe exact-session delivery tool. Do not use a shared `.cosyncing/outbox`
