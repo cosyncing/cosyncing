@@ -39,6 +39,26 @@ import {
   type JsonRpcOutbound,
 } from './types.ts';
 
+/**
+ * How a normal (not forced) {@link AcpClient.close} asks a live child to exit.
+ *
+ * The default ends stdin, waits 2s, then sends SIGKILL.
+ * An agent whose stdin-EOF shutdown routinely outlasts that grace is killed
+ * every time; setting `terminateGraceMs` inserts a SIGTERM step between the
+ * stdin grace and SIGKILL, so SIGKILL is left for a child that ignores both.
+ * Every wait is bounded. A forced close always sends SIGKILL at once.
+ */
+export interface AcpCloseEscalation {
+  /** Wait after ending stdin before the first signal. Default 2s. */
+  stdinGraceMs?: number;
+  /**
+   * When above zero: send SIGTERM after the stdin grace and wait this long
+   * before SIGKILL. Unset or zero keeps the default, which goes straight to
+   * SIGKILL.
+   */
+  terminateGraceMs?: number;
+}
+
 export interface AcpClientOptions {
   command: string;
   args?: string[];
@@ -55,6 +75,8 @@ export interface AcpClientOptions {
   maxFrameBytes?: number;
   /** Abort child startup or an in-progress initialize handshake. */
   signal?: AbortSignal;
+  /** How a normal `close()` escalates. Default: stdin EOF, 2s, SIGKILL. */
+  closeEscalation?: AcpCloseEscalation;
 }
 
 export class AcpRpcError extends Error {
@@ -98,6 +120,10 @@ function rpcIdKey(id: JsonRpcId): string {
   return id === null ? 'null' : `${typeof id === 'number' ? 'number' : 'string'}:${String(id)}`;
 }
 
+function graceMs(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
 export class AcpClient {
   private child: AcpChild | null = null;
   private readonly pending = new Map<string, PendingRequest>();
@@ -107,6 +133,8 @@ export class AcpClient {
   private readonly hooks: AcpClientHooks;
   private readonly requestTimeoutMs: number;
   private readonly promptTimeoutMs: number;
+  private readonly stdinCloseGraceMs: number;
+  private readonly terminateGraceMs: number;
   private readonly dispatcher: AcpDispatcher;
   private initializeResultValue: AcpInitializeResult | null = null;
   private protocolVersionValue: number | null = null;
@@ -117,6 +145,8 @@ export class AcpClient {
     this.hooks = options.hooks ?? {};
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.promptTimeoutMs = options.promptTimeoutMs ?? DEFAULT_PROMPT_TIMEOUT_MS;
+    this.stdinCloseGraceMs = graceMs(options.closeEscalation?.stdinGraceMs, CLOSE_GRACE_MS);
+    this.terminateGraceMs = graceMs(options.closeEscalation?.terminateGraceMs, 0);
     this.dispatcher = new AcpDispatcher({
       trace: this.trace,
       hooks: this.hooks,
@@ -344,6 +374,11 @@ export class AcpClient {
   /**
    * Reject every pending request, end stdin, and reap the child. Idempotent;
    * the only entry point that drops connection state.
+   *
+   * A normal close ends stdin and waits the stdin grace; a child still alive
+   * then gets SIGTERM and the terminate grace when the client was built with
+   * {@link AcpCloseEscalation.terminateGraceMs}, and SIGKILL after that. A
+   * forced close sends SIGKILL at once. Every wait is bounded.
    */
   async close(options: { force?: boolean } = {}): Promise<void> {
     if (this.closed) return;
@@ -351,22 +386,20 @@ export class AcpClient {
     this.failAllPending(new Error('acp client closed'));
     const child = this.child;
     if (!child) return;
-    if (child.alive && options.force) {
-      child.kill('SIGKILL');
-      await Promise.race([child.exited.then(() => true), sleep(CLOSE_GRACE_MS).then(() => false)]);
-    } else if (child.alive) {
-      child.endStdin();
-      const exited = await Promise.race([
-        child.exited.then(() => true),
-        sleep(CLOSE_GRACE_MS).then(() => false),
-      ]);
-      if (!exited) {
-        child.kill('SIGKILL');
-        await Promise.race([child.exited.then(() => true), sleep(CLOSE_GRACE_MS).then(() => false)]);
-      }
-    } else {
+    if (!child.alive) {
       await child.exited.catch(() => {});
+      return;
     }
+    if (!options.force) {
+      child.endStdin();
+      if (await exitsWithin(child, this.stdinCloseGraceMs)) return;
+      if (this.terminateGraceMs > 0) {
+        child.kill('SIGTERM');
+        if (await exitsWithin(child, this.terminateGraceMs)) return;
+      }
+    }
+    child.kill('SIGKILL');
+    await exitsWithin(child, CLOSE_GRACE_MS);
   }
 
   // ── Internals ──────────────────────────────────────────────────────────────
@@ -440,6 +473,13 @@ export class AcpClient {
   }
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/** True when the child exits within `ms`. The timer never outlives the answer. */
+function exitsWithin(child: AcpChild, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    child.exited.then(() => true),
+    new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
 }

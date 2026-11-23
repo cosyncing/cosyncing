@@ -9,8 +9,9 @@
  *
  * Covered: handshake, correlation, notification dispatch, cancel, the
  * permission round-trip, extension routing, tolerant decode (string/number
- * `protocolVersion`, unknown fields preserved), dead-child reject, and
- * trace-on-unknown-frame.
+ * `protocolVersion`, unknown fields preserved), dead-child reject,
+ * trace-on-unknown-frame, and the close escalation (stdin EOF, SIGTERM,
+ * SIGKILL) against children that outlive stdin close.
  *
  *   bun run packages/typescript/acp-client/test/test-acp-client.ts
  */
@@ -29,6 +30,7 @@ import {
   AcpRequestTimeoutError,
   AcpRpcError,
   type AcpClientHooks,
+  type AcpCloseEscalation,
   type AcpExtensionEvent,
   type AcpRequestPermissionParams,
   type AcpSessionUpdateParams,
@@ -70,6 +72,16 @@ const config = JSON.parse(readFileSync(process.env.FAKE_ACP_CONFIG, 'utf8'));
 const log = (entry) => appendFileSync(config.log, JSON.stringify(entry) + '\\n');
 const send = (frame) => process.stdout.write(JSON.stringify(frame) + '\\n');
 if (config.keepAliveAfterStdinEnd) setInterval(() => {}, 1_000);
+// A bound on a fake that ignores stdin close, so a failed scenario cannot leave it behind.
+if (Number.isSafeInteger(config.maxLifetimeMs) && config.maxLifetimeMs > 0) {
+  setTimeout(() => process.exit(0), config.maxLifetimeMs);
+}
+if (config.onSigterm === 'exit' || config.onSigterm === 'ignore') {
+  process.on('SIGTERM', () => {
+    log({ sigterm: true });
+    if (config.onSigterm === 'exit') process.exit(143);
+  });
+}
 if (Number.isSafeInteger(config.emitStderrBytes) && config.emitStderrBytes > 0) {
   process.stderr.write('e'.repeat(config.emitStderrBytes));
 }
@@ -244,6 +256,7 @@ async function startFake(
     promptTimeoutMs?: number;
     maxFrameBytes?: number;
     signal?: AbortSignal;
+    closeEscalation?: AcpCloseEscalation;
   } = {},
 ): Promise<FakeRun> {
   const configPath = join(workdir, `fake-config-${configCounter++}.json`);
@@ -290,6 +303,7 @@ async function startFake(
       promptTimeoutMs: options.promptTimeoutMs,
       maxFrameBytes: options.maxFrameBytes,
       signal: options.signal,
+      closeEscalation: options.closeEscalation,
     });
   } catch (caught) {
     error = caught instanceof Error ? caught : new Error(String(caught));
@@ -818,6 +832,67 @@ try {
         caught instanceof Error && /stdio|not running/.test(caught.message) && stopped,
         JSON.stringify({ caught: String(caught), stopped, alive: run.client.alive, log: run.readLog() }));
       await run.client.close();
+    }
+  }
+
+  // ── Scenario M: close escalation for a child that outlives stdin close ───
+  // Each child here ignores stdin EOF and records any SIGTERM it receives.
+  // Opted in, close sends SIGTERM before SIGKILL; at the default, which
+  // Reasonix uses, close goes straight to SIGKILL after the same 2s grace.
+  {
+    const run = await startFake(
+      { keepAliveAfterStdinEnd: true, onSigterm: 'exit', maxLifetimeMs: 30_000 },
+      { closeEscalation: { stdinGraceMs: 200, terminateGraceMs: 5_000 } },
+    );
+    check('close escalation: setup connects', run.client !== null, String(run.error));
+    if (run.client) {
+      await run.client.close();
+      const ledger = run.readLog();
+      const stdinEndedAt = ledger.findIndex((row) => row.stdinEnded === true);
+      const sigtermAt = ledger.findIndex((row) => row.sigterm === true);
+      const exit = run.traces.find((event) => event.kind === 'child-exit');
+      check('an opted-in close ends stdin, then sends SIGTERM to a child still alive, which exits without SIGKILL',
+        stdinEndedAt >= 0 && sigtermAt > stdinEndedAt
+          && exit?.message.includes('(code 143, signal null)') === true,
+        JSON.stringify({ ledger, exit: exit?.message }));
+    }
+  }
+
+  {
+    const run = await startFake(
+      { keepAliveAfterStdinEnd: true, onSigterm: 'ignore', maxLifetimeMs: 30_000 },
+      { closeEscalation: { stdinGraceMs: 100, terminateGraceMs: 300 } },
+    );
+    check('close escalation, SIGTERM ignored: setup connects', run.client !== null, String(run.error));
+    if (run.client) {
+      const started = Date.now();
+      await run.client.close();
+      const elapsed = Date.now() - started;
+      const ledger = run.readLog();
+      const exit = run.traces.find((event) => event.kind === 'child-exit');
+      check('...a child that also ignores SIGTERM gets SIGKILL only after the terminate grace',
+        ledger.some((row) => row.sigterm === true)
+          && exit?.message.includes('signal SIGKILL') === true
+          && elapsed >= 350,
+        JSON.stringify({ elapsed, ledger, exit: exit?.message }));
+    }
+  }
+
+  {
+    const run = await startFake({ keepAliveAfterStdinEnd: true, onSigterm: 'ignore', maxLifetimeMs: 30_000 });
+    check('default close: setup connects', run.client !== null, String(run.error));
+    if (run.client) {
+      const started = Date.now();
+      await run.client.close();
+      const elapsed = Date.now() - started;
+      const ledger = run.readLog();
+      const exit = run.traces.find((event) => event.kind === 'child-exit');
+      check('the default close is unchanged: stdin EOF, the 2s grace, then SIGKILL with no SIGTERM step',
+        ledger.some((row) => row.stdinEnded === true)
+          && !ledger.some((row) => row.sigterm === true)
+          && exit?.message.includes('signal SIGKILL') === true
+          && elapsed >= 1_900,
+        JSON.stringify({ elapsed, ledger, exit: exit?.message }));
     }
   }
 } catch (error) {
