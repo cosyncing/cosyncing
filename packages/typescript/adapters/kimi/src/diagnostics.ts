@@ -257,6 +257,13 @@ export async function diagnoseKimiSetup(
     displayName: 'Kimi Code',
     command: usingFallback ? fallbackPath : 'kimi',
     versionArgs: ['--version'],
+    // Kimi Code's own opt-out (0.43.0 `isAutoUpdateDisabledByEnv`, also read
+    // under its legacy name `KIMI_CLI_NO_AUTO_UPDATE`). It matters even for
+    // `--version`: a native install swaps in an update that an earlier
+    // interactive run staged automatically at the start of EVERY invocation,
+    // before the command is parsed, and this variable is what holds that swap
+    // back. With it, the probe cannot be the step that moves the install to 2.x.
+    versionProbeEnv: { KIMI_CODE_NO_AUTO_UPDATE: '1' },
     minimum: KIMI_MINIMUM_VERSION,
     installMessage: 'Install Kimi Code, then rerun doctor.',
     upgradeCommand: 'kimi update',

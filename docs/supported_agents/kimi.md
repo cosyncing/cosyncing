@@ -20,6 +20,12 @@ Kimi shows as unavailable, its sessions are not listed, new sessions cannot be
 created, and `cosyncing doctor` names the version it found and the supported
 range.
 
+Kimi Code 0.43 can update itself to the newest release, which is 2.x, when you
+start it interactively, and `kimi update` installs 2.x as well. To stay on a
+supported version, set `KIMI_CODE_NO_AUTO_UPDATE=1` in the environment you
+start Kimi Code from. cosyncing sets that variable itself when it starts
+`kimi web` and when doctor reads the installed version.
+
 ## Current behavior
 
 - Every session on the server is discovered and observable read-only, whoever

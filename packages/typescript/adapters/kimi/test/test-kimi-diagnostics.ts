@@ -423,6 +423,27 @@ check('the floor remediation names the supported range and no longer offers `kim
     && (byId(oldOffPath, 'kimi.version')?.remediation?.message ?? '').includes('>= 0.35.0 and < 2.0.0'),
   JSON.stringify(byId(oldOffPath, 'kimi.version')?.remediation));
 
+// The version probe EXECUTES the installed `kimi`, and a native Kimi Code swaps
+// in an automatically staged update at the start of every invocation, before it
+// reads `--version`. Its own opt-out holds that back (0.43.0
+// `isAutoUpdateDisabledByEnv`), so the probe has to carry it.
+{
+  let probeEnv: Readonly<Record<string, string | undefined>> | undefined;
+  let probeArgs: readonly string[] = [];
+  const probed = await diagnoseKimiSetup(context({
+    runReadOnly: async (_executable, args, _timeoutMs, envOverrides) => {
+      probeArgs = args;
+      probeEnv = envOverrides;
+      return { status: 'ok', exitCode: 0, stdout: FIXTURE.kimiVersion, stderr: '' };
+    },
+  }), { instances: liveOne, token: 't' });
+  check('the doctor version probe runs `kimi --version` with Kimi Code\'s own update opt-out',
+    probeArgs.join(' ') === '--version'
+      && probeEnv?.KIMI_CODE_NO_AUTO_UPDATE === '1'
+      && byId(probed, 'kimi.version')?.status === 'pass',
+    `${probeArgs.join(' ')} ${JSON.stringify(probeEnv)}`);
+}
+
 // ── The top of the range ────────────────────────────────────────────────────
 //
 // Kimi Code went from 0.43.1 to 2.0.0, and 2.x replaced the local server

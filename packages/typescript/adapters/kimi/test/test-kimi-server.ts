@@ -258,6 +258,15 @@ function boundMeta(extra: Record<string, unknown> = {}): Record<string, unknown>
         && described?.launch?.env?.KIMI_CODE_HOME === '/custom/home',
       `${described?.identityKey} | ${described?.launch?.env?.KIMI_CODE_HOME}`,
     );
+    // A native Kimi Code swaps in an automatically staged update at the start of
+    // EVERY invocation, `kimi web` included. Without its own opt-out, the
+    // broker's start would be the step that moves the managed host to 2.x.
+    check(
+      'the managed-host launch carries Kimi Code\'s own update opt-out',
+      described?.launch?.env?.KIMI_CODE_NO_AUTO_UPDATE === '1'
+        && described.launch.args.join(' ') === 'web --no-open',
+      JSON.stringify(described?.launch),
+    );
   }
 
   // Ports are derived from the adapter's own constant rather than written as

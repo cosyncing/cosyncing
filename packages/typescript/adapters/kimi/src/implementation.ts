@@ -779,11 +779,18 @@ export class KimiAdapter implements AgentBackend {
         // and an installed service resolves its own. Naming the home here makes
         // the launch agree with the descriptor that authorized it, by
         // construction rather than by coincidence.
+        //
+        // `KIMI_CODE_NO_AUTO_UPDATE` is Kimi Code's own update opt-out (0.43.0
+        // `isAutoUpdateDisabledByEnv`). A native install swaps in an update an
+        // earlier interactive run staged automatically at the start of every
+        // invocation, `kimi web` included, before the command is parsed. Without
+        // the variable, the broker's own start would be the step that moves this
+        // host to 2.x, a version the identity gate then refuses.
         ? {
           command: executable,
           args: ['web', '--no-open'],
           cwd: this.homeDir,
-          env: { KIMI_CODE_HOME: this.home() },
+          env: { KIMI_CODE_HOME: this.home(), KIMI_CODE_NO_AUTO_UPDATE: '1' },
         }
         : null,
       // The registry's own numbers, which is the only place kimi's chosen port
