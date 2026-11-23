@@ -4,14 +4,28 @@
  * `e2e/broker/runtime-updates.test.ts` drives every restart path through a real broker
  * and real (fake) runtime processes. What it cannot do deterministically is land a second
  * request while a restart is mid-flight, or a shutdown signal between an inspection and
- * the restart it allowed. Those orderings are pinned here with deferred promises.
+ * the restart it allowed. Those orderings are pinned here with deferred promises. So is a
+ * run of identical automatic failures, which a broker under test only reaches after minutes of
+ * polling: the pause it ends in is checked against the real attention policy and store.
  */
-import { describe, expect, test } from 'bun:test';
+import { afterAll, describe, expect, test } from 'bun:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { AttentionPolicy } from '../../src/attention/attention-policy.ts';
+import { AttentionStore } from '../../src/attention/attention-store.ts';
 import {
+  AUTO_RESTART_IDENTICAL_FAILURE_LIMIT,
+  RUNTIME_UPDATE_RESTART_INPUT_FINGERPRINT,
   RuntimeUpdateCoordinator,
   type RuntimeUpdateInspection,
   type RuntimeUpdateProvider,
 } from '../../src/updates/runtime-update.ts';
+
+const roots: string[] = [];
+afterAll(() => {
+  for (const root of roots) rmSync(root, { recursive: true, force: true });
+});
 
 function status(current: boolean, autoRestartReady = false): RuntimeUpdateInspection {
   return {
@@ -132,6 +146,84 @@ describe('runtime update coordinator', () => {
     });
     expect((await coordinator.refresh('codex', { autoRestart: true }))?.state).toBe('current');
     expect(observed).toEqual(['pending', 'current']);
+  });
+
+  test('identical automatic failures pause automatic restarts under one attention item until the restart input changes', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'cosyncing-runtime-pause-'));
+    roots.push(home);
+    const store = new AttentionStore({ home, now: () => 1_000_000 });
+    const attention = new AttentionPolicy(store, { now: () => 1_000_000 });
+    // The live refusal from a host whose daemon receipt could not be verified.
+    const refusal = 'Codex is answering without a verified daemon PID receipt; this backend cannot be restarted safely.';
+    let installed = '0.154.0';
+    let receipt = 'receipt generation 1';
+    let restarts = 0;
+    const provider: RuntimeUpdateProvider = {
+      agent: 'codex',
+      inspect: async () => ({
+        ...status(false, true),
+        installedVersion: installed,
+        [RUNTIME_UPDATE_RESTART_INPUT_FINGERPRINT]: receipt,
+      }),
+      restart: async () => {
+        restarts += 1;
+        throw new Error(refusal);
+      },
+    };
+    const coordinator = new RuntimeUpdateCoordinator([provider], {
+      onStatus: (next) => attention.reconcileRuntimeStatus(next),
+    });
+    const check = () => coordinator.refresh('codex', { autoRestart: true })
+      .then(() => 'no attempt', (error: unknown) => String(error));
+    const activeEvents = () => store.listActive().filter((event) => event.kind === 'runtime-update-ready');
+    const failUntilPaused = async () => {
+      const before = restarts;
+      for (let attempt = 0; attempt < AUTO_RESTART_IDENTICAL_FAILURE_LIMIT; attempt += 1) {
+        expect(await check()).toContain(refusal);
+      }
+      // Later checks still probe and report, but neither restart nor fail again.
+      expect(await check()).toBe('no attempt');
+      expect(await check()).toBe('no attempt');
+      expect(restarts - before).toBe(AUTO_RESTART_IDENTICAL_FAILURE_LIMIT);
+      expect(coordinator.get('codex')).toMatchObject({ state: 'error', managed: true, updateAvailable: true, autoRestartReady: false });
+      expect(coordinator.get('codex')?.detail).toContain(refusal);
+      expect(coordinator.get('codex')?.detail).toContain(`paused after ${AUTO_RESTART_IDENTICAL_FAILURE_LIMIT} identical failures`);
+      expect(activeEvents()).toHaveLength(1);
+    };
+
+    await failUntilPaused();
+    const event = activeEvents()[0]!;
+    // A new daemon receipt is a new input.
+    receipt = 'receipt generation 2';
+    await failUntilPaused();
+    // A manual request is attempted even while paused, and re-arms automatic restarts.
+    await expect(coordinator.restartNow('codex')).rejects.toThrow(refusal);
+    expect(restarts).toBe(2 * AUTO_RESTART_IDENTICAL_FAILURE_LIMIT + 1);
+    await failUntilPaused();
+    expect(activeEvents().map((active) => active.id)).toEqual([event.id]);
+    // So is a newly installed version; it replaces the one update item with another.
+    installed = '0.155.0';
+    await failUntilPaused();
+    expect(activeEvents()[0]!.id).not.toBe(event.id);
+    expect(restarts).toBe(4 * AUTO_RESTART_IDENTICAL_FAILURE_LIMIT + 1);
+  });
+
+  test('automatic failures that differ keep being retried', async () => {
+    let restarts = 0;
+    const provider: RuntimeUpdateProvider = {
+      agent: 'codex',
+      inspect: async () => status(false, true),
+      restart: async () => {
+        restarts += 1;
+        throw new Error(restarts % 2 ? 'graceful drain failed' : 'another daemon is running');
+      },
+    };
+    const coordinator = new RuntimeUpdateCoordinator([provider]);
+    for (let attempt = 0; attempt < 2 * AUTO_RESTART_IDENTICAL_FAILURE_LIMIT; attempt += 1) {
+      await coordinator.refresh('codex', { autoRestart: true }).catch(() => undefined);
+    }
+    expect(restarts).toBe(2 * AUTO_RESTART_IDENTICAL_FAILURE_LIMIT);
+    expect(coordinator.get('codex')?.detail).not.toContain('paused');
   });
 
   test('a restart after which the change is still pending is a failure', async () => {

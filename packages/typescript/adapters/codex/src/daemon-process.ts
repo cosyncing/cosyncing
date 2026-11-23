@@ -282,6 +282,22 @@ function inspectProcess(
   }
 }
 
+/**
+ * The PID receipts as a restart would read them, without inspecting any process. Only a change
+ * marker for restart inputs (a new daemon generation or a rewritten receipt); never ownership proof.
+ */
+export function codexDaemonReceiptFingerprint(home: string): string {
+  return JSON.stringify((['app-server.pid', 'daemon.pid'] as const).map((layout) => {
+    const path = join(home, 'app-server-daemon', layout);
+    try {
+      const stat = lstatSync(path);
+      return stat.isFile() && stat.size <= 4096 ? readFileSync(path, 'utf8') : 'unsafe';
+    } catch (error) {
+      return (error as NodeJS.ErrnoException)?.code === 'ENOENT' ? null : 'unreadable';
+    }
+  }));
+}
+
 /** The native PID receipt survives a lost control socket. Never infer process exit from an RPC failure. */
 export function readCodexDaemonProcess(home: string, cli: string, dependencies: {
   /** Test seam: the receipt start-time read, where a reap can land mid-inspection. */

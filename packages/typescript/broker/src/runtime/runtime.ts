@@ -67,6 +67,7 @@ import {
   createCodexConfigFreshnessProbe,
   queryCodexLoadedThreadActivitiesStrict,
   readCodexDaemonVersion,
+  readCodexDaemonReceiptFingerprint,
   restartCodexDaemon,
   inspectCodexDaemonHealth,
   stopCodexDaemonEnsureProcess,
@@ -1361,6 +1362,7 @@ const runtimeUpdates = new RuntimeUpdateCoordinator([
     loadedThreads: queryCodexLoadedThreadActivitiesStrict,
     policy: getCodexUpdatePolicy,
     restart: restartCodexDaemon,
+    readRestartInput: readCodexDaemonReceiptFingerprint,
   }),
   createOpencodeRuntimeUpdateProvider({
     readVersions: readManagedOpencodeVersions,

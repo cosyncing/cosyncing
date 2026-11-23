@@ -122,7 +122,7 @@ import {
   resolveCodexMacConfiguredExecutable,
 } from './tui-presence.ts';
 import { diagnoseCodexSetup } from './diagnostics.ts';
-import { readCodexDaemonProcess, createCodexNewThreadFolderScan, codexDaemonProcessState, gracefullyStopCodexDaemonProcess, forceStopCodexDaemonProcess } from './daemon-process.ts';
+import { readCodexDaemonProcess, codexDaemonReceiptFingerprint, createCodexNewThreadFolderScan, codexDaemonProcessState, gracefullyStopCodexDaemonProcess, forceStopCodexDaemonProcess } from './daemon-process.ts';
 import { restartCodexDaemonVerified, type CodexRestartOptions, type CodexDaemonCommandResult } from './daemon-restart.ts';
 export type { CodexRestartOptions } from './daemon-restart.ts';
 import {
@@ -2909,6 +2909,11 @@ export function inspectCodexDaemonHealth(): CodexDaemonHealth {
       ? `Codex daemon pid=${daemon.process.pid} is still running but its control endpoint is unavailable. Use Restart to recover the daemon and release its session locks.`
       : daemon.state === 'unknown' ? daemon.detail : 'Codex managed daemon is not running.',
   };
+}
+
+/** Read-only change marker for the daemon PID receipts a restart would verify (no process inspection). */
+export function readCodexDaemonReceiptFingerprint(): string {
+  return codexDaemonReceiptFingerprint(CODEX_HOME);
 }
 
 function codexRestartVerifyMs(): number {
