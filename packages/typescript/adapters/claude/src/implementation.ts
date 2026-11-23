@@ -4841,7 +4841,7 @@ export class ClaudeResumeConnection implements SessionConnection {
         response: {
           subtype: 'success',
           request_id: this.pendingQuestionControlId,
-          response: { behavior: 'allow', updatedInput: { ...input, answers: map } },
+          response: { behavior: 'allow', updatedInput: { ...questionAnswerEcho(input), answers: map } },
         },
       });
       this.pendingQuestionControlId = undefined;
@@ -4868,7 +4868,7 @@ export class ClaudeResumeConnection implements SessionConnection {
       response: {
         subtype: 'success',
         request_id: this.pendingQuestionControlId,
-        response: { behavior: 'allow', updatedInput: this.pendingQuestionControlInput ?? {} },
+        response: { behavior: 'allow', updatedInput: questionAnswerEcho(this.pendingQuestionControlInput) },
       },
     });
     this.pendingQuestionControlId = undefined;
@@ -5449,6 +5449,20 @@ type QuestionCard = Extract<AgentMessage, { type: 'question-request' }>;
 /** A decision on a Drive question the CLI is not waiting on; the broker nacks it as NOT_FOUND. */
 const questionNotPending = (requestId: string): ControlRefusedError =>
   new ControlRefusedError(`Claude question ${requestId} is not pending.`, 'request-not-pending');
+
+/** `afkTimeoutMs` is set only by Claude's own dialog when it times out with nobody at the keyboard.
+ *  From 2.1.321 Claude refuses a host's AskUserQuestion answer whose `updatedInput` carries that key at
+ *  all (whatever its value), so the asked input is echoed back without it. */
+const CLAUDE_HOST_FORBIDDEN_QUESTION_FIELD = 'afkTimeoutMs';
+
+/** The asked AskUserQuestion input as a Drive answer may echo it back in `updatedInput`. */
+function questionAnswerEcho(input: unknown): Record<string, unknown> {
+  const echo: Record<string, unknown> = input && typeof input === 'object' && !Array.isArray(input)
+    ? { ...(input as Record<string, unknown>) }
+    : {};
+  delete echo[CLAUDE_HOST_FORBIDDEN_QUESTION_FIELD];
+  return echo;
+}
 
 /** Claude's first-party AskUserQuestion tool → the canonical question-request card. `readOnly` is true in
  *  Observe/history replay (the terminal owns the answer) and false on the live Drive turn (the app can
