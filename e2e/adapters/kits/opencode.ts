@@ -680,6 +680,47 @@ const opencodeExtras: ConformanceExtra[] = [
     },
   },
   {
+    title: 'share runs through the serve, and a serve from OpenCode 1.19.1 (sharing discontinued) is neither offered nor sent share or unshare',
+    async run(context) {
+      const fake = fakeOf(context);
+      const names = (stream: SessionStream): string[] =>
+        ((stream.ofKind('commands').at(-1)?.commands ?? []) as any[]).map((command) => command.name);
+      const seeded = fake.seedSession({ title: 'share' });
+      await context.client.waitForSession((row) => row.id === seeded.id);
+      const stream = await context.openDrive({ id: seeded.id, cwd: seeded.cwd, reason: 'takeover' });
+      expect(names(stream)).toEqual(expect.arrayContaining(['share', 'unshare']));
+      const mark = fake.ledger.mark();
+      const from = stream.frames.length;
+      expect((await stream.sendAndAwait({ kind: 'command', name: 'share' })).kind).toBe('ack');
+      await stream.waitForFrame((frame) => frame.kind === 'notice' && String(frame.message).startsWith('Shared: '), { after: from });
+      expect(fake.ledger.routed('POST', new RegExp(`^/session/${seeded.id}/share$`), mark).length).toBe(1);
+      try {
+        // The serve is upgraded under an open session: the actions that session listed are refused
+        // before any native call, and a session opened afterwards does not offer them.
+        fake.serve.setVersion('1.19.1');
+        const upgraded = fake.ledger.mark();
+        for (const name of ['share', 'unshare']) {
+          const refused = await stream.sendAndAwait({ kind: 'command', name });
+          expect(refused.kind).toBe('nack');
+          expect(refused.code).toBe('NOT_SUPPORTED');
+          expect(String(refused.message)).toContain('1.19.1');
+        }
+        const later = fake.seedSession({ title: 'share after 1.19.1' });
+        await context.client.waitForSession((row) => row.id === later.id);
+        const fresh = await context.openDrive({ id: later.id, cwd: later.cwd, reason: 'takeover' });
+        expect(names(fresh)).not.toContain('share');
+        expect(names(fresh)).not.toContain('unshare');
+        expect(names(fresh)).toEqual(expect.arrayContaining(['compact', 'undo', 'redo', 'stop', 'review']));
+        fresh.close();
+        expect(fake.ledger.routed('POST', /\/share$/, upgraded)).toEqual([]);
+        expect(fake.ledger.routed('DELETE', /\/share$/, upgraded)).toEqual([]);
+      } finally {
+        fake.serve.setVersion(OPENCODE_VERSION);
+      }
+      stream.close();
+    },
+  },
+  {
     title: 'completion telemetry is not a terminal fence: a run ends at idle, or as an error when the serve fails it',
     async run(context) {
       const fake = fakeOf(context);

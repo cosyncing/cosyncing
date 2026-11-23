@@ -42,6 +42,7 @@ import {
   SessionNotFoundError,
   TranscriptExportTooLargeError,
   bunSpawnResolvedInvocation,
+  compareSemanticVersions,
   isOpaqueSessionId,
   isRegularSqliteStoreSync,
   readRegularFileSync,
@@ -54,7 +55,7 @@ import { homedir } from 'node:os';
 import { Database } from 'bun:sqlite';
 import { attachedTuiSessions, tuiPresenceSupported } from './tui-presence.ts';
 import { diagnoseOpenCodeSetup } from './diagnostics.ts';
-import { opencodeAllowsV1, opencodeChildEnv, opencodeGeneration, opencodeGenerationForLaunch, OPENCODE_V1_READ_ONLY_REASON } from './generation.ts';
+import { normalizeOpencodeVersion, opencodeAllowsV1, opencodeChildEnv, opencodeGeneration, opencodeGenerationForLaunch, OPENCODE_V1_READ_ONLY_REASON } from './generation.ts';
 import { mapOpenCodePart as mapSharedOpenCodePart } from '@cosyncing/opencode-wire';
 
 export { opencodeChildEnv } from './generation.ts';
@@ -2709,23 +2710,54 @@ class OpenCodeConnection implements SessionConnection {
   }
 
   async listCommands(): Promise<SlashCommand[]> {
-    let templates: SlashCommand[] = [];
-    try {
-      const res = await fetch(this.url('/command'), { signal: AbortSignal.timeout(4000) });
-      if (res.ok) {
-        const list = (await res.json()) as any[];
-        templates = (Array.isArray(list) ? list : [])
-          .filter((c) => typeof c?.name === 'string' && c.name.trim() && !/[\r\n]/.test(c.name))
-          .map((c) => ({ name: c.name, description: c.description, kind: 'prompt' as const }));
+    const loadTemplates = async (): Promise<SlashCommand[]> => {
+      try {
+        const res = await fetch(this.url('/command'), { signal: AbortSignal.timeout(4000) });
+        if (res.ok) {
+          const list = (await res.json()) as any[];
+          return (Array.isArray(list) ? list : [])
+            .filter((c) => typeof c?.name === 'string' && c.name.trim() && !/[\r\n]/.test(c.name))
+            .map((c) => ({ name: c.name, description: c.description, kind: 'prompt' as const }));
+        }
+      } catch {
+        /* server gone / no commands */
       }
+      return [];
+    };
+    const [sharingDiscontinued, templates] = await Promise.all([this.sharingDiscontinued(), loadTemplates()]);
+    const actions = sharingDiscontinued
+      ? BUILTIN_ACTIONS.filter((action) => !SHARE_ACTIONS.has(action.name))
+      : BUILTIN_ACTIONS;
+    return [...actions, ...templates];
+  }
+
+  /** OpenCode discontinued session sharing in 1.19.1: from that version its serve still routes
+   *  `POST /session/:id/share` but fails it, and `DELETE` only clears the local link. Decided by the
+   *  version the serve itself reports, since that is the process answering the request. A serve that
+   *  does not report a comparable version keeps the historical actions. */
+  private async sharingDiscontinued(): Promise<boolean> {
+    try {
+      const res = await fetch(this.url('/global/health'), { signal: AbortSignal.timeout(1500) });
+      if (!res.ok) return false;
+      const body = (await res.json()) as { version?: unknown } | null;
+      const version = normalizeOpencodeVersion(String(body?.version ?? ''));
+      const order = compareSemanticVersions(version, OPENCODE_SHARING_DISCONTINUED_VERSION);
+      return order !== undefined && order >= 0;
     } catch {
-      /* server gone / no commands */
+      return false;
     }
-    return [...BUILTIN_ACTIONS, ...templates];
   }
 
   async runCommand(name: string, args?: string): Promise<CommandResult | void> {
     const sid = encodeURIComponent(this.info.id);
+    // Refused before any native call: a client that listed the actions before the serve was
+    // upgraded must not reach a route that now only fails.
+    if (SHARE_ACTIONS.has(name) && await this.sharingDiscontinued()) {
+      throw new ControlRefusedError(
+        `OpenCode ${OPENCODE_SHARING_DISCONTINUED_VERSION} and newer no longer support session sharing, so /${name} is unavailable.`,
+        'command-unsupported',
+      );
+    }
     const post = (path: string, body?: unknown) =>
       fetch(this.url(path), {
         method: 'POST',
@@ -2883,6 +2915,11 @@ const BUILTIN_ACTIONS: SlashCommand[] = [
   { name: 'share', description: 'Create a share link', kind: 'action' },
   { name: 'unshare', description: 'Remove the share link', kind: 'action' },
 ];
+
+/** Withheld, and refused, on a serve at or past {@link OPENCODE_SHARING_DISCONTINUED_VERSION}. */
+const SHARE_ACTIONS: ReadonlySet<string> = new Set(['share', 'unshare']);
+/** Upstream release that discontinued session sharing (its share route fails from here on). */
+const OPENCODE_SHARING_DISCONTINUED_VERSION = '1.19.1';
 
 /**
  * Tracks real-time activity for EVERY OpenCode session via one persistent /global/event
