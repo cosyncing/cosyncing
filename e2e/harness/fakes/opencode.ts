@@ -22,6 +22,8 @@ export interface OpencodeLedgerEntry {
   kind: 'cli' | 'serve-started' | 'serve-exit' | 'serve-waiting' | 'create';
   id?: string;
   argv?: string[];
+  /** On `cli` entries: the invocation's OPENCODE_DISABLE_AUTOUPDATE, or null when unset. */
+  autoUpdateDisabled?: string | null;
   version?: string;
   port?: number;
   reason?: string;

@@ -365,6 +365,10 @@ describe.each(['sqlite', 'json'] as StoreLayout[])('OpenCode without a serve, %s
     expect(exported.body.code).toBe('EXPORT_FAILED');
     expect(treeSnapshot(store.dataDir)).toEqual(before);
     expect(ledger.entries().slice(mark).filter((entry) => entry.kind !== 'version-probe')).toEqual([]);
+    // Every version probe the broker ran, before and after the upgrade, disabled OpenCode's in-place updater.
+    const probes = ledger.entries().filter((entry) => entry.kind === 'version-probe');
+    expect(probes.length).toBeGreaterThan(0);
+    expect(probes.map((entry) => entry.autoUpdateDisabled)).toEqual(probes.map(() => '1'));
     resumed.close();
     refusedResume.close();
 

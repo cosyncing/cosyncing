@@ -96,7 +96,8 @@ async function serve(hostname: string, port: number): Promise<void> {
 }
 
 const args = process.argv.slice(2);
-ledger({ kind: 'cli', argv: args });
+// Whether the in-place updater was disabled for this invocation (every child the broker starts sets it).
+ledger({ kind: 'cli', argv: args, autoUpdateDisabled: process.env.OPENCODE_DISABLE_AUTOUPDATE ?? null });
 if (args[0] === '--version') {
   const versionConfig = config();
   const failedProbe = join(state, 'failed-version-probe');

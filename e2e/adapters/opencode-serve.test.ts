@@ -93,6 +93,11 @@ posix('the serve the broker launches and owns', () => {
     await eventually(() => opencode.serves().length === 1, { what: 'the managed serve to start' });
     const cli = opencode.ledger().filter((entry) => entry.kind === 'cli' && entry.argv?.[0] === 'serve');
     expect(cli.at(-1)!.argv).toEqual(['serve', '--hostname', '127.0.0.1', '--port', String(port)]);
+    // Neither the long-lived serve nor any version probe may let OpenCode update itself in place.
+    expect(cli.at(-1)!.autoUpdateDisabled).toBe('1');
+    const probes = opencode.ledger().filter((entry) => entry.kind === 'cli' && entry.argv?.[0] === '--version');
+    expect(probes.length).toBeGreaterThan(0);
+    expect(probes.map((entry) => entry.autoUpdateDisabled)).toEqual(probes.map(() => '1'));
     expect(opencode.ledger().find((entry) => entry.kind === 'serve-started')!.port).toBe(port);
     const row = await client.waitForSession((candidate) => candidate.id === 'ses_managed');
     expect(row.attachMode).toBe('live');
