@@ -70,9 +70,11 @@ version is not 0.2.0-rc.2 or 0.1.0-rc.6:
 
 - cosyncing does not start a managed host, and does not use a host at an address
   on this machine, whoever started it. DeepSeek Harness lists no sessions and
-  shows that sessions cannot be created. Opening a session, creating one,
-  renaming one, loading the model list, and sending to a session that is already
-  open fail with a message that names the supported versions.
+  shows that sessions cannot be created.
+- Opening a session, creating one, and sending to a session that is already open
+  fail with a message that names the supported versions. Renaming a session and
+  loading the model list fail with their usual error, which does not say why;
+  `cosyncing doctor` does.
 - A host that cosyncing started before the change is left running, and the
   broker log says why it is no longer used.
 - `cosyncing doctor` fails the `dsh.version` check and gives the install command

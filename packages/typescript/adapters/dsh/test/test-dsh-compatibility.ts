@@ -14,6 +14,7 @@
  *   bun run packages/typescript/adapters/dsh/test/test-dsh-compatibility.ts
  */
 export {};
+import { isSessionCreateTemporarilyUnavailableError } from '@cosyncing/adapter-api';
 import {
   classifyDshVersion,
   compareDshVersions,
@@ -370,13 +371,18 @@ function check(name: string, ok: boolean, detail = ''): void {
     });
     return { adapter, sent };
   };
-  const failure = async (attempt: () => Promise<unknown>): Promise<string> => {
+  const thrown = async (attempt: () => Promise<unknown>): Promise<unknown> => {
     try {
       await attempt();
-      return '';
+      return undefined;
     } catch (error) {
-      return error instanceof Error ? error.message : String(error);
+      return error;
     }
+  };
+  const failure = async (attempt: () => Promise<unknown>): Promise<string> => {
+    const error = await thrown(attempt);
+    if (error === undefined) return '';
+    return error instanceof Error ? error.message : String(error);
   };
 
   const qualified = scripted('0.2.0-rc.2');
@@ -385,6 +391,9 @@ function check(name: string, ok: boolean, detail = ''): void {
     qualifiedAvailable === true && qualified.sent.includes('POST /api/session/list')
       && await qualified.adapter.canCreateSession() === true,
     qualified.sent.join(' '));
+  const qualifiedPrepared = await thrown(() => qualified.adapter.prepareCreateSession());
+  check('the qualified 0.2.0-rc.2 install passes Create\'s readiness boundary',
+    qualifiedPrepared === undefined, String(qualifiedPrepared));
 
   for (const version of ['0.2.1-rc.5', '0.2.3-alpha.2']) {
     const { adapter, sent } = scripted(version);
@@ -395,13 +404,36 @@ function check(name: string, ok: boolean, detail = ''): void {
       available === false && sessions.length === 0 && creatable === false && sent.length === 0,
       JSON.stringify({ available, sessions: sessions.length, creatable, sent }));
 
+    // The broker asks Create's readiness boundary FIRST and answers its typed
+    // refusal with a 503 that carries the message and the detail code. Only if
+    // it returns does the broker ask `canCreateSession`, whose `false` above it
+    // can turn only into a generic "temporarily unavailable" with no reason.
+    const prepared = await thrown(() => adapter.prepareCreateSession());
+    check(`${version}: Create's readiness boundary, asked before canCreateSession, refuses as dsh-version-unsupported with the reason`,
+      isSessionCreateTemporarilyUnavailableError(prepared)
+        && prepared.detailCode === 'dsh-version-unsupported'
+        && prepared.message.includes(version) && prepared.message.includes(DSH_QUALIFIED_VERSION_LIST)
+        && prepared.message.includes('@deepseek-ai/dsh@0.2.0-rc.2')
+        && sent.length === 0,
+      JSON.stringify({ prepared: String(prepared), sent }));
+    const created = await thrown(() => adapter.createSession());
+    check(`${version}: a create that skips the boundary gets the same typed refusal`,
+      isSessionCreateTemporarilyUnavailableError(created)
+        && created.detailCode === 'dsh-version-unsupported'
+        && created.message === (prepared instanceof Error ? prepared.message : '')
+        && sent.length === 0,
+      String(created));
+
+    // The adapter's own refusals. The broker forwards the attach message to the
+    // app; for rename and the model catalog it answers with its generic failure,
+    // so there the reason is the adapter's and doctor's, not the app's.
     const refusals = {
       attach: await failure(() => adapter.attach('session-fixture-001', 'live')),
       create: await failure(() => adapter.createSession()),
       rename: await failure(() => adapter.renameSession('session-fixture-001', 'renamed')),
       models: await failure(() => adapter.listModels()),
     };
-    check(`${version}: Observe, Drive, Create, rename and the model catalog refuse with a reason naming the qualified versions`,
+    check(`${version}: the adapter's Observe, Drive, Create, rename and model catalog calls refuse with a reason naming the qualified versions`,
       Object.values(refusals).every((message) => message.includes(version)
         && message.includes(DSH_QUALIFIED_VERSION_LIST) && message.includes('@deepseek-ai/dsh@0.2.0-rc.2'))
         && sent.length === 0,

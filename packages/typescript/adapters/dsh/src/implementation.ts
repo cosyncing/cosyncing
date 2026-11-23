@@ -28,6 +28,7 @@ import {
   CLIENT_REVISION_WITH_TOLERANT_INTEGRATION_KIND_DECODE,
   EXTERNAL_HOST_DISCOVERY_BUDGET_MS,
   PRODUCT_IDENTITY,
+  SessionCreateTemporarilyUnavailableError,
   type AgentBackend,
   type AgentCapabilities,
   type AgentSetupDiagnosis,
@@ -920,6 +921,23 @@ export class DshAdapter implements AgentBackend {
   }
 
   /**
+   * Create's readiness boundary, asked by the broker BEFORE `canCreateSession`.
+   *
+   * A refused version also makes `canCreateSession` false, but the broker can
+   * only turn a `false` into its generic "temporarily unavailable" sentence. The
+   * reason reaches the app only as this typed refusal, which the broker answers
+   * with a 503 carrying the message and `dsh-version-unsupported`. Nothing is
+   * sent to the host. A qualified version, or no local evidence, returns, and
+   * the broker's readiness check decides as before.
+   */
+  async prepareCreateSession(): Promise<void> {
+    const refusal = this.installedVersionRefusal();
+    if (refusal !== undefined) {
+      throw new SessionCreateTemporarilyUnavailableError(refusal, 'dsh-version-unsupported');
+    }
+  }
+
+  /**
    * The web contract family to speak, chosen by a read-only fingerprint.
    *
    * Two rules govern this, and both were established by the review of the
@@ -1653,8 +1671,10 @@ export class DshAdapter implements AgentBackend {
     title?: string;
     model?: PromptInput['model'];
   }): Promise<SessionInfo> {
-    // Before the workspace read below, which would otherwise reach the host first.
-    this.assertInstalledVersionAccepted();
+    // The same typed refusal as the readiness boundary, so a caller that skips
+    // it is told the same thing; before the workspace read below, which would
+    // otherwise reach the host first.
+    await this.prepareCreateSession();
     const remoteHost = await this.usingRemoteHost();
     const directory = opts?.directory?.replace(/\/+$/, '');
     // Which workspace the session lands in is decided in two steps, and the
