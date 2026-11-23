@@ -20,7 +20,8 @@ export const RUNTIME_UPDATE_OCCURRENCE_FINGERPRINT = Symbol('runtime-update-occu
 
 /**
  * Internal-only: what a restart acts on beyond the versions and the configuration occurrence, such
- * as the Codex daemon's PID receipts. A change re-arms paused automatic restarts. Never serialized.
+ * as the Codex daemon's PID receipts. A change the restart attempts did not make themselves re-arms
+ * paused automatic restarts. Never serialized.
  */
 export const RUNTIME_UPDATE_RESTART_INPUT_FINGERPRINT = Symbol('runtime-update-restart-input-fingerprint');
 
@@ -33,20 +34,40 @@ export type RuntimeUpdateInspection = AgentRuntimeUpdateStatus & {
  * Identical consecutive automatic restart failures after which automatic restarts pause until the
  * restart input changes or a manual restart is requested. The first retries cover a one-off race
  * (a turn that starts during the graceful drain, a concurrent replacement); a third identical
- * refusal on unchanged versions, configuration and runtime receipts is deterministic, and each
- * further attempt only repeats the native probes and the failure log every poll.
+ * failure on unchanged versions, configuration and runtime receipts is deterministic, and each
+ * further attempt repeats the native probes and the failure log every poll, or worse, stops and
+ * starts the runtime again before failing the same way.
  */
 export const AUTO_RESTART_IDENTICAL_FAILURE_LIMIT = 3;
 
-/** What an automatic restart would act on. Equal keys mean nothing an attempt depends on changed. */
-function restartInputKey(status: RuntimeUpdateInspection): string {
+/** What an automatic restart is asked to apply: the pending change, both versions, the config. */
+function restartIntentKey(status: RuntimeUpdateInspection): string {
   return JSON.stringify([
     [...(status.pendingChanges ?? [])].sort(),
     status.runningVersion ?? null,
     status.installedVersion ?? null,
     status[RUNTIME_UPDATE_OCCURRENCE_FINGERPRINT] ?? null,
-    status[RUNTIME_UPDATE_RESTART_INPUT_FINGERPRINT] ?? null,
   ]);
+}
+
+const restartRuntimeInput = (status: RuntimeUpdateInspection): string | null =>
+  status[RUNTIME_UPDATE_RESTART_INPUT_FINGERPRINT] ?? null;
+
+/**
+ * The input of the last failed automatic restart. `runtimeInputs` holds the runtime fingerprint
+ * before the attempt and as the attempt left it: an attempt that stopped the runtime and started
+ * another before failing verification has replaced, for Codex, the PID receipt itself. A later
+ * attempt is identical when its intent is the same and its fingerprint is one of these.
+ */
+interface AutoRestartFailures {
+  intent: string;
+  runtimeInputs: (string | null)[];
+  detail: string;
+  count: number;
+}
+
+function sameRestartInput(failures: AutoRestartFailures, status: RuntimeUpdateInspection): boolean {
+  return failures.intent === restartIntentKey(status) && failures.runtimeInputs.includes(restartRuntimeInput(status));
 }
 
 function pausedAutoRestartDetail(detail: string): string {
@@ -73,8 +94,8 @@ export class RuntimeUpdateCoordinator {
   private readonly statuses = new Map<string, RuntimeUpdateInspection>();
   private readonly inFlight = new Map<string, Promise<RuntimeUpdateInspection>>();
   private readonly manualRestarts = new Map<string, Promise<RuntimeUpdateInspection | undefined>>();
-  /** Consecutive identical automatic restart failures per agent, keyed by the restart input. */
-  private readonly autoRestartFailures = new Map<string, { input: string; detail: string; count: number }>();
+  /** Consecutive identical automatic restart failures per agent. */
+  private readonly autoRestartFailures = new Map<string, AutoRestartFailures>();
 
   constructor(
     providers: RuntimeUpdateProvider[],
@@ -120,7 +141,7 @@ export class RuntimeUpdateCoordinator {
           ? status.pendingChanges.join(' + ')
           : `${status.runningVersion ?? 'unknown'} → ${status.installedVersion ?? 'newer'}`;
         console.log(`${LOG_PREFIX} ${status.displayName} ${status.runtimeKind || 'runtime'} change (${changes}); restarting at idle`);
-        const input = restartInputKey(status);
+        const attempted = status;
         try {
           await provider.restart();
           status = await provider.inspect();
@@ -128,7 +149,9 @@ export class RuntimeUpdateCoordinator {
           this.autoRestartFailures.delete(agent);
           await this.storeStatus(status);
         } catch (error) {
-          await this.storeRestartFailure(status, error, this.recordAutoRestartFailure(agent, input, error));
+          // What the failed attempt left behind, best effort; a post-restart inspection already is.
+          const after = status !== attempted ? status : await provider.inspect().catch(() => undefined);
+          await this.storeRestartFailure(status, error, this.recordAutoRestartFailure(agent, attempted, after, error));
           throw error;
         }
       }
@@ -187,13 +210,14 @@ export class RuntimeUpdateCoordinator {
 
   /**
    * Present a pending runtime whose automatic restart is paused as the error it keeps producing.
-   * `current` proves nothing is left to apply, and a pending runtime with a different restart input
-   * is a new attempt; both re-arm. An unreadable or unavailable runtime is no evidence either way.
+   * `current` proves nothing is left to apply, and a pending runtime whose input the failed
+   * attempts did not leave behind is a new attempt; both re-arm. An unreadable or unavailable
+   * runtime is no evidence either way.
    */
   private withAutoRestartPause(agent: string, status: RuntimeUpdateInspection): RuntimeUpdateInspection {
     const failures = this.autoRestartFailures.get(agent);
     if (!failures) return status;
-    if (status.state === 'current' || (status.state === 'pending' && failures.input !== restartInputKey(status))) {
+    if (status.state === 'current' || (status.state === 'pending' && !sameRestartInput(failures, status))) {
       this.autoRestartFailures.delete(agent);
       return status;
     }
@@ -202,11 +226,15 @@ export class RuntimeUpdateCoordinator {
   }
 
   /** Count an automatic failure; true once it is the limit-th identical one in a row. */
-  private recordAutoRestartFailure(agent: string, input: string, error: unknown): boolean {
+  private recordAutoRestartFailure(
+    agent: string, attempted: RuntimeUpdateInspection, after: RuntimeUpdateInspection | undefined, error: unknown,
+  ): boolean {
     const detail = error instanceof Error ? error.message : String(error);
     const prior = this.autoRestartFailures.get(agent);
-    const count = prior && prior.input === input && prior.detail === detail ? prior.count + 1 : 1;
-    this.autoRestartFailures.set(agent, { input, detail, count });
+    const count = prior && prior.detail === detail && sameRestartInput(prior, attempted) ? prior.count + 1 : 1;
+    const runtimeInputs = [restartRuntimeInput(attempted)];
+    if (after && !runtimeInputs.includes(restartRuntimeInput(after))) runtimeInputs.push(restartRuntimeInput(after));
+    this.autoRestartFailures.set(agent, { intent: restartIntentKey(attempted), runtimeInputs, detail, count });
     return count >= AUTO_RESTART_IDENTICAL_FAILURE_LIMIT;
   }
 

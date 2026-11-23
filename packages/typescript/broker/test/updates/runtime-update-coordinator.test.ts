@@ -208,6 +208,56 @@ describe('runtime update coordinator', () => {
     expect(restarts).toBe(4 * AUTO_RESTART_IDENTICAL_FAILURE_LIMIT + 1);
   });
 
+  test('a restart that replaces the receipt before failing verification still pauses, until an input it did not produce changes', async () => {
+    // What the verified Codex restart throws once `codex app-server daemon start` has written a new
+    // receipt for a daemon that never answered as the installed version.
+    const verification = 'Codex restart failed verification: the previous process must exit and the installed daemon must answer.';
+    let installed = '0.154.0';
+    let receipt = 'receipt generation 0';
+    let generation = 0;
+    let restarts = 0;
+    const provider: RuntimeUpdateProvider = {
+      agent: 'codex',
+      inspect: async () => ({
+        ...status(false, true),
+        installedVersion: installed,
+        [RUNTIME_UPDATE_RESTART_INPUT_FINGERPRINT]: receipt,
+      }),
+      restart: async () => {
+        restarts += 1;
+        generation += 1;
+        receipt = `receipt generation ${generation}`;
+        throw new Error(verification);
+      },
+    };
+    const coordinator = new RuntimeUpdateCoordinator([provider]);
+    const check = () => coordinator.refresh('codex', { autoRestart: true })
+      .then(() => 'no attempt', (error: unknown) => String(error));
+    const failUntilPaused = async () => {
+      const before = restarts;
+      for (let attempt = 0; attempt < AUTO_RESTART_IDENTICAL_FAILURE_LIMIT; attempt += 1) {
+        expect(await check()).toContain(verification);
+      }
+      expect(restarts - before).toBe(AUTO_RESTART_IDENTICAL_FAILURE_LIMIT);
+      // Every attempt replaced the receipt; the one it left behind does not re-arm the pause.
+      for (let poll = 0; poll < 5; poll += 1) expect(await check()).toBe('no attempt');
+      expect(restarts - before).toBe(AUTO_RESTART_IDENTICAL_FAILURE_LIMIT);
+      expect(coordinator.get('codex')).toMatchObject({ state: 'error', updateAvailable: true, autoRestartReady: false });
+      expect(coordinator.get('codex')?.detail).toContain(verification);
+      expect(coordinator.get('codex')?.detail).toContain(`paused after ${AUTO_RESTART_IDENTICAL_FAILURE_LIMIT} identical failures`);
+    };
+
+    await failUntilPaused();
+    expect(generation).toBe(AUTO_RESTART_IDENTICAL_FAILURE_LIMIT);
+    // A receipt that no attempt wrote, such as a daemon the user started, is a new input.
+    receipt = 'receipt written outside an attempt';
+    await failUntilPaused();
+    // So is a newly installed version, on the receipt the last attempt left.
+    installed = '0.155.0';
+    await failUntilPaused();
+    expect(restarts).toBe(3 * AUTO_RESTART_IDENTICAL_FAILURE_LIMIT);
+  });
+
   test('automatic failures that differ keep being retried', async () => {
     let restarts = 0;
     const provider: RuntimeUpdateProvider = {

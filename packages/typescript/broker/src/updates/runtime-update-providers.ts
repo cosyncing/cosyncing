@@ -34,7 +34,6 @@ export function inspectionFromVersions(input: {
   blockerDetails?: RuntimeUpdateInspection['blockerDetails'];
   pendingChanges?: RuntimeUpdateInspection['pendingChanges'];
   occurrenceFingerprint?: string;
-  restartInputFingerprint?: string;
   detail?: string;
 }): RuntimeUpdateInspection {
   const pendingChanges = input.pendingChanges
@@ -61,9 +60,6 @@ export function inspectionFromVersions(input: {
   if (input.occurrenceFingerprint) {
     inspection[RUNTIME_UPDATE_OCCURRENCE_FINGERPRINT] = input.occurrenceFingerprint;
   }
-  if (input.restartInputFingerprint) {
-    inspection[RUNTIME_UPDATE_RESTART_INPUT_FINGERPRINT] = input.restartInputFingerprint;
-  }
   return inspection;
 }
 
@@ -83,7 +79,7 @@ export interface CodexRuntimeDependencies {
 }
 
 export function createCodexRuntimeUpdateProvider(deps: CodexRuntimeDependencies): RuntimeUpdateProvider {
-  return {
+  const daemon: RuntimeUpdateProvider = {
     agent: 'codex',
     async inspect() {
       let version: CodexDaemonVersion | undefined;
@@ -148,14 +144,6 @@ export function createCodexRuntimeUpdateProvider(deps: CodexRuntimeDependencies)
         ...(version.cliVersion !== version.appServerVersion ? ['binary-version' as const] : []),
         ...(configFreshness.changed ? ['configuration' as const] : []),
       ];
-      let restartInputFingerprint: string | undefined;
-      if (pendingChanges.length) {
-        try {
-          restartInputFingerprint = deps.readRestartInput?.();
-        } catch {
-          restartInputFingerprint = undefined;
-        }
-      }
       if (pendingChanges.length === 0) {
         return inspectionFromVersions({
           agent: 'codex',
@@ -193,7 +181,6 @@ export function createCodexRuntimeUpdateProvider(deps: CodexRuntimeDependencies)
           ...(configFreshness.changed
             ? { occurrenceFingerprint: configFreshness.fingerprint }
             : {}),
-          restartInputFingerprint,
           safe,
           blockers: loaded.length,
           blockerComposition,
@@ -215,11 +202,27 @@ export function createCodexRuntimeUpdateProvider(deps: CodexRuntimeDependencies)
           ...(configFreshness.changed
             ? { occurrenceFingerprint: configFreshness.fingerprint }
             : {}),
-          restartInputFingerprint,
           safe: false,
           detail: `${configFreshness.changed ? `${configFreshness.detail} ` : ''}Loaded-thread safety probe failed: ${error instanceof Error ? error.message : String(error)}`,
         });
       }
+    },
+    restart: deps.restart,
+  };
+  return {
+    agent: 'codex',
+    async inspect() {
+      const inspection = await daemon.inspect();
+      // Read after the probe and in every state: a daemon writes its receipt before it answers, so
+      // this is the receipt behind what was just observed, including one a failed restart left.
+      let restartInput: string | undefined;
+      try {
+        restartInput = deps.readRestartInput?.();
+      } catch {
+        restartInput = undefined;
+      }
+      if (restartInput) inspection[RUNTIME_UPDATE_RESTART_INPUT_FINGERPRINT] = restartInput;
+      return inspection;
     },
     restart: deps.restart,
   };
