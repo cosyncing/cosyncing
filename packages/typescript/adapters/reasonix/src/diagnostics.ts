@@ -20,11 +20,24 @@ import { reasonixStoreRoot } from './store.ts';
  */
 export const REASONIX_VERIFIED_VERSION = '1.25.2';
 
+/**
+ * The final upstream release. Reasonix development has ended and its repository is archived, so this is
+ * the one newer version support can move to; until it does, every other version stays Observe-only.
+ */
+export const REASONIX_FINAL_UPSTREAM_VERSION = '2.61.0';
+
+/**
+ * What a newer install gets, in the one wording doctor, the Drive reason and the Create/Resume refusals
+ * share. Names no date: none is promised.
+ */
+export const REASONIX_NEWER_VERSIONS_NOTE = `Reasonix 2.x and 1.x releases after ${REASONIX_VERIFIED_VERSION} `
+  + `stay Observe-only until support for the final ${REASONIX_FINAL_UPSTREAM_VERSION} release lands.`;
+
 export const REASONIX_MINIMUM_VERSION: AgentMinimumVersion = Object.freeze({
   version: REASONIX_VERIFIED_VERSION,
   requiredFeature: 'the ACP stdio create/load/prompt surface and schema-v2 session store used by this adapter',
   evidenceUrl: 'https://reasonix.io/changelog/v1.25.2/',
-  evidenceNote: 'Exact measured version: native-contract fixtures and isolated probes were recorded against Reasonix 1.25.2 on 2026-08-27; other versions remain Observe-only and the full physical pass is pending.',
+  evidenceNote: `Exact measured version: native-contract fixtures and isolated probes were recorded against Reasonix ${REASONIX_VERIFIED_VERSION} on 2026-08-27. Upstream development has ended. ${REASONIX_NEWER_VERSIONS_NOTE}`,
 });
 
 function storeCheck(context: SetupDiagnosisContext, binaryPresent: boolean): SetupCheck {
@@ -79,7 +92,8 @@ export async function diagnoseReasonixSetup(
     productNames: ['reasonix'],
     preferVersionProbe: true,
     minimum: REASONIX_MINIMUM_VERSION,
-    installMessage: 'Install the official Reasonix CLI, then rerun doctor.',
+    installMessage: `Install Reasonix ${REASONIX_VERIFIED_VERSION}, the only supported version `
+      + `(npm install -g reasonix@${REASONIX_VERIFIED_VERSION}), then rerun doctor.`,
     upgradeCommand: `npm install -g reasonix@${REASONIX_VERIFIED_VERSION}`,
   });
   if (binary.installedVersion && binary.installedVersion !== REASONIX_VERIFIED_VERSION) {
@@ -89,14 +103,15 @@ export async function diagnoseReasonixSetup(
         id: 'reasonix.version',
         status: 'fail',
         detailCode: 'version-unverified',
-        summary: `Reasonix ${binary.installedVersion} is not the native-contract-measured ${REASONIX_VERIFIED_VERSION} build.`,
+        summary: `Reasonix ${binary.installedVersion} is Observe-only here: ${REASONIX_VERIFIED_VERSION} is the only `
+          + `supported version. Upstream development has ended. ${REASONIX_NEWER_VERSIONS_NOTE}`,
         evidence: {
           installedVersion: binary.installedVersion,
           verifiedVersion: REASONIX_VERIFIED_VERSION,
         },
         remediation: {
           kind: 'command',
-          message: `Install Reasonix ${REASONIX_VERIFIED_VERSION} for Resume/Create, or keep using Observe.`,
+          message: `Install Reasonix ${REASONIX_VERIFIED_VERSION} for Create and Resume, or keep using Observe.`,
           command: `npm install -g reasonix@${REASONIX_VERIFIED_VERSION}`,
         },
       };

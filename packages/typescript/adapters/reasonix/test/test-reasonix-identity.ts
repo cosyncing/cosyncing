@@ -7,6 +7,9 @@ import type { AgentMessage, SessionInfo } from '@cosyncing/adapter-api';
 import {
   mapReasonixSessionUpdate,
   mapReasonixTranscript,
+  REASONIX_FINAL_UPSTREAM_VERSION,
+  REASONIX_NEWER_VERSIONS_NOTE,
+  REASONIX_VERIFIED_VERSION,
   ReasonixAdapter,
   ReasonixObserveConnection,
 } from '../src/index.ts';
@@ -261,6 +264,47 @@ try {
     await unchanged.close();
   } finally {
     modeTree.cleanup();
+  }
+
+  // The exact pin, and what a current install meets: `npm i -g reasonix` now installs 2.61.0, the final
+  // upstream release. It stays Observe-only, and the row and the Resume refusal say why in the freeze
+  // wording rather than as an unexplained version mismatch.
+  const frozenTree = buildReasonixFixtureTree();
+  try {
+    const frozenFake = writeFakeReasonixBinary(
+      join(frozenTree.root, 'bin'),
+      frozenTree.id,
+      REASONIX_FINAL_UPSTREAM_VERSION,
+    );
+    const frozen = new ReasonixAdapter({
+      command: frozenFake.path,
+      env: { ...frozenFake.env, REASONIX_HOME: frozenTree.root },
+    });
+    const frozenRow = (await frozen.discoverSessions()).find((candidate) => candidate.id === frozenTree.id);
+    const frozenReason = frozenRow?.control?.drive.reason ?? '';
+    check('a 2.61.0 binary lists its sessions Observe-only and says 1.25.2 is the only supported version',
+      frozenRow?.control?.drive.state === 'observing'
+        && frozenRow?.control?.drive.supported === false
+        && frozenRow?.control?.drive.takeoverAvailable === undefined
+        && frozenReason.includes(`Reasonix ${REASONIX_VERIFIED_VERSION}, the only supported version`)
+        && frozenReason.includes(REASONIX_NEWER_VERSIONS_NOTE),
+      JSON.stringify(frozenRow?.control?.drive));
+    let frozenResumeRefusal = '';
+    try {
+      await frozen.attach(frozenTree.id, 'resume');
+    } catch (error) {
+      frozenResumeRefusal = error instanceof Error ? error.message : String(error);
+    }
+    const frozenObserver = await frozen.attach(frozenTree.id, 'observe');
+    await frozenObserver.close();
+    check('a 2.61.0 binary refuses Create and Resume with the freeze wording, keeps Observe, and starts no ACP child',
+      await frozen.canCreateSession() === false
+        && frozenResumeRefusal.includes('Observe remains available')
+        && frozenResumeRefusal.includes(REASONIX_NEWER_VERSIONS_NOTE)
+        && frozenFake.spawnCount() === 0,
+      JSON.stringify({ refusal: frozenResumeRefusal, spawns: frozenFake.spawnCount() }));
+  } finally {
+    frozenTree.cleanup();
   }
 
   const createRoot = mkdtempSync(join(tmpdir(), 'cosyncing-reasonix-create-'));

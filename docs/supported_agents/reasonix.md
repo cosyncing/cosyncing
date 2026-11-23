@@ -1,10 +1,14 @@
 # Reasonix (experimental)
 
-The current native contract is measured against Reasonix 1.25.2 exactly.
-Other versions remain Observe-only until their ACP and store contracts are
-measured. The installed broker/client physical pass completed against the
-measured version. Install the official CLI, then confirm that a new login shell
-can find it:
+Reasonix 1.25.2 is the only supported version. Reasonix 2.x, and 1.x releases
+after 1.25.2, open stored sessions in Observe mode only until support for
+Reasonix 2.61.0 lands. Upstream development has ended: 2.61.0 is the final
+release and the Reasonix repository is archived.
+
+`npm install --global reasonix` and `reasonix upgrade` now move to a newer
+release, so pin the version. The installed broker/client physical pass completed
+against 1.25.2. Install the pinned CLI, then confirm that a new login shell can
+find it:
 
 ```bash
 npm install --global reasonix@1.25.2
@@ -17,8 +21,9 @@ cosy doctor
 
 Setup does not install Reasonix, edit its configuration, or start a daemon.
 Cosyncing keeps stored sessions available in Observe mode when another
-Reasonix version is installed, but Create and Resume remain disabled until that
-version's native ACP and store contract is measured.
+Reasonix version is installed, but Create and Resume stay disabled on any
+version other than 1.25.2. `cosy doctor` reports such an install as
+`version-unverified`.
 The adapter reads Reasonix's local session store and starts a workspace-scoped
 `reasonix acp` child when a resumed app connection requests the native command
 catalog. Observe-only connections do not start Reasonix.
