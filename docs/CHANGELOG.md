@@ -72,6 +72,16 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   omp version is unsupported and stops, instead of retrying every five seconds
   with "disconnected: HTTP 409". A synced omp terminal no longer floods the broker
   with requests while the broker cannot use its omp installation.
+- `cosy update` refreshes the Pi and omp terminal bridges that cosyncing installed,
+  using the bridge shipped with the new version. Open Pi and omp terminals keep the
+  previous bridge until they are restarted or `/reload` is run. If a bridge cannot
+  be refreshed, the update still completes and lists it under "Setup recommended".
+  Updating from a version without this change refreshes bridges from the next
+  update on.
+- A Pi or omp bridge that the broker installed on its own is recorded as
+  cosyncing's, so later updates refresh it and uninstall removes it, instead of
+  reporting it as an unrecognized extension. `cosyncing setup` also records an
+  unrecorded Pi bridge that matches the current version, as it already did for omp.
 - Kilo Code: if Kilo v2 (`kilo2`) is installed, `cosy doctor` and New Session say
   Kilo v2 is not supported yet instead of reporting an old or missing Kilo.
 - Antigravity sessions show their model again after agy renames the model saved in
