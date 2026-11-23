@@ -113,7 +113,7 @@ Drive、マネージド serve、ターミナルへの引き継ぎ、モデル／
 インストール済みの cosyncing サービスが、ホストが動いていなければ起動し、落ちれば再起動し、
 自分が起動したものだけを停止します。あなた自身が起動したホストは、停止も置き換えも再設定も
 されません。セットアップでは、管理を許可する前に両方のホスト名を提示します。DeepSeek Harness は
-`npm install -g @deepseek-ai/dsh` でグローバルにインストールしてください。cosyncing は PATH 上の
+`npm install -g @deepseek-ai/dsh@0.2.0-rc.2` でグローバルにインストールしてください。cosyncing は PATH 上の
 `dsh` を探すため、`npx` のみのインストールでは通信はできても起動やバージョン確認はできません。
 両方のホストについては [対応エージェントのセットアップ](docs/supported_agents/README.md) を
 参照してください。

@@ -114,7 +114,7 @@ None needs a rollout flag. Managed-host adapters need no terminal left open: an 
 service starts a host when none is running, restarts one that crashes, and stops only the process it
 started. A host you started yourself is never stopped, replaced, or reconfigured, and setup names
 each managed runtime before you agree to it. Install DeepSeek Harness globally with
-`npm install -g @deepseek-ai/dsh` —
+`npm install -g @deepseek-ai/dsh@0.2.0-rc.2` —
 cosyncing looks for `dsh` on your PATH, so an `npx`-only install can be talked to but never started or
 version-checked. See [supported-agent setup](docs/supported_agents/README.md) for each runtime.
 

@@ -115,7 +115,7 @@ terminal abierta: un servicio cosyncing instalado
 arranca un host si no hay ninguno en marcha, reinicia el que se cae y detiene solo el que él mismo
 inició. Un host que hayas arrancado tú nunca se detiene, se sustituye ni se reconfigura, y la
 configuración nombra ambos hosts antes de que aceptes gestionarlos. Instala DeepSeek Harness de forma
-global con `npm install -g @deepseek-ai/dsh`: cosyncing busca `dsh` en tu PATH, así que con una
+global con `npm install -g @deepseek-ai/dsh@0.2.0-rc.2`: cosyncing busca `dsh` en tu PATH, así que con una
 instalación solo por `npx` puede comunicarse con él, pero nunca arrancarlo ni comprobar su versión.
 Consulta la [configuración de agentes compatibles](docs/supported_agents/README.md) para ambos hosts.
 

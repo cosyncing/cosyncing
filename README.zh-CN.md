@@ -101,7 +101,7 @@ SQLite 快照，并在 7.4.23 及更高版本上通过 Broker 托管的专用回
 
 这八个适配器都不需要开关标志。托管宿主适配器也不需要一直开着终端：安装后的 cosyncing 服务会在宿主未运行时启动它、在它崩溃后
 重启它，并且只停止自己启动的那个进程。你自己启动的宿主不会被停止、替换或重新配置，安装流程也会在征求同意
-前列出每个将托管的运行时。DeepSeek Harness 请全局安装：`npm install -g @deepseek-ai/dsh` —— cosyncing
+前列出每个将托管的运行时。DeepSeek Harness 请全局安装：`npm install -g @deepseek-ai/dsh@0.2.0-rc.2` —— cosyncing
 只在 PATH 上查找 `dsh`，因此仅用 `npx` 的安装可以通信，但无法被启动或校验版本。各运行时的安装说明见
 [支持的智能体](docs/supported_agents/README.md)（英文）。
 
