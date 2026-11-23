@@ -11,12 +11,14 @@ import { lstat } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import {
+  ControlRefusedError,
   EXTERNAL_HOST_DISCOVERY_BUDGET_MS,
   SessionCreateTemporarilyUnavailableError,
   SessionNotFoundError,
   resolveInvocation,
   type AgentBackend,
   type AgentMessage,
+  type AgentMessageHandler,
   type AgentCapabilities,
   type AgentSetupDiagnosis,
   type AttachMode,
@@ -31,11 +33,13 @@ import {
   type SessionDiscoveryOptions,
   type SessionInfo,
   type SetupDiagnosisContext,
+  type Unsubscribe,
 } from '@cosyncing/adapter-api';
 import {
   OpenCodeLiveConnection,
   OpenCodeLiveMutationAmbiguousError,
   OpenCodeLiveOwnershipUnprovenError,
+  type OpenCodeLiveConnectionOptions,
   type OpenCodeLiveOwnershipHooks,
   type OpenCodeLiveRecovery,
   type OpenCodeLiveUnavailableCause,
@@ -68,7 +72,12 @@ import {
 } from './version.ts';
 
 export const KILO_MANAGED_PORT = 4097;
+const KILO_DISPLAY_NAME = 'Kilo Code';
 const KILO_HTTP_TIMEOUT_MS = 5_000;
+/** A question answer or dismissal, bounded like a permission reply. */
+const KILO_QUESTION_REPLY_TIMEOUT_MS = 8_000;
+/** How many question ids one live connection remembers having put in front of its clients. */
+const KILO_LIVE_MAX_QUESTION_IDS = 256;
 const KILO_HTTP_MUTATION_TIMEOUT_MS = 30_000;
 const KILO_HTTP_MAX_BODY_BYTES = 8 * 1024 * 1024;
 const KILO_LIVE_MAX_ROWS_PER_SCOPE = 4_096;
@@ -612,78 +621,297 @@ async function readyWithin(ready: Promise<unknown>, message: string, ms = 4_000)
   }
 }
 
-const KILO_PERMISSIONS: OpenCodeLivePermissionDialect = {
-  /**
-   * THROWS when `/permission` refuses. Answering `[]` is a claim that nothing is
-   * pending, and every consumer treats it as one: `seedLiveState` runs on EVERY
-   * SSE reconnect and emits `permission-resolved decision:'external'` for each
-   * id that has disappeared, so a session genuinely blocked on a permission
-   * would have its card dismissed by a 503 during a reconnect — status
-   * re-derived as Working, the agent blocked forever, nothing left to click.
-   *
-   * A throw is the "unknown" the three call sites already handle: two trace and
-   * carry on, and the broker's `getPending` keeps its existing map.
-   */
-  async loadPending(context): Promise<AgentMessage[]> {
-    const directory = context.directory ? `?directory=${encodeURIComponent(context.directory)}` : '';
-    const response = await context.fetch(`${context.baseUrl}/permission${directory}`, {
-      signal: requestSignal(context.signal, 3_000),
+type KiloQuestionRequest = Extract<AgentMessage, { type: 'question-request' }>;
+
+/**
+ * One Kilo question request (`question.asked` properties, or a `GET /question` row) as the existing
+ * question card draws it. Measured on 7.5.16: `{ id: 'que_…', sessionID, questions: [{ question,
+ * header, options: [{ label, description }], multiple? }], tool: { messageID, callID } }`; the pending
+ * list adds `blocking: null`. Every question is kept, in order, because an answer is one row per
+ * question by position.
+ */
+function questionRequestFrom(raw: unknown, sessionId: string): KiloQuestionRequest | undefined {
+  const request = raw && typeof raw === 'object' ? raw as Record<string, any> : {};
+  if (String(request.sessionID ?? '') !== sessionId) return undefined;
+  if (typeof request.id !== 'string' || !request.id || !Array.isArray(request.questions)) return undefined;
+  return {
+    type: 'question-request',
+    requestId: request.id,
+    questions: request.questions.map((question: any) => ({
+      question: typeof question?.question === 'string' ? question.question : '',
+      ...(typeof question?.header === 'string' && question.header ? { header: question.header } : {}),
+      options: (Array.isArray(question?.options) ? question.options : []).flatMap((option: any) =>
+        typeof option?.label === 'string' && option.label
+          ? [{
+              label: option.label,
+              ...(typeof option.description === 'string' && option.description ? { description: option.description } : {}),
+            }]
+          : []),
+      multiple: question?.multiple === true,
+    })),
+  };
+}
+
+/** `question.replied` carries the answer as sent: one array of labels or typed text per question. */
+function answerRows(value: unknown): string[][] | undefined {
+  return Array.isArray(value)
+    && value.every((row) => Array.isArray(row) && row.every((label) => typeof label === 'string'))
+    ? value.map((row: string[]) => [...row])
+    : undefined;
+}
+
+/** Kilo's request events: its questions, then the permission vocabulary {@link permissionFromEvent} maps. */
+function requestFromEvent(raw: unknown, sessionId: string): AgentMessage | undefined {
+  const event = raw && typeof raw === 'object' ? raw as Record<string, any> : {};
+  const type = String(event.type);
+  if (type === 'question.asked') return questionRequestFrom(event.properties, sessionId);
+  if (type === 'question.replied' || type === 'question.rejected') {
+    const properties = event.properties ?? {};
+    if (String(properties.sessionID ?? '') !== sessionId) return undefined;
+    const requestId = properties.requestID;
+    if (typeof requestId !== 'string' || !requestId) return undefined;
+    const answers = type === 'question.replied' ? answerRows(properties.answers) : undefined;
+    return { type: 'question-resolved', requestId, ...(answers ? { answers } : {}) };
+  }
+  return permissionFromEvent(raw, sessionId);
+}
+
+/**
+ * The questions one live connection has put in front of its clients: asked on the event stream, or
+ * read pending from `GET /question`. Only these can be answered through it. And the wire settles
+ * every open request it withdraws (a reconnect that no longer lists it, a lost or demoted Drive, a
+ * close) as `permission-resolved`; for one of these that is restated as the `question-resolved` a
+ * question card and its attention item close on.
+ */
+class KiloQuestionLedger {
+  private readonly ids = new Set<string>();
+
+  note(message: AgentMessage | undefined): void {
+    if (message?.type !== 'question-request') return;
+    this.ids.delete(message.requestId);
+    this.ids.add(message.requestId);
+    while (this.ids.size > KILO_LIVE_MAX_QUESTION_IDS) this.ids.delete(this.ids.values().next().value!);
+  }
+
+  surfaced(requestId: string): boolean {
+    return this.ids.has(requestId);
+  }
+
+  restate(message: AgentMessage): AgentMessage {
+    return message.type === 'permission-resolved' && this.ids.has(message.requestId)
+      ? { type: 'question-resolved', requestId: message.requestId }
+      : message;
+  }
+}
+
+/** One of Kilo's directory-scoped pending lists (`/permission`, `/question`): its rows, or a throw. */
+async function readPendingList(
+  context: OpenCodeLiveRequestContext,
+  route: '/permission' | '/question',
+  what: string,
+): Promise<unknown[]> {
+  const directory = context.directory ? `?directory=${encodeURIComponent(context.directory)}` : '';
+  const response = await context.fetch(`${context.baseUrl}${route}${directory}`, {
+    signal: requestSignal(context.signal, 3_000),
+  });
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new Error(`Kilo ${what} read failed with HTTP ${response.status}.`);
+  }
+  const raw = await readBoundedJson(response);
+  if (!Array.isArray(raw)) {
+    throw new Error(`Kilo ${what} read returned a non-array document.`);
+  }
+  return raw.slice(0, KILO_LIVE_MAX_STATUS_ENTRIES);
+}
+
+/** Permissions and questions for one live connection; questions it surfaces go in `questions`. */
+function kiloRequestDialect(questions: KiloQuestionLedger): OpenCodeLivePermissionDialect {
+  return {
+    /**
+     * THROWS when `/permission` or `/question` refuses. Answering `[]` is a claim
+     * that nothing is pending, and every consumer treats it as one: `seedLiveState`
+     * runs on EVERY SSE reconnect and emits `permission-resolved decision:'external'`
+     * for each id that has disappeared, so a session genuinely blocked on a
+     * permission or a question would have its card dismissed by a 503 during a
+     * reconnect — status re-derived as Working, the agent blocked forever, nothing
+     * left to click.
+     *
+     * A throw is the "unknown" the three call sites already handle: two trace and
+     * carry on, and the broker's `getPending` keeps its existing map.
+     */
+    async loadPending(context): Promise<AgentMessage[]> {
+      const [permissions, pendingQuestions] = await Promise.all([
+        readPendingList(context, '/permission', 'pending-permission'),
+        readPendingList(context, '/question', 'pending-question'),
+      ]);
+      return [
+        ...permissions.flatMap((permission) => {
+          const message = permissionFromEvent({ type: 'permission.asked', properties: permission }, context.sessionId);
+          return message?.type === 'permission-request' ? [message] : [];
+        }),
+        ...pendingQuestions.flatMap((request) => {
+          const message = questionRequestFrom(request, context.sessionId);
+          questions.note(message);
+          return message ? [message] : [];
+        }),
+      ];
+    },
+    mapEvent(event, sessionId) {
+      const message = requestFromEvent(event, sessionId);
+      questions.note(message);
+      return message;
+    },
+    respond: respondToKiloPermission,
+  };
+}
+
+/**
+ * The shared OpenCode-lineage live connection, with Kilo's question transport.
+ *
+ * Kilo's `question` tool is on for serve clients (`KILO_CLIENT` defaults to `cli`): the turn waits
+ * on `question.asked` until `POST /question/{id}/reply` (`{ answers }`) or `/reject` (no body), both
+ * scoped by `?directory=` like `GET /question`; Kilo answers `true`, or 404 for a question it no
+ * longer holds. The wire maps the events through {@link kiloRequestDialect} and holds the cards; this
+ * adds the answer and the dismissal, under the guards a permission reply passes (a writable Drive,
+ * the ownership check before the mutation, an ambiguous transport demotes). The card closes on
+ * Kilo's own `question.replied` / `question.rejected`, as an OpenCode question does.
+ */
+class KiloLiveConnection extends OpenCodeLiveConnection {
+  private readonly questions: KiloQuestionLedger;
+  private readonly questionContext: OpenCodeLiveRequestContext;
+  private readonly writer?: OpenCodeLiveOwnershipHooks;
+  private ended = false;
+
+  constructor(options: Omit<OpenCodeLiveConnectionOptions, 'dialect'>, questions = new KiloQuestionLedger()) {
+    super({
+      ...options,
+      dialect: { productId: 'kilo', displayName: KILO_DISPLAY_NAME, permissions: kiloRequestDialect(questions) },
     });
-    if (!response.ok) {
-      await response.body?.cancel().catch(() => undefined);
-      throw new Error(`Kilo pending-permission read failed with HTTP ${response.status}.`);
+    this.questions = questions;
+    this.writer = options.ownership;
+    this.questionContext = {
+      baseUrl: options.baseUrl.replace(/\/$/u, ''),
+      sessionId: options.info.id,
+      ...(options.info.cwd ? { directory: options.info.cwd } : {}),
+      fetch: options.fetch ?? globalThis.fetch,
+    };
+  }
+
+  override subscribe(handler: AgentMessageHandler): Unsubscribe {
+    return super.subscribe((message) => handler(this.questions.restate(message)));
+  }
+
+  async answerQuestion(requestId: string, answers: string[][]): Promise<void> {
+    await this.sendQuestion(requestId, 'reply', { answers });
+  }
+
+  async rejectQuestion(requestId: string): Promise<void> {
+    await this.sendQuestion(requestId, 'reject');
+  }
+
+  override async close(): Promise<void> {
+    this.ended = true;
+    await super.close();
+  }
+
+  /** A demoted, withheld (serve away) or read-only connection sends nothing. */
+  private assertQuestionWritable(): void {
+    if (!this.ended && this.info.attachMode !== 'observe' && this.info.control?.drive.supported === true) return;
+    throw new Error(this.info.control?.drive.reason
+      ?? `${KILO_DISPLAY_NAME} question reply refused: this connection is read-only.`);
+  }
+
+  private async sendQuestion(requestId: string, action: 'reply' | 'reject', body?: { answers: string[][] }): Promise<void> {
+    this.assertQuestionWritable();
+    // Kilo's question routes are not session-scoped: an id this session never showed (another
+    // session's question, a forged one) is refused here rather than delivered.
+    if (!this.questions.surfaced(requestId)) {
+      throw new ControlRefusedError(`${KILO_DISPLAY_NAME} has no such question open in this session.`, 'request-not-pending');
     }
-    const raw = await readBoundedJson(response);
-    if (!Array.isArray(raw)) {
-      throw new Error('Kilo pending-permission read returned a non-array document.');
-    }
-    return raw.slice(0, KILO_LIVE_MAX_STATUS_ENTRIES).flatMap((permission) => {
-      const message = permissionFromEvent({ type: 'permission.asked', properties: permission }, context.sessionId);
-      return message?.type === 'permission-request' ? [message] : [];
-    });
-  },
-  mapEvent: permissionFromEvent,
-  async respond(
-    context: OpenCodeLiveRequestContext,
-    requestId: string,
-    decision: PermissionDecision,
-  ): Promise<void> {
-    if (decision === 'approve-rule') throw new Error('Kilo Code does not expose persistent approval rules.');
-    const response = decision === 'reject' ? 'reject' : decision === 'approve-session' ? 'always' : 'once';
-    const directory = context.directory ? `?directory=${encodeURIComponent(context.directory)}` : '';
-    let result: Response;
     try {
-      result = await context.fetch(
-        `${context.baseUrl}/session/${encodeURIComponent(context.sessionId)}/permissions/${encodeURIComponent(requestId)}${directory}`,
+      await this.writer?.beforeMutation('permission');
+    } catch (error) {
+      if (!(error instanceof OpenCodeLiveOwnershipUnprovenError)) {
+        this.demote(error instanceof Error ? error.message : String(error));
+      }
+      throw error;
+    }
+    this.assertQuestionWritable();
+    const what = action === 'reply' ? 'answer' : 'dismissal';
+    const { baseUrl, directory } = this.questionContext;
+    let response: Response;
+    try {
+      response = await this.questionContext.fetch(
+        `${baseUrl}/question/${encodeURIComponent(requestId)}/${action}${directory ? `?directory=${encodeURIComponent(directory)}` : ''}`,
         {
           method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ response }),
-          signal: AbortSignal.timeout(8_000),
+          ...(body ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}),
+          signal: AbortSignal.timeout(KILO_QUESTION_REPLY_TIMEOUT_MS),
         },
       );
     } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
+      const message = `${KILO_DISPLAY_NAME} question ${what} transport became ambiguous: ${error instanceof Error ? error.message : String(error)}`;
+      this.demote(message);
+      throw new OpenCodeLiveMutationAmbiguousError(message, { cause: error });
+    }
+    if (response.ok) return;
+    // Kilo's QuestionNotFoundError: already answered or dismissed (from another client or Kilo's own
+    // terminal), or withdrawn. Refused, never acked as delivered.
+    if (response.status === 404) {
+      throw new ControlRefusedError(`${KILO_DISPLAY_NAME} no longer holds this question open.`, 'request-not-pending');
+    }
+    if (response.status === 401 || response.status === 403 || response.status >= 500) {
+      const message = response.status >= 500
+        ? `${KILO_DISPLAY_NAME} question ${what} may have been accepted before the server failed (${response.status}).`
+        : `${KILO_DISPLAY_NAME} authentication was rejected while sending a question ${what}.`;
+      this.demote(message);
+      throw new OpenCodeLiveMutationAmbiguousError(message);
+    }
+    throw new Error(`${KILO_DISPLAY_NAME} question ${what} failed (${response.status}).`);
+  }
+}
+
+async function respondToKiloPermission(
+  context: OpenCodeLiveRequestContext,
+  requestId: string,
+  decision: PermissionDecision,
+): Promise<void> {
+  if (decision === 'approve-rule') throw new Error('Kilo Code does not expose persistent approval rules.');
+  const response = decision === 'reject' ? 'reject' : decision === 'approve-session' ? 'always' : 'once';
+  const directory = context.directory ? `?directory=${encodeURIComponent(context.directory)}` : '';
+  let result: Response;
+  try {
+    result = await context.fetch(
+      `${context.baseUrl}/session/${encodeURIComponent(context.sessionId)}/permissions/${encodeURIComponent(requestId)}${directory}`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ response }),
+        signal: AbortSignal.timeout(8_000),
+      },
+    );
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new OpenCodeLiveMutationAmbiguousError(
+      `Kilo Code permission transport became ambiguous: ${detail}`,
+      { cause: error },
+    );
+  }
+  if (!result.ok) {
+    if (result.status === 401 || result.status === 403) {
       throw new OpenCodeLiveMutationAmbiguousError(
-        `Kilo Code permission transport became ambiguous: ${detail}`,
-        { cause: error },
+        'Kilo Code authentication was rejected while replying to a permission.',
       );
     }
-    if (!result.ok) {
-      if (result.status === 401 || result.status === 403) {
-        throw new OpenCodeLiveMutationAmbiguousError(
-          'Kilo Code authentication was rejected while replying to a permission.',
-        );
-      }
-      if (result.status >= 500) {
-        throw new OpenCodeLiveMutationAmbiguousError(
-          `Kilo Code permission reply may have been accepted before the server failed (${result.status}).`,
-        );
-      }
-      throw new Error(`Kilo Code permission reply failed (${result.status}).`);
+    if (result.status >= 500) {
+      throw new OpenCodeLiveMutationAmbiguousError(
+        `Kilo Code permission reply may have been accepted before the server failed (${result.status}).`,
+      );
     }
-  },
-};
+    throw new Error(`Kilo Code permission reply failed (${result.status}).`);
+  }
+}
 
 function modelOptions(raw: unknown): ModelOption[] {
   const body = raw && typeof raw === 'object' ? raw as Record<string, any> : {};
@@ -759,7 +987,7 @@ function sessionInfo(session: KiloStoredSession): SessionInfo {
 
 export class KiloAdapter implements AgentBackend {
   readonly id = 'kilo';
-  readonly displayName = 'Kilo Code';
+  readonly displayName = KILO_DISPLAY_NAME;
   readonly integration = { externalHost: { managed: true as const } };
   readonly capabilities: AgentCapabilities;
   readonly discoveryBudgetMs = EXTERNAL_HOST_DISCOVERY_BUDGET_MS;
@@ -1095,10 +1323,9 @@ export class KiloAdapter implements AgentBackend {
         this.opening.delete(sessionId);
         throw error;
       }
-      const driver = new OpenCodeLiveConnection({
+      const driver = new KiloLiveConnection({
         baseUrl: this.baseUrl,
         info: this.retagLiveInfo(live, true),
-        dialect: { productId: 'kilo', displayName: this.displayName, permissions: KILO_PERMISSIONS },
         loadModels: () => this.listLiveModels(),
         sendCurrentModelOnPrompt: true,
         onModelObserved: (model) => {
@@ -1154,10 +1381,9 @@ export class KiloAdapter implements AgentBackend {
     live.control = observeControl(live.origin === 'subagent'
       ? 'Kilo Code subagent sessions are Observe-only.'
       : 'This Kilo Code session has no durable app-created writer ownership.');
-    const connection = new OpenCodeLiveConnection({
+    const connection = new KiloLiveConnection({
       baseUrl: this.baseUrl,
       info: live,
-      dialect: { productId: 'kilo', displayName: this.displayName, permissions: KILO_PERMISSIONS },
       loadModels: () => this.listLiveModels(),
       loadStatus: (context) => this.loadLiveStatus(context),
       fetch: this.fetcher,

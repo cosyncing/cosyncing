@@ -40,15 +40,19 @@ records and supervises only the process it owns. A user-managed server on port
   permission replies use authenticated HTTP. SSE supplies live status, model,
   token/cache/cost, run-summary, and message updates; replay retains the same
   stable identities.
+- Questions from Kilo's `question` tool appear as question cards, including a
+  question that was already waiting when the app attached or reconnected. An
+  answer or a dismissal sent from the app reaches the waiting Kilo turn, and the
+  turn continues. Measured against Kilo Code 7.5.16.
 - Native child rows are Observe-only and require a live-server-qualified
   `parent_id` relationship. The installed physical capture confirmed native
   parent/child identity while keeping the child free of writer controls.
 
 ## Limits
 
-- No terminal handoff, question route, permission-mode vocabulary, agent
-  switch, files, artifacts, fork, clone, export, or trustworthy context-window
-  denominator has been measured.
+- No terminal handoff, permission-mode vocabulary, agent switch, files,
+  artifacts, fork, clone, export, or trustworthy context-window denominator has
+  been measured.
 - Kilo v2 (the `kilo2` binary, released as `0.0.0-v2-…`) is a separate product
   and is not supported yet. Its sessions are not shown, Create and Drive stay
   off while `kilo` is Kilo v2, and `cosy doctor` says so.

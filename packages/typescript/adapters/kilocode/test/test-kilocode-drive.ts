@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import {
+  ControlRefusedError,
   EXTERNAL_HOST_DISCOVERY_BUDGET_MS,
   SessionCreateTemporarilyUnavailableError,
   type AgentMessage,
@@ -25,6 +26,17 @@ const check = (name: string, condition: unknown, detail = '') => {
   passed += 1;
   console.log(`PASS  ${name}${detail ? ` — ${detail}` : ''}`);
 };
+const same = (actual: unknown, expected: unknown): boolean => {
+  try { assert.deepStrictEqual(actual, expected); return true; } catch { return false; }
+};
+// Kilo 7.5.16's question tool, captured live from `kilo serve` (fixtures/kilo-7.5.16-question.json):
+// /global/event frames, GET /question rows and the reply/reject exchanges, verbatim. The only change
+// made here is the captured session id, replaced by the fixture session's.
+const questionCapture = JSON.parse(readFileSync(join(import.meta.dir, 'fixtures', 'kilo-7.5.16-question.json'), 'utf8'));
+const capturedFor = <T>(value: T, sessionId: string): T =>
+  JSON.parse(JSON.stringify(value).replaceAll(questionCapture.sessionID, sessionId)) as T;
+/** What the fixture serve lists on GET /question; a reply or reject removes its row, as Kilo does. */
+let pendingQuestionRows: Array<{ id: string }> = [];
 
 const root = mkdtempSync(join(tmpdir(), 'cosyncing-kilo-live-'));
 // Waits are on conditions, never on durations. `flush` yields the event loop so every synchronously
@@ -182,6 +194,15 @@ const fakeFetch = (async (input: string | URL | Request, init: RequestInit = {})
         ? [{ id: 'perm-created', sessionID: 'ses_created', permission: 'shell', status: 'asked' }]
         : []),
     ]);
+  }
+  if (parsed.pathname === '/question' && method === 'GET') return json(pendingQuestionRows);
+  const questionRoute = /^\/question\/([^/]+)\/(reply|reject)$/u.exec(parsed.pathname);
+  if (questionRoute && method === 'POST') {
+    const index = pendingQuestionRows.findIndex((row) => row.id === decodeURIComponent(questionRoute[1]!));
+    if (index < 0) return json(questionCapture.notPending.response, questionCapture.notPending.status);
+    pendingQuestionRows.splice(index, 1);
+    const captured = questionRoute[2] === 'reply' ? questionCapture.answered.reply : questionCapture.rejected.reject;
+    return json(captured.response, captured.status);
   }
   if (parsed.pathname === '/provider') return json({
     connected: ['fixture', 'native-provider', 'later-native-provider'],
@@ -559,6 +580,11 @@ try {
       && childObserve.info.parentThreadId === 'ses_parent'
       && childObserve.info.attachMode === 'observe'
       && childObserve.info.control?.drive.supported === false);
+  const questionPostsBeforeObserve = calls.filter((call) => call.url.startsWith('/question/')).length;
+  await assert.rejects(childObserve.answerQuestion!('que_observe_only', [['Red']]), /Observe-only/u);
+  await assert.rejects(childObserve.rejectQuestion!('que_observe_only'), /Observe-only/u);
+  check('an Observe-only Kilo connection sends no question answer or dismissal',
+    calls.filter((call) => call.url.startsWith('/question/')).length === questionPostsBeforeObserve);
   emit({
     type: 'message.updated',
     properties: {
@@ -881,6 +907,9 @@ try {
   await diskConnection.close();
   globalEventCalls = 0;
 
+  // KL-1: a question already waiting when this Drive attaches (the captured GET /question row).
+  const firstQuestionId = questionCapture.answered.asked.payload.properties.id as string;
+  pendingQuestionRows = capturedFor(questionCapture.answered.pendingAtAsk, 'ses_child');
   const conn = await adapter.attach('ses_child', 'live');
   const live: AgentMessage[] = [];
   conn.subscribe((message) => live.push(message));
@@ -898,13 +927,16 @@ try {
     streamController?.close();
     await until(what, () => globalEventCalls > streamsBefore && liveSeeds() > seedsBefore);
   };
+  const questionCards = () => live.filter((row) => row.type === 'question-request' && row.requestId === firstQuestionId).length;
   await reopenEventStream('the event stream to reopen and re-read the pending list');
   const cardsAfterFirstReopen = pendingCards();
+  const questionCardsAfterFirstReopen = questionCards();
   await reopenEventStream('the event stream to reopen once more');
   await reopenEventStream('and once more');
   check('a reopened event stream re-sends no pending card this connection already sent',
-    cardsAfterFirstReopen <= 1 && pendingCards() === cardsAfterFirstReopen && conn.info.status === 'needs-input',
-    `cards=${cardsAfterFirstReopen}->${pendingCards()}`);
+    cardsAfterFirstReopen <= 1 && pendingCards() === cardsAfterFirstReopen && conn.info.status === 'needs-input'
+      && questionCardsAfterFirstReopen <= 1 && questionCards() === questionCardsAfterFirstReopen,
+    `cards=${cardsAfterFirstReopen}->${pendingCards()} questions=${questionCardsAfterFirstReopen}->${questionCards()}`);
   // The attach's own stream and the three reopened here: the count the demotion below must not grow.
   const eventStreamsOpened = globalEventCalls;
   check('...each reopen was one new event stream', eventStreamsOpened === 4, `streams=${eventStreamsOpened}`);
@@ -915,6 +947,97 @@ try {
   check('successful local permission reply resolves the actionable card immediately',
     live.some((row) => row.type === 'permission-resolved' && row.requestId === 'perm-existing')
       && calls.some((call) => call.url.endsWith('/permissions/perm-existing') && call.hasSignal));
+
+  // KL-1. Kilo's question tool holds the turn on `question.asked` until the answer reaches Kilo.
+  // Every frame, row and exchange below is the captured one (`questionCapture`).
+  const answered = questionCapture.answered;
+  const rejected = questionCapture.rejected;
+  const secondQuestionId = rejected.asked.payload.properties.id as string;
+  const cardQuestions = (asked: any) => asked.payload.properties.questions.map((question: any) => ({ ...question, multiple: false }));
+  const questionPosts = (from: number) => calls.slice(from).filter((call) => call.method === 'POST' && call.url.startsWith('/question/'));
+  const recovered = (await conn.getPending!()).find((row) => row.type === 'question-request' && row.requestId === firstQuestionId);
+  check('a question already waiting at attach is recovered from GET /question as the question card',
+    recovered?.type === 'question-request' && same(recovered.questions, cardQuestions(answered.asked))
+      && calls.some((call) => call.url === '/question' && call.method === 'GET'
+        && call.search === `?directory=${encodeURIComponent(root)}`),
+    JSON.stringify(recovered));
+  const callsBeforeAnswer = calls.length;
+  await conn.answerQuestion!(firstQuestionId, answered.reply.body.answers);
+  const answerPosts = questionPosts(callsBeforeAnswer);
+  check('the answer reaches Kilo as the captured reply: its route, its body, the session directory',
+    answerPosts.length === 1 && answerPosts[0]!.url === answered.reply.path
+      && answerPosts[0]!.search === `?directory=${encodeURIComponent(root)}`
+      && same(answerPosts[0]!.body, answered.reply.body) && answerPosts[0]!.hasSignal,
+    JSON.stringify(answerPosts));
+  for (const frame of [answered.replied, answered.toolCompleted, answered.busy, answered.answerText]) {
+    emit(capturedFor(frame, 'ses_child'));
+  }
+  const answerTextPart = answered.answerText.payload.properties.part;
+  await until('the turn to go on after the answer',
+    () => live.some((row) => row.type === 'model-output' && row.key === answerTextPart.id));
+  const answeredResolution = live.find((row) => row.type === 'question-resolved' && row.requestId === firstQuestionId);
+  check('Kilo\'s question.replied closes the card with the answer it took, and the turn goes on under Drive',
+    answeredResolution?.type === 'question-resolved'
+      && same(answeredResolution.answers, answered.replied.payload.properties.answers)
+      && live.some((row) => row.type === 'model-output' && row.key === answerTextPart.id && row.text === answerTextPart.text)
+      && conn.info.status === 'working' && conn.info.attachMode === 'live'
+      && !live.some((row) => row.type === 'tool-call' && row.toolName === 'question'),
+    JSON.stringify(answeredResolution));
+  const callsBeforeLateAnswer = calls.length;
+  await assert.rejects(
+    conn.answerQuestion!(firstQuestionId, [['Blue']]),
+    (error: unknown) => error instanceof ControlRefusedError && error.refusal === 'request-not-pending',
+  );
+  check('a late answer gets Kilo\'s captured 404 and is refused, never acked as delivered; Drive stays',
+    questionPosts(callsBeforeLateAnswer).length === 1 && conn.info.attachMode === 'live');
+  // Kilo's question routes are not session-scoped, and /global/event carries every session's events.
+  emit(capturedFor(rejected.asked, 'ses_parent'));
+  await flush();
+  const callsBeforeForeignAnswer = calls.length;
+  await assert.rejects(
+    conn.answerQuestion!(secondQuestionId, [['Yes']]),
+    (error: unknown) => error instanceof ControlRefusedError && error.refusal === 'request-not-pending',
+  );
+  check('another session\'s question shows no card here and cannot be answered through this Drive',
+    calls.length === callsBeforeForeignAnswer
+      && !live.some((row) => row.type === 'question-request' && row.requestId === secondQuestionId));
+  pendingQuestionRows = capturedFor(rejected.pendingAtAsk, 'ses_child');
+  emit(capturedFor(rejected.asked, 'ses_child'));
+  emit(capturedFor(rejected.toolRunning, 'ses_child'));
+  await until('the question asked live',
+    () => live.some((row) => row.type === 'question-request' && row.requestId === secondQuestionId));
+  const liveCard = live.find((row) => row.type === 'question-request' && row.requestId === secondQuestionId);
+  check('a question asked on the event stream becomes the question card',
+    liveCard?.type === 'question-request' && same(liveCard.questions, cardQuestions(rejected.asked)),
+    JSON.stringify(liveCard));
+  const callsBeforeReject = calls.length;
+  await conn.rejectQuestion!(secondQuestionId);
+  const rejectPosts = questionPosts(callsBeforeReject);
+  check('dismissing reaches Kilo as the captured reject: its route, no body, the session directory',
+    rejected.reject.hasBody === false && rejectPosts.length === 1 && rejectPosts[0]!.url === rejected.reject.path
+      && rejectPosts[0]!.body === undefined && rejectPosts[0]!.search === `?directory=${encodeURIComponent(root)}`,
+    JSON.stringify(rejectPosts));
+  for (const frame of [rejected.rejected, rejected.toolDismissed]) emit(capturedFor(frame, 'ses_child'));
+  await until('the dismissed question to close',
+    () => live.some((row) => row.type === 'question-resolved' && row.requestId === secondQuestionId));
+  const dismissal = live.find((row) => row.type === 'question-resolved' && row.requestId === secondQuestionId);
+  check('Kilo\'s question.rejected closes the card with no answer, and Drive stays',
+    dismissal?.type === 'question-resolved' && dismissal.answers === undefined && conn.info.attachMode === 'live');
+  const questionAttentionRoot = mkdtempSync(join(tmpdir(), 'cosyncing-kilo-question-attention-'));
+  try {
+    // The broker's own attention policy, fed every subscriber frame in delivery order.
+    const questionStore = new AttentionStore({ path: join(questionAttentionRoot, 'attention-events.json'), onWarning: () => undefined });
+    const questionPolicy = new AttentionPolicy(questionStore);
+    for (const message of live) await questionPolicy.handleMessage(conn.info, message);
+    const raised = questionStore.listEvents().filter((event) => event.kind === 'question-required');
+    check('a Kilo question raises the "needs your answer" item, and its resolution closes it',
+      raised.some((event) => event.requestId === secondQuestionId)
+        && !questionStore.listActive().some((event) => event.kind === 'question-required'),
+      JSON.stringify(raised.map((event) => [event.requestId, event.resolvedAt !== undefined])));
+  } finally {
+    rmSync(questionAttentionRoot, { recursive: true, force: true });
+  }
+  pendingQuestionRows = [];
 
   emit({ type: 'permission.replied', properties: { sessionID: 'ses_child', requestID: 'perm-external', response: 'always' } });
   emit({ type: 'session.error', properties: { sessionID: 'ses_child', error: { data: { message: 'nested provider refusal\nsecret' } } } });
@@ -1109,6 +1232,8 @@ try {
   const mutationCallsAfterDemotion = calls.length;
   await assert.rejects(conn.runCommand?.('stop') ?? Promise.resolve(), /read-only|ambiguous|may have been accepted/u);
   await assert.rejects(conn.respondPermission('perm-stale', 'reject'), /read-only|ambiguous|may have been accepted/u);
+  await assert.rejects(conn.answerQuestion!(firstQuestionId, [['Red']]), /read-only|ambiguous|may have been accepted/u);
+  await assert.rejects(conn.rejectQuestion!(secondQuestionId), /read-only|ambiguous|may have been accepted/u);
   await flush();
   check('demotion stops SSE reconnect and refuses every stale mutation',
     globalEventCalls === eventStreamsOpened && calls.length === mutationCallsAfterDemotion);
@@ -1371,6 +1496,7 @@ try {
   const closeSnapshot = await readKiloHistory(closeStored);
   boundaries.set(created.id, kiloHistorySourceIdentity(closeStored, closeSnapshot!));
   createdPermissionPending = true;
+  pendingQuestionRows = capturedFor(questionCapture.answered.pendingAtAsk, created.id);
   const activeCloseConnection = await secondRestartedAdapter.attach(created.id, 'live');
   const activeCloseMessages: AgentMessage[] = [];
   activeCloseConnection.subscribe((message) => activeCloseMessages.push(message));
@@ -1380,6 +1506,13 @@ try {
     !boundaries.has(created.id)
       && activeCloseMessages.some((message) => message.type === 'permission-resolved'
         && message.requestId === 'perm-created' && message.decision === 'external'));
+  // The wire settles every request it withdraws as `permission-resolved`; a question's card and its
+  // attention item close only on `question-resolved`.
+  check('a question still open at close is settled as a question',
+    activeCloseMessages.some((message) => message.type === 'question-resolved' && message.requestId === firstQuestionId)
+      && !activeCloseMessages.some((message) => message.type === 'permission-resolved' && message.requestId === firstQuestionId),
+    JSON.stringify(activeCloseMessages.filter((message) => message.type.endsWith('-resolved'))));
+  pendingQuestionRows = [];
   // A mid-turn mutation's ownership read meets a store another process is using: the serve writes
   // the turn, and every connection that reads records how far it read in the WAL index (`-shm`).
   // Neither is a reason to refuse the mutation, and a store that cannot be read right now is never
