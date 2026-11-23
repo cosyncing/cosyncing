@@ -785,11 +785,17 @@ const claudeExtras: ConformanceExtra[] = [
       const fake = context.fake as ClaudeFake;
       const ended = seedAged(fake, 5_000);
       const open = seedAged(fake, 5_000, true);
+      const mark = fake.ledger.mark();
       try {
         fake.setAgents([ended, open].map((session) => ({ sessionId: claudeUuidOf(session.id), status: 'busy' })));
         await context.client.waitForSession((row: any) => row.id === open.id && row.status === 'working');
         // The same busy report on a turn that already ended is a stale overlay.
         expect((await context.client.waitForSession((row: any) => row.id === ended.id)).status).toBe('idle');
+        // The busy report came from `claude agents --json`, which the roster runs against the user's
+        // own Claude on every sweep: each run has Claude's background auto-updater switched off.
+        const probes = fake.ledger.since(mark).filter((entry) => entry.kind === 'agents');
+        expect(probes.length).toBeGreaterThan(0);
+        expect(probes.map((entry) => entry.autoUpdateDisabled)).toEqual(probes.map(() => '1'));
       } finally {
         fake.setAgents([]);
       }

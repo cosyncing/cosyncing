@@ -1090,9 +1090,13 @@ try {
       JSON.stringify(handed));
   }
 
+  let claudeProbeEnv: Readonly<Record<string, string | undefined>> | undefined;
   const claudeLegacy = await diagnoseClaudeSetup(fakeContext({
     executables: { claude: '/fixture/bin/claude' },
-    runReadOnly: async () => ({ status: 'ok', stdout: '2.1.207', stderr: '' }),
+    runReadOnly: async (_executable, _args, _timeoutMs, envOverrides) => {
+      claudeProbeEnv = envOverrides;
+      return { status: 'ok', stdout: '2.1.207', stderr: '' };
+    },
   }), {
     inspectLegacyHooks: (path) => ({ status: 'legacy-marker', path, entryCount: 2, requiresConfirmation: true }),
   });
@@ -1101,6 +1105,10 @@ try {
     legacyHook.status === 'warn' && legacyHook.detailCode === 'legacy-hooks-marked' &&
       legacyHook.evidence?.entryCount === 2 && !!legacyHook.remediation &&
       !('commandText' in (legacyHook.evidence ?? {})));
+  // Running the user's `claude --version` must not let that install update itself.
+  check('the Claude version probe runs with Claude\'s auto-updater off',
+    checkById(claudeLegacy, 'claude.version').status === 'pass' && claudeProbeEnv?.DISABLE_AUTOUPDATER === '1',
+    JSON.stringify(claudeProbeEnv ?? null));
 
   const journalHome = join(testRoot, 'journal-home');
   makeOwnerOnlyDirectory(journalHome);

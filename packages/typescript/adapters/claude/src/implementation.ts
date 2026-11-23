@@ -130,7 +130,7 @@ import {
   UNKNOWN_TRANSCRIPT_TYPE_EVENT,
 } from '@cosyncing/adapter-api';
 import { ClaudeModConnection } from './mod-connection.ts';
-import { diagnoseClaudeSetup } from './diagnostics.ts';
+import { CLAUDE_NO_AUTOUPDATE_ENV, diagnoseClaudeSetup } from './diagnostics.ts';
 import { JsonlHistorySource } from './history-source.ts';
 import { ClaudeHistoryStore, type ClaudeHistoryState, acquireClaudeHistoryStore, historyRecords, historyGuards } from './history-store.ts';
 import { claudeAnswerRows } from './question-answers.ts';
@@ -9360,7 +9360,9 @@ function runAgentsJson(store: ClaudeStore): Promise<LiveStatusProbe> {
   if (!bin) return Promise.resolve({ ok: true, map: m });
   const rank: Record<RawStatus, number> = { 'needs-input': 0, working: 1, idle: 2 };
   return new Promise((resolveStatus) => {
-    const env = { ...process.env, CLAUDE_CONFIG_DIR: store.configDir };
+    // This probe runs the user's own `claude` on every roster sweep; it must never let that install
+    // update itself, so Claude's background auto-updater is switched off for the probe.
+    const env = { ...process.env, CLAUDE_CONFIG_DIR: store.configDir, [CLAUDE_NO_AUTOUPDATE_ENV]: '1' };
     // `claude` is a `.cmd` shim on Windows, and execFile on a batch file bypasses the shared
     // invocation boundary every other launch goes through. Bun 1.4.0 refuses that outright — spawn
     // EINVAL — so live status threw on Windows there while 1.3.8 allowed it. Resolve it properly.

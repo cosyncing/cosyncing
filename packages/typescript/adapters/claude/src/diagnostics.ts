@@ -14,6 +14,10 @@ export const CLAUDE_MINIMUM_VERSION: AgentMinimumVersion = Object.freeze({
   evidenceNote: 'Conservative floor: permission, question, task, and resume behavior in this adapter is fixture- and real-host-verified on Claude Code 2.1.207.',
 });
 
+/** The variable Claude Code reads to turn off its background auto-updater. Every probe that runs the
+ *  user's `claude` sets it to `1`, so asking Claude a question never replaces the installed build. */
+export const CLAUDE_NO_AUTOUPDATE_ENV = 'DISABLE_AUTOUPDATER';
+
 export interface LegacyClaudeHookDiagnosticInspection {
   status: 'absent' | 'legacy-marker' | 'unreadable';
   path: string;
@@ -107,6 +111,9 @@ export async function diagnoseClaudeSetup(
     displayName: 'Claude Code',
     command: binaryName,
     versionArgs: ['--version'],
+    // A version probe must not let the user's Claude update itself. Claude Code reads this
+    // variable to turn its background auto-updater off.
+    versionProbeEnv: { [CLAUDE_NO_AUTOUPDATE_ENV]: '1' },
     minimum: CLAUDE_MINIMUM_VERSION,
     installMessage: 'Install the official Claude Code CLI, then rerun doctor.',
     upgradeCommand: 'claude update',
