@@ -44,10 +44,24 @@ export const KILO_MINIMUM_SUPPORTED_VERSION = lowestSemanticVersion(KILO_MEASURE
 /** Retained under its original name for operator-facing copy. */
 export const KILO_VERIFIED_VERSION = KILO_MINIMUM_SUPPORTED_VERSION;
 
-export type KiloVersionStanding = 'measured' | 'newer-unmeasured' | 'below-floor' | 'unreadable';
+/**
+ * Kilo v2: Kilo rebuilt on the OpenCode V2 runtime, released as `0.0.0-v2-<build>` (the `kilo-v2`
+ * line; 0.0.0-v2-239 on 2026-11-20). It installs a `kilo2` binary, keeps its own `kilo2` data and
+ * config directories, and serves its API under `/api` with none of what this adapter reads (no
+ * `/global/health`, `/global/event`, `prompt_async` or `question.*`). Upstream plans to rename
+ * `kilo2` to `kilo` at cutover. Its version sorts below the 7.x floor, so without this it would be
+ * reported as an old Kilo and the operator told to upgrade; it is named as unsupported instead.
+ */
+const KILO_V2_VERSION = /^0\.0\.0-v2(?:[.-]|$)/u;
+
+/** The binary Kilo v2 installs. Only ever resolved on PATH to name it; never executed. */
+export const KILO_V2_COMMAND = 'kilo2';
+
+export type KiloVersionStanding = 'measured' | 'newer-unmeasured' | 'below-floor' | 'kilo-v2' | 'unreadable';
 
 export function kiloVersionStanding(version: string | undefined): KiloVersionStanding {
   if (!version) return 'unreadable';
+  if (KILO_V2_VERSION.test(version)) return 'kilo-v2';
   if (KILO_MEASURED_VERSION_SET.has(version)) return 'measured';
   const order = compareSemanticVersions(version, KILO_MINIMUM_SUPPORTED_VERSION);
   if (order === undefined) return 'unreadable';
@@ -77,7 +91,7 @@ export function kiloChildEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return { ...env, KILO_DISABLE_AUTOUPDATE: '1' };
 }
 
-const cache = new Map<string, { result: boolean; expiresAt: number }>();
+const cache = new Map<string, { standing: KiloVersionStanding; expiresAt: number }>();
 
 function key(invocation: ResolvedInvocation): string | undefined {
   try {
@@ -88,17 +102,25 @@ function key(invocation: ResolvedInvocation): string | undefined {
   }
 }
 
-export async function kiloVerifiedInvocation(
-  command: string,
-  env: NodeJS.ProcessEnv,
-): Promise<ResolvedInvocation | undefined> {
+/** What the configured kilo is: not on PATH, or the standing its `--version` probe reported. */
+export interface KiloProbe {
+  invocation?: ResolvedInvocation;
+  standing: KiloVersionStanding | 'missing';
+}
+
+/**
+ * The one version probe, cached by path, size and mtime. A failed or unparsable probe is
+ * `unreadable`. Callers that need only the gate use {@link kiloVerifiedInvocation}; a refusal that
+ * has to say WHY reads the standing from here, from the same cached probe, never a second launch.
+ */
+export async function probeKilo(command: string, env: NodeJS.ProcessEnv): Promise<KiloProbe> {
   const invocation = resolveInvocation(command, { env });
-  if (!invocation) return undefined;
+  if (!invocation) return { standing: 'missing' };
   const identity = key(invocation);
   const now = Date.now();
   const remembered = identity ? cache.get(identity) : undefined;
-  if (remembered && remembered.expiresAt > now) return remembered.result ? invocation : undefined;
-  let result = false;
+  if (remembered && remembered.expiresAt > now) return { invocation, standing: remembered.standing };
+  let standing: KiloVersionStanding = 'unreadable';
   try {
     const probe = await probeResolvedInvocation(invocation, ['--version'], {
       // Applied HERE because this is the only place the adapter starts a kilo
@@ -109,17 +131,31 @@ export async function kiloVerifiedInvocation(
       env: kiloChildEnv(env),
       timeout: 5_000, maxBuffer: 64 * 1024,
     });
-    result = !probe.error && probe.status === 0
-      && kiloVersionAllowsDrive(reportedProductVersion(
+    if (!probe.error && probe.status === 0) {
+      standing = kiloVersionStanding(reportedProductVersion(
         `${probe.stdout}\n${probe.stderr}`,
         ['kilo', 'kilocode'],
       ));
+    }
   } catch {
-    result = false;
+    standing = 'unreadable';
   }
   if (identity) {
-    cache.set(identity, { result, expiresAt: now + (result ? 300_000 : 30_000) });
+    cache.set(identity, { standing, expiresAt: now + (kiloStandingAllowsDrive(standing) ? 300_000 : 30_000) });
     while (cache.size > 64) cache.delete(cache.keys().next().value!);
   }
-  return result ? invocation : undefined;
+  return { invocation, standing };
+}
+
+/** Whether a probed standing may Drive: the same rule as {@link kiloVersionAllowsDrive}. */
+export function kiloStandingAllowsDrive(standing: KiloProbe['standing']): boolean {
+  return standing === 'measured' || standing === 'newer-unmeasured';
+}
+
+export async function kiloVerifiedInvocation(
+  command: string,
+  env: NodeJS.ProcessEnv,
+): Promise<ResolvedInvocation | undefined> {
+  const probe = await probeKilo(command, env);
+  return kiloStandingAllowsDrive(probe.standing) ? probe.invocation : undefined;
 }

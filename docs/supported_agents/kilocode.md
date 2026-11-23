@@ -49,6 +49,9 @@ records and supervises only the process it owns. A user-managed server on port
 - No terminal handoff, question route, permission-mode vocabulary, agent
   switch, files, artifacts, fork, clone, export, or trustworthy context-window
   denominator has been measured.
+- Kilo v2 (the `kilo2` binary, released as `0.0.0-v2-…`) is a separate product
+  and is not supported yet. Its sessions are not shown, Create and Drive stay
+  off while `kilo` is Kilo v2, and `cosy doctor` says so.
 - Native tool display stays disabled until a captured Kilo tool part proves its
   identity and field semantics; shared OpenCode ancestry is not enough.
 - The installed physical pass confirmed the managed host, Create/Drive, model

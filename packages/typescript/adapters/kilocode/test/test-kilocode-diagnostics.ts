@@ -17,6 +17,8 @@ interface FakeWorld {
   listLimits?: number[];
   portOpen?: boolean;
   portUnknown?: boolean;
+  /** Where `kilo2` resolves on PATH; it is never run. */
+  kilo2?: string;
   /** Every version probe doctor started: its arguments and the environment it added. */
   probes?: Array<{ args: readonly string[]; env?: Readonly<Record<string, string | undefined>> }>;
 }
@@ -29,7 +31,9 @@ function check(name: string, ok: boolean, detail = ''): void {
 function context(world: FakeWorld): SetupDiagnosisContext {
   return {
     effects: 'forbidden', platform: 'linux', arch: 'x64', env: world.env ?? {}, homeDir: HOME,
-    resolveExecutable: (command) => command === (world.env?.COSYNCING_KILO_BIN ?? 'kilo') ? world.executable : undefined,
+    resolveExecutable: (command) => command === (world.env?.COSYNCING_KILO_BIN ?? 'kilo')
+      ? world.executable
+      : command === 'kilo2' ? world.kilo2 : undefined,
     inspectPath: (path) => {
       const status = world.paths?.[path] ?? 'missing';
       return { status, readable: status !== 'unreadable', displayPath: path };
@@ -136,6 +140,41 @@ const dataRoot = `${HOME}/.local/share/kilo`;
     probes.length === 1 && probes[0]!.args.join(' ') === '--version'
       && probes[0]!.env?.KILO_DISABLE_AUTOUPDATE === '1',
     JSON.stringify(probes));
+}
+// KL-5: Kilo v2 (`0.0.0-v2-<build>`, binary `kilo2`, data under `kilo2`) is a different product
+// that cosyncing does not support yet. Doctor names it instead of calling it an old or missing Kilo.
+{
+  const probes: NonNullable<FakeWorld['probes']> = [];
+  const diagnosis = await diagnoseKiloSetup(context({
+    executable: '/fixture/bin/kilo', version: '0.0.0-v2-239', paths: { [dataRoot]: 'directory' }, probes,
+  }));
+  const version = checkOf(diagnosis, 'kilo.version');
+  check('a kilo that reports a Kilo v2 build is named as unsupported Kilo v2, not as an old Kilo to update',
+    version?.status === 'warn' && version.detailCode === 'version-kilo-v2-unsupported'
+      && /Kilo v2/u.test(version.summary) && /not support Kilo v2 yet/u.test(version.summary)
+      && !/older|Update Kilo Code/u.test(`${version.summary} ${version.remediation?.message ?? ''}`),
+    JSON.stringify(version));
+}
+{
+  const diagnosis = await diagnoseKiloSetup(context({ kilo2: '/fixture/bin/kilo2', paths: { [dataRoot]: 'directory' } }));
+  const binary = checkOf(diagnosis, 'kilo.binary');
+  check('kilo gone with kilo2 on PATH says Kilo v2 is installed and not supported yet',
+    binary?.status === 'warn' && binary.detailCode === 'binary-missing'
+      && /kilo2/u.test(binary.summary) && /not support Kilo v2 yet/u.test(binary.summary)
+      && binary.evidence?.kiloV2Executable === '/fixture/bin/kilo2',
+    JSON.stringify(binary));
+}
+{
+  const kiloV2Data = `${HOME}/.local/share/kilo2`;
+  const diagnosis = await diagnoseKiloSetup(context({
+    executable: '/fixture/bin/kilo', version: '7.5.16',
+    paths: { [dataRoot]: 'directory', [`${dataRoot}/kilo.db`]: 'file', [kiloV2Data]: 'directory' },
+    names: { [dataRoot]: ['kilo.db'] },
+  }));
+  const storage = checkOf(diagnosis, 'kilo.storage');
+  check('Kilo v2 sessions beside the 7.x store are named as not shown, and the 7.x store still passes',
+    storage?.status === 'pass' && storage.summary.includes(kiloV2Data) && /not support Kilo v2 yet/u.test(storage.summary),
+    JSON.stringify(storage));
 }
 
 const failed = results.filter((result) => !result.ok);

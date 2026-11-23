@@ -59,9 +59,12 @@ import {
   type KiloStoreTrace,
 } from './store.ts';
 import {
+  kiloStandingAllowsDrive,
   kiloVerifiedInvocation,
-  kiloVersionAllowsDrive,
+  kiloVersionStanding,
   KILO_MINIMUM_SUPPORTED_VERSION,
+  KILO_V2_COMMAND,
+  probeKilo,
 } from './version.ts';
 
 export const KILO_MANAGED_PORT = 4097;
@@ -983,10 +986,20 @@ export class KiloAdapter implements AgentBackend {
   async prepareCreateSession(): Promise<void> {
     // The same typed, retryable refusal every adapter gives when it cannot create right now
     // (`canCreateSession` false): installing or upgrading Kilo is how the user recovers.
-    if (!await kiloVerifiedInvocation(this.command, this.env)) {
-      const installed = resolveInvocation(this.command, { env: this.env }) !== undefined;
+    const probe = await probeKilo(this.command, this.env);
+    if (!kiloStandingAllowsDrive(probe.standing)) {
+      const installed = probe.standing !== 'missing';
+      // Kilo v2 is a different product, not an old Kilo: either the configured kilo reports a v2
+      // build, or kilo is gone and only v2's `kilo2` is on PATH (found by lookup, never run).
+      const kiloV2 = probe.standing === 'kilo-v2'
+        ? 'the installed kilo is Kilo v2, which is not supported yet'
+        : !installed && resolveInvocation(KILO_V2_COMMAND, { env: this.env }) !== undefined
+          ? `no kilo executable was found; \`${KILO_V2_COMMAND}\` (Kilo v2) is installed, and Kilo v2 is not supported yet`
+          : undefined;
       throw new SessionCreateTemporarilyUnavailableError(
-        installed
+        kiloV2
+          ? `Kilo Code Drive requires Kilo Code ${KILO_MINIMUM_SUPPORTED_VERSION} or a newer 7.x release as kilo; ${kiloV2}. Run \`cosyncing doctor\` for setup guidance.`
+          : installed
           ? `Kilo Code Drive requires kilo ${KILO_MINIMUM_SUPPORTED_VERSION} or newer; the installed kilo reports an older or unreadable version. Run \`cosyncing doctor\` for setup guidance.`
           : `Kilo Code Drive requires kilo ${KILO_MINIMUM_SUPPORTED_VERSION} or newer, and no kilo executable was found. Run \`cosyncing doctor\` for setup guidance.`,
         installed ? 'kilo-version-unsupported' : 'kilo-binary-missing',
@@ -1180,6 +1193,13 @@ export class KiloAdapter implements AgentBackend {
     if (response.status === 401 || response.status === 403) {
       return { kind: 'incompatible', detail: `the managed-server credential was rejected (${response.status}).` };
     }
+    if (response.status === 404) {
+      // Every Kilo 7.x serves /global/health. Kilo v2 moved its API under /api and has none.
+      return {
+        kind: 'incompatible',
+        detail: 'the health endpoint returned 404, so this is not a Kilo Code 7.x server (Kilo v2 has no /global/health, and Kilo v2 is not supported yet).',
+      };
+    }
     if (!response.ok) {
       return { kind: 'incompatible', detail: `the health endpoint returned unexpected status ${response.status}.` };
     }
@@ -1192,11 +1212,13 @@ export class KiloAdapter implements AgentBackend {
       // gate already admitted, and the shapes this adapter reads from it are
       // checked structurally elsewhere. Requiring an exact match here would
       // refuse a server the CLI gate had just accepted.
-      if (!kiloVersionAllowsDrive(
-        typeof health.version === 'string' ? health.version : undefined)) {
+      const standing = kiloVersionStanding(typeof health.version === 'string' ? health.version : undefined);
+      if (!kiloStandingAllowsDrive(standing)) {
         return {
           kind: 'incompatible',
-          detail: `server version ${String(health.version ?? 'missing')} is below the measured floor ${KILO_MINIMUM_SUPPORTED_VERSION}.`,
+          detail: standing === 'kilo-v2'
+            ? `server version ${String(health.version)} is Kilo v2, which is not supported yet.`
+            : `server version ${String(health.version ?? 'missing')} is below the measured floor ${KILO_MINIMUM_SUPPORTED_VERSION}.`,
         };
       }
       return { kind: 'ready' };

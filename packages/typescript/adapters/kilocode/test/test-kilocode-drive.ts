@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert';
-import { chmodSync, copyFileSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Database } from 'bun:sqlite';
@@ -474,6 +474,16 @@ try {
   );
   healthStatus = 200;
   check('health 501 from a wrong listener is incompatible and never retryable', true);
+  // KL-5: every Kilo 7.x serves /global/health; Kilo v2 moved its API under /api and has none.
+  healthStatus = 404;
+  await assert.rejects(
+    adapter.prepareCreateSession(),
+    (error: unknown) => error instanceof Error
+      && !(error instanceof SessionCreateTemporarilyUnavailableError)
+      && /not a Kilo Code 7\.x server/u.test(error.message) && /Kilo v2 is not supported yet/u.test(error.message),
+  );
+  healthStatus = 200;
+  check('a health 404 is incompatible, never retryable, and names Kilo v2 as not supported yet', true);
   const unowned = new KiloAdapter({
     command: fakeKilo,
     env: { PATH: '', KILO_DATA_DIR: root },
@@ -508,6 +518,34 @@ try {
     );
     check(`create with a ${label} kilo is the typed retryable create unavailability (${detailCode})`, true);
   }
+  // KL-5: Kilo v2 (released as 0.0.0-v2-<build>, binary `kilo2`) is not an old Kilo, so Create says
+  // it is not supported yet instead of asking for an upgrade. Kilo v2's `--version` output was not
+  // captured; this fake prints its release version bare, the way 7.x prints its own.
+  const kiloV2 = join(root, 'kilo-v2');
+  writeFileSync(kiloV2, '#!/bin/sh\nprintf "0.0.0-v2-239\\n"\n');
+  chmodSync(kiloV2, 0o700);
+  const kiloV2OnlyPath = join(root, 'kilo2-only-bin');
+  const kilo2Ran = join(root, 'kilo2-ran');
+  mkdirSync(kiloV2OnlyPath);
+  writeFileSync(join(kiloV2OnlyPath, 'kilo2'), `#!/bin/sh\ntouch ${JSON.stringify(kilo2Ran)}\n`);
+  chmodSync(join(kiloV2OnlyPath, 'kilo2'), 0o700);
+  for (const [label, command, path, detailCode] of [
+    ['a kilo that reports a Kilo v2 build', kiloV2, '', 'kilo-version-unsupported'],
+    ['no kilo and only kilo2 on PATH', 'kilo', kiloV2OnlyPath, 'kilo-binary-missing'],
+  ] as const) {
+    const v2 = new KiloAdapter({
+      command, env: { PATH: path, KILO_DATA_DIR: root }, homeDir: root,
+      baseUrl: 'http://127.0.0.1:4097', serverPassword: 'fixture-password', fetch: fakeFetch, ...ownershipOptions,
+    });
+    await assert.rejects(
+      v2.prepareCreateSession(),
+      (error: unknown) => error instanceof SessionCreateTemporarilyUnavailableError && error.detailCode === detailCode
+        && /Kilo v2/u.test(error.message) && /not supported yet/u.test(error.message)
+        && !/older or unreadable/u.test(error.message),
+    );
+    check(`create with ${label} says Kilo v2 is not supported yet (${detailCode})`, true);
+  }
+  check('kilo2 is only looked up on PATH, never run', !existsSync(kilo2Ran));
   check('API-only Kilo child rows preserve native lineage immediately',
     roster.some((row) => row.id === lineageChild.id && row.origin === 'subagent'
       && row.parentThreadId === 'ses_parent' && row.attachMode === 'observe'
