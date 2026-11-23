@@ -647,6 +647,90 @@ console.log(JSON.stringify({status:result.status, rows:JSON.parse(result.stdout)
         renderLifecycleStatus(unavailable, 'en').split('\n').find((line) => line.startsWith('Agents')));
     }
 
+    // A busy broker is not an unavailable one either. A cold all-history roster sweep (44.6 s on a real
+    // host) held `/api/sessions` past its 30 s read, and status printed "Sessions: broker unavailable" about
+    // a broker that was running. The transport reports a held read exactly as it reports a refused
+    // connection, so the premise comes first, against the shipped transport and real sockets: both come
+    // back `unreachable`, and only the time they took tells them apart.
+    {
+      // Long enough that a refused loopback connect, which can take about a second on Windows, still lands
+      // well inside it. The collector files a failed read as held when it ran within 100 ms of its deadline.
+      const DEADLINE_MS = 2_000;
+      const HELD_BOUNDARY_MS = DEADLINE_MS - 100;
+      // Accepts the read and never answers it; `stop(true)` below drops the held connection.
+      const holding = Bun.serve({ port: 0, fetch: () => new Promise<Response>(() => undefined) });
+      const vacated = await reserveLoopbackFixturePort();
+      await vacated.release();
+      try {
+        const real = createSetupDiagnosisContext();
+        const timed = async (url: string) => {
+          const started = Bun.nanoseconds();
+          const probe = await real.fetchJson(url, {}, DEADLINE_MS);
+          return { status: probe.status, elapsedMs: Math.round((Bun.nanoseconds() - started) / 1e6) };
+        };
+        const heldRead = await timed(`http://127.0.0.1:${holding.port}/api/sessions`);
+        const refusedRead = await timed(`http://127.0.0.1:${vacated.port}/api/sessions`);
+        check('the transport reports a held read and a refused connection alike; only the elapsed deadline differs',
+          heldRead.status === 'unreachable' && heldRead.elapsedMs >= HELD_BOUNDARY_MS
+            && refusedRead.status === 'unreachable' && refusedRead.elapsedMs < HELD_BOUNDARY_MS,
+          `held=${JSON.stringify(heldRead)} refused=${JSON.stringify(refusedRead)}`);
+      } finally {
+        holding.stop(true);
+      }
+    }
+    // Then the collector. A read that used its whole deadline reads busy on its own line, while an
+    // immediate `unreachable` (the silent-broker checks above) still reads unavailable. The injected clock
+    // stands in for the deadlines, so nothing here waits 30 s.
+    {
+      const exhausting = async (pathname: string) => {
+        let clockMs = Date.parse('2026-11-23T00:00:00.000Z');
+        return collectLifecycleStatus({
+          ...baseOptions(m),
+          now: () => new Date(clockMs),
+          context: {
+            ...m.context,
+            async fetchJson(
+              url: string,
+              headers?: Readonly<Record<string, string>>,
+              timeoutMs?: number,
+              maxBytes?: number,
+            ): Promise<SetupHttpProbe> {
+              if (new URL(url).pathname !== pathname) return m.context.fetchJson(url, headers, timeoutMs, maxBytes);
+              // Held until the reader gave up: its whole deadline passes, then the transport says unreachable.
+              clockMs += timeoutMs ?? 3_000;
+              return { status: 'unreachable' };
+            },
+          },
+        });
+      };
+      const bin = PRODUCT_IDENTITY.primaryBinary;
+      const line = (report: LifecycleStatusReport, language: 'en' | 'zh-Hans', prefix: string) =>
+        renderLifecycleStatus(report, language).split('\n').find((candidate) => candidate.startsWith(prefix));
+      const slowSessions = await exhausting('/api/sessions');
+      check('a session roster held past its deadline reads as a busy broker, not an unavailable one',
+        slowSessions.sessions === 'busy'
+          && slowSessions.ok === true
+          && line(slowSessions, 'en', 'Sessions:')
+            === `Sessions: broker busy, still loading sessions; run ${bin} status again shortly`
+          && line(slowSessions, 'zh-Hans', '会话：')
+            === `会话：broker 繁忙，仍在加载会话；请稍后再次运行 ${bin} status`,
+        `${line(slowSessions, 'en', 'Sessions:')} | ${line(slowSessions, 'zh-Hans', '会话：')}`);
+      const slowAgents = await exhausting('/api/agents');
+      check('an agent roster held past its deadline reads busy and says so in its detail code',
+        slowAgents.agentsRead === 'busy'
+          && slowAgents.agents.length === 0
+          && slowAgents.detailCodes.includes('agent-roster-busy')
+          && line(slowAgents, 'en', 'Agents')
+            === `Agents (registered): broker busy, still checking agents; run ${bin} status again shortly`,
+        `${line(slowAgents, 'en', 'Agents')} codes=${slowAgents.detailCodes.join(',')}`);
+      const slowUpdates = await exhausting('/api/agent-runtime-updates');
+      check('an update feed held past its deadline reads busy',
+        slowUpdates.updates === 'busy'
+          && line(slowUpdates, 'en', 'Updates:')
+            === `Updates: broker busy, still checking updates; run ${bin} status again shortly`,
+        line(slowUpdates, 'en', 'Updates:'));
+    }
+
     // The raised ceiling is production wiring, not a default. Without it a real roster fails the moment it
     // passes the shared 256 KiB probe limit, which 2.4k sessions already do three times over.
     {
