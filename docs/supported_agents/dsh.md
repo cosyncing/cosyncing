@@ -1,12 +1,15 @@
 # DeepSeek Harness (experimental)
 
 The provisional DeepSeek Harness adapter is intended for source contributors.
-It connects to a `dsh web` host. The recorded version targets are:
-`@deepseek-ai/dsh` 0.1.0-rc.6 and 0.2.0-rc.2. Those are two different wire
-contracts, not one contract with an older build behind it, and cosyncing selects
-between them by reading the host rather than by trusting a version string.
-Other builds in the 0.1 or 0.2 family are reported as unverified;
-family recognition does not qualify their behavior. Other versions may be refused.
+It connects to a `dsh web` host. It supports exactly two `@deepseek-ai/dsh`
+versions: 0.2.0-rc.2, the current contract, and 0.1.0-rc.6, the older legacy
+contract. Those are two different wire contracts, not one contract with an older
+build behind it, and cosyncing selects between them by reading the host.
+
+Every other version is refused until it is qualified, including other 0.2 and
+0.1 builds. A newer 0.2 build keeps the routes and sign-in of 0.2.0-rc.2 but
+changes some of its messages, so accepting it would lose live updates and image
+previews without saying so. See [Version check](#version-check).
 
 cosyncing never installs or configures that host, but it can start, supervise,
 and stop one it owns — see [Managed hosts](#managed-hosts).
@@ -22,7 +25,7 @@ bun run broker
 
 ## Install the host
 
-Install it globally with npm, so that `dsh` lands on your PATH:
+Install the exact version globally with npm, so that `dsh` lands on your PATH:
 
 ```bash
 npm install -g @deepseek-ai/dsh@0.2.0-rc.2
@@ -34,12 +37,17 @@ Or pin the older contract, which keeps its separate legacy code path:
 npm install -g @deepseek-ai/dsh@0.1.0-rc.6
 ```
 
+Always name the version. An unpinned install takes npm's `latest` tag, which
+points to a newer build that cosyncing refuses.
+
 **An `npx @deepseek-ai/dsh` install is not enough.** npx keeps the package in an
 ephemeral cache and puts nothing on your PATH, and cosyncing finds the host
 binary by looking for `dsh` there. Without it, cosyncing can still talk to a host
 you started yourself — discovery, transcripts, and control all work — but it
 cannot start one for you, restart one that crashed, or report which version you
-are running. `cosyncing doctor` says so rather than failing: it reports the npx
+are running. Because it cannot read that version, it cannot refuse an
+unsupported one either, so run the supported version by name
+(`npx @deepseek-ai/dsh@0.2.0-rc.2 web`). `cosyncing doctor` reports the npx
 cache as an advisory and skips the version check instead of failing it.
 
 If the binary is missing, Ubuntu may suggest `sudo apt install dsh`. That is an
@@ -54,6 +62,27 @@ everyone else.
 Do not start a full source broker alongside an installed broker that owns the
 same native agents. Stop the installed service for the review window and
 restore it afterward.
+
+## Version check
+
+cosyncing checks the version of the `dsh` installed on this machine. If that
+version is not 0.2.0-rc.2 or 0.1.0-rc.6:
+
+- cosyncing does not start a managed host, and does not use a host at an address
+  on this machine, whoever started it. DeepSeek Harness lists no sessions and
+  shows that sessions cannot be created. Opening a session, creating one,
+  renaming one, loading the model list, and sending to a session that is already
+  open fail with a message that names the supported versions.
+- A host that cosyncing started before the change is left running, and the
+  broker log says why it is no longer used.
+- `cosyncing doctor` fails the `dsh.version` check and gives the install command
+  for the supported version.
+
+The check reads the installed package, not the running host. After you change
+the installed version, restart any `dsh web` that is still running the old one,
+or stop it and let cosyncing start the supported version. A host at an address on
+another machine is not checked, because the version installed here says nothing
+about it.
 
 ## Signing in to a 0.2 host
 
@@ -174,7 +203,8 @@ re-enrolling when what actually went wrong is something else.
 "0.2" here means one build: `0.2.0-rc.2`, the version the contract was captured
 from and the version every 0.2 result below was re-checked against. A different
 0.2 build, including stable 0.2.0 or another release
-candidate, has not been qualified and is not covered by the statements below.
+candidate, has not been qualified, is not covered by the statements below, and
+is refused (see [Version check](#version-check)).
 
 What was captured from a running `0.2.0-rc.2` host and re-checked against one:
 starting a host without a browser window opening, becoming authenticated to it
