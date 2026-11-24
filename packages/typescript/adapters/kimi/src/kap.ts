@@ -2,12 +2,12 @@
  * The Kimi Agent Protocol (KAP 1.x, Kimi Code 2.7.0 and newer), spoken BEHIND
  * the 0.x surface the rest of this package is written against.
  *
- * Owner decision D4 keeps both wires and selects one from `/api/v1/meta`. The
- * observe and drive connections carry years of hard-won rules — echo
- * correlation, the foreign-writer detector, interaction reconciliation, the
- * cursor discipline — and none of those rules is about the wire format. So
- * rather than fork them, a KAP server is translated at the three transport
- * seams the connections already inject:
+ * Both wires are kept, and the one a server speaks is selected from its
+ * `/api/v1/meta`. The observe and drive connections carry years of hard-won
+ * rules — echo correlation, the foreign-writer detector, interaction
+ * reconciliation, the cursor discipline — and none of those rules is about the
+ * wire format. So rather than fork them, a KAP server is translated at the
+ * three transport seams the connections already inject:
  *
  *  - the READ door: {@link KimiKapTranslator} answers the 0.x reads
  *    (`/api/v2/sessions`, `.../messages`, `.../status`, `.../approvals`, …)
@@ -31,7 +31,7 @@ import type {
   KimiNativeGet,
   KimiWire,
 } from './server.ts';
-import type { KimiSocketFactory, KimiSocketLike } from './observe.ts';
+import { KIMI_WS_FRAME_MAX_BYTES, type KimiSocketFactory, type KimiSocketLike } from './observe.ts';
 
 // ── Live state ──────────────────────────────────────────────────────────────
 
@@ -39,8 +39,10 @@ import type { KimiSocketFactory, KimiSocketLike } from './observe.ts';
 const KAP_MEMORY_LIMIT = 1_024;
 /** Bound on the sessions whose live state is held at once. */
 const KAP_SESSION_LIMIT = 256;
-/** The same per-frame ceiling the connection applies (`observe.ts` `KIMI_WS_FRAME_MAX_BYTES`). */
-const KAP_FRAME_MAX_BYTES = 4 * 1024 * 1024;
+/** The same per-frame ceiling the connection applies. */
+const KAP_FRAME_MAX_BYTES = KIMI_WS_FRAME_MAX_BYTES;
+/** How much of an oversized frame's head is read to recognize it; see {@link kapOversizedTurnsHead}. */
+const KAP_FRAME_HEAD_CHARS = 1_024;
 
 /**
  * What a KAP server has said about one session over the socket, kept because
@@ -672,6 +674,43 @@ function frameBytes(raw: unknown): number | undefined {
   return undefined;
 }
 
+/** At most the first `max` units of a frame, decoded without touching the rest. */
+function frameHead(raw: unknown, max: number): string | undefined {
+  if (typeof raw === 'string') return raw.slice(0, max);
+  if (raw instanceof ArrayBuffer) return Buffer.from(raw, 0, Math.min(raw.byteLength, max)).toString('utf8');
+  if (ArrayBuffer.isView(raw)) {
+    return Buffer.from(raw.buffer, raw.byteOffset, Math.min(raw.byteLength, max)).toString('utf8');
+  }
+  return undefined;
+}
+
+/**
+ * The session and agent of an oversized KAP `turns` frame, read from the
+ * frame's head WITHOUT parsing the frame.
+ *
+ * KAP writes a frame's scalar fields ahead of its payload — `{"type":"turns",
+ * "session_id":…,"agent_id":…,"event_created_at":…,"turns":[…]}`, captured —
+ * so the text between the opening brace and the first nested value is exactly
+ * the frame's top level, and a match there cannot come from inside a turn.
+ * Anything else (another type, another key order, a head that ends before any
+ * nested value) is not recognized, and the caller treats the frame as any
+ * other oversized one.
+ */
+export function kapOversizedTurnsHead(raw: unknown): { sessionId: string; agentId: string } | undefined {
+  const head = frameHead(raw, KAP_FRAME_HEAD_CHARS);
+  if (head === undefined) return undefined;
+  const open = head.indexOf('{');
+  if (open < 0 || head.slice(0, open).trim() !== '') return undefined;
+  const nested = head.slice(open + 1).search(/[[{]/);
+  if (nested < 0) return undefined;
+  const top = head.slice(open + 1, open + 1 + nested);
+  if (!/"type"\s*:\s*"turns"\s*,/.test(top)) return undefined;
+  const sessionId = /"session_id"\s*:\s*"([^"\\]{1,256})"/.exec(top)?.[1];
+  if (!sessionId) return undefined;
+  const agentId = /"agent_id"\s*:\s*"([^"\\]{1,256})"/.exec(top)?.[1] ?? 'main';
+  return { sessionId, agentId };
+}
+
 function frameText(raw: unknown): string {
   if (typeof raw === 'string') return raw;
   if (raw instanceof ArrayBuffer) return Buffer.from(raw).toString('utf8');
@@ -766,9 +805,22 @@ export class KimiKapSocket implements KimiSocketLike {
   private receive(raw: unknown): void {
     const bytes = frameBytes(raw);
     if (bytes === undefined) return;
-    // Oversized: handed on untouched, so the connection's own ceiling drops it
-    // and records the hole, exactly as it would on the 0.x wire.
     if (bytes > KAP_FRAME_MAX_BYTES) {
+      // The latest-turns page KAP sends after every subscribe is ONE frame, and
+      // on a long, tool-heavy session it outgrows the ceiling. Dropped, it
+      // would leave the transcript unread until the next poll and the turn in
+      // flight unknown, so its live frames and its prompts' settlement would
+      // be lost. All it asks of the connection is a reset, which needs only
+      // its session: that is read from the head, and the turns themselves
+      // come back through the bounded, paged read the reset starts.
+      const turns = kapOversizedTurnsHead(raw);
+      if (turns) {
+        const reset = { type: 'turns', session_id: turns.sessionId, agent_id: turns.agentId, turns: [] };
+        for (const legacy of this.translate(reset)) this.deliver(legacy);
+        return;
+      }
+      // Any other oversized frame is handed on untouched, so the connection's
+      // own ceiling drops it and records the hole, as it would on the 0.x wire.
       this.fire('message', { data: raw });
       return;
     }

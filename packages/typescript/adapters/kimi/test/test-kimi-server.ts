@@ -46,7 +46,7 @@ import {
   scanKimiInstances,
   type KimiInstanceScan,
 } from '../src/server.ts';
-import type { KimiSocketLike } from '../src/observe.ts';
+import { KIMI_WS_FRAME_MAX_BYTES, type KimiSocketLike } from '../src/observe.ts';
 import {
   KIMI_IDEMPOTENT_WRITE_CODES,
   KIMI_SESSION_LOCKED_CODE,
@@ -2382,6 +2382,70 @@ try {
   const plain = new KapWire();
   check('a socket to a server the gate did not verify as KAP is passed through untouched',
     hub.socketFactory(() => plain)(`ws://127.0.0.1:${KIMI_DEFAULT_PORT}/api/v1/ws`, undefined) === plain);
+
+  // An oversized latest-turns page. KAP sends the whole page as ONE frame after
+  // every subscribe, so on a long, tool-heavy session it outgrows the
+  // per-frame ceiling. Built from the captured page, its turn repeated until
+  // the frame is past the ceiling; the frame's own head is untouched.
+  const bigHub = new KimiKapHub();
+  bigHub.noteVerified(kapBaseUrl, 'kap', 'api-generation');
+  const approvalRows = KAP.ws.approval ?? [];
+  const capturedPage = approvalRows.find((row) => row.dir === 'in' && row.frame?.type === 'turns')?.frame;
+  const capturedUserItem = approvalRows.find((row) => row.dir === 'in' && row.frame?.type === 'item.ended')?.frame;
+  const rawPageTurns: unknown = capturedPage?.turns;
+  const pageTurns: unknown[] = Array.isArray(rawPageTurns) ? rawPageTurns : [];
+  if (!capturedPage || !capturedUserItem || pageTurns.length === 0) {
+    throw new Error('the 2.7.2 fixture is missing the approval conversation\'s turns page');
+  }
+  const copies = Math.ceil(KIMI_WS_FRAME_MAX_BYTES / Buffer.byteLength(JSON.stringify(pageTurns))) + 1;
+  const oversizedPage = JSON.stringify({ ...capturedPage, turns: Array.from({ length: copies }, () => pageTurns).flat() });
+  check('(setup) the repeated captured page is past the per-frame ceiling',
+    Buffer.byteLength(oversizedPage) > KIMI_WS_FRAME_MAX_BYTES);
+  const big = kapReplay(bigHub, approvalRows.filter((row) => row.frame?.type === 'response'), KAP_LIVE);
+  const afterSubscribe = big.received.length;
+  big.wire.fire('message', { data: oversizedPage });
+  const fromPage = big.received.slice(afterSubscribe);
+  check('an oversized KAP turns page still resets the transcript: one 0.x reset for its session, the page never handed on',
+    fromPage.length === 1 && fromPage[0]?.type === 'transcript.reset' && fromPage[0]?.session_id === KAP_LIVE
+      && (fromPage[0]?.payload as { agentId?: unknown } | undefined)?.agentId === 'main',
+    JSON.stringify(fromPage.map((frame) => frame.type)));
+  const afterText = big.received.length;
+  big.wire.fire('message', { data: new TextEncoder().encode(oversizedPage).buffer });
+  check('...the same page arriving as a binary frame too',
+    big.received.length === afterText + 1 && big.received.at(-1)?.type === 'transcript.reset',
+    JSON.stringify(big.received.slice(afterText).map((frame) => frame.type)));
+  const afterElsewhere = big.received.length;
+  big.wire.fire('message', { data: oversizedPage.replace(KAP_LIVE, KAP_FAILED) });
+  check('...and an oversized page about a session this socket did not subscribe delivers nothing',
+    big.received.length === afterElsewhere);
+
+  // The reset starts the connection's bounded, paged read, which is where the
+  // turn in flight is learned. The subscribe landed mid-turn (no
+  // `turn.started` on this socket), so only that read can tell the shim which
+  // turn its steps, its end and its prompt belong to.
+  const bigHttp = new KimiReadOnlyHttp({ baseUrl: kapBaseUrl, token: 'fixture-token' }).speaking(bigHub.translator());
+  const reread = await bigHttp.getJson<{ items: unknown[] }>(`/api/v1/sessions/${KAP_LIVE}/messages`, { page_size: 20 });
+  const afterReread = big.received.length;
+  for (const row of approvalRows) {
+    if (row.dir === 'in' && (row.frame?.type === 'turn.updated' || row.frame?.type === 'turn.ended')) big.wire.deliver(row.frame);
+  }
+  const midTurn = kapEvents(big.received.slice(afterReread));
+  check('...after that read, the turn already in flight reports its steps, its end and its prompt\'s settlement live',
+    reread.ok
+      && kapPayloads(midTurn, 'turn.step.completed').length === 3
+      && kapPayloads(midTurn, 'turn.ended')[0]?.turnId === 1
+      && kapPayloads(midTurn, 'prompt.completed')[0]?.promptId === 'approval-1',
+    JSON.stringify(midTurn.map((frame) => frame.type)));
+
+  const oversizedItem = JSON.stringify({
+    ...capturedUserItem,
+    item: { ...(capturedUserItem.item as Record<string, unknown>), text: 'x'.repeat(KIMI_WS_FRAME_MAX_BYTES) },
+  });
+  const afterItem = big.received.length;
+  big.wire.fire('message', { data: oversizedItem });
+  check('any other oversized KAP frame is handed on untouched, for the connection\'s own ceiling to drop and record',
+    big.received.length === afterItem + 1 && big.received.at(-1)?.type === 'item.ended',
+    JSON.stringify(big.received.slice(afterItem).map((frame) => frame.type)));
 
   // ── 9e. The write door on KAP ─────────────────────────────────────────────
   const kapDoor = new KimiDriveHttp({ baseUrl: kapBaseUrl, token: 'fixture-token', wire: 'kap' });
