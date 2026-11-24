@@ -52,6 +52,7 @@ import {
 } from './observe.ts';
 import { KimiReadOnlyHttp } from './server.ts';
 import {
+  KIMI_SESSION_LOCKED_CODE,
   isKimiIdempotentWriteCode,
   isKimiWriteError,
   type KimiDriveHttp,
@@ -2149,12 +2150,26 @@ export class KimiDriveConnection extends KimiObserveConnection {
     this.settleStreamWaiters(false);
   }
 
-  /** Route an unauthorized write into the SAME transport invalidation the reads use. */
+  /**
+   * Route an unauthorized write into the SAME transport invalidation the reads
+   * use, and a LOCKED session into the same demotion a foreign prompt causes.
+   *
+   * A KAP server (2.7.0+) refuses a write to a session another Kimi Code
+   * process holds — a terminal `kimi`, or Kimi Desktop — with
+   * {@link KIMI_SESSION_LOCKED_CODE}. That is the server PROVING a second
+   * writer, which the divergence detector otherwise has to infer from rows: so
+   * the connection stops driving, says why once, and refuses this write with
+   * the demoted refusal every later write gets.
+   */
   private async write<T>(call: () => Promise<T>): Promise<T> {
     try {
       return await call();
     } catch (error) {
       if (isKimiWriteError(error) && error.reason === 'unauthorized') this.noteUnauthorized('unauthorized');
+      if (isKimiWriteError(error) && error.code === KIMI_SESSION_LOCKED_CODE) {
+        this.demoteToObserve(KIMI_FOREIGN_WRITER_REASON);
+        throw new Error(KIMI_DEMOTED_REFUSAL);
+      }
       throw error;
     }
   }

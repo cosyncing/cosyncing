@@ -36,6 +36,8 @@ import {
   decodeKimiEnvelope,
   readBoundedBody,
 } from './server.ts';
+import type { KimiWire } from './server.ts';
+import { kapSessionAsV1 } from './kap.ts';
 
 // ── Native request bodies (structural, exactly the upstream schema names) ────
 
@@ -191,6 +193,16 @@ export interface KimiRenameSessionBody {
  */
 export const KIMI_IDEMPOTENT_WRITE_CODES = Object.freeze([40902, 40903, 40909] as const);
 
+/**
+ * KAP `SESSION_LOCKED` (Kimi Code 2.7.0 and newer): another Kimi Code process —
+ * a terminal `kimi`, or Kimi Desktop — holds this session, and the server
+ * refused the write. Captured on 2.7.2 for a prompt and a rename while a
+ * terminal held the session: "This session is in use by another Kimi Code CLI
+ * instance…", HTTP 200. It is a proven second writer, which is what the drive
+ * connection's demotion exists for (`drive.ts`).
+ */
+export const KIMI_SESSION_LOCKED_CODE = 40_931;
+
 export function isKimiIdempotentWriteCode(code: number): boolean {
   return (KIMI_IDEMPOTENT_WRITE_CODES as readonly number[]).includes(code);
 }
@@ -276,6 +288,14 @@ export interface KimiDriveHttpOptions {
   timeoutMs?: number;
   maxBytes?: number;
   fetchImpl?: KimiWriteFetch;
+  /**
+   * The wire the identity gate verified for this server (`server.ts`
+   * `resolveVerifiedInstance`); 0.x when absent. On `'kap'` three of the ten
+   * operations take their KAP paths and bodies — cancel, and the interaction
+   * answers — and two answers are reshaped to the 0.x `data` callers read.
+   * The SET of operations does not change with the wire.
+   */
+  wire?: KimiWire;
 }
 
 export class KimiDriveHttp {
@@ -284,8 +304,10 @@ export class KimiDriveHttp {
   private readonly timeoutMs: number;
   private readonly maxBytes: number;
   private readonly fetchImpl: KimiWriteFetch;
+  private readonly kap: boolean;
 
   constructor(options: KimiDriveHttpOptions) {
+    this.kap = options.wire === 'kap';
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
     if (options.token) this.token = options.token;
     this.timeoutMs = options.timeoutMs && options.timeoutMs > 0 ? options.timeoutMs : KIMI_HTTP_TIMEOUT_MS;
@@ -300,9 +322,23 @@ export class KimiDriveHttp {
 
   // ── The allowlist. Ten operations, no eleventh door. ──────────────────────
 
-  /** Create a session. One of `workspace_id`/`metadata.cwd` is required; this adapter always sends cwd. */
-  createSession(body: KimiCreateSessionBody): Promise<KimiWriteOutcome> {
-    return this.#post('/api/v1/sessions', body);
+  /**
+   * Create a session. One of `workspace_id`/`metadata.cwd` is required; this adapter always sends cwd.
+   *
+   * KAP takes the cwd at the top level and answers with its flat session row
+   * (both captured on 2.7.2); the row is reshaped to the 0.x v1 row the caller
+   * maps (`mapKimiCreatedSession`).
+   */
+  async createSession(body: KimiCreateSessionBody): Promise<KimiWriteOutcome> {
+    if (!this.kap) return this.#post('/api/v1/sessions', body);
+    const outcome = await this.#post('/api/v1/sessions', {
+      ...(body.title !== undefined ? { title: body.title } : {}),
+      cwd: body.metadata.cwd,
+    });
+    const row = outcome.data;
+    return row && typeof row === 'object' && !Array.isArray(row)
+      ? { ...outcome, data: kapSessionAsV1(row as Record<string, unknown>) }
+      : outcome;
   }
 
   /** Submit a prompt. NEVER rejects as busy — a prompt sent mid-turn is queued natively. */
@@ -315,8 +351,14 @@ export class KimiDriveHttp {
    * id, not a path separator (`routes/sessions.ts:716-905`, action list at
    * `:748`), so the id is encoded and the suffix appended after it.
    */
-  abortSession(sessionId: string): Promise<KimiWriteOutcome> {
-    return this.#post(`/api/v1/sessions/${encodeURIComponent(sessionId)}:abort`, {});
+  async abortSession(sessionId: string): Promise<KimiWriteOutcome> {
+    if (!this.kap) return this.#post(`/api/v1/sessions/${encodeURIComponent(sessionId)}:abort`, {});
+    // KAP renamed the action `:cancel` (2.7.2 answers `:abort` with 40001
+    // "unsupported action", captured) and answers `{cancelled}` — false on an
+    // idle session, captured — which is the 0.x `{aborted}` under another name.
+    const outcome = await this.#post(`/api/v1/sessions/${encodeURIComponent(sessionId)}:cancel`, {});
+    const cancelled = (outcome.data as { cancelled?: unknown } | null | undefined)?.cancelled;
+    return typeof cancelled === 'boolean' ? { ...outcome, data: { aborted: cancelled } } : outcome;
   }
 
   resolveApproval(
@@ -324,6 +366,9 @@ export class KimiDriveHttp {
     approvalId: string,
     body: KimiApprovalResolveBody,
   ): Promise<KimiWriteOutcome> {
+    // KAP answers both kinds through one route, discriminated by `kind`
+    // (captured: `{kind:'approval', decision}` → `{outcome, ended_at}`).
+    if (this.kap) return this.#post(this.#interactionPath(sessionId, approvalId), { kind: 'approval', ...body });
     return this.#post(
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/approvals/${encodeURIComponent(approvalId)}`,
       body,
@@ -335,6 +380,8 @@ export class KimiDriveHttp {
     questionId: string,
     body: KimiQuestionAnswerBody,
   ): Promise<KimiWriteOutcome> {
+    // Answers keyed by question item id, the same union on both wires (captured: `{q_0:{kind:'single', option_id}}`).
+    if (this.kap) return this.#post(this.#interactionPath(sessionId, questionId), { kind: 'question', ...body });
     return this.#post(
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/questions/${encodeURIComponent(questionId)}`,
       body,
@@ -343,6 +390,8 @@ export class KimiDriveHttp {
 
   /** Dismiss a question. Succeeds with envelope code 40909 rather than 0; see {@link KIMI_IDEMPOTENT_WRITE_CODES}. */
   dismissQuestion(sessionId: string, questionId: string): Promise<KimiWriteOutcome> {
+    // KAP: a dismissal is a question answer that says so, and succeeds with code 0 (captured).
+    if (this.kap) return this.#post(this.#interactionPath(sessionId, questionId), { kind: 'question', dismissed: true });
     return this.#post(
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/questions/${encodeURIComponent(questionId)}:dismiss`,
       {},
@@ -397,6 +446,11 @@ export class KimiDriveHttp {
   }
 
   // ── The single transport, private on purpose ──────────────────────────────
+
+  /** KAP `POST /api/v1/sessions/{sid}/interactions/{id}`: one route for approvals and questions. */
+  #interactionPath(sessionId: string, interactionId: string): string {
+    return `/api/v1/sessions/${encodeURIComponent(sessionId)}/interactions/${encodeURIComponent(interactionId)}`;
+  }
 
   /**
    * An ECMAScript PRIVATE method, and that is the whole allowlist mechanism: no
