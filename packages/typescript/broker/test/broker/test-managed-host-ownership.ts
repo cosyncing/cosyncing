@@ -693,6 +693,30 @@ try {
       JSON.stringify({ outcome, signals, records: records.size }));
   }
   {
+    // The same race, seen from the adapter. Anything it took from our child's
+    // output (a launch token, for one host) belongs to a process that never
+    // served this address, so it must not be used against the host that does.
+    const spawnPid = 5160;
+    const table = new Map([[spawnPid, { pid: spawnPid, start: '9', boot: BOOT, comm: 'host' }], [HOST_PID, OWNED]]);
+    let locates = 0;
+    const ended: string[] = [];
+    const { effects } = fakeEffects({
+      identities: table, spawnPid, childDiesOn: 'SIGTERM', missingProcess: PROCESS_ABSENT,
+    });
+    const outcome = await startManagedHost(
+      plan({
+        ready: async () => locates > 0,
+        locate: async () => (locates++ === 0 ? HOST_ABSENT : hostAt(HOST_PID)),
+        launchEnded: (reason) => { ended.push(reason); },
+      }),
+      effects, memoryStore().store,
+    );
+    check('a child that loses the address to another host ends its launch',
+      outcome.action === 'already-serving'
+        && JSON.stringify(ended) === JSON.stringify(['superseded-by-new-launch', 'address-taken']),
+      JSON.stringify({ outcome, ended }));
+  }
+  {
     // Ready, but this machine will not say which process serves it. Killing our
     // child here would destroy a working host over a failure to LOOK, so it is
     // kept — recorded, provably ours, and reported as unproven.

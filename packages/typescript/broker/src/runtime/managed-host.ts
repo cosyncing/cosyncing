@@ -411,8 +411,9 @@ export interface ManagedHostPlan {
   observeOutput?(text: string): void;
   /**
    * A launch is over and its process is gone or disowned: drop anything derived
-   * from its output. Said when a start fails, when a child proven to be the
-   * server exits, and before every spawn (for whatever launch came before).
+   * from its output. Said when a start fails, when another host takes the
+   * address from the child, when a child proven to be the server exits, and
+   * before every spawn (for whatever launch came before).
    */
   launchEnded?(reason: string): void;
   /** How long a freshly spawned host has to become ready before it is a failure. */
@@ -916,6 +917,9 @@ export async function startManagedHost(
         // than leaked — and the winner is classified and left strictly alone.
         const stopped = await terminate(child.pid, plan.stopGraceMs, effects, childGone);
         if (stopped.gone) store.clear(plan.agent);
+        // Our launch is over even if the child is slow to go: it does not serve
+        // this address, so nothing it printed is about the host that does.
+        endLaunch('address-taken');
         const live = effects.liveProcess(serving.pid);
         return {
           action: 'already-serving',
