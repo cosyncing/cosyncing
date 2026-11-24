@@ -47,16 +47,16 @@ export const AGY_CLI_MODELS_TIMEOUT_MS = 15_000;
 export const AGY_CLI_MODELS_MAX_BYTES = 256 * 1024;
 
 /**
- * SP-1: the variable that stops agy updating itself from a broker probe.
+ * The variable that stops agy updating itself from a broker probe.
  *
  * MEASURED 2026-11-23: every `agy models` run on 1.5.14 logs `auto_updater.go]
  * Spawned background update process` and rewrites `updater/update_status.json`
- * (agy replaced itself on 2026-11-22). MEASURED 2026-11-24 on 1.5.16 (AG-4, an
- * isolated home): only the exact value `true` stops it — the run logs
+ * (agy replaced itself on 2026-11-22). MEASURED 2026-11-24 on 1.5.16, in an
+ * isolated home: only the exact value `true` stops it — the run logs
  * `auto_updater.go:285] Auto-update disabled via environment variable
  * AGY_CLI_DISABLE_AUTO_UPDATE` — while `1`, `TRUE` and `yes` still log
- * `Spawned background update process`. (T1 set `1` from the binary's strings
- * alone, so its probes still let agy update itself.) It is set on every PROBE the
+ * `Spawned background update process`. (An earlier `1`, chosen from the binary's
+ * strings alone, still let agy update itself.) It is set on every PROBE the
  * broker runs — the model list here and doctor's `--version` —
  * and not on a Drive child, which is the user's own session under agy's own policy.
  */
