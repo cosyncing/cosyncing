@@ -843,7 +843,7 @@ opencodeV2Kit.extras!.push(
     },
   },
   {
-    title: 'agent selection uses native IDs, waits out a location still loading its agents, and rejects an unavailable agent',
+    title: 'agent selection uses native IDs, waits out its own location still loading its agents, and rejects an unavailable agent',
     async run(context) {
       const fake = context.fake as OpencodeV2Fake;
       const session = await context.drivableSession('agent choice');
@@ -854,14 +854,27 @@ opencodeV2Kit.extras!.push(
       try {
         // The session's own location answers with no agents until its plugins load (2.2.7+).
         const loading = fake.ledger.mark();
-        fake.serve.agentsLoading = true;
+        fake.serve.agentsLoading = { directory: session.cwd };
         expect((await context.prompt(stream, 'plan a change', { agent: 'plan' })).kind).toBe('ack');
         const reads = fake.ledger.routed('GET', /^\/api\/agent$/, loading);
         expect(reads.length).toBeGreaterThanOrEqual(2);
         expect(reads.map((entry) => (entry.query as Record<string, string>)['location[directory]'])).toEqual(reads.map(() => session.cwd));
+        // The location's own announcement ends the wait, well inside its 5 s bound.
+        expect(reads[1]!.at - reads[0]!.at).toBeLessThan(2000);
         expect(fake.ledger.routed('POST', new RegExp(`^/api/session/${session.id}/agent$`), loading)).toHaveLength(1);
         expect(fake.serve.session(session.id).info.agent).toBe('plan');
         await stream.waitForFrame((frame) => frame.kind === 'session' && frame.info.currentAgent === 'plan');
+        // Another location announcing its agents first (as captured) does not end this location's
+        // wait: rereading then would still find none and refuse the agent.
+        const scoped = fake.ledger.mark();
+        fake.serve.agentsLoading = { directory: session.cwd, otherDirectory: fake.workspace('other-location') };
+        expect((await context.prompt(stream, 'build it now', { agent: 'build' })).kind).toBe('ack');
+        const scopedReads = fake.ledger.routed('GET', /^\/api\/agent$/, scoped);
+        expect(scopedReads.length).toBeGreaterThanOrEqual(2);
+        expect(scopedReads.map((entry) => (entry.query as Record<string, string>)['location[directory]'])).toEqual(scopedReads.map(() => session.cwd));
+        expect(scopedReads[1]!.at - scopedReads[0]!.at).toBeLessThan(2000);
+        expect(fake.ledger.routed('POST', new RegExp(`^/api/session/${session.id}/agent$`), scoped).map((entry) => entry.body)).toEqual([{ agent: 'build' }]);
+        await stream.waitForFrame((frame) => frame.kind === 'session' && frame.info.currentAgent === 'build');
         expect((await context.prompt(stream, 'switch model here', { model: { providerID: OPENCODE_PROVIDER, modelID: 'model-b' } })).kind).toBe('ack');
         await stream.waitForFrame((frame) => frame.kind === 'session' && frame.info.currentModel?.modelID === 'model-b');
         const mark = fake.ledger.mark();

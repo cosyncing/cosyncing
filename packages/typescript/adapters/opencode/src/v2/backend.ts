@@ -18,6 +18,10 @@ export interface V2BackendOptions {
  *  OpenCode itself waited up to 5 s for them. */
 const AGENT_LIST_SETTLE_MS = 5_000;
 
+/** Whether an `agent.updated` from location `from` speaks for a read of `directory`: an event or a
+ *  read without a location speaks for every location. */
+const agentUpdateFor = (directory: string | undefined, from: string) => directory === undefined || from === '' || from === directory;
+
 /** One event subscription and activity projection for the complete shared service. */
 export class OpenCodeV2Backend {
   binding?: V2Binding;
@@ -44,9 +48,10 @@ export class OpenCodeV2Backend {
   private presence = new Set<string>();
   unknownEvents = 0;
   unknownMessages = 0;
-  /** `agent.updated` events seen, and readers waiting for the next one (see {@link listAgents}). */
-  private agentUpdates = 0;
-  private readonly agentWaiters = new Set<() => void>();
+  /** `agent.updated` events seen per location directory ('' for an event that names none), and readers
+   *  waiting for their location's next one (see {@link listAgents}). */
+  private readonly agentUpdates = new Map<string, number>();
+  private readonly agentWaiters = new Set<(directory: string) => void>();
 
   constructor(readonly resolver: BindingResolver, private readonly options: V2BackendOptions) {}
 
@@ -274,8 +279,9 @@ export class OpenCodeV2Backend {
       if (changed || pendingChanged) this.changed(id);
     }
     if (event.type === 'agent.updated') {
-      this.agentUpdates++;
-      for (const wake of [...this.agentWaiters]) wake();
+      const directory = typeof event.location?.directory === 'string' ? event.location.directory : '';
+      this.agentUpdates.set(directory, (this.agentUpdates.get(directory) ?? 0) + 1);
+      for (const wake of [...this.agentWaiters]) wake(directory);
     }
     if (!['server.connected', 'server.heartbeat', 'agent.updated', 'session.created', 'session.updated', 'session.renamed', 'session.forked', 'session.deleted', 'session.status', 'session.execution.started', 'session.execution.succeeded', 'session.execution.failed', 'session.execution.interrupted', 'session.inbox.enqueued', 'session.inbox.delivered', 'session.text.started', 'session.text.delta', 'session.text.ended', 'session.reasoning.started', 'session.reasoning.delta', 'session.reasoning.ended', 'session.step.started', 'session.step.first-token', 'session.step.streamed', 'session.step.ended', 'session.step.failed', 'session.usage.updated', 'session.instructions.updated', 'session.revert.staged', 'session.revert.cleared', 'session.revert.committed', 'session.compaction.started', 'session.compaction.delta', 'session.compaction.ended', 'session.compaction.failed', 'session.tool.input.started', 'session.tool.input.ended', 'session.tool.progress', 'session.tool.called', 'session.tool.success', 'session.tool.failed', 'permission.asked', 'permission.replied', 'form.created', 'form.replied', 'form.cancelled'].includes(event.type)) this.unknownEvents++;
     if (event.type === 'session.inbox.enqueued' && object(data.item?.payload)) {
@@ -430,25 +436,34 @@ export class OpenCodeV2Backend {
    * The selectable agents of one session's location. From 2.2.7 a location that is still loading its
    * plugins answers with the agents loaded so far, and announces the rest with `agent.updated`;
    * 2.3.2 was captured answering with none at all right after a location first loaded. An empty
-   * answer waits, bounded, for that event and reads once more.
+   * answer waits, bounded, for that location's event and reads once more; another location finishing
+   * its own plugins (captured firing first) says nothing about this one.
    */
   async listAgents(directory?: string): Promise<AgentOption[]> {
-    const path = '/api/agent' + (directory ? `?location%5Bdirectory%5D=${encodeURIComponent(directory)}` : '');
+    const location = directory || undefined;
+    const path = '/api/agent' + (location ? `?location%5Bdirectory%5D=${encodeURIComponent(location)}` : '');
     const read = async () => arrayData(await this.transport!.json(path)).filter((agent) => typeof agent.id === 'string' && agent.hidden !== true && agent.mode !== 'subagent')
       .map((agent) => ({ name: agent.id, ...(typeof agent.description === 'string' ? { description: agent.description } : {}) }));
-    const seen = this.agentUpdates;
+    const seen = this.agentUpdateCount(location);
     const agents = await read();
     if (agents.length) return agents;
-    if (this.agentUpdates === seen) await this.nextAgentUpdate(AGENT_LIST_SETTLE_MS);
+    if (this.agentUpdateCount(location) === seen) await this.nextAgentUpdate(location, AGENT_LIST_SETTLE_MS);
     return read();
   }
 
-  private nextAgentUpdate(timeoutMs: number): Promise<void> {
+  private agentUpdateCount(directory: string | undefined): number {
+    let count = 0;
+    for (const [from, seen] of this.agentUpdates) if (agentUpdateFor(directory, from)) count += seen;
+    return count;
+  }
+
+  private nextAgentUpdate(directory: string | undefined, timeoutMs: number): Promise<void> {
     return new Promise<void>((resolve) => {
-      const done = () => { clearTimeout(timer); this.agentWaiters.delete(done); resolve(); };
+      const wake = (from: string) => { if (agentUpdateFor(directory, from)) done(); };
+      const done = () => { clearTimeout(timer); this.agentWaiters.delete(wake); resolve(); };
       const timer = setTimeout(done, timeoutMs);
       timer.unref?.();
-      this.agentWaiters.add(done);
+      this.agentWaiters.add(wake);
     });
   }
 

@@ -23,6 +23,8 @@ export interface V2Event {
   data: Record<string, any>;
   created?: number;
   durable?: { aggregateID: string; seq: number; version?: number };
+  /** The location an event belongs to (`Location.Ref`); service-wide events carry none. */
+  location?: { directory?: unknown };
 }
 
 /** Credentials and native error bodies never appear in transport errors. */

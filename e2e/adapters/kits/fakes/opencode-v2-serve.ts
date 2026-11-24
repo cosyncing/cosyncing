@@ -41,8 +41,10 @@ export class FakeOpenCodeV2Serve {
   authenticationRequired = true;
   migration: 'required' | 'running' | 'completed' | 'error' = 'completed';
   formFields?: Json[];
-  /** The next agent list is read from a location still loading its plugins (see {@link route}). */
-  agentsLoading = false;
+  /** A location still loading its plugins, and optionally another location that finishes loading its
+   *  own first (see {@link route}). */
+  agentsLoading?: { directory: string; otherDirectory?: string };
+  private agentsAnnounced?: { directory: string; otherDirectory?: string };
   malformedPendingFor?: string;
   beforeRosterReply?: () => Promise<void>;
   beforePendingReply?: (id: string) => Promise<void>;
@@ -221,11 +223,20 @@ export class FakeOpenCodeV2Serve {
     if (path === '/api/model') return Response.json({ location: { directory: '/work/project' }, data: ['model-a', 'model-b'].map((id) => ({ id, modelID: id, providerID: 'test-provider', name: id === 'model-a' ? 'Model A' : 'Model B', enabled: true, variants: [{ id: 'low' }, { id: 'high' }] })) });
     if (path === '/api/agent') {
       const location = { directory: url.searchParams.get('location[directory]') ?? '/work/project' };
-      if (this.agentsLoading) {
+      const loading = this.agentsLoading;
+      if (loading?.directory === location.directory) {
         // As captured on 2.3.2: a location still loading answers with the agents loaded so far (here
-        // none, as right after a location first loaded), then announces the rest with agent.updated.
-        this.agentsLoading = false;
-        setTimeout(() => this.emit('agent.updated', {}, false, location), 20);
+        // none, as right after a location first loaded) until it announces the rest with agent.updated.
+        // In the capture another location announced its own agents first.
+        if (this.agentsAnnounced !== loading) {
+          this.agentsAnnounced = loading;
+          const other = loading.otherDirectory;
+          if (other) setTimeout(() => this.emit('agent.updated', {}, false, { directory: other }), 20);
+          setTimeout(() => {
+            if (this.agentsLoading === loading) this.agentsLoading = undefined;
+            this.emit('agent.updated', {}, false, location);
+          }, other ? 250 : 20);
+        }
         return Response.json({ location, data: [] });
       }
       return Response.json({ location, data: [{ id: 'build', name: 'Build', mode: 'primary', hidden: false }, { id: 'plan', name: 'Plan', mode: 'primary', hidden: false }] });
