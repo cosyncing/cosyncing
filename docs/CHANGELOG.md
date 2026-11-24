@@ -22,9 +22,10 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   session written by a newer omp than the one cosyncing runs stays readable but
   is not resumed, forked or renamed through omp.
 - Forms from omp 19.1.0 extensions appear as question cards: choices, multiple
-  choices, and typed answers. An answer the form would refuse is not sent, and
-  the card stays open. A form omp withdraws, for example at its timeout, closes
-  its card.
+  choices, and typed answers. Answers are checked against the form's own rules
+  before they are sent, and a refused answer leaves the card open; a pattern too
+  costly to check is left to omp. A form omp withdraws, for example at its
+  timeout, closes its card.
 - Sessions can be forked on omp 19.1.0. Forking a whole session copies all of it;
   forking at a message keeps that message in the copy. Clone stays unavailable
   for omp.
