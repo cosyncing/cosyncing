@@ -26,6 +26,32 @@ for (const accepted of [
 ]) assert.equal(managedCodexDaemonArguments(accepted), true, JSON.stringify(accepted));
 assert.deepEqual(parseManagedCodexDaemonArguments(modern), { valid: true, unknownFlags: ['--analytics-default-enabled'] });
 assert.deepEqual(parseManagedCodexDaemonArguments(['app-server', '--listen=unix://', '--future-flag']), { valid: true, unknownFlags: ['--future-flag'] });
+// Real Codex 0.171.0 daemon argv (/proc/<pid>/cmdline, isolated CODEX_HOME) after `daemon start --enable
+// shell_snapshot --disable apps`, and after `daemon restart --enable shell_snapshot`: each saved feature
+// override is relaunched as a `-c features.<name>=<bool>` pair; `--enable`/`--disable` never appear.
+const withOverrides = ['app-server', '--listen', 'unix://', '--analytics-default-enabled', '-c', 'features.apps=false', '-c', 'features.shell_snapshot=true', '--managed-daemon'];
+const withOneOverride = ['app-server', '--listen', 'unix://', '--analytics-default-enabled', '-c', 'features.shell_snapshot=true', '--managed-daemon'];
+assert.deepEqual(parseManagedCodexDaemonArguments(withOverrides), {
+  valid: true, unknownFlags: ['--analytics-default-enabled'], featureOverrides: ['features.apps=false', 'features.shell_snapshot=true'],
+});
+assert.deepEqual(parseManagedCodexDaemonArguments(withOneOverride), {
+  valid: true, unknownFlags: ['--analytics-default-enabled'], featureOverrides: ['features.shell_snapshot=true'],
+});
+const overrideAt = (...pair: string[]) => [...withOverrides.slice(0, 4), ...pair, '--managed-daemon'];
+for (const unsafe of [
+  // `daemon start` saves only feature toggles; any other key never reaches a daemon Codex launched.
+  overrideAt('-c', 'model="o3"'),
+  overrideAt('-c', 'features.apps=1'),
+  overrideAt('-c', 'features.apps'),
+  overrideAt('-c', 'features.Apps=true'),
+  // The CLI canonicalises the table form before launch.
+  overrideAt('-c', 'features.apps.enabled=false'),
+  overrideAt('-c', 'features.apps=false', '-c', 'features.apps=true'),
+  overrideAt('--config', 'features.apps=false'),
+  overrideAt('-c=features.apps=false'),
+  overrideAt('--enable', 'apps'),
+  ['app-server', '--listen', 'unix://', '-c'],
+]) assert.equal(managedCodexDaemonArguments(unsafe), false, JSON.stringify(unsafe));
 for (const unsafe of [
   ['app-server', '--listen', 'ws://127.0.0.1:4500'],
   ['app-server', '--listen', 'unix:///tmp/other.sock'],
@@ -43,7 +69,8 @@ for (const unsafe of [
   ['app-server', '--listen', 'unix://', '--bad_flag'],
 ]) assert.equal(managedCodexDaemonArguments(unsafe), false, JSON.stringify(unsafe));
 for (const [token, rest, named] of [
-  ['--config', ['x=y'], '--config'], ['-c', ['x'], '-c'], ['--x=1', [], '--x=1'],
+  ['--config', ['x=y'], '--config'], ['-c', ['x'], '-c'], ['-c', ['model_instructions_file=/private/path/prompt.md'], '-c'],
+  ['--x=1', [], '--x=1'],
   ['--listen', ['unix:///private/path/control.sock'], '--listen'],
   ['--x=/private/path/config', [], '--x=<value>'],
   ['--UPPER', [], '--UPPER'], ['--bad_flag', [], '--bad_flag'], ['daemon', [], 'daemon'],
@@ -55,7 +82,7 @@ for (const [token, rest, named] of [
     assert.equal(refused.detail.includes('/private/path'), false);
   }
 }
-console.log('PASS legacy, 0.162.1, reordered and future bare flags; values, positionals and alternate listeners refused with named flags');
+console.log('PASS legacy, 0.162.1, reordered and future bare flags, 0.171.0 feature-override pairs; other -c keys, values, positionals and alternate listeners refused with named flags');
 
 // Exercise the macOS inspection branch, not just its parser, on any POSIX test host.
 if (process.platform !== 'win32') {
@@ -281,6 +308,27 @@ function fixture() {
   deps.run = async (...args) => { const result = await run(...args); deps.readVersion = async () => undefined; return result; };
   await assert.rejects(restartCodexDaemonVerified(deps, { confirmed: true }), /failed verification/);
   console.log('PASS start exit zero without a healthy endpoint is rejected');
+}
+{
+  // The old daemon ran with a saved feature the installed CLI refuses (0.171.0's refusal text, captured
+  // for an unknown feature name).
+  const { state, deps } = fixture();
+  const withFeature = { ...target, featureOverrides: ['features.retired_toggle=true'] };
+  deps.captureProcess = () => state.old ? { state: 'running', process: withFeature }
+    : state.newDaemon ? { state: 'running', process: { ...target, pid: 456, start: '200' } } : { state: 'absent' };
+  deps.gracefulStop = () => { state.commands.push('graceful'); state.old = false; state.endpoint = false; };
+  const run = deps.run;
+  deps.run = async (command, timeoutMs, args = []) => {
+    if (args.length) {
+      state.commands.push([command, ...args].join(' '));
+      return { code: 1, stdout: '', stderr: 'Error: daemon start requires a boolean feature toggle: retired_toggle\n' };
+    }
+    return run(command, timeoutMs);
+  };
+  await restartCodexDaemonVerified(deps);
+  assert.deepEqual(state.commands, ['graceful', 'start -c features.retired_toggle=true', 'start']);
+  assert.equal(state.newDaemon, true);
+  console.log('PASS a refused saved feature override cannot leave Codex stopped after its daemon exited');
 }
 for (const state of ['exited', 'unknown'] as const) {
   const events: string[] = [];

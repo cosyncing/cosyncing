@@ -12,8 +12,16 @@ import { restartCodexDaemonVerified } from '../src/daemon-restart.ts';
 // `captured()` receipts follow a real Linux Codex 0.165.0 receipt (pid, boot id and digests scrubbed):
 // the legacy start text written at launch plus the native identity, read here after a host suspend
 // had moved `ps -o lstart` by 36 minutes while the boot id and start ticks still matched.
+// `CODEX_0171` follows a Codex 0.171.0 daemon.pid captured in an isolated CODEX_HOME (mode 0644, boot id
+// and digests scrubbed); one minute after launch `ps -o lstart` already read 56 s later than its start text.
 const CAPTURED_BOOT = '11111111-2222-4333-8444-555555555555';
 const CAPTURED_TICKS = 36211;
+const CODEX_0165 = { start: 'Sat Nov 21 23:33:57 2026', startTicks: CAPTURED_TICKS };
+const CODEX_0171 = { start: 'Tue Nov 24 16:03:28 2026', startTicks: 22882029, release: '0.171.0-x86_64-unknown-linux-musl' };
+// Its argv (from /proc/<pid>/cmdline) after `daemon start --enable shell_snapshot --disable apps`.
+const CODEX_0171_OVERRIDES = ['features.apps=false', 'features.shell_snapshot=true'];
+const CODEX_0171_ARGS = ['app-server', '--listen', 'unix://', '--analytics-default-enabled',
+  ...CODEX_0171_OVERRIDES.flatMap((pair) => ['-c', pair]), '--managed-daemon'];
 if (process.platform !== 'win32') {
   const cases: Record<string, (f: Fixture) => void> = {
     'legacy-layout': (f) => { f.layout = 'app-server.pid'; f.executable = f.cli; },
@@ -42,6 +50,22 @@ if (process.platform !== 'win32') {
     'identity-other-start': (f) => { f.captured({ startTicks: CAPTURED_TICKS + 1 }); f.refused = 'absent'; },
     'identity-other-boot': (f) => { f.captured({ bootId: '66666666-7777-4888-8999-000000000000' }); f.refused = 'absent'; },
     'malformed-identity': (f) => { f.captured({ startTicks: String(CAPTURED_TICKS) }); f.refused = 'unknown'; },
+    // A 0.171 daemon relaunched with its saved feature overrides; restart relaunches it with the same pairs.
+    'codex-0171-feature-overrides': (f) => {
+      f.captured({}, CODEX_0171);
+      f.mode = 0o644;
+      f.cli = f.binary('standalone', CODEX_0171.release);
+      f.executable = f.binary('app-server-daemon', CODEX_0171.release);
+      f.args = [...CODEX_0171_ARGS];
+      f.featureOverrides = CODEX_0171_OVERRIDES;
+      f.restarts = true;
+    },
+    'codex-0171-config-override': (f) => {
+      f.captured({}, CODEX_0171);
+      f.args = ['app-server', '--listen', 'unix://', '--analytics-default-enabled', '-c', 'model="o3"', '--managed-daemon'];
+      f.refused = 'unknown';
+      f.detail = /`-c` must be followed by a boolean feature override/;
+    },
     'invalid-pid': (f) => { f.receiptPid = -1; f.refused = 'unknown'; },
     'unsafe-mode': (f) => { f.mode = 0o622; f.refused = 'unknown'; },
     'unsafe-owner': (f) => { f.receiptOwner++; f.refused = 'unknown'; },
@@ -112,13 +136,14 @@ if (process.platform !== 'win32') {
     refused?: 'absent' | 'unknown';
     detail?: RegExp;
     staleReceipts?: CodexDaemonReceiptLayout[];
+    featureOverrides?: string[];
     restarts = false;
     /** The live process carries kernel start ticks; `ps -o lstart` (here the same value) no longer matches. */
-    captured(identity: Record<string, unknown> = {}) {
-      this.liveStart = String(CAPTURED_TICKS);
+    captured(identity: Record<string, unknown> = {}, generation: { start: string; startTicks: number } = CODEX_0165) {
+      this.liveStart = String(generation.startTicks);
       this.liveBoot = CAPTURED_BOOT;
-      this.receiptStart = 'Sat Nov 21 23:33:57 2026';
-      this.identity = { bootId: CAPTURED_BOOT, startTicks: CAPTURED_TICKS, ...identity };
+      this.receiptStart = generation.start;
+      this.identity = { bootId: CAPTURED_BOOT, startTicks: generation.startTicks, ...identity };
     }
     addSecondProcess(start = 'fixture start', executable = this.executable) {
       this.secondProcess = { pid: this.pid + 1, start, executable };
@@ -215,7 +240,8 @@ if (process.platform !== 'win32') {
         assert.equal(read.process.pid, f.pid, 'the live receipt selects the daemon');
         assert.equal(read.process.executable, originalRealpath(f.executable));
         assert.deepEqual(read.process.unknownFlags, ['--analytics-default-enabled']);
-        if (f.restarts) await restartProceeds(read.process);
+        assert.deepEqual(read.process.featureOverrides, f.featureOverrides, 'saved feature overrides are read from argv');
+        if (f.restarts) await restartProceeds(read.process, f.featureOverrides);
       } else {
         if (name.startsWith('two-live-')) {
           assert.equal(read.state, 'unknown');
@@ -241,8 +267,9 @@ if (process.platform !== 'win32') {
   }
 }
 
-/** A verified daemon is stopped by its captured identity and replaced; nothing else is signalled. */
-async function restartProceeds(daemon: CodexDaemonProcess) {
+/** A verified daemon is stopped by its captured identity and replaced with its saved feature overrides;
+ * nothing else is signalled. */
+async function restartProceeds(daemon: CodexDaemonProcess, featureOverrides: string[] = []) {
   const actions: string[] = [];
   let stopped = false;
   let started = false;
@@ -254,10 +281,15 @@ async function restartProceeds(daemon: CodexDaemonProcess) {
     processState: (expected) => { assert.equal(expected, daemon); return stopped ? 'exited' : 'running'; },
     gracefulStop: (expected) => { assert.equal(expected, daemon); actions.push('graceful'); stopped = true; },
     forceStop: () => { actions.push('force'); },
-    run: async (command) => { actions.push(command); started = true; return { code: 0, stdout: '', stderr: '' }; },
+    run: async (command, _timeoutMs, args = []) => {
+      actions.push([command, ...args].join(' '));
+      started = true;
+      return { code: 0, stdout: '', stderr: '' };
+    },
     now: () => 0, sleep: async () => {}, gracefulMs: 0, verifyMs: 0,
   });
-  assert.deepEqual(actions, ['graceful', 'start'], 'an automatic restart proceeds without force');
+  assert.deepEqual(actions, ['graceful', ['start', ...featureOverrides.flatMap((pair) => ['-c', pair])].join(' ')],
+    'an automatic restart proceeds without force and relaunches the saved feature overrides');
 }
 
 async function refusesRestartWithoutMutation(read: CodexDaemonProcessRead) {
