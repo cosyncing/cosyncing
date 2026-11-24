@@ -141,6 +141,7 @@ import {
   claudeModControl,
   claudeModLostControl,
   claudeModRowPatch,
+  claudeVersionAtLeast,
   CLAUDE_MOD_COMMAND_REFUSAL,
   type ClaudeAdapterOptions,
   type ClaudeModCommand,
@@ -3360,6 +3361,9 @@ export class ClaudeResumeConnection implements SessionConnection {
   private tailWakeTurnId?: string;
   private readonly seenTokenIds = new Set<string>();
   private contextWindow = newClaudeContextWindowState();
+  /** The window read in flight, and whether another was asked for while it ran ({@link readContextWindow}). */
+  private contextWindowRead?: Promise<void>;
+  private contextWindowReadAgain = false;
   /** Auto-surfaced subagent/workflow progress cards + parent-answered tool_use_ids (subagent done). The
    *  watcher re-points if the live process ever reports a rotated session id (defensive — issue 15a). */
   private activity?: ClaudeActivityWatcher;
@@ -4304,6 +4308,7 @@ export class ClaudeResumeConnection implements SessionConnection {
       const model = typeof response?.model === 'string' && response.model ? response.model : change.model;
       const effort = this.info.currentModel?.reasoningEffort;
       seedClaudeContextModel(this.contextWindow, model);
+      this.readContextWindow();
       this.info.model = model;
       this.info.currentModel = {
         providerID: this.store.isDefault ? 'anthropic' : 'wrapper',
@@ -4338,6 +4343,34 @@ export class ClaudeResumeConnection implements SessionConnection {
     }
     publish();
     return true;
+  }
+
+  /**
+   * Ask the child for the window it measures this session against, and let the meter use it (CL-2).
+   *
+   * `get_context_usage` with `detail: "summary"` answers from the last response and local estimates, with
+   * no token-count request, and is answered while a turn runs (measured on 2.1.330). Asked when `init`
+   * names the model, after each turn's `result`, and after an accepted model switch; requests coalesce to
+   * one in flight. A child older than {@link CLAUDE_CONTEXT_USAGE_MIN_VERSION}, or one that refuses or does
+   * not answer, leaves the meter on the registry rules. Nothing waits on it.
+   */
+  private readContextWindow(): void {
+    if (!this.proc || !claudeVersionAtLeast(this.contextWindow.cliVersion, CLAUDE_CONTEXT_USAGE_MIN_VERSION)) return;
+    if (this.contextWindowRead) {
+      this.contextWindowReadAgain = true;
+      return;
+    }
+    this.contextWindowRead = (async () => {
+      do {
+        this.contextWindowReadAgain = false;
+        const { outcome, response } = await this.requestControl({ subtype: 'get_context_usage', detail: 'summary' });
+        if (outcome !== 'accepted') return;
+        const corrected = learnClaudeContextWindow(this.contextWindow, response);
+        if (corrected) this.emit(corrected);
+      } while (this.contextWindowReadAgain && this.proc);
+    })().finally(() => {
+      this.contextWindowRead = undefined;
+    });
   }
 
   hasLiveBackgroundWork(): boolean {
@@ -4544,6 +4577,7 @@ export class ClaudeResumeConnection implements SessionConnection {
             if (context) this.emit(context);
           }
         }
+        this.readContextWindow();
         if (o.is_error && !interrupted && typeof o.result === 'string' && o.result) this.emit({ type: 'error', message: oneLine(o.result) });
         // Turn over → the NEXT assistant event without a message_start is a local-command reply, not a
         // late per-block re-delivery of this turn's streamed message (see emitFinalAssistant).
@@ -4766,10 +4800,13 @@ export class ClaudeResumeConnection implements SessionConnection {
     // currentModel/Mode). `init` is the source of truth for the effort claude launched with when it reports
     // one; otherwise preserve the effort already chosen so a model re-seed doesn't drop it.
     const initEffort = typeof o.effort === 'string' && o.effort ? o.effort : this.info.currentModel?.reasoningEffort;
+    // The child's version decides whether its window can be asked for, and how an unregistered model reads.
+    if (typeof o.claude_code_version === 'string' && o.claude_code_version) this.contextWindow.cliVersion = o.claude_code_version;
     // Preserve the exact model id reported by init as resolved-session identity. Curated aliases remain
     // selection inputs only; they must not replace the concrete model a running session actually reports.
     if (typeof o.model === 'string' && o.model) {
       seedClaudeContextModel(this.contextWindow, o.model);
+      this.readContextWindow();
       this.info.model = o.model;
       this.info.currentModel = {
         providerID: this.store.isDefault ? 'anthropic' : 'wrapper',
@@ -5272,6 +5309,11 @@ function takeQueuedSendKey(state: ClaudeQueuedSends | undefined, uuid: string, t
 /** Durable evidence and latest reading for Claude's composer context meter. */
 export interface ClaudeContextWindowState {
   oneMillionModels: Set<string>;
+  /** The window Claude Code itself reported for a model (`get_context_usage` on a Drive child), by the
+   *  model id the meter keys on. Plain data, so the stored replay's checkpoint can carry it. */
+  reportedWindows?: Record<string, number>;
+  /** The Claude Code version behind the latest reading: a transcript row's `version`, or Drive `init`. */
+  cliVersion?: string;
   lastModel?: string;
   lastUsed?: number;
   lastEmittedUsed?: number;
@@ -5297,15 +5339,66 @@ const CLAUDE_NATIVE_1M_MODELS: ReadonlySet<string> = new Set([
   'claude-mythos-5', 'claude-mythos-5-1', 'claude-mythos-5-2',
 ]);
 
+/** The rest of the 2.1.330 registry: ids Claude Code knows, on a 200k window unless a `[1m]` spelling
+ *  asks for more. Every `claude-3-*` id is treated the same. Knowing them is what lets an id in NEITHER
+ *  set be read the way the CLI reads one it does not recognize ({@link CLAUDE_UNKNOWN_MODEL_1M_SINCE}). */
+const CLAUDE_REGISTRY_200K_MODELS: ReadonlySet<string> = new Set([
+  'claude-opus-4-0', 'claude-opus-4-1', 'claude-opus-4-5', 'claude-opus-4-6',
+  'claude-sonnet-4-0', 'claude-sonnet-4-5', 'claude-sonnet-4-6', 'claude-haiku-4-5',
+]);
+
+/** Claude Code 2.1.323 changed the window it assumes for a model id it does not recognize from 200k to 1M
+ *  (changelog; measured on 2.1.330: `get_context_usage` answers 1,000,000 with `autocompactSource:
+ *  "unknown-model"` for an unlisted `claude-*` id, and 200,000 under `CLAUDE_CODE_DISABLE_1M_CONTEXT=1`). */
+export const CLAUDE_UNKNOWN_MODEL_1M_SINCE = '2.1.323';
+
+/** The oldest Claude Code measured to answer `get_context_usage` with `detail: "summary"` (local, no
+ *  token-count requests). A child without it would count with the API and hold its exit for the reply. */
+export const CLAUDE_CONTEXT_USAGE_MIN_VERSION = '2.1.312';
+
 /** A dated id (`claude-opus-4-8-20260101`) has its base id's window. */
+function claudeBaseModel(model: string): string {
+  return model.replace(/-\d{8}$/, '');
+}
+
 function claudeNative1M(model: string): boolean {
-  return CLAUDE_NATIVE_1M_MODELS.has(model.replace(/-\d{8}$/, ''));
+  return CLAUDE_NATIVE_1M_MODELS.has(claudeBaseModel(model));
+}
+
+function claudeRegistry200k(model: string): boolean {
+  const base = claudeBaseModel(model);
+  return CLAUDE_REGISTRY_200K_MODELS.has(base) || /^claude-3-/.test(base);
 }
 
 function claudeContextModel(model: unknown): string | undefined {
   if (typeof model !== 'string') return undefined;
   const clean = model.replace(/\[1m\]$/, '');
   return /^claude-/i.test(clean) ? clean : undefined;
+}
+
+/** The model a reading is keyed on: a `claude-*` id without its `[1m]` suffix, or any other id (a
+ *  wrapper's backend model) once Claude Code has reported a window for it. */
+function claudeMeterModel(state: ClaudeContextWindowState, model: unknown): string | undefined {
+  const clean = claudeContextModel(model);
+  if (clean) return clean;
+  return typeof model === 'string' && model && state.reportedWindows?.[model] !== undefined ? model : undefined;
+}
+
+/**
+ * The window a reading is measured against, in the order the evidence is trusted:
+ *  1. what Claude Code reported for this model (Drive), which already follows `[1m]`, the 1M opt-out and
+ *     the window overrides a transcript never records;
+ *  2. `[1m]` evidence, or a reading already past 200k;
+ *  3. the registry's native-1M and 200k sets;
+ *  4. an id the registry does not know: 1M when the row was written by Claude Code 2.1.323 or later, as
+ *     that CLI assumes, else 200k. A row with no version is read as an older CLI.
+ */
+function claudeContextMax(state: ClaudeContextWindowState, model: string, used: number): number {
+  const reported = state.reportedWindows?.[model];
+  if (reported !== undefined) return reported;
+  if (claudeNative1M(model) || state.oneMillionModels.has(model) || used > CLAUDE_DEFAULT_CONTEXT_MAX) return CLAUDE_EXTENDED_CONTEXT_MAX;
+  if (claudeRegistry200k(model)) return CLAUDE_DEFAULT_CONTEXT_MAX;
+  return claudeVersionAtLeast(state.cliVersion, CLAUDE_UNKNOWN_MODEL_1M_SINCE) ? CLAUDE_EXTENDED_CONTEXT_MAX : CLAUDE_DEFAULT_CONTEXT_MAX;
 }
 
 /** `init.model` is Drive's durable model identity. Preserve the `[1m]` suffix as
@@ -5315,7 +5408,8 @@ function seedClaudeContextModel(
   model: unknown,
 ): void {
   const cleanModel = claudeContextModel(model);
-  state.lastModel = cleanModel;
+  // A wrapper's backend model is kept as reported: it has a meter once Claude Code reports its window.
+  state.lastModel = cleanModel ?? (typeof model === 'string' && model ? model : undefined);
   if (cleanModel && typeof model === 'string') {
     // Unlike cumulative transcript evidence, init describes the model/window
     // the live Drive child is using now. A later untagged init must therefore
@@ -5331,15 +5425,13 @@ function claudeContextUsageMessage(
   used: number,
   onlyWhenChanged = false,
 ): AgentMessage | undefined {
-  const cleanModel = claudeContextModel(model);
-  state.lastModel = cleanModel;
+  const cleanModel = claudeMeterModel(state, model);
+  // A wrapper's model is kept even before its window is known, so the window read that answers after
+  // this reading can still restate it ({@link learnClaudeContextWindow}).
+  state.lastModel = cleanModel ?? (typeof model === 'string' && model ? model : undefined);
   state.lastUsed = used;
   if (!cleanModel) return undefined;
-  // A resident reading above 200k is itself proof that this session is on the
-  // 1M window even when the durable cost-state marker has not landed yet.
-  const max = claudeNative1M(cleanModel) || state.oneMillionModels.has(cleanModel) || used > CLAUDE_DEFAULT_CONTEXT_MAX
-    ? CLAUDE_EXTENDED_CONTEXT_MAX
-    : CLAUDE_DEFAULT_CONTEXT_MAX;
+  const max = claudeContextMax(state, cleanModel, used);
   const boundedUsed = Math.min(used, max);
   if (
     onlyWhenChanged
@@ -5349,6 +5441,33 @@ function claudeContextUsageMessage(
   state.lastEmittedUsed = boundedUsed;
   state.lastEmittedMax = max;
   return { type: 'metadata-update', key: 'contextUsage', value: { used: boundedUsed, max } };
+}
+
+/** The most a reported window or reading may be: well past any model's window, short of nonsense. */
+const CLAUDE_MAX_REPORTED_TOKENS = 100_000_000;
+
+function claudeTokenCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= CLAUDE_MAX_REPORTED_TOKENS ? value : undefined;
+}
+
+/**
+ * Learn the window from Claude Code's answer to `get_context_usage`, and restate the meter when it moved.
+ *
+ * The answer names the model it measured (`model`, with any `[1m]` spelling) and the window it measured
+ * against (`rawMaxTokens`, equal to `maxTokens`): the model's own window, or a smaller compaction window
+ * when one is configured (`autocompactSource`), which is also what Claude's `/context` divides by. A
+ * Drive child's meter divides by that figure from then on. The reading itself is not taken from here:
+ * the turn's `result` remains the meter's `used`.
+ */
+export function learnClaudeContextWindow(state: ClaudeContextWindowState, response: unknown): AgentMessage | undefined {
+  const r = response as { model?: unknown; rawMaxTokens?: unknown; maxTokens?: unknown } | null | undefined;
+  if (!r || typeof r !== 'object') return undefined;
+  const window = claudeTokenCount(r.rawMaxTokens) ?? claudeTokenCount(r.maxTokens);
+  if (!window || typeof r.model !== 'string' || !r.model) return undefined;
+  const model = claudeContextModel(r.model) ?? r.model;
+  state.reportedWindows = { ...state.reportedWindows, [model]: window };
+  if (state.lastModel !== model || state.lastUsed === undefined) return undefined;
+  return claudeContextUsageMessage(state, model, state.lastUsed, true);
 }
 
 /** Update the durable 1M model evidence. cost-state is cumulative session data:
@@ -5457,6 +5576,8 @@ export function mapLine(
   peerNames?: Map<string, string>,
 ): AgentMessage[] {
   if (!ln || typeof ln !== 'object') return [];
+  // The CLI that wrote the row decides how an unregistered model's window is read (CL-3).
+  if (contextWindow && typeof ln.version === 'string' && ln.version) contextWindow.cliVersion = ln.version;
   const contextCorrection = feedClaudeCostState(contextWindow, ln);
   if (contextCorrection.length > 0) return contextCorrection;
   switch (ln.type) {

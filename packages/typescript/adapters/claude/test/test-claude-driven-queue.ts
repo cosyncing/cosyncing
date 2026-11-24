@@ -671,6 +671,81 @@ async function main(): Promise<void> {
     await h.conn.close();
   }
 
+  // ── CL-2: the window Claude Code reports wins over every list ────────────────────────────────────
+  // Real `get_context_usage` answers from a scratch Claude Code 2.1.330 (2026-11-24, `detail: "summary"`,
+  // no sign-in needed), trimmed to the fields the adapter reads plus their neighbours; categories, grid,
+  // skills and memory files dropped. `claude-zeta-9-9` is an id no registry has; the 200k answers were
+  // taken under CLAUDE_CODE_DISABLE_1M_CONTEXT=1, where the CLI runs even a native-1M model at 200k.
+  {
+    const captured = {
+      unknown: { totalTokens: 14368, maxTokens: 1000000, rawMaxTokens: 1000000, autocompactSource: 'unknown-model', percentage: 1, model: 'claude-zeta-9-9', autoCompactThreshold: 967000, isAutoCompactEnabled: true, apiUsage: null },
+      unknownNo1m: { totalTokens: 14369, maxTokens: 200000, rawMaxTokens: 200000, autocompactSource: 'unknown-model', percentage: 7, model: 'claude-zeta-9-9', autoCompactThreshold: 167000, isAutoCompactEnabled: true, apiUsage: null },
+      opusNo1m: { totalTokens: 14455, maxTokens: 200000, rawMaxTokens: 200000, autocompactSource: 'model-default', percentage: 7, model: 'claude-opus-5-5', autoCompactThreshold: 167000, isAutoCompactEnabled: true, apiUsage: null },
+    };
+    const result = (used: number) => ({
+      type: 'result',
+      usage: { input_tokens: 10, output_tokens: 99, cache_read_input_tokens: used - 10, cache_creation_input_tokens: 0 },
+    });
+    const meters = (h: Harness) => h.msgs.filter((m: any) => m.type === 'metadata-update' && m.key === 'contextUsage').map((m: any) => m.value);
+    const asked = (h: Harness) => h.stdin.filter((line: any) => line.type === 'control_request' && line.request?.subtype === 'get_context_usage');
+
+    for (const fixture of [
+      { label: 'an id in no list', answer: captured.unknownNo1m, max: 200_000 },
+      { label: 'a native-1M id the CLI runs at 200k', answer: captured.opusNo1m, max: 200_000 },
+      { label: 'an id in no list, CLI default', answer: captured.unknown, max: 1_000_000 },
+    ]) {
+      const h = newConn();
+      await h.history();
+      h.answerControl = (request) => request.subtype === 'get_context_usage' ? { subtype: 'success', response: fixture.answer } : undefined;
+      // The send launches the child; its `init` follows the first prompt, as the CLI's does.
+      await h.conn.sendPrompt({ text: `cli window ${fixture.label}` });
+      (h.conn as any).ingestInit({ model: fixture.answer.model, permissionMode: 'default', slash_commands: [], claude_code_version: '2.1.330' });
+      await settled();
+      h.msgs.length = 0;
+      (h.conn as any).handleEvent(result(150_000));
+      check(`CL-2 Drive (${fixture.label}): the meter divides by the window Claude Code reported`,
+        JSON.stringify(meters(h)) === JSON.stringify([{ used: 150_000, max: fixture.max }])
+          && asked(h).every((line: any) => line.request.detail === 'summary') && asked(h).length >= 1,
+        JSON.stringify({ meters: meters(h), asked: asked(h) }));
+      await h.conn.close();
+    }
+
+    // An answer that lands after the turn's reading restates the meter once; the registry rule was on screen
+    // until then.
+    {
+      const h = newConn();
+      await h.history();
+      await h.conn.sendPrompt({ text: 'late window' });
+      (h.conn as any).ingestInit({ model: 'claude-opus-5-5', permissionMode: 'default', slash_commands: [], claude_code_version: '2.1.330' });
+      h.msgs.length = 0;
+      (h.conn as any).handleEvent(result(150_000));
+      const pending = asked(h);
+      for (const line of pending) {
+        (h.conn as any).handleEvent({ type: 'control_response', response: { subtype: 'success', request_id: line.request_id, response: captured.opusNo1m } });
+      }
+      await settled();
+      check('CL-2 Drive: a late answer restates the reading against the reported window, once',
+        pending.length === 1 && JSON.stringify(meters(h)) === JSON.stringify([{ used: 150_000, max: 1_000_000 }, { used: 150_000, max: 200_000 }]),
+        JSON.stringify({ meters: meters(h), pending: pending.length }));
+      await h.conn.close();
+    }
+
+    // A child older than the measured floor is never asked: it would count with the API and hold its exit.
+    {
+      const h = newConn();
+      await h.history();
+      await h.conn.sendPrompt({ text: 'old child' });
+      (h.conn as any).ingestInit({ model: 'claude-zeta-9-9', permissionMode: 'default', slash_commands: [], claude_code_version: '2.1.311' });
+      h.msgs.length = 0;
+      (h.conn as any).handleEvent(result(150_000));
+      await settled();
+      check('CL-2 Drive: a child below 2.1.312 is not asked, and an unknown id on it reads 200k (CL-3)',
+        asked(h).length === 0 && JSON.stringify(meters(h)) === JSON.stringify([{ used: 150_000, max: 200_000 }]),
+        JSON.stringify({ meters: meters(h), asked: asked(h).length }));
+      await h.conn.close();
+    }
+  }
+
   // ── every abnormal termination closes the live run exactly once ───────────────────────────────
   {
     const h = newConn();

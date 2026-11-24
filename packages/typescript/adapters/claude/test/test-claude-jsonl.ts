@@ -678,6 +678,28 @@ peerCaptures.self.origin.from = peerCaptures.self.agentId;
   }
 }
 
+// CL-3: an observed session's window when no list names its model. Claude Code 2.1.323 started assuming
+// 1M for an id it does not recognize (measured on 2.1.330 with `claude-zeta-9-9`); the row's `version`
+// says which CLI wrote it. Row shapes are a 2.1.330 assistant row's; the counts are arbitrary.
+{
+  const row = (model: string, version: string | undefined, id: string) => ({
+    type: 'assistant', uuid: `ctx-${id}`, ...(version ? { version } : {}),
+    message: { id: `msg_${id}`, role: 'assistant', model, content: [], usage: { input_tokens: 6, cache_creation_input_tokens: 1_200, cache_read_input_tokens: 48_794, output_tokens: 40 } },
+  });
+  const meter = (line: any) => (mapTranscript([line]).find((m) => m.type === 'metadata-update' && m.key === 'contextUsage') as any)?.value;
+  const cases: [string, any, number][] = [
+    ['an unregistered id written by 2.1.330', row('claude-zeta-9-9', '2.1.330', 'a'), 1_000_000],
+    ['an unregistered id written by 2.1.322', row('claude-zeta-9-9', '2.1.322', 'b'), 200_000],
+    ['an unregistered id on a row with no version', row('claude-zeta-9-9', undefined, 'c'), 200_000],
+    ['a registered 200k id written by 2.1.330', row('claude-sonnet-4-6', '2.1.330', 'd'), 200_000],
+    ['a dated registered 200k id written by 2.1.330', row('claude-haiku-4-5-20251001', '2.1.330', 'e'), 200_000],
+    ['a native-1M id written by an old CLI', row('claude-opus-5-5', '2.1.300', 'f'), 1_000_000],
+  ];
+  const wrong = cases.filter(([, line, max]) => meter(line)?.max !== max || meter(line)?.used !== 50_000);
+  check('CL-3: the observed meter reads an unregistered id the way the CLI that wrote the row does',
+    wrong.length === 0, JSON.stringify(wrong.map(([label, line, max]) => ({ label, max, got: meter(line) }))));
+}
+
 // Drive uses a real child, controlled over a test-only TCP socket. All adapter
 // observations use SessionConnection: no private state, stdin or tail methods.
 {
