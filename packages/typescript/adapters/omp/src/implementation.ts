@@ -20,6 +20,7 @@ import { OMP_BRIDGE_EMBEDDED_SHA256, OMP_BRIDGE_EMBEDDED_SOURCE } from './bridge
 import {
   currentOmpRuntimeReadiness,
   OMP_RPC_FORK_MINIMUM_VERSION,
+  ompNativeWriteRefusal,
   ompSupportsRpcFork,
   type OmpRuntimeReadiness,
 } from './runtime-readiness.ts';
@@ -43,6 +44,8 @@ export const OMP_RUNTIME: PiDialectRuntime = resolvePiDialectRuntime(OMP_DIALECT
       }
       return currentOmpRuntimeReadiness();
     },
+    // A file a newer omp wrote is not continued by an older configured omp (Resume, rename, fork).
+    nativeWriteRefusal: (sessionFile) => ompNativeWriteRefusal(sessionFile, currentOmpRuntimeReadiness().packageVersion),
     diagnose: (context, inspectBridge) => diagnoseOmpSetup(context, { inspectBridge }),
   },
   bridgeAsset: {

@@ -198,8 +198,10 @@ try {
   });
 
   // The hello gate accepts each captured omp build (17.4.2 and 19.1.0), whichever the broker's own
-  // omp is, and refuses a release between them. The broker's omp here is 17.4.2, whose RPC has no
-  // fork, so fork is not offered.
+  // omp is, and refuses a release between them: a live bridge runs the terminal's own omp. A later
+  // Resume would run the broker's omp instead, so that is refused for a file a newer omp wrote
+  // (omp test-omp-discovery). The broker's omp here is 17.4.2, whose RPC has no fork, so fork is not
+  // offered.
   await test('captured omp builds register, an uncaptured one is refused, and 17.4.2 offers no fork', async () => {
     const nineteenFile = join(DISCOVERY_SESSION_DIR, '2026-11-24T00-00-00-000Z_omp-nineteen.jsonl');
     writeFileSync(nineteenFile, JSON.stringify({ type: 'session', version: 3, id: 'omp-nineteen', timestamp: new Date().toISOString(), cwd: DISCOVERY_CWD }) + '\n');

@@ -181,6 +181,63 @@ process.exit(73);
   process.env.COSYNCING_OMP_BRIDGE_AUTOINSTALL = '0';
   resetOmpRuntimeReadinessCache();
 
+  // ── A file a newer omp wrote is not continued by an older configured omp ──
+  // omp 19.1.0 stamps `runtime:{version}` on every entry it appends (captured; the shape below is
+  // the captured one). omp 17.4.2 writes none and ignores 19.1.0's `activeLeafId`, so it could
+  // continue such a file on the wrong branch: Resume and native rename refuse before any spawn.
+  const { newestOmpWriterVersion, ompNativeWriteRefusal } = await import('../src/index.ts');
+  const sessionD = join(sessionsRoot, '2026-11-24_dddd.jsonl');
+  writeFileSync(sessionD, [
+    JSON.stringify({ type: 'title', v: 1, title: '', updatedAt: '2026-11-24T08:25:35.080Z', pad: '' }),
+    JSON.stringify({ type: 'session', version: 3, id: 'sess-d', timestamp: '2026-11-24T08:25:35.080Z', cwd: cwdA }),
+    JSON.stringify({ type: 'model_change', id: 'd1', parentId: null, timestamp: '2026-11-24T08:25:35.173Z', runtime: { version: '19.0.3' }, model: 'fixture-provider/fixture-model' }),
+    JSON.stringify({ type: 'message', id: 'd2', parentId: 'd1', timestamp: '2026-11-24T08:25:35.367Z', runtime: { version: '19.1.0' }, message: { role: 'user', content: [{ type: 'text', text: 'written by omp 19.1.0' }] } }),
+  ].join('\n') + '\n');
+  check('the newest writer stamp is read from the file',
+    newestOmpWriterVersion(sessionD) === '19.1.0' && newestOmpWriterVersion(sessionA) === undefined,
+    `${newestOmpWriterVersion(sessionD)}/${newestOmpWriterVersion(sessionA)}`);
+  check('only an omp older than the file\'s newest writer is refused',
+    /written by omp 19\.1\.0, which is newer than the omp 17\.4\.2/.test(ompNativeWriteRefusal(sessionD, '17.4.2') ?? '')
+      && ompNativeWriteRefusal(sessionD, '19.1.0') === undefined
+      && ompNativeWriteRefusal(sessionA, '17.4.2') === undefined
+      && ompNativeWriteRefusal(sessionD, undefined) === undefined);
+  const olderBin = join(root, 'omp-older');
+  const olderSpawnMarker = join(root, 'older-runtime-spawned');
+  writeFileSync(olderBin, `#!/usr/bin/env bun
+import { writeFileSync } from 'node:fs';
+if (process.argv.includes('--version')) { console.log('17.4.2'); process.exit(0); }
+writeFileSync(${JSON.stringify(olderSpawnMarker)}, 'spawned');
+process.exit(73);
+`);
+  chmodSync(olderBin, 0o755);
+  process.env.COSYNCING_OMP_BIN = olderBin;
+  resetOmpRuntimeReadinessCache();
+  const olderAdapter = new OmpAdapter({ brokerUrl: 'http://127.0.0.1:7734' });
+  const refusalOf = async (action: () => Promise<unknown>): Promise<{ name: string; message: string }> => {
+    try {
+      await action();
+      return { name: 'none', message: '' };
+    } catch (error) {
+      return { name: (error as Error).name, message: String((error as Error).message) };
+    }
+  };
+  const newerResume = await refusalOf(() => olderAdapter.attach(idOf(sessionD), 'resume'));
+  const newerRename = await refusalOf(() => olderAdapter.renameSession(idOf(sessionD), 'must not persist'));
+  check('omp 17.4.2 refuses Resume (unresumable) and native rename (alias fallback) of a file omp 19.1.0 wrote, before spawning',
+    newerResume.name === 'NativeSessionUnresumableError'
+      && /newer than the omp 17\.4\.2/.test(newerResume.message)
+      && newerRename.name === 'NativeSessionRenameUnsupportedError'
+      && !existsSync(olderSpawnMarker),
+    JSON.stringify({ newerResume, newerRename }));
+  const newerObserve = await olderAdapter.attach(idOf(sessionD), 'observe');
+  const newerHistory = await newerObserve.getHistory();
+  check('the refused file stays readable through Observe',
+    newerHistory.some((message) => message.type === 'user-message' && message.text === 'written by omp 19.1.0'));
+  await newerObserve.close();
+  rmSync(sessionD, { force: true });
+  delete process.env.COSYNCING_OMP_BIN;
+  resetOmpRuntimeReadinessCache();
+
   // ── omp 19.1.0 form dialogs, read and validated the way omp reads and validates them ──
   const { parsePiFormDialog, piFormAnswer, piFormQuestions } = await import('../../../pi-engine/src/form-dialog.ts');
   const controls = parsePiFormDialog(`<form>

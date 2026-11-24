@@ -51,6 +51,67 @@ export function ompSupportsRpcFork(version: unknown): boolean {
   return comparison !== undefined && comparison >= 0;
 }
 
+/** `"runtime":{"version":"…"` as omp 19.1.0 serializes the writer stamp on every entry it appends. */
+const OMP_WRITER_STAMP = /"runtime":\{"version":"([^"\\]{1,64})"/g;
+const OMP_WRITER_SCAN_CHUNK_BYTES = 1024 * 1024;
+
+/**
+ * The newest omp build that wrote any entry of a session file, from the `runtime.version` stamp
+ * omp 19.1.0 sets on every entry it appends (measured; `SessionEntryBase.runtime`). omp 17.4.2
+ * writes no stamp, so a file only it wrote has none: undefined. A stamp whose version does not
+ * compare counts as the newest, so it is never taken for an older writer. Read in bounded chunks,
+ * linear in the file's size; an unreadable file has no answer.
+ */
+export function newestOmpWriterVersion(sessionFile: string): string | undefined {
+  let fd: number | undefined;
+  try {
+    fd = openSync(sessionFile, 'r');
+    const buffer = Buffer.alloc(OMP_WRITER_SCAN_CHUNK_BYTES);
+    const decoder = new TextDecoder('utf-8');
+    let carry = '';
+    let position = 0;
+    let newest: string | undefined;
+    for (;;) {
+      const read = readSync(fd, buffer, 0, buffer.length, position);
+      if (read <= 0) break;
+      position += read;
+      const text = carry + decoder.decode(buffer.subarray(0, read), { stream: true });
+      for (const match of text.matchAll(OMP_WRITER_STAMP)) {
+        const version = match[1]!;
+        if (newest === undefined) {
+          newest = version;
+          continue;
+        }
+        const comparison = compareSemanticVersions(version, newest);
+        if (comparison === undefined || comparison > 0) newest = version;
+      }
+      // A stamp cut by the chunk boundary is matched again whole in the next window.
+      carry = text.slice(-128);
+    }
+    return newest;
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+/**
+ * Why the configured omp must not continue or change a session file: a newer omp wrote it. An older
+ * omp does not know the newer one's replay rules (omp 17.4.2 ignores the `activeLeafId` that omp
+ * 19.1.0 records for entries written off the active branch), so it could continue on the wrong
+ * branch. Undefined when the configured omp is at least as new as every writer, or its version is
+ * unknown (readiness refuses that case on its own).
+ */
+export function ompNativeWriteRefusal(sessionFile: string, configuredVersion: string | undefined): string | undefined {
+  if (!configuredVersion) return undefined;
+  const writer = newestOmpWriterVersion(sessionFile);
+  if (writer === undefined) return undefined;
+  const comparison = compareSemanticVersions(writer, configuredVersion);
+  if (comparison !== undefined && comparison <= 0) return undefined;
+  return `This omp session was written by omp ${writer}, which is newer than the omp ${configuredVersion} cosyncing runs, so cosyncing will not continue or change it. Continue it in a terminal with omp ${writer}, or update the omp cosyncing uses; it stays readable here.`;
+}
+
 /** The verified versions as prose: `17.4.2 and 19.1.0`. */
 export function ompVerifiedVersionsText(): string {
   const versions = [...OMP_VERIFIED_VERSIONS];
