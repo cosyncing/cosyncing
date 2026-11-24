@@ -235,6 +235,25 @@ process.exit(73);
   const after = await ompNativeWriteRefusal(growing, '19.1.0');
   check('the cached reading follows the file when it changes',
     before === undefined && /written by omp 19\.2\.0/.test(after ?? ''), JSON.stringify({ before, after }));
+  // A later omp may order the runtime keys differently, or write the stamp after a large payload:
+  // the top-level stamp is still found, past a nested one, without parsing the entry whole.
+  const reordered = stampFile('stamps-reordered', [JSON.stringify({
+    type: 'message', id: 's1', parentId: null, timestamp: '2026-11-24T08:25:35.367Z',
+    runtime: { build: 'later', version: '19.2.0' },
+    message: { role: 'user', content: [{ type: 'text', text: 'ok' }] },
+  })]);
+  const payloadFirst = stampFile('stamps-payload-first', [JSON.stringify({
+    type: 'message', id: 's1', parentId: null, timestamp: '2026-11-24T08:25:35.367Z',
+    message: { role: 'toolResult', content: [{ type: 'text', text: 'x'.repeat(4 * 1024 * 1024) }], details: { runtime: { version: '22.11.0' } } },
+    runtime: { version: '19.2.0' },
+  })]);
+  const walkStarted = performance.now();
+  const reorderedStamps = await readOmpWriterStamps(reordered);
+  const payloadFirstStamps = await readOmpWriterStamps(payloadFirst);
+  const walkMs = performance.now() - walkStarted;
+  check('the top-level stamp is found whatever its key order and after a 4 MiB payload',
+    reorderedStamps.newest === '19.2.0' && payloadFirstStamps.newest === '19.2.0' && walkMs < 2_000,
+    `${Math.round(walkMs)} ms ${JSON.stringify({ reorderedStamps, payloadFirstStamps })}`);
   const olderBin = join(root, 'omp-older');
   const olderSpawnMarker = join(root, 'older-runtime-spawned');
   writeFileSync(olderBin, `#!/usr/bin/env bun

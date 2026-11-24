@@ -52,10 +52,90 @@ export function ompSupportsRpcFork(version: unknown): boolean {
   return comparison !== undefined && comparison >= 0;
 }
 
-/** Where omp 19.1.0's writer stamp sits in a serialized entry; only a line that has it is parsed. */
-const OMP_WRITER_MARKER = '"runtime":{"version":"';
+/** A `runtime` key as omp serializes it, in any key order; only a line that has one is read. */
+const OMP_WRITER_MARKER = '"runtime":';
 const OMP_WRITER_SCAN_CHUNK_BYTES = 1024 * 1024;
 const OMP_WRITER_CACHE_LIMIT = 64;
+/** A top-level `runtime` value longer than this is not read: omp's writer stamp is a few dozen. */
+const OMP_WRITER_RUNTIME_MAX_CHARS = 4096;
+
+const isJsonSpace = (code: number): boolean => code === 32 || code === 9 || code === 10 || code === 13;
+
+/** Where the JSON string opening at `open` ends (past its closing quote), or the line's end. */
+function jsonStringEnd(line: string, open: number): number {
+  let at = open + 1;
+  while (at < line.length) {
+    const code = line.charCodeAt(at);
+    if (code === 92 /* \ */) at += 2;
+    else if (code === 34 /* " */) return at + 1;
+    else at++;
+  }
+  return line.length;
+}
+
+/** Where the JSON value starting at `start` ends, or -1 when it runs past `max` characters or the
+ *  line ends first (a torn last line). */
+function jsonValueEnd(line: string, start: number, max: number): number {
+  const limit = Math.min(line.length, start + max);
+  let depth = 0;
+  let at = start;
+  while (at < limit) {
+    const code = line.charCodeAt(at);
+    if (code === 34) {
+      at = jsonStringEnd(line, at);
+      if (depth === 0) return at <= limit ? at : -1;
+      continue;
+    }
+    if (code === 123 || code === 91) depth++;
+    else if (code === 125 || code === 93) {
+      // A scalar ends at the brace that closes its entry; an object or array at its own last brace.
+      if (depth === 0) return at;
+      if (--depth === 0) return at + 1;
+    } else if (code === 44 && depth === 0) return at;
+    at++;
+  }
+  return -1;
+}
+
+/**
+ * The top-level `runtime` value of one serialized entry, without parsing the rest of it: one forward
+ * walk that skips strings and nested values, stopping at the entry's own `runtime` key, so an entry
+ * of any size costs one linear pass and allocates only that value. Undefined when the entry has no
+ * top-level `runtime`, or its value is longer than {@link OMP_WRITER_RUNTIME_MAX_CHARS} or does not
+ * parse (a torn last line): neither is a writer stamp this reader can use.
+ */
+function topLevelRuntime(line: string): unknown {
+  const length = line.length;
+  let at = 0;
+  while (at < length && isJsonSpace(line.charCodeAt(at))) at++;
+  if (line.charCodeAt(at) !== 123 /* { */) return undefined;
+  let depth = 0;
+  while (at < length) {
+    const code = line.charCodeAt(at);
+    if (code === 34) {
+      const start = at;
+      at = jsonStringEnd(line, at);
+      if (depth !== 1) continue;
+      // A string at the entry's own level followed by `:` is one of its keys.
+      let colon = at;
+      while (colon < length && isJsonSpace(line.charCodeAt(colon))) colon++;
+      if (line.charCodeAt(colon) !== 58 /* : */ || at - start !== 9 || line.slice(start, at) !== '"runtime"') continue;
+      let value = colon + 1;
+      while (value < length && isJsonSpace(line.charCodeAt(value))) value++;
+      const end = jsonValueEnd(line, value, OMP_WRITER_RUNTIME_MAX_CHARS);
+      if (end < 0) return undefined;
+      try {
+        return JSON.parse(line.slice(value, end));
+      } catch {
+        return undefined;
+      }
+    }
+    if (code === 123 || code === 91) depth++;
+    else if (code === 125 || code === 93) depth--;
+    at++;
+  }
+  return undefined;
+}
 
 /** The omp writer stamps of one session file. */
 export interface OmpWriterStamps {
@@ -70,11 +150,12 @@ const ompWriterStampCache = new Map<string, { size: number; mtimeMs: number; sta
 /**
  * The writer stamps of a session file, from the `runtime.version` omp 19.1.0 sets on every entry it
  * appends (measured; `SessionEntryBase.runtime`). omp 17.4.2 writes none, so a file only it wrote
- * has no newest version. Only an entry's own top-level `runtime` counts: a line that carries the
- * marker is parsed, so an object of the same shape nested in it (a tool's `details`) is not taken
- * for a writer. The file is read asynchronously in bounded chunks, linear in its size, and the
- * result is cached by path, size and mtime, so the broker reads each version of a file once. An
- * unreadable file has no stamps.
+ * has no newest version. Only an entry's own top-level `runtime` counts, with its keys in any
+ * order: a line that carries a `runtime` key is walked to its top-level one
+ * ({@link topLevelRuntime}), so an object of the same shape nested in it (a tool's `details`) is not
+ * taken for a writer, and a large entry is never parsed whole. The file is read asynchronously in
+ * bounded chunks, linear in its size, and the result is cached by path, size and mtime, so the
+ * broker reads each version of a file once. An unreadable file has no stamps.
  */
 export async function readOmpWriterStamps(sessionFile: string): Promise<OmpWriterStamps> {
   let handle: FileHandle | undefined;
@@ -86,13 +167,7 @@ export async function readOmpWriterStamps(sessionFile: string): Promise<OmpWrite
     const stamps: OmpWriterStamps = { incomparable: false };
     const take = (line: string): void => {
       if (!line.includes(OMP_WRITER_MARKER)) return;
-      let entry: unknown;
-      try {
-        entry = JSON.parse(line);
-      } catch {
-        return;
-      }
-      const runtime = entry !== null && typeof entry === 'object' ? (entry as { runtime?: unknown }).runtime : undefined;
+      const runtime = topLevelRuntime(line);
       const version = runtime !== null && typeof runtime === 'object' ? (runtime as { version?: unknown }).version : undefined;
       if (typeof version !== 'string') return;
       if (compareSemanticVersions(version, version) === undefined) {
