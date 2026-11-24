@@ -28,7 +28,11 @@ The adapter reads Reasonix's local session store and starts a workspace-scoped
 catalog. Observe-only connections do not start Reasonix.
 `REASONIX_HOME` is honored when Reasonix uses a non-default store root.
 The broker checks the installed version about once an hour, and again on the
-next refresh after the `reasonix` executable is reinstalled or replaced.
+next refresh after the `reasonix` executable is reinstalled or replaced. When
+`reasonix` on the `PATH` is a version-manager shim, the broker sees the shim,
+which does not change when the manager switches versions behind it: after such
+a switch, run `cosy restart` or allow up to an hour before Drive follows the
+new version.
 
 ## Moving from 1.25.2 to 2.61.0
 
