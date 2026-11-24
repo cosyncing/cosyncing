@@ -84,20 +84,26 @@
  *   is a per-COMMAND-NAME allowlist of 84 entries (MEASURED) — dsh's situation,
  *   not kimi's per-session one.
  *   THERE ARE TWO AXES, and conflating them was the error in the earlier answer.
- *   `--mode` selects an EXECUTION mode and takes exactly three values —
- *   `default`, `accept-edits`, `plan` — verbatim from the 1.1.20 binary's own
- *   flag help and its `shift+tab` cycle hint. `always-proceed` / `request-review`
- *   / `strict` are the separate AUTO-APPROVAL policy and have no flag at all.
- *   `full-access` is not a value of either: the string does not occur in the
- *   binary.
+ *   The EXECUTION mode was three values on 1.1.20 — `default`, `accept-edits`,
+ *   `plan`, verbatim from the binary's own flag help and its `shift+tab` cycle
+ *   hint — and is four since 1.3.5 added `auto`. `always-proceed` /
+ *   `request-review` / `strict` are the separate AUTO-APPROVAL policy and have no
+ *   flag at all. `full-access` is not a value of either: the string does not
+ *   occur in the binary.
+ *   AG-4 (MEASURED 2026-11-24 / 1.5.16): since 1.5.7 a launch that names no mode
+ *   runs in Auto wherever agy offers it, and `--mode default` is refused ("valid:
+ *   accept-edits, auto, plan"). So every Drive launch names its mode, encoded per
+ *   agy version (`agyModeLaunchArgs`): Default is pinned with
+ *   `--settings '{"agentMode":""}'`, other modes add `--mode`.
  *   That is why `init.permission_mode` reports `"request-review"` under
  *   `--mode=plan`, `--mode=accept-edits` AND no `--mode` — it answers the OTHER
  *   axis. So `init` can NEVER be the source of `currentMode` (the earlier answer
  *   said it was); a DRIVE connection publishes the mode it LAUNCHED with, which
- *   is the only thing that knows. `listModes()` returns the three; a `--mode`
- *   outside them is dropped before launch with a trace, because the host silently
- *   ignores an unrecognized value and the row would then advertise a posture the
- *   child is not in.
+ *   is the only thing that knows. `listModes()` returns the four (less `auto` on an
+ *   agy older than 1.3.5); a mode outside them is replaced by Default before
+ *   launch with a trace, because the host does not apply an unrecognized value
+ *   and the row would then advertise a posture the child is not in. When agy says
+ *   on stderr that it did not apply the launched mode, the row is corrected.
  *   A DISCOVERY row carries no `currentMode` from agy. C2 is SETTLED and the
  *   answer is that no record exists — `--mode=accept-edits` leaves no trace
  *   anywhere in the store, `--mode=plan` shows only as a `/plan` prefix on user
@@ -264,7 +270,7 @@
  *   | `usage.thinking`            | unsupported       | agy reports a fourth token bucket the protocol has no field for. NOT folded into `output` — inventing a sum is the exact error `token-count` warns about |
  *   | `respondPermission`         | unsupported       | agy publishes no permission channel over stream-json, and answering by writing a prompt would put words in the conversation the user never typed |
  *   | `listModels`                | SUPPORTED (P2a)   | 19 rows from the cockpit catalog; effort variants collapsed, `--effort` never passed (Q1) |
- *   | `listModes`                 | SUPPORTED (P2b)   | the three `--mode` values compiled into the binary's own flag help (Q2) |
+ *   | `listModes`                 | SUPPORTED (P2b)   | the execution modes compiled into the binary (Q2): `default`, `accept-edits`, `auto` (1.3.5+), `plan` |
  *   | `--effort` on the wire      | unsupported       | a real flag, deliberately unused: every catalog id is already an effort variant and the binary rejects `--model <variant> --effort <same>` |
  *   | slash commands              | unsupported       | upstream: `/x` is "unavailable with `--input-format stream-json`" — so `listCommands` stays absent under drive |
  *   | `exportTranscript`          | SUPPORTED (P2f)   | no export subcommand exists, so the export IS the JSONL re-emitted as one JSON document, through the same bounded reader history uses |
@@ -670,7 +676,7 @@ export class AgyAdapter implements AgentBackend {
 
   /**
    * The mode the app last drove `sessionId` with, when the broker recorded one agy accepts.
-   * A value outside the three `--mode` values is never published: the host would drop it.
+   * A value outside agy's modes is never published: the host would not apply it.
    */
   private storedCurrentMode(sessionId: string): string | undefined {
     let mode: string | undefined;

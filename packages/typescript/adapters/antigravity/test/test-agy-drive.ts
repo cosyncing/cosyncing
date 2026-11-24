@@ -44,6 +44,12 @@ import {
 } from '../src/index.ts';
 import { buildAgyFixtureTree, FIXTURE, jsonl, writeFakeAgyBinary, type AgyFakeScript } from './fixtures/tree.ts';
 
+/** Verbatim agy 1.5.16 output on modes (AG-4) — see `_provenance` in the file. */
+const MODES_1_5_16 = await Bun.file(new URL('./fixtures/agy-1.5.16-modes.json', import.meta.url)).json() as {
+  versionStdout: string;
+  stderr: { modeDefaultRefused: string; modeAutoUnavailable: string };
+};
+
 const results: Array<{ name: string; ok: boolean }> = [];
 function check(name: string, ok: boolean, detail = ''): void {
   results.push({ name, ok });
@@ -541,28 +547,146 @@ function newDrive(
   }
 }
 
-// ── 11b. A mode agy would silently drop never becomes `currentMode` ─────────
+// ── 11b. A mode agy would not apply never becomes `currentMode` ─────────────
 //
-// The host's own 1.1.20 changelog records fixing "`--mode` being ignored … an
-// unrecognized value produced no warning at all". So passing one leaves the
-// child in `default` while the row advertises the mode that was asked for: the
-// client believes X, the session is Y, and nothing says so (reflection §11).
+// agy does not apply a `--mode` it does not recognize: it warns and runs in its
+// own startup mode (MEASURED 1.5.16, AG-4). So passing one leaves the child in a
+// mode the row does not name: the client believes X, the session is Y
+// (reflection §11). Such a value is replaced by Default before launch.
 {
   const h = newDrive({ init: INIT_EVENT, defaultTurn: [RESULT_OK] }, { mode: 'request-review' });
   try {
-    check('an off-vocabulary launch mode is refused before it can be advertised',
-      h.connection.info.currentMode === undefined,
+    check('an off-vocabulary launch mode is refused before it can be advertised; the row names Default',
+      h.connection.info.currentMode === 'default',
       JSON.stringify({ currentMode: h.connection.info.currentMode }));
     await h.connection.getHistory();
     await h.connection.sendPrompt({ text: 'go', permissionMode: 'full-access' });
     await waitFor(() => h.fake.launches() === 1);
     const launched = h.fake.argv() ?? [];
-    check('a per-turn mode agy does not have is dropped from the argv, with a trace',
-      !launched.includes('--mode') && h.traces.some((trace) => trace.op === 'drive-mode-rejected'),
+    check('a per-turn mode agy does not have launches Default instead, with a trace',
+      !launched.includes('--mode') && !launched.includes('full-access')
+        && h.traces.some((trace) => trace.op === 'drive-mode-rejected'),
       `${launched.join(' ')} / ${h.traces.map((trace) => trace.op).join(',')}`);
     check('the dropped mode never reaches `currentMode` either',
-      h.connection.info.currentMode === undefined,
+      h.connection.info.currentMode === 'default',
       String(h.connection.info.currentMode));
+  } finally {
+    h.cleanup();
+  }
+}
+
+// ── 11c. Every launch names its mode, for the agy that runs it (AG-4) ───────
+//
+// Since agy 1.5.7 a launch that names no mode runs in Auto wherever agy offers
+// it (changelog and docs), and on 1.5.16 `--mode default` is refused (MEASURED
+// 2026-11-24). So the first child of a session nobody chose a mode for must still be
+// launched in Default, pinned with session settings; Auto is a choice, and agy's
+// own "not available" answer moves the row back to Default and says so. The fake
+// prints the version and the stderr lines agy 1.5.16 printed, verbatim
+// (`fixtures/agy-1.5.16-modes.json`).
+/** The notices a harness's connection emitted, oldest first. */
+const notices = (h: Harness): string[] =>
+  h.messages.filter((m) => m.type === 'notice').map((m) => (m as { message: string }).message);
+{
+  const h = newDrive({ init: INIT_EVENT, defaultTurn: [RESULT_OK], version: MODES_1_5_16.versionStdout.trim() });
+  try {
+    check('before any launch the row names Default — the mode the first child will be launched in',
+      h.connection.info.currentMode === 'default', String(h.connection.info.currentMode));
+    await h.connection.getHistory();
+    await h.connection.sendPrompt({ text: 'no mode chosen' });
+    await waitFor(() => h.fake.launches() === 1 && (h.fake.argv() ?? []).length > 0);
+    const argv = h.fake.argv() ?? [];
+    check('1.5.16, no mode chosen: the child is pinned to Default, never left to agy\'s Auto',
+      argv.includes('--settings') && argv[argv.indexOf('--settings') + 1] === '{"agentMode":""}'
+        && !argv.includes('--mode'),
+      argv.join(' '));
+    check('…and the row says Default', h.connection.info.currentMode === 'default', String(h.connection.info.currentMode));
+    const modes = await h.connection.listModes();
+    check('1.5.16 offers Auto in the existing picker',
+      modes.map((mode) => mode.value).join(',') === 'default,accept-edits,auto,plan',
+      modes.map((mode) => mode.value).join(','));
+  } finally {
+    h.cleanup();
+  }
+}
+{
+  // agy answers `--mode auto` with its own "not available" warning on stderr.
+  const h = newDrive({
+    init: INIT_EVENT,
+    defaultTurn: [RESULT_OK],
+    version: MODES_1_5_16.versionStdout.trim(),
+    stderr: MODES_1_5_16.stderr.modeAutoUnavailable,
+  });
+  try {
+    await h.connection.getHistory();
+    await h.connection.sendPrompt({ text: 'go auto', permissionMode: 'auto' });
+    await waitFor(() => h.fake.launches() === 1 && (h.fake.argv() ?? []).length > 0);
+    const argv = h.fake.argv() ?? [];
+    check('Auto rides --mode over the Default pin',
+      argv.slice(argv.indexOf('--mode'), argv.indexOf('--mode') + 2).join(' ') === '--mode auto'
+        && argv.includes('--settings'),
+      argv.join(' '));
+    check('the row first names the mode the child was launched in',
+      h.messages.some((m) => m.type === 'metadata-update'
+        && JSON.stringify((m as { value: unknown }).value) === '{"currentMode":"auto"}'),
+      h.messages.filter((m) => m.type === 'metadata-update').map((m) => JSON.stringify(m)).join(' | '));
+    check('agy\'s "not available" warning moves the row to Default, which the pin makes true',
+      await waitFor(() => h.connection.info.currentMode === 'default'),
+      String(h.connection.info.currentMode));
+    check('the user is told the turn runs in Default, not Auto',
+      notices(h).some((message) => /Auto mode is not available.*runs in Default/.test(message)),
+      notices(h).join(' | '));
+    check('the warning is traced', h.traces.some((trace) => trace.op === 'drive-mode-warning'),
+      h.traces.map((trace) => trace.op).join(','));
+  } finally {
+    h.cleanup();
+  }
+}
+{
+  // An agy older than Auto: the stored Auto launches Default, the picker drops Auto, and nothing pins settings.
+  const h = newDrive({ init: INIT_EVENT, defaultTurn: [RESULT_OK], version: '1.1.20' }, { mode: 'auto' });
+  try {
+    await h.connection.getHistory();
+    await h.connection.sendPrompt({ text: 'old agy' });
+    await waitFor(() => h.fake.launches() === 1 && (h.fake.argv() ?? []).length > 0);
+    const argv = h.fake.argv() ?? [];
+    check('before 1.5.7 Default rides `--mode default`, with no --settings flag that agy lacks',
+      argv.slice(argv.indexOf('--mode'), argv.indexOf('--mode') + 2).join(' ') === '--mode default'
+        && !argv.includes('--settings'),
+      argv.join(' '));
+    check('a stored Auto on an agy without Auto ends as Default on the row, and the user is told',
+      h.connection.info.currentMode === 'default' && notices(h).some((message) => /has no Auto mode/.test(message)),
+      `${String(h.connection.info.currentMode)}; ${notices(h).join(' | ')}`);
+    const modes = await h.connection.listModes();
+    check('the picker offers no Auto on an agy that predates it',
+      modes.map((mode) => mode.value).join(',') === 'default,accept-edits,plan', modes.map((mode) => mode.value).join(','));
+  } finally {
+    h.cleanup();
+  }
+}
+{
+  // A refused `--mode` (the captured 1.5.16 line, on a version this adapter still
+  // encodes with `--mode default`) leaves the child in a mode nobody named.
+  const h = newDrive({
+    init: INIT_EVENT,
+    defaultTurn: [RESULT_OK],
+    version: '1.5.6',
+    stderr: MODES_1_5_16.stderr.modeDefaultRefused,
+  });
+  try {
+    await h.connection.getHistory();
+    await h.connection.sendPrompt({ text: 'refused' });
+    check('a mode agy refused is cleared from the row rather than left as the one asked for',
+      await waitFor(() => h.connection.info.currentMode === undefined),
+      String(h.connection.info.currentMode));
+    check('…explicitly, so clients drop the old posture',
+      h.messages.some((m) => m.type === 'metadata-update'
+        && JSON.stringify((m as { value: unknown }).value) === '{}'
+        && 'currentMode' in ((m as { value: Record<string, unknown> }).value)),
+      h.messages.filter((m) => m.type === 'metadata-update').map((m) => JSON.stringify(m)).join(' | '));
+    check('and the user is told agy did not accept it',
+      notices(h).some((message) => /did not accept the Default mode/.test(message)),
+      notices(h).join(' | '));
   } finally {
     h.cleanup();
   }

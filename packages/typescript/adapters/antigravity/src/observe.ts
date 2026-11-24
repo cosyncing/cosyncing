@@ -56,13 +56,14 @@ import {
   type AgyFrame,
   type AgyTailReadResult,
 } from './safe-read.ts';
-import { agyCliCatalogForPicker, type AgyCliCatalogOptions } from './cli-catalog.ts';
+import { agyCliCatalogForPicker, agyCliVersion, type AgyCliCatalogOptions } from './cli-catalog.ts';
 import {
   AGY_MODES,
   AGY_TASK_ID_SEGMENT,
   AGY_TASK_LOG_BUDGET_BYTES,
   AGY_TASK_LOG_MAX_BYTES,
   agyModelOptions,
+  agyModesFor,
   agyTaskLogPath,
   agyTranscriptFullPath,
   agyTranscriptPath,
@@ -130,7 +131,8 @@ export class AgyObserveConnection implements SessionConnection {
   protected readonly conversationId: string;
   protected readonly trace?: AgyTraceSink;
   private readonly catalogBinary?: string;
-  private readonly catalogOptions?: AgyCliCatalogOptions;
+  /** The probes' options (trace, clock, recovery stamp); the Drive reads agy's version with them too. */
+  protected readonly catalogOptions?: AgyCliCatalogOptions;
   private readonly queuedSendsLookup?: () => AgyQueuedSends | undefined;
   private readonly handlers = new Set<AgentMessageHandler>();
   protected readonly path: string;
@@ -808,11 +810,19 @@ export class AgyObserveConnection implements SessionConnection {
   }
 
   /**
-   * The three `--mode` values agy accepts. Static because the host's list is:
-   * they are compiled into the binary's flag help, not published in any file.
+   * The modes agy runs sessions in. The host publishes them in no file — they are
+   * compiled into the binary — so the list is the adapter's own, less Auto where
+   * the installed agy predates it (AG-4: Auto arrived in 1.3.5, 1.4.4 on Windows).
+   * The version is one cached `agy --version` per binary image; without a binary
+   * the whole list is offered, as for current upstream.
    */
   async listModes(): Promise<ModeOption[]> {
-    return AGY_MODES;
+    if (!this.catalogBinary) return AGY_MODES;
+    const version = await agyCliVersion(
+      this.catalogBinary,
+      this.catalogOptions ?? { ...(this.trace ? { trace: this.trace } : {}) },
+    );
+    return agyModesFor(version);
   }
 
   // ── Observe is read-only ───────────────────────────────────────────────────

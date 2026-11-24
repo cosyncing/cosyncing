@@ -32,7 +32,9 @@ import {
 import {
   AGY_CLI_MODELS_MAX_BACKOFF_MS,
   AGY_CLI_MODELS_TTL_MS,
+  AGY_NO_AUTO_UPDATE_ENV,
   agyCliCatalogFailure,
+  agyCliVersion,
   agyCliModelsBackoffMs,
   agyProbeEnv,
   cachedAgyCliCatalog,
@@ -42,6 +44,7 @@ import {
   resetAgyCliCatalogForTests,
 } from '../src/cli-catalog.ts';
 import {
+  AGY_DEFAULT_MODE_SETTINGS,
   AGY_MODES,
   AGY_REASONING_EFFORTS,
   AGY_SETTLEMENT_MAX_FILES,
@@ -52,6 +55,11 @@ import {
   agyTaskLogPath,
   groupAgyModelFamilies,
   isAgyMode,
+  agyModeLaunchArgs,
+  agyModesFor,
+  compareAgyVersions,
+  parseAgyModeWarning,
+  parseAgyVersion,
   parseAgyModelVariant,
   resolveAgyLaunchModel,
   scanAgyBrainDirs,
@@ -86,6 +94,15 @@ const CLI_LOG = await Bun.file(new URL('./fixtures/agy-cli-log.json', import.met
   signInNetworkError: string[];
   signInRestored: string[];
   modelAlias: string[];
+};
+
+/** Verbatim agy 1.5.16 output on modes and its updater (AG-4) — see `_provenance` in the file. */
+const MODES_1_5_16 = await Bun.file(new URL('./fixtures/agy-1.5.16-modes.json', import.meta.url)).json() as {
+  versionStdout: string;
+  helpModeLine: string;
+  stderr: { modeDefaultRefused: string; modeBogusRefused: string; modeAutoUnavailable: string; settingsDefaultRefused: string };
+  log: { modeApplied: string; modeAutoUnavailable: string; updaterDisabled: string; updaterSpawned: string };
+  updaterByValue: Record<string, string>;
 };
 
 /** Point `<appData>/cli.log` at `log/<name>` holding `lines`, the relative link agy itself writes. */
@@ -871,27 +888,142 @@ const IDS = FIXTURE.conversationIds;
   }
 }
 
-// ── 10. The mode picker (P2b) ──────────────────────────────────────────────
+// ── 10. The mode picker (P2b, AG-4) ─────────────────────────────────────────
 //
-// Three values, compiled into the binary's own flag help. The values that are
+// Four modes in agy's own cycle order, `auto` since 1.3.5. The values that are
 // NOT here matter as much as the ones that are: `full-access` occurs nowhere in
 // the binary, and `request-review`/`always-proceed`/`strict` belong to the
 // separate auto-approval axis that has no flag at all.
 {
-  check('listModes offers exactly the three `--mode` values the binary documents',
-    JSON.stringify(AGY_MODES.map((mode) => mode.value)) === JSON.stringify(['default', 'accept-edits', 'plan']),
+  check('listModes offers the four modes in agy\'s own cycle order',
+    JSON.stringify(AGY_MODES.map((mode) => mode.value)) === JSON.stringify(['default', 'accept-edits', 'auto', 'plan']),
     AGY_MODES.map((mode) => mode.value).join(','));
   check('`full-access` is not among them — it is not a value agy has',
     !AGY_MODES.some((mode) => mode.value === 'full-access'));
-  check('the auto-approval vocabulary is NOT offered as a --mode',
+  check('the auto-approval vocabulary is NOT offered as a mode',
     !AGY_MODES.some((mode) => ['request-review', 'always-proceed', 'strict'].includes(mode.value)));
   check('plan is filed as custom, not as a permission posture',
     AGY_MODES.find((mode) => mode.value === 'plan')?.category === 'custom');
+  check('auto sits in the existing approve-for-me group with accept-edits, not as full access',
+    AGY_MODES.find((mode) => mode.value === 'auto')?.category === 'approve-for-me');
   check('every mode carries the host\'s own one-clause description',
     AGY_MODES.every((mode) => (mode.description ?? '').length > 0));
-  check('isAgyMode accepts the three and refuses everything else',
-    isAgyMode('plan') && isAgyMode('default') && isAgyMode('accept-edits')
+  check('isAgyMode accepts the four and refuses everything else',
+    isAgyMode('plan') && isAgyMode('default') && isAgyMode('accept-edits') && isAgyMode('auto')
       && !isAgyMode('request-review') && !isAgyMode('full-access') && !isAgyMode(undefined));
+
+  // AG-4: the binary's own vocabulary and version, as 1.5.16 printed them.
+  check('1.5.16\'s `--mode` help names accept-edits, auto and plan — and not default',
+    MODES_1_5_16.helpModeLine.includes('(accept-edits, auto, plan)'), MODES_1_5_16.helpModeLine);
+  check('`agy --version` output parses to its version', parseAgyVersion(MODES_1_5_16.versionStdout) === '1.5.16');
+  check('versions compare numerically, not as text',
+    compareAgyVersions('1.5.16', '1.5.7') > 0 && compareAgyVersions('1.3.5', '1.3.5') === 0
+      && compareAgyVersions('1.1.20', '1.3.5') < 0);
+  check('the picker drops auto only for an agy that predates it (1.3.5; 1.4.4 on Windows)',
+    !agyModesFor('1.1.20', 'linux').some((mode) => mode.value === 'auto')
+      && agyModesFor('1.3.5', 'linux').some((mode) => mode.value === 'auto')
+      && !agyModesFor('1.4.0', 'win32').some((mode) => mode.value === 'auto')
+      && agyModesFor('1.5.16', 'win32').length === 4
+      && agyModesFor(undefined, 'linux').length === 4,
+    agyModesFor('1.1.20', 'linux').map((mode) => mode.value).join(','));
+
+  // Every launch names its mode. On 1.5.16 `--mode default` is refused, so Default
+  // is pinned through session settings, and every other mode adds `--mode`.
+  const current = (mode?: string) => agyModeLaunchArgs(mode, '1.5.16', 'linux');
+  check('1.5.16: Default is pinned with `--settings {"agentMode":""}`, never `--mode default`',
+    JSON.stringify(current('default').args) === JSON.stringify(['--settings', AGY_DEFAULT_MODE_SETTINGS])
+      && AGY_DEFAULT_MODE_SETTINGS === '{"agentMode":""}',
+    JSON.stringify(current('default').args));
+  check('1.5.16: no mode chosen is Default, not agy\'s own Auto',
+    JSON.stringify(current(undefined)) === JSON.stringify(current('default')) && current(undefined).mode === 'default');
+  check('1.5.16: auto, accept-edits and plan ride --mode over the Default pin',
+    ['auto', 'accept-edits', 'plan'].every((mode) => JSON.stringify(current(mode).args)
+      === JSON.stringify(['--settings', AGY_DEFAULT_MODE_SETTINGS, '--mode', mode])),
+    JSON.stringify(current('auto').args));
+  check('1.5.16: every launch pins Default, so agy\'s "continuing in the default mode" means Default',
+    ['default', 'accept-edits', 'auto', 'plan'].every((mode) => current(mode).pinsDefault));
+  check('an unknown version is encoded as current upstream, never as the old `--mode default`',
+    JSON.stringify(agyModeLaunchArgs('default', undefined, 'linux').args) === JSON.stringify(current('default').args));
+  check('before 1.5.7 every mode is `--mode <mode>`, default included, with no --settings',
+    JSON.stringify(agyModeLaunchArgs('default', '1.1.20', 'linux').args) === JSON.stringify(['--mode', 'default'])
+      && JSON.stringify(agyModeLaunchArgs('auto', '1.4.10', 'linux').args) === JSON.stringify(['--mode', 'auto'])
+      && !agyModeLaunchArgs('plan', '1.5.6', 'linux').pinsDefault);
+  const tooOld = agyModeLaunchArgs('auto', '1.1.20', 'linux');
+  check('auto on an agy older than 1.3.5 launches Default and says why',
+    tooOld.mode === 'default' && JSON.stringify(tooOld.args) === JSON.stringify(['--mode', 'default'])
+      && (tooOld.refused ?? '').includes('1.1.20'),
+    JSON.stringify(tooOld));
+  const offVocabulary = agyModeLaunchArgs('full-access', '1.5.16', 'linux');
+  check('a value agy has no mode for launches Default and says why',
+    offVocabulary.mode === 'default' && (offVocabulary.refused ?? '').includes('full-access'),
+    JSON.stringify(offVocabulary));
+
+  // agy's own stderr when it does not apply a mode — the lines the drive reads.
+  const refusedDefault = parseAgyModeWarning(MODES_1_5_16.stderr.modeDefaultRefused);
+  check('the captured `--mode default` refusal reads as unrecognized "default"',
+    refusedDefault?.kind === 'unrecognized' && refusedDefault.value === 'default', JSON.stringify(refusedDefault));
+  const refusedBogus = parseAgyModeWarning(MODES_1_5_16.stderr.modeBogusRefused);
+  check('the captured refusal of an unknown value names that value',
+    refusedBogus?.kind === 'unrecognized' && refusedBogus.value === 'bogus', JSON.stringify(refusedBogus));
+  const unavailable = parseAgyModeWarning(MODES_1_5_16.stderr.modeAutoUnavailable);
+  check('the captured "auto is not available" warning reads as unavailable auto',
+    unavailable?.kind === 'unavailable' && unavailable.value === 'auto', JSON.stringify(unavailable));
+  check('other stderr — the settings refusal, agy\'s log lines — is not a mode warning',
+    parseAgyModeWarning(MODES_1_5_16.stderr.settingsDefaultRefused) === undefined
+      && parseAgyModeWarning(MODES_1_5_16.log.modeAutoUnavailable) === undefined
+      && parseAgyModeWarning(MODES_1_5_16.log.modeApplied) === undefined
+      && parseAgyModeWarning('warning: ignoring unsupported stream input message event "future_thing"') === undefined);
+}
+
+// ── 10b. The installed agy's version is read once per binary image (AG-4) ────
+//
+// The Drive encodes its mode per agy version and the picker offers Auto only to an
+// agy that has it, so the version is read with `agy --version` — the probe 1.5.16
+// answered in 0.13 s without a run log — once per binary image, with agy's
+// self-update off. A stand-in prints the captured output and records each run.
+{
+  const tree = buildAgyFixtureTree();
+  try {
+    resetAgyCliCatalogForTests();
+    const binDir = join(tree.dir, 'version-bin');
+    mkdirSync(binDir, { recursive: true });
+    const binary = join(binDir, 'agy');
+    const runsFile = join(binDir, 'runs');
+    const writeStandIn = (version: string) => {
+      writeFileSync(binary, [
+        '#!/bin/sh',
+        '[ "$1" = "--version" ] || exit 64',
+        `printf '%s\\n' "\${AGY_CLI_DISABLE_AUTO_UPDATE-unset}" >> '${runsFile}'`,
+        `printf '%s' '${version}'`,
+        '',
+      ].join('\n'));
+      chmodSync(binary, 0o755);
+    };
+    const runs = () => (existsSync(runsFile) ? readFileSync(runsFile, 'utf8').split('\n').filter(Boolean) : []);
+    writeStandIn(MODES_1_5_16.versionStdout);
+    const traces: AgyTrace[] = [];
+    const first = await agyCliVersion(binary, { trace: (trace) => traces.push(trace) });
+    const again = await agyCliVersion(binary, { trace: (trace) => traces.push(trace) });
+    check('the version is read from `agy --version`, once for the same binary image',
+      first === '1.5.16' && again === '1.5.16' && runs().length === 1, `${first}/${again}; ${runs().length} runs`);
+    check('the version read runs with agy\'s self-update off', runs().every((value) => value === 'true'), runs().join(','));
+    check('the read is traced with the version it found',
+      traces.some((trace) => trace.op === 'cli-version' && trace.detail.includes('1.5.16')),
+      traces.map((trace) => trace.detail).join(' | '));
+    // agy replaces itself: a new image (here a different size and mtime) is read again.
+    writeStandIn('1.5.17\n');
+    utimesSync(binary, new Date(Date.now() + 60_000), new Date(Date.now() + 60_000));
+    const replaced = await agyCliVersion(binary);
+    check('a replaced binary is read again', replaced === '1.5.17' && runs().length === 2, `${replaced}; ${runs().length} runs`);
+    // An agy that prints no version leaves it unknown, which callers read as current upstream.
+    writeFileSync(binary, '#!/bin/sh\nexit 3\n');
+    chmodSync(binary, 0o755);
+    utimesSync(binary, new Date(Date.now() + 120_000), new Date(Date.now() + 120_000));
+    check('a failed read is undefined, not a guess', await agyCliVersion(binary) === undefined);
+  } finally {
+    resetAgyCliCatalogForTests();
+    tree.cleanup();
+  }
 }
 
 // ── 11. Subagent lineage and the frozen summaries table (P2d) ──────────────
@@ -1724,6 +1856,12 @@ const IDS = FIXTURE.conversationIds;
     const overridden = agyProbeEnv({ PATH: '/fixture/bin', AGY_CLI_DISABLE_AUTO_UPDATE: '0' });
     check('SP-1: the probe env keeps the broker\'s own and overrides an inherited opt-in to updates',
       overridden.AGY_CLI_DISABLE_AUTO_UPDATE === 'true' && overridden.PATH === '/fixture/bin');
+    // AG-4 capture on 1.5.16: only `true` turned the updater off; `1` (what T1 set) did not.
+    check('SP-1: the value is the one agy 1.5.16 honoured, not one it ignored',
+      MODES_1_5_16.updaterByValue[AGY_NO_AUTO_UPDATE_ENV.AGY_CLI_DISABLE_AUTO_UPDATE!] === 'disabled'
+        && MODES_1_5_16.updaterByValue['1'] === 'spawned'
+        && MODES_1_5_16.log.updaterDisabled.endsWith('Auto-update disabled via environment variable AGY_CLI_DISABLE_AUTO_UPDATE'),
+      AGY_NO_AUTO_UPDATE_ENV.AGY_CLI_DISABLE_AUTO_UPDATE);
 
     // The measured shape: a child that never answers is killed at the limit and backs off the same way.
     resetAgyCliCatalogForTests();

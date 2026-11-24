@@ -9,6 +9,12 @@
  * ── The child (MEASURED, agy 1.1.17 and re-pinned on 1.1.20, 2026-08-25) ─────
  *
  *   agy --conversation <id> --output-format=stream-json --input-format=stream-json
+ *       [--model <id>] <mode>
+ *
+ * `<mode>` is never empty (AG-4, MEASURED 1.5.16): from 1.5.7 it is
+ * `--settings {"agentMode":""}` plus `--mode <m>` for any mode but Default;
+ * before 1.5.7 it is `--mode <m>`. See `agyModeLaunchArgs` in `store.ts`. The
+ * stream-json child is agy's print mode (`printmode.go` in its log).
  *
  * `--print` is NEVER passed. On ≤1.1.17 `--print` takes the prompt as its VALUE,
  * so `agy --print --model X` makes `--model` the prompt: the run succeeds, answers
@@ -88,8 +94,20 @@ import {
   type AgyStep,
 } from './mapping.ts';
 import { AGY_MAX_LINE_BYTES, AgyLineFramer, truncateToUtf8Bytes } from './safe-read.ts';
-import { cachedAgyCliCatalog } from './cli-catalog.ts';
-import { AGY_PROVIDER_ID, isAgyMode, readAgyModelCatalog, resolveAgyLaunchModel } from './store.ts';
+import { agyCliVersion, cachedAgyCliCatalog } from './cli-catalog.ts';
+import {
+  AGY_MODES,
+  AGY_PROVIDER_ID,
+  agyModeLaunchArgs,
+  isAgyMode,
+  parseAgyModeWarning,
+  readAgyModelCatalog,
+  resolveAgyLaunchModel,
+  type AgyModeWarning,
+} from './store.ts';
+
+/** Most stderr held while waiting for a line end. agy's mode warnings are one short line each. */
+const AGY_STDERR_LINE_MAX = 4096;
 
 /**
  * Ceiling on ONE step's accumulated `text_delta`s. ~4× the largest whole
@@ -109,10 +127,15 @@ const AGY_MAX_OPEN_STEPS = 256;
 /**
  * Build the child's argv. Pure, and exported, so the "never `--print`" rule is
  * asserted by a test rather than trusted to a reviewer.
+ *
+ * Every launch names its mode (AG-4): since agy 1.5.7 a launch that names none
+ * runs in Auto wherever agy offers it, so "no mode" stopped meaning Default.
+ * `agyModeLaunchArgs` encodes the mode for the agy version that will run it; with
+ * no mode the launch is Default.
  */
 export function agyDriveArgs(
   conversationId: string | undefined,
-  options: { model?: string; mode?: string } = {},
+  options: { model?: string; mode?: string; version?: string; platform?: NodeJS.Platform } = {},
 ): string[] {
   const args: string[] = [];
   // A brand-new session omits `--conversation` and adopts the id agy reports in
@@ -120,8 +143,13 @@ export function agyDriveArgs(
   if (conversationId) args.push('--conversation', conversationId);
   args.push('--output-format=stream-json', '--input-format=stream-json');
   if (options.model) args.push('--model', options.model);
-  if (options.mode) args.push('--mode', options.mode);
+  args.push(...agyModeLaunchArgs(options.mode, options.version, options.platform).args);
   return args;
+}
+
+/** The picker's label for a mode value, for user-facing text. */
+function agyModeLabel(value: string): string {
+  return AGY_MODES.find((mode) => mode.value === value)?.label ?? value;
 }
 
 /** One prompt this connection accepted and has not yet seen delivered. */
@@ -198,7 +226,14 @@ export class AgyDriveConnection extends AgyObserveConnection {
   /** What ended this connection's Drive, once it ended. */
   private demotedBy?: 'foreign-prompt' | 'rewritten';
   private launchModel?: string;
+  /** The mode the child runs in; undefined only after agy said it did not apply the one asked for. */
   private launchMode?: string;
+  /** The current child's launch pinned Default underneath, so agy's own fallback is Default (AG-4). */
+  private launchPinsDefault = false;
+  /** The agy version the current child was launched for, as `agy --version` read it (AG-4). */
+  private agyVersion?: string;
+  /** The current child's stderr since its last line end, read for agy's mode warnings. */
+  private stderrLine = '';
 
   constructor(options: AgyDriveOptions) {
     super(options);
@@ -206,9 +241,10 @@ export class AgyDriveConnection extends AgyObserveConnection {
     this.binary = options.binary;
     if (options.onClose) this.onCloseHook = options.onClose;
     if (options.model) this.launchModel = options.model;
-    // Same guard as `relaunch`: a mode the host would silently drop must never
-    // become the `currentMode` this connection advertises.
-    if (isAgyMode(options.mode)) this.launchMode = options.mode;
+    // The mode the first child will launch in: the one the app last drove this
+    // conversation with, else Default, which every launch now names (AG-4). Same
+    // guard as `relaunch`: a mode agy does not have is never advertised.
+    this.launchMode = isAgyMode(options.mode) ? options.mode : 'default';
     this.info.control = this.controlState();
     this.publishCurrentMode();
   }
@@ -223,9 +259,11 @@ export class AgyDriveConnection extends AgyObserveConnection {
    * `"request-review"` under every launch. So a DRIVE connection knows its mode
    * because it chose it, and nothing else can be asked.
    *
-   * Cleared EXPLICITLY when we launched without a mode — reflection §2: an absent
-   * key leaves whatever the row had before, which after a mode switch is the
-   * previous posture, still displayed as if it were current.
+   * Every launch names its mode (AG-4), so this is the launched mode — unless agy
+   * said on stderr that it did not apply it (see {@link onModeWarning}), when it
+   * is Default where the launch pinned Default, and otherwise CLEARED EXPLICITLY:
+   * reflection §2, an absent key leaves whatever the row had before, which is the
+   * posture the user asked for and did not get.
    */
   private publishCurrentMode(): void {
     const mode = this.launchMode;
@@ -497,11 +535,24 @@ export class AgyDriveConnection extends AgyObserveConnection {
     // model. Resolve, then compare, then launch — all on the same value.
     const explicitModel = this.resolveModelSelection(input.model);
     const explicitMode = input.permissionMode;
-    if (
-      !this.proc
-      || (explicitModel && explicitModel !== this.launchModel)
-      || (explicitMode && explicitMode !== this.launchMode)
-    ) {
+    const needsLaunch = (): boolean => !this.proc
+      || Boolean(explicitModel && explicitModel !== this.launchModel)
+      || Boolean(explicitMode && explicitMode !== this.launchMode);
+    if (needsLaunch()) {
+      // AG-4: how a mode is put on the argv depends on the agy version, read once
+      // per binary image (a cached answer after the first). Awaited BEFORE the
+      // launch decision is re-taken below, so a send that arrives meanwhile sees
+      // the child this one starts rather than starting a second.
+      this.agyVersion = await agyCliVersion(
+        this.binary,
+        this.catalogOptions ?? { ...(this.trace ? { trace: this.trace } : {}) },
+      );
+      if (this.closed) throw new Error('This Antigravity session is closed.');
+      if (this.demoted) {
+        throw new Error('This conversation was taken over in a terminal, so the app can no longer send to it.');
+      }
+    }
+    if (needsLaunch()) {
       this.relaunch(
         explicitModel ?? this.launchModel ?? this.info.currentModel?.modelID,
         explicitMode ?? this.launchMode ?? this.info.currentMode,
@@ -626,26 +677,33 @@ export class AgyDriveConnection extends AgyObserveConnection {
    * accounting is closed explicitly, here, before the old child goes.
    */
   private relaunch(model?: string, requestedMode?: string): boolean {
-    // A `--mode` agy does not recognize is SILENTLY DROPPED by the host — its own
-    // 1.1.20 changelog records fixing "an unrecognized value produced no warning
-    // at all". Passing one would leave the child in `default` while
+    // A `--mode` agy does not recognize is NOT APPLIED by the host: it warns on
+    // stderr and runs in its own startup mode (MEASURED 1.5.16, AG-4), which since
+    // 1.5.7 is Auto wherever agy offers it (changelog). Passing one would leave the child in that mode while
     // `publishCurrentMode` advertised the mode that was asked for, which is
     // exactly the "the client believes X, the session is Y, nothing says so"
-    // shape reflection §11 is about. So an off-vocabulary mode is dropped HERE,
-    // with a trace, and never becomes `currentMode`.
-    const mode = isAgyMode(requestedMode) ? requestedMode : undefined;
-    if (requestedMode !== undefined && mode === undefined) {
-      this.trace?.({
-        op: 'drive-mode-rejected',
-        detail: `agy has no --mode ${JSON.stringify(requestedMode)}; launching without one`,
-      });
+    // shape reflection §11 is about. So a mode this agy does not have is replaced
+    // HERE by Default, with a trace, and never becomes `currentMode`; and every
+    // launch names its mode, because naming none is no longer Default.
+    const launch = agyModeLaunchArgs(requestedMode, this.agyVersion);
+    const mode = launch.mode;
+    if (launch.refused) {
+      this.trace?.({ op: 'drive-mode-rejected', detail: `${launch.refused}; launching in default` });
+      // A real agy mode this binary lacks (Auto before 1.3.5) is a choice the user
+      // made, so they are told; an off-vocabulary value never came from the picker.
+      if (requestedMode !== undefined && isAgyMode(requestedMode)) {
+        this.emit({
+          type: 'notice',
+          message: `This Antigravity version has no ${agyModeLabel(requestedMode)} mode, so the session runs in Default.`,
+        });
+      }
     }
     // Before the old child is unreachable: whatever it owed is not coming.
     // A cold start settles nothing, because nothing is in flight.
     this.settleGeneration({
       op: 'drive-turn-abandoned-by-relaunch',
       status: 'cancelled',
-      detail: `relaunching for model=${model ?? 'default'} mode=${mode ?? 'default'}`,
+      detail: `relaunching for model=${model ?? 'default'} mode=${mode}`,
       message:
         'Antigravity was restarted to change the model or mode while a turn was running, so that turn was '
         + 'cancelled without a result. Send it again.',
@@ -658,7 +716,8 @@ export class AgyDriveConnection extends AgyObserveConnection {
 
     const args = agyDriveArgs(this.conversationId, {
       ...(model ? { model } : {}),
-      ...(mode ? { mode } : {}),
+      mode,
+      ...(this.agyVersion ? { version: this.agyVersion } : {}),
     });
     let proc: ChildProcessWithoutNullStreams;
     try {
@@ -677,6 +736,8 @@ export class AgyDriveConnection extends AgyObserveConnection {
     this.proc = proc;
     this.launchModel = model;
     this.launchMode = mode;
+    this.launchPinsDefault = launch.pinsDefault;
+    this.stderrLine = '';
     // The posture changed with the child, so the row must change with it.
     this.publishCurrentMode();
     proc.stdin.on('error', (error) => {
@@ -690,8 +751,10 @@ export class AgyDriveConnection extends AgyObserveConnection {
     proc.stdout.on('data', (chunk: Buffer) => this.onStdout(chunk));
     proc.stderr.on('data', (chunk: Buffer) => {
       // stderr carries the "ignoring unsupported stream input message event" warning
-      // that accompanies the exit-0 silent failure. Traced, never interpreted.
+      // that accompanies the exit-0 silent failure. Traced, never interpreted —
+      // except agy's warnings about the mode it was launched with (AG-4).
       this.trace?.({ op: 'drive-stderr', detail: chunk.toString('utf8').trim().slice(0, 400) });
+      if (this.proc === proc) this.readStderr(chunk.toString('utf8'));
     });
     proc.on('error', (error) => {
       this.trace?.({ op: 'drive-process-error', detail: String(error) });
@@ -705,6 +768,51 @@ export class AgyDriveConnection extends AgyObserveConnection {
       this.onChildGone(code);
     });
     return true;
+  }
+
+  /**
+   * Split the current child's stderr into lines and read each for a mode warning.
+   * Bounded: a line longer than {@link AGY_STDERR_LINE_MAX} is dropped unread (the
+   * warnings are short ASCII lines, so a chunk boundary inside a multibyte
+   * character elsewhere cannot hide one).
+   */
+  private readStderr(text: string): void {
+    let buffered = this.stderrLine + text;
+    let newline = buffered.indexOf('\n');
+    while (newline !== -1) {
+      const warning = parseAgyModeWarning(buffered.slice(0, newline));
+      if (warning) this.onModeWarning(warning);
+      buffered = buffered.slice(newline + 1);
+      newline = buffered.indexOf('\n');
+    }
+    this.stderrLine = buffered.length > AGY_STDERR_LINE_MAX ? '' : buffered;
+  }
+
+  /**
+   * agy said it did not apply the mode it was launched with (AG-4, MEASURED 1.5.16).
+   *
+   * `--mode auto` where agy offers no Auto (an enterprise account, no terminal
+   * sandbox, a rollout not reached) warns "continuing in the default mode", and
+   * that default is whatever agy starts in on its own — a saved `agentMode`
+   * included (MEASURED: a saved `accept-edits` stayed in force). A launch that
+   * pinned Default underneath therefore falls back to Default, and the row says
+   * so; any other fallback is a mode the app cannot see, and the row says nothing
+   * rather than the mode that was refused. The user is told either way: the turn
+   * runs with less (or other) approval than they chose.
+   */
+  private onModeWarning(warning: AgyModeWarning): void {
+    const asked = agyModeLabel(warning.value);
+    this.trace?.({ op: 'drive-mode-warning', detail: `${warning.kind}: --mode ${warning.value}` });
+    const fallback = warning.kind === 'unavailable' && this.launchPinsDefault ? 'default' : undefined;
+    this.launchMode = fallback;
+    this.publishCurrentMode();
+    this.emit({
+      type: 'notice',
+      message: warning.kind === 'unavailable'
+        ? `Antigravity says ${asked} mode is not available for this account or computer, so the session runs in `
+          + `${fallback ? 'Default' : 'the mode Antigravity starts in on its own'}.`
+        : `Antigravity did not accept the ${asked} mode, so the session runs in the mode Antigravity starts in on its own.`,
+    });
   }
 
   /**
@@ -861,7 +969,7 @@ export class AgyDriveConnection extends AgyObserveConnection {
       // log does not re-derive C2 from scratch.
       this.trace?.({
         op: 'drive-init-permission-mode-ignored',
-        detail: `init reported "${reported}" while launched with --mode=${this.launchMode}; it does not echo the flag`,
+        detail: `init reported "${reported}" while launched in mode ${this.launchMode}; it does not echo the mode`,
       });
     }
     if (Object.keys(patch).length === 0) return;
