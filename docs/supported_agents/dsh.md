@@ -261,9 +261,14 @@ and its durable readback, and the roster and projection reads of a cold session
 after a host restart. The same steps were repeated on a `0.2.0-rc.2` host for
 comparison. Two messages differ, and the adapter reads both forms: a live
 update can carry several values under one sequence number, and an image readback
-request names the whole stored image reference rather than only its id. Managed launch,
-Windows and macOS, provider-backed turns, approvals, questions and the browser
-passes above have not been repeated on `0.2.2-rc.5`.
+request names the whole stored image reference rather than only its id.
+
+A managed launch on Linux was also run through cosyncing's own start and stop
+code against a disposable `0.2.2-rc.5` host, started as `dsh web --port <port>
+--no-open`. On a first start cosyncing picked up its launch URL and signed in
+with nothing typed. On SIGTERM it stopped in about 160 ms and left no
+process behind. Windows and macOS, provider-backed turns, approvals, questions
+and the browser passes above have not been repeated on `0.2.2-rc.5`.
 
 Forwarded native errors preserve both scalar messages and error-chain details.
 A model-provider failure leaves a healthy authenticated host eligible for the
