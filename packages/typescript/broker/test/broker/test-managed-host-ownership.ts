@@ -32,6 +32,7 @@ import {
   managedHostGateEnv,
   managedHostOwnerPath,
   MANAGED_HOST_ACTIONS,
+  MANAGED_LAUNCH_OUTPUT_EXTRA_POLLS,
   MANAGED_HOST_RESTART_BUDGET,
   managedHostRestartLedger,
   managedHostStartupReport,
@@ -1448,8 +1449,10 @@ try {
   }
   {
     // Every other managed host implements none of these hooks. Nothing changes
-    // for it: the same start, the same stop, readiness from isAvailable alone.
+    // for it: the same start, the same stop, readiness from isAvailable alone,
+    // and no wait for output once it is ready.
     let spawned = false;
+    let spawnedAt = 0;
     const listeners = new Map<number, ManagedHostLocation>([[59999, HOST_ABSENT]]);
     const { effects, spawns, signals } = fakeEffects({
       spawnPid: SPAWN_PID,
@@ -1461,18 +1464,96 @@ try {
     const spawn = effects.spawn.bind(effects);
     effects.spawn = (launch) => {
       spawned = true;
+      spawnedAt = effects.now();
       listeners.set(59999, hostAt(SPAWN_PID));
       return spawn(launch);
     };
     const { store } = memoryStore();
     const plain = backend({ isAvailable: async () => spawned });
     const started = await ensureManagedHost(plain as never, effects, store, AUTHORIZED);
+    const startedAfter = effects.now() - spawnedAt;
     await settle();
     const stopped = await releaseManagedHost(plain as never, effects, store);
     check('a managed host without the launch hooks starts and stops exactly as before',
       started.action === 'started' && started.servingProven === true && spawns.length === 1
+        && startedAfter === 0
         && stopped.action === 'stopped' && signals.length === 1,
-      JSON.stringify({ started, stopped, signals }));
+      JSON.stringify({ started, startedAfter, stopped, signals }));
+  }
+  // ── Output an adapter still awaits once the host is ready ─────────────────
+  //
+  // A host can pass readiness before what it printed has been forwarded, and
+  // nothing is forwarded after the start returns. An adapter that says it is
+  // still waiting gets the output a few more polls. Readiness is not asked
+  // again, so the wait can delay a ready host but never fail it.
+  const startAwaiting = async (options: {
+    readyTimeoutMs: number;
+    readyAfterMs: number;
+    output: string[];
+    awaiting: (forwarded: string[]) => boolean;
+  }) => {
+    let spawnedAt: number | undefined;
+    const forwarded: string[] = [];
+    const listeners = new Map<number, ManagedHostLocation>([[59999, HOST_ABSENT]]);
+    const { effects } = fakeEffects({
+      spawnPid: SPAWN_PID,
+      identities: new Map([[SPAWN_PID, SPAWNED]]),
+      missingProcess: PROCESS_ABSENT,
+      listeners,
+      outputScript: options.output,
+    });
+    const spawn = effects.spawn.bind(effects);
+    effects.spawn = (launch) => {
+      spawnedAt = effects.now();
+      listeners.set(59999, hostAt(SPAWN_PID));
+      return spawn(launch);
+    };
+    const outcome = await ensureManagedHost(backend({
+      describeManagedHost: async () => ({
+        identityKey: KEY,
+        locator: { kind: 'tcp-port' as const, port: 59999 },
+        launch: { command: '/fixture/bin/host', args: ['web'] },
+        readyTimeoutMs: options.readyTimeoutMs,
+        stopGraceMs: 100,
+      }),
+      isAvailable: async () => spawnedAt !== undefined && effects.now() - spawnedAt >= options.readyAfterMs,
+      observeManagedOutput: (text: string) => { forwarded.push(text); },
+      awaitingManagedOutput: () => options.awaiting(forwarded),
+    }) as never, effects, memoryStore().store, AUTHORIZED);
+    return { outcome, forwarded, elapsed: spawnedAt === undefined ? -1 : effects.now() - spawnedAt };
+  };
+  const BOOTING = 'stdout:\nbooting\nstderr:\n';
+  {
+    // Ready on the last probe before the deadline (300 ms at 150 ms polls),
+    // and the adapter never stops waiting. Before the wait existed this host
+    // was started; it still is, and the wait stops at the deadline.
+    const { outcome, forwarded, elapsed } = await startAwaiting({
+      readyTimeoutMs: 300, readyAfterMs: 150, output: [BOOTING], awaiting: () => true,
+    });
+    check('a host ready just before the deadline is started while its adapter still awaits output',
+      outcome.action === 'started' && elapsed <= 300 && forwarded.length > 2,
+      JSON.stringify({ outcome, elapsed, forwards: forwarded.length }));
+  }
+  {
+    const announced = 'stdout:\nbooting\nannounced\nstderr:\n';
+    const late = await startAwaiting({
+      readyTimeoutMs: 3_000,
+      readyAfterMs: 0,
+      output: [BOOTING, BOOTING, BOOTING, announced],
+      awaiting: (forwarded) => !forwarded.includes(announced),
+    });
+    check('output still awaited after readiness is forwarded on the following polls until it arrives',
+      late.outcome.action === 'started' && late.forwarded.length === 4
+        && late.forwarded.at(-1) === announced && late.elapsed === 2 * 150,
+      JSON.stringify({ outcome: late.outcome, forwards: late.forwarded.length, elapsed: late.elapsed }));
+    const never = await startAwaiting({
+      readyTimeoutMs: 3_000, readyAfterMs: 0, output: [BOOTING], awaiting: () => true,
+    });
+    check('the wait for output after readiness is bounded',
+      never.outcome.action === 'started'
+        && never.forwarded.length === MANAGED_LAUNCH_OUTPUT_EXTRA_POLLS + 2
+        && never.elapsed === MANAGED_LAUNCH_OUTPUT_EXTRA_POLLS * 150,
+      JSON.stringify({ outcome: never.outcome, forwards: never.forwarded.length, elapsed: never.elapsed }));
   }
   {
     // Read-only by construction: an adapter that throws on its own intake must

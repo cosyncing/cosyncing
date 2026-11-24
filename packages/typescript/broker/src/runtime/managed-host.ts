@@ -416,6 +416,15 @@ export interface ManagedHostPlan {
    * before every spawn (for whatever launch came before).
    */
   launchEnded?(reason: string): void;
+  /**
+   * Whether the adapter is still waiting for something in this launch's
+   * output. Asked only after readiness has passed: while it says yes, the
+   * output is forwarded again for at most
+   * {@link MANAGED_LAUNCH_OUTPUT_EXTRA_POLLS} more polls, never past the
+   * deadline, and then the start goes on as it would have. Readiness is not
+   * asked again, so this can delay a start but never fail one.
+   */
+  awaitingOutput?(): boolean;
   /** How long a freshly spawned host has to become ready before it is a failure. */
   readyTimeoutMs: number;
   /** Poll interval while waiting for readiness. */
@@ -866,6 +875,29 @@ export async function startManagedHost(
   // startup budget before authentication has even received that URL.
   if (plan.observeOutput) await effects.sleep(0);
   const pollMs = plan.readyPollMs ?? 150;
+  // Readiness can pass before the output has given the adapter what it needs
+  // from this launch: a host that authenticates with a stored credential can
+  // answer before the URL carrying its new token has been forwarded, and no
+  // output is forwarded once the start returns. An adapter that says it is
+  // still waiting gets the output again at once, then once per poll for at
+  // most MANAGED_LAUNCH_OUTPUT_EXTRA_POLLS polls, never past the deadline.
+  // Readiness has already passed and is not asked again, so this can delay a
+  // start but never fail one. An adapter without the hook is not delayed.
+  const awaitingOutput = (): boolean => {
+    try {
+      return plan.awaitingOutput?.() === true;
+    } catch {
+      return false;
+    }
+  };
+  const awaitLaunchOutput = async (): Promise<void> => {
+    for (let extra = 0; awaitingOutput(); extra += 1) {
+      forwardOutput();
+      if (!awaitingOutput() || extra >= MANAGED_LAUNCH_OUTPUT_EXTRA_POLLS || childGone()
+        || deadline - effects.now() < pollMs) return;
+      await effects.sleep(pollMs);
+    }
+  };
   let polls = 0;
   for (;;) {
     // Forwarded on EVERY poll, which is what "each poll" in the contract means.
@@ -881,6 +913,7 @@ export async function startManagedHost(
     // and idempotent, and the first poll still primes the exchange.
     forwardOutput();
     if (await probeReady(plan, effects, deadline - effects.now())) {
+      await awaitLaunchOutput();
       const serving = await plan.locate();
       // Ours if it IS the child, or if two fresh walks both prove it descends
       // from the child. Only 'yes' counts: 'no' and 'unknown' both fall through
@@ -964,6 +997,18 @@ export async function startManagedHost(
     await effects.sleep(pollMs);
   }
 }
+
+/**
+ * How many more polls of output a started host's adapter can get after
+ * readiness has passed, while it says it is still waiting for something in
+ * that output ({@link ManagedHostPlan.awaitingOutput}).
+ *
+ * The output is forwarded once more straight away, which is usually enough:
+ * in a managed-launch capture on dsh 0.2.2-rc.5 the probe that passed began
+ * 11-19 ms before the launch URL reached the pipe and returned about 120 ms
+ * later. The extra polls are margin for a busy broker.
+ */
+export const MANAGED_LAUNCH_OUTPUT_EXTRA_POLLS = 3;
 
 /**
  * Two independent walks, because one proves nothing durable. This branch RE-KEYS
@@ -1460,6 +1505,7 @@ export async function ensureManagedHost(
     isAvailable(options?: { signal?: AbortSignal }): Promise<boolean>;
     observeManagedOutput?(chunk: string): void;
     managedLaunchEnded?(reason: string): void;
+    awaitingManagedOutput?(): boolean;
   },
   effects: ManagedHostEffects,
   store: ManagedHostStore,
@@ -1526,6 +1572,7 @@ export async function ensureManagedHost(
       // line. An adapter with no use for them simply does not implement the hook.
       observeOutput: (text) => backend.observeManagedOutput?.(text),
       launchEnded: (reason) => backend.managedLaunchEnded?.(reason),
+      awaitingOutput: () => backend.awaitingManagedOutput?.() === true,
       launch: descriptor.launch,
       ...(descriptor.launchKeepsServerForeground ? { launchKeepsServerForeground: true } : {}),
       readyTimeoutMs: descriptor.readyTimeoutMs,

@@ -297,6 +297,18 @@ export interface AgentBackend {
    * before every spawn, so nothing from an earlier launch is held into the next.
    */
   managedLaunchEnded?(reason: string): void;
+
+  /**
+   * Is the adapter still waiting for something in the owned launch's output?
+   *
+   * Asked only after the host has passed readiness, because that is the one
+   * moment output can be left unread: a host may answer before what it printed
+   * has been forwarded, and nothing is forwarded once the start returns. While
+   * this says yes, the broker forwards the output a few more polls, bounded
+   * and never past the start's deadline, and then reports the start as it would
+   * have. It cannot make a ready host fail. Absent means no wait.
+   */
+  awaitingManagedOutput?(): boolean;
   /**
    * WHICH host a given environment points this adapter at, as an opaque identity
    * key — the same key {@link import('./integration.ts').ManagedHostDescriptor}
