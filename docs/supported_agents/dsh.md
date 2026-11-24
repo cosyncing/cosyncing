@@ -130,6 +130,15 @@ for. A host cosyncing starts for itself needs no `dsh connect` at all: the launc
 URL it prints goes straight from the child process to the adapter that configured
 that address, and the exchange runs on its own.
 
+The cookie lasts 30 days. In its last day, cosyncing renews it with the launch
+URL of a host it started, so a host cosyncing manages does not need you to sign
+in again. When cosyncing restarts that host, it does not treat the new host as
+ready until it has read the new launch URL, and it never uses the URL of a host
+that has stopped. cosyncing can renew only with a launch URL it read itself. A
+host you started yourself, or a host that was already running when the broker
+started, gives cosyncing no URL to read, so when its cookie expires, run
+`cosyncing dsh connect` again.
+
 `cosyncing doctor` reads the same enrollment the running broker uses, so it never
 reports "not enrolled" about a host you are logged into, and it never suggests
 re-enrolling when what actually went wrong is something else.
