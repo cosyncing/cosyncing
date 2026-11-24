@@ -626,6 +626,58 @@ peerCaptures.self.origin.from = peerCaptures.self.agentId;
   }
 }
 
+// CL-5: the stored history path is the one production attaches through, and its live rows reach
+// subscribers from the store. A record type nobody has decided about, written while attached, still
+// raises the drift alarm there: once per type, never for a known type, never stored as a row.
+{
+  const root = mkdtempSync(join(tmpdir(), 'cosyncing-stored-drift-'));
+  const previousHome = process.env.COSYNCING_HOME;
+  process.env.COSYNCING_HOME = root;
+  const file = join(root, 'drift-session.jsonl');
+  const info: SessionInfo = { id: 'drift-session', title: 'Drift fixture', tool: 'claude', status: 'idle', attachMode: 'observe' };
+  const conn = new ClaudeObserveConnection(file, info);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const user = (uuid: string, text: string) => ({ type: 'user', uuid, message: { role: 'user', content: text } });
+    writeFileSync(file, JSON.stringify(user('drift-u1', 'before attach')) + '\n');
+    await conn.openHistorySnapshot();
+    const received: AgentMessage[] = [];
+    const reached = new Promise<void>((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('the stored live tail never delivered the fence row')), 5000);
+      conn.subscribe((message) => {
+        received.push(message);
+        if (message.type === 'user-message' && message.text === 'after the new types') resolve();
+      });
+    });
+    appendFileSync(file, [
+      { type: 'a-record-type-no-build-writes', n: 1 },
+      { type: 'a-record-type-no-build-writes', n: 2 },
+      // A decided type: the account record, its identifiers zeroed.
+      { type: 'session-owner', accountUuid: '00000000-0000-4000-8000-000000000000', organizationUuid: '00000000-0000-4000-8000-000000000000', sessionId: 'drift-session' },
+      { type: 'tools-used', tools: ['Bash'], sessionId: 'drift-session' },
+      user('drift-u2', 'after the new types'),
+    ].map((line) => JSON.stringify(line)).join('\n') + '\n');
+    await reached;
+    clearTimeout(timer);
+    const alarms = received.filter((m) => m.type === 'event' && m.name === 'transcript.unknown-type') as any[];
+    check('stored live tail: a new record type raises one drift event naming only the type',
+      alarms.length === 1 && JSON.stringify(alarms[0].payload) === JSON.stringify({ lineType: 'a-record-type-no-build-writes' }),
+      JSON.stringify(alarms));
+    const snapshot = await conn.openHistorySnapshot();
+    const persisted = snapshot ? await snapshot.reader.read(Array.from({ length: snapshot.count }, (_, i) => i)) : undefined;
+    const rows = persisted && 'messages' in persisted ? persisted.messages : [];
+    check('stored live tail: the alarm is not stored as a history row, and no row is lost around it',
+      !rows.some((m) => m.type === 'event' && m.name === 'transcript.unknown-type')
+        && rows.filter((m) => m.type === 'user-message').map((m: any) => m.text).join('|') === 'before attach|after the new types',
+      JSON.stringify(rows.map((m) => m.type)));
+  } finally {
+    clearTimeout(timer);
+    await conn.close();
+    if (previousHome === undefined) delete process.env.COSYNCING_HOME; else process.env.COSYNCING_HOME = previousHome;
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 // Drive uses a real child, controlled over a test-only TCP socket. All adapter
 // observations use SessionConnection: no private state, stdin or tail methods.
 {

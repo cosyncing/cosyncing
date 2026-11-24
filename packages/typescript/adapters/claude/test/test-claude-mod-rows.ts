@@ -493,6 +493,35 @@ check(
   JSON.stringify(forkContextRef),
 );
 
+// Claude Code 2.1.330 resumes from a table naming every record type it writes (read from the build on
+// 2026-11-24; 2.1.331's is the same), plus `repl-mode`, `hybrid-organization` and `host-row` handled beside
+// it. Each one is a decision here, except `host-row`: Code Mode's record of the calls a script made,
+// which the app does not show yet, so the unknown-type event is still the honest answer for it.
+const writtenBy2_1_330 = [
+  'agent-color', 'agent-name', 'agent-setting', 'ai-title', 'api-request', 'api-request-blob', 'api-request-resumed',
+  'api-request-shape', 'artifact-autoreact-ledger', 'artifact-comment-monitor', 'assistant', 'atis-latch', 'attachment',
+  'attribution-snapshot', 'bridge-session', 'content-replacement', 'continued-in', 'cost-state', 'custom-title',
+  'data-flow-incomplete', 'data-flow-records', 'derived-from', 'dev-mods', 'ended-by-model', 'file-history-delta',
+  'file-history-snapshot', 'fork-context-ref', 'frame-link', 'history-suppression', 'isolation-latch', 'last-prompt',
+  'memory-mode', 'mode', 'observer-ref', 'permission-mode', 'pr-link', 'progress', 'queue-operation', 'relocated',
+  'resume-head-vouch', 'session-owner', 'summary', 'system', 'tag', 'tools-used', 'user', 'worktree-state',
+  'repl-mode', 'hybrid-organization',
+];
+const undecided = writtenBy2_1_330.filter((type) => !CLAUDE_KNOWN_LINE_TYPES.has(type));
+check('every record type Claude Code 2.1.330 writes, but host-row, is a decision', undecided.length === 0, JSON.stringify(undecided));
+// The account record's shape as the host's transcripts carry it (500 rows); the identifiers are zeroed.
+const owner = mapLine(
+  { type: 'session-owner', accountUuid: '00000000-0000-4000-8000-000000000000', organizationUuid: '00000000-0000-4000-8000-000000000000', sessionId: '00000000-0000-4000-8000-000000000001' },
+  callMeta, new Set(), undefined, undefined, undefined, new Set(),
+);
+check('a session-owner row maps to nothing at all: its account and organization ids go nowhere', owner.length === 0, JSON.stringify(owner));
+const hostRow = mapLine({ type: 'host-row', ranByToolUseId: 'toolu_x' }, callMeta, new Set(), undefined, undefined, undefined, new Set());
+check(
+  'a Code Mode host-row is still reported, because the app shows none of it',
+  !CLAUDE_KNOWN_LINE_TYPES.has('host-row') && hostRow.length === 1 && hostRow[0]?.type === 'event',
+  JSON.stringify(hostRow),
+);
+
 // ── R4-8: one reading of the mod per row per roster tick ─────────────────────
 // A reading is not free: the broker's status read sweeps holds, probes the pid and can retire the row.
 // A counting bridge is the proof here, because the claim is a count.

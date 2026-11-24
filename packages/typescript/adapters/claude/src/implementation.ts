@@ -2310,7 +2310,14 @@ export class ClaudeObserveConnection implements SessionConnection {
           const activity = storedParentActivity(store);
           collectParentActivity(record.line, store.setOf('activityResolved'), activity.backgroundToolUseIds,
             activity.notifiedToolUseIds, activity.backgroundSpawnMs!, activity, Boolean(append && this.primed));
-          if (append && this.primed) this.noteSessionFacts(record.line);
+          if (append && this.primed) {
+            this.noteSessionFacts(record.line);
+            // The stored mapper replays without a per-connection type set, and the live rows reach
+            // subscribers from the store, so the drift alarm the plain tail raises has to be raised
+            // here: once per type per connection, for lines written while attached, never stored.
+            const unknown = claudeUnknownLineTypeEvent(record.line, this.unknownLineTypes);
+            if (unknown) this.emit(unknown);
+          }
         }
         replay.checkpoint();
         const after = fileHistorySourceIdentity(this.path);
@@ -5401,7 +5408,32 @@ export const CLAUDE_KNOWN_LINE_TYPES: ReadonlySet<string> = new Set([
   // audit never read: a pointer from a forked subagent back to the parent context it was forked
   // from. Bookkeeping, not conversation, so it is skipped like the sidecars above.
   'fork-context-ref',
+  // Read from the record table Claude Code 2.1.330 resumes from (every type that build writes, with
+  // how resume treats it) and from this host's transcripts on 2026-11-24. None is conversation: the
+  // per-request journals (`api-request*`, about 38% of transcript bytes here), the tool and data-flow
+  // ledgers, resume and compaction markers, latches, colours, tags and the end-by-model mark.
+  // `session-owner`, `hybrid-organization` and `history-suppression` carry account and organization
+  // UUIDs; like every member here they are skipped, and nothing else in the adapter reads them, so
+  // that content never leaves the transcript. `derived-from` is lineage (a session another session
+  // launched), which no row shows yet. `progress` and `summary` are older shapes the table still
+  // names. `host-row` is deliberately absent: Code Mode writes the calls a script made as host rows,
+  // the app shows none of them yet, and that is what the unknown-type event exists to say.
+  'api-request', 'api-request-blob', 'api-request-resumed', 'api-request-shape', 'tools-used',
+  'data-flow-records', 'data-flow-incomplete', 'content-replacement', 'resume-head-vouch', 'observer-ref',
+  'session-owner', 'hybrid-organization', 'history-suppression', 'attribution-snapshot', 'isolation-latch',
+  'dev-mods', 'memory-mode', 'agent-color', 'tag', 'ended-by-model', 'repl-mode', 'derived-from',
+  'progress', 'summary',
 ]);
+
+/** The drift alarm for one transcript line: the first line of a type this adapter has never decided
+ *  about yields one `transcript.unknown-type` event naming the type and nothing else; `seen` (MUTATED)
+ *  keeps it to one per type. */
+function claudeUnknownLineTypeEvent(ln: any, seen: Set<string>): AgentMessage | undefined {
+  const type = ln?.type;
+  if (typeof type !== 'string' || !type || CLAUDE_KNOWN_LINE_TYPES.has(type) || seen.has(type)) return undefined;
+  seen.add(type);
+  return { type: 'event', name: UNKNOWN_TRANSCRIPT_TYPE_EVENT, payload: { lineType: type } };
+}
 
 /**
  * Map ONE parsed transcript line to canonical messages (0..n). `callMeta` resolves a tool-result's
@@ -5461,13 +5493,10 @@ export function mapLine(
       // a Claude build changing its own history is that the app shows less and says nothing. So
       // the first occurrence per mapping run names the type, once, as an event the broker can
       // turn into an attention event. It carries the type verbatim and nothing else.
-      if (unknownTypes && typeof ln.type === 'string' && ln.type && !CLAUDE_KNOWN_LINE_TYPES.has(ln.type)) {
-        if (!unknownTypes.has(ln.type)) {
-          unknownTypes.add(ln.type);
-          return [{ type: 'event', name: UNKNOWN_TRANSCRIPT_TYPE_EVENT, payload: { lineType: ln.type } }];
-        }
+      {
+        const unknown = unknownTypes ? claudeUnknownLineTypeEvent(ln, unknownTypes) : undefined;
+        return unknown ? [unknown] : [];
       }
-      return [];
   }
 }
 
