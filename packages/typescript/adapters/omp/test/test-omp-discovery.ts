@@ -451,9 +451,10 @@ default</textarea></label>
     cheapOk?.ok === true && cheapRefused?.ok === false && /^Value: Must match /.test(cheapRefused.problem),
     JSON.stringify({ cheapOk, cheapRefused }));
   const slug = patternForm('[a-z]+(-[a-z]+)*');
-  const slugAnswer = slug && piFormAnswer(slug, [['my-slug']]);
+  // `My_Slug` does not match: only a skipped check lets it through, so this proves omp is left to check it.
+  const slugAnswer = slug && piFormAnswer(slug, [['My_Slug']]);
   check('a linear pattern the bound counts as costly is left to omp, and the answer is sent',
-    JSON.stringify(slugAnswer) === JSON.stringify({ ok: true, data: { v: 'my-slug' } }), JSON.stringify(slugAnswer));
+    JSON.stringify(slugAnswer) === JSON.stringify({ ok: true, data: { v: 'My_Slug' } }), JSON.stringify(slugAnswer));
   const patternStarted = performance.now();
   const polynomial = patternForm('\\w*\\w*\\w*\\w*x');
   const polynomialAnswer = polynomial && piFormAnswer(polynomial, [['a'.repeat(1024)]]);
