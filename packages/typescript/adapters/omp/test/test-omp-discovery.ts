@@ -463,6 +463,20 @@ default</textarea></label>
   check('a polynomial pattern with a 1024-character answer returns at once, and a long answer is no longer refused',
     patternMs < 1_000 && polynomialAnswer?.ok === true && longAnswer?.ok === true,
     `${Math.round(patternMs)} ms ${JSON.stringify({ polynomial: polynomialAnswer?.ok, long: longAnswer?.ok })}`);
+  // Compiling runs on the broker too: a pattern past the length budget is neither compiled nor
+  // checked here. These 8,000 set-operation classes would take seconds to compile.
+  const compileStarted = performance.now();
+  const longSetForm = patternForm('[\\p{L}--\\p{Lu}]'.repeat(8000));
+  const longSetAnswer = longSetForm && piFormAnswer(longSetForm, [['NOT LOWER 1']]);
+  const compileMs = performance.now() - compileStarted;
+  check('a pattern past the compile budget keeps its form, is never compiled, and is left to omp',
+    compileMs < 1_000 && longSetForm?.fields.length === 1 && longSetForm.fields[0]!.pattern === undefined
+      && longSetAnswer?.ok === true,
+    `${Math.round(compileMs)} ms ${JSON.stringify(longSetAnswer)}`);
+  const budgetForm = parsePiFormDialog(`<form>${[1, 2, 3].map((n) => `<label>P${n} <input name="p${n}" pattern="${'a'.repeat(900)}"></label>`).join('')}</form>`);
+  check('one form compiles at most its budget of pattern text, and the rest is left to omp',
+    JSON.stringify(budgetForm?.fields.map((field) => field.pattern !== undefined)) === JSON.stringify([true, true, false]),
+    JSON.stringify(budgetForm?.fields.map((field) => field.pattern?.length)));
 
   // The parser runs on the broker's event loop: crafted HTML up to the size cap stays linear.
   const megabyte = 1024 * 1024 - 64;

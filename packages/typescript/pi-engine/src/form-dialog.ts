@@ -20,8 +20,10 @@
  * anything is sent ({@link piFormAnswer}); a refused answer leaves the card open. One rule is
  * skipped where it is not cheap: a `pattern` runs on the broker's event loop, and a backtracking
  * matcher can take polynomial or exponential time, so it is checked only when a worst-case bound
- * on that work for the answer's length is small ({@link patternCheckIsCheap}). Otherwise omp alone
- * checks it, and an answer that fails it fails the extension's dialog after the card closed.
+ * on that work for the answer's length is small ({@link patternCheckIsCheap}). Compiling it runs
+ * there too, so a pattern is compiled once, when the form is read, and only within a length budget
+ * ({@link PATTERN_MAX_CHARS}, {@link PATTERN_FORM_MAX_CHARS}). Otherwise omp alone checks it, and an
+ * answer that fails it fails the extension's dialog after the card closed.
  *
  * Each named control becomes one question, in document order. A form this reader cannot represent
  * faithfully (a file input, a name shared by two different controls, a required group with nothing
@@ -62,7 +64,8 @@ export interface PiFormField {
   step?: number;
   minLength?: number;
   maxLength?: number;
-  /** A `pattern` that compiles the way omp compiles it; an invalid one is dropped, as omp ignores it. */
+  /** A `pattern` compiled here the way omp compiles it, and so checked here where that is cheap. An
+   *  invalid one is dropped, as omp ignores it; one past the compile budget is left to omp. */
   pattern?: string;
 }
 
@@ -86,6 +89,16 @@ export interface PiFormQuestion {
 export const PI_FORM_HTML_MAX_CHARS = 1024 * 1024;
 /** The most matcher steps a `pattern` check may take, by {@link patternWorkBound}: a few ms. */
 const PATTERN_CHECK_BUDGET = 1_000_000;
+/**
+ * The longest `pattern` compiled here. Compiling runs on the broker's event loop, and some syntax is
+ * slow to compile: a `v`-flag set operation such as `[\p{L}--\p{Lu}]` takes about 0.5 ms on Bun
+ * 1.3.14 (measured in review). A longer pattern is neither compiled nor checked here; omp checks it.
+ */
+const PATTERN_MAX_CHARS = 1024;
+/** The most pattern text compiled for one form; patterns past it are likewise left to omp. */
+const PATTERN_FORM_MAX_CHARS = 2048;
+/** Each kept pattern compiled once, when its form is read. */
+const compiledPatterns = new WeakMap<PiFormField, RegExp>();
 
 const SKIPPED = new Set(['script', 'style', 'template', 'head', 'title', 'noscript', 'iframe', 'button']);
 /** Elements whose content is text, not markup, up to their own end tag (HTML raw text / RCDATA). */
@@ -372,7 +385,8 @@ function patternCheckIsCheap(pattern: string, text: string): boolean {
   return patternWorkBound(pattern, text.length) <= PATTERN_CHECK_BUDGET;
 }
 
-/** `^(?:pattern)$` as omp (and HTML) matches `pattern`, or undefined when it does not compile. */
+/** `^(?:pattern)$` as omp (and HTML) matches `pattern`, or undefined when it does not compile. Only
+ *  for a pattern within {@link PATTERN_MAX_CHARS}: compiling runs on the broker's event loop. */
 function compilePattern(pattern: string): RegExp | undefined {
   try {
     return new RegExp(`^(?:${pattern})$`, 'v');
@@ -412,6 +426,7 @@ export function parsePiFormDialog(html: unknown): PiFormDialog | undefined {
   let pending = '';
   let lastText: string | undefined;
   let unsupported = false;
+  let compiledPatternChars = 0;
 
   const settleText = (): void => {
     const text = squash(pending);
@@ -595,10 +610,20 @@ export function parsePiFormDialog(html: unknown): PiFormDialog | undefined {
       const maxLength = finiteNumber(attrs.get('maxlength'));
       if (minLength !== undefined) draft.field.minLength = minLength;
       if (maxLength !== undefined) draft.field.maxLength = maxLength;
-      // omp ignores a pattern that does not compile. One that does is kept, whatever it costs to
-      // run: it is checked here only where that is cheap (`textFieldProblem`), otherwise by omp.
+      // omp ignores a pattern that does not compile. One within the compile budget is compiled once
+      // here and kept, whatever it costs to run: it is checked only where that is cheap
+      // (`textFieldProblem`). One past the budget is not compiled, and only omp checks it. A
+      // pattern never keeps the form from being offered.
       const pattern = attrs.get('pattern');
-      if (pattern !== undefined && compilePattern(pattern)) draft.field.pattern = pattern;
+      if (pattern !== undefined && pattern.length <= PATTERN_MAX_CHARS
+        && compiledPatternChars + pattern.length <= PATTERN_FORM_MAX_CHARS) {
+        compiledPatternChars += pattern.length;
+        const compiled = compilePattern(pattern);
+        if (compiled) {
+          draft.field.pattern = pattern;
+          compiledPatterns.set(draft.field, compiled);
+        }
+      }
       target(attrs, { draft });
       continue;
     }
@@ -689,8 +714,9 @@ function textFieldProblem(field: PiFormField, value: string | number | undefined
   if (field.inputType === 'email' && !/^[^\s@]+@[^\s@]+$/.test(text)) return 'Enter an email address';
   if (field.inputType === 'url' && !canParseUrl(text)) return 'Enter a full URL';
   // Skipped where it is not cheap: omp checks it then, and an answer that fails it fails the dialog.
-  if (field.pattern && patternCheckIsCheap(field.pattern, text)) {
-    if (compilePattern(field.pattern)?.test(text) === false) return `Must match ${field.pattern}`;
+  const compiled = compiledPatterns.get(field);
+  if (field.pattern && compiled && patternCheckIsCheap(field.pattern, text) && !compiled.test(text)) {
+    return `Must match ${field.pattern}`;
   }
   return undefined;
 }
