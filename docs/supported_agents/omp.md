@@ -59,9 +59,10 @@ service reconfiguration instead of leaving omp without its bridge.
   and multi-selects become multiple-choice questions, and text and number
   inputs become typed answers. An answer the form's own rules would refuse
   (`required`, a length or number range, an email or URL field) is not sent
-  and the card stays open. A `pattern` is checked the same way only when that
-  check is quick for the answer given; otherwise omp checks it, and an answer
-  that does not match fails the form after the card has closed. A form that
+  and the card stays open. A `pattern` is checked the same way only when it is
+  short enough to compile quickly and the check is quick for the answer given;
+  otherwise omp checks it, and an answer that does not match fails the form
+  after the card has closed. A form that
   omp withdraws (for example when its timeout expires) closes its card; omp
   then submits the form's defaults.
 - In sessions driven from the app on omp 19.1.0, a turn that hands work to
