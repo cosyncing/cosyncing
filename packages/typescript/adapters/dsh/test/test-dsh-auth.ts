@@ -499,6 +499,35 @@ for (const origin of ['stored', 'owned-exchange'] as const) {
     `${session.state} saves=${String(saves)}`);
 }
 
+{
+  // A restart usually reaches the session as "release, then adopt": the
+  // broker ends every launch before it spawns the next one. The new token must
+  // count as a new launch exactly as a token that replaces a held one does,
+  // or what the old launch was blocked for outlives it. Here the old launch's
+  // requests were refused by the Host/Origin fence, a block that otherwise
+  // stands for the life of the session.
+  const run = async (releaseFirst: boolean): Promise<{ state: string; reason: string }> => {
+    const store = memoryStore();
+    store.records.set('scope-test', {
+      name: COOKIE_NAME, value: 'v1.enrolled.sig', expiresAt: 1_700_000_000_000 + 10 * 86_400_000,
+    });
+    const { session } = harness(() => okResponse(), { store });
+    session.adoptLaunchToken('token-first-launch');
+    await session.ensure();
+    session.reportCredentialRefused('host-or-origin-refused');
+    if (releaseFirst) session.releaseLaunchToken(true);
+    session.adoptLaunchToken('token-next-launch');
+    const outcome = await session.ensure();
+    return { state: outcome.state, reason: outcome.reason };
+  };
+  const replaced = await run(false);
+  const afterRelease = await run(true);
+  check('a launch token adopted after a release is a new launch, as one that replaces a held token is',
+    replaced.state === 'authenticated'
+      && afterRelease.state === replaced.state && afterRelease.reason === replaced.reason,
+    JSON.stringify({ replaced, afterRelease }));
+}
+
 // ── A store that will not answer is not an empty store (review R10) ──────────
 
 {
