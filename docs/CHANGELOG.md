@@ -19,8 +19,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   card and the session stayed Working.
 - omp 19.1.0 is supported alongside omp 17.4.2. omp 19.1.0 needs Bun 1.4.4 or
   newer; doctor names the Bun it needs.
-- omp 19.1.0 forms appear as question cards: choices, multiple choices, and typed
-  answers. A form omp withdraws, for example at its timeout, closes its card.
+- Forms from omp 19.1.0 extensions appear as question cards: choices, multiple
+  choices, and typed answers. A form omp withdraws, for example at its timeout,
+  closes its card.
 - Sessions can be forked on omp 19.1.0. Forking a whole session copies all of it;
   forking at a message keeps that message in the copy. Clone stays unavailable
   for omp.
@@ -52,15 +53,15 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - While omp 19.1.0 waits for background work it started, the session shows
   Working with "Waiting for background work…" instead of going idle early.
 - Pi is verified against Pi 1.6.0. The minimum version stays 0.78.1.
-- Cline: Cline 3.0.75 and the managed Cline Hub it ships are now measured, so New
-  Session, prompts, approvals and Stop are supported on it. The minimum versions
-  are unchanged.
+- Cline 3.0.75 and the Cline Hub it ships (core 0.2.1) are now measured versions,
+  and `cosy doctor` lists them. With Hub core 0.2.1, cosyncing also checks the
+  Hub's own id, so a record left by an earlier Hub on the same port is no longer
+  taken for the running one. The minimum versions are unchanged.
 
 ### Fixed
 
-- Cline: sessions written by Cline 3.0.75, and their subagents, appear in the
-  session list again with their transcripts. Before, Cline 3.0.75 sessions were
-  missing from the list.
+- Cline: sessions the Cline 3.0.75 CLI writes, and their subagents, now appear in
+  the session list with their transcripts. Before, they were missing.
 - OpenCode 2 is recognized from its `opencode v2.x.y` version banner. Before, the
   broker read it as an unknown version and kept its OpenCode 1 behavior, so it
   could start its managed OpenCode server with the OpenCode 2 binary. Now OpenCode
