@@ -51,14 +51,17 @@ export const AGY_CLI_MODELS_MAX_BYTES = 256 * 1024;
  *
  * MEASURED 2026-11-23: every `agy models` run on 1.5.14 logs `auto_updater.go]
  * Spawned background update process` and rewrites `updater/update_status.json`
- * (agy replaced itself on 2026-11-22). The 1.5.14 binary carries
- * `AGY_CLI_DISABLE_AUTO_UPDATE` beside the log text "Auto-update disabled via
- * environment variable %s" (read from the binary, not run). It is set on every
- * PROBE the broker runs — the model list here and doctor's `--version` — and not
- * on a Drive child, which is the user's own session under agy's own policy.
+ * (agy replaced itself on 2026-11-22). MEASURED 2026-11-24 on 1.5.16 (AG-4, an
+ * isolated home): only the exact value `true` stops it — the run logs
+ * `auto_updater.go:285] Auto-update disabled via environment variable
+ * AGY_CLI_DISABLE_AUTO_UPDATE` — while `1`, `TRUE` and `yes` still log
+ * `Spawned background update process`. (T1 set `1` from the binary's strings
+ * alone, so its probes still let agy update itself.) It is set on every PROBE the
+ * broker runs — the model list here and doctor's `--version` —
+ * and not on a Drive child, which is the user's own session under agy's own policy.
  */
 export const AGY_NO_AUTO_UPDATE_ENV: Readonly<Record<string, string>> = Object.freeze({
-  AGY_CLI_DISABLE_AUTO_UPDATE: '1',
+  AGY_CLI_DISABLE_AUTO_UPDATE: 'true',
 });
 
 /** A probe's environment: the broker's own, plus {@link AGY_NO_AUTO_UPDATE_ENV}. */
