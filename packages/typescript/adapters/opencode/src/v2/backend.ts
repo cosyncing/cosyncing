@@ -353,7 +353,7 @@ export class OpenCodeV2Backend {
     if (migration.status === 'required' || migration.status === 'running') {
       const present = new Set(rows.map((row) => row.id));
       for (const old of this.options.legacySessions(options)) if (!present.has(old.id) && nativeId(old.id, 'ses')) rows.push({
-        id: old.id, tool: 'opencode', title: old.title || old.id, cwd: old.directory,
+        id: old.id, tool: 'opencode', title: old.title || '', cwd: old.directory,
         createdAt: old.time?.created, updatedAt: old.time?.updated, status: 'idle', attachMode: 'observe',
         ...(typeof old.model?.providerID === 'string' && typeof (old.model.id ?? old.model.modelID) === 'string' ? { model: old.model.id ?? old.model.modelID, currentModel: { providerID: old.model.providerID, modelID: (old.model.id ?? old.model.modelID)! } } : {}),
         control: { drive: { supported: false, state: 'observing', reason: 'This session has not yet been imported by OpenCode.' }, terminalSync: { supported: false, syncAvailable: false, active: false } },

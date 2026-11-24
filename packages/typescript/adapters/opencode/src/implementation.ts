@@ -561,7 +561,7 @@ export class OpenCodeAdapter implements AgentBackend {
     if (binding.generation === 'none') {
       if (binding.reason === 'v2-service-starting') this.unavailable(binding);
       return this.readPrivateSessions(options).parents.map((session): SessionInfo => ({
-        id: session.id, tool: this.id, title: session.title || session.id, cwd: session.directory,
+        id: session.id, tool: this.id, title: session.title || '', cwd: session.directory,
         status: this.diskActivity(session.id), attachMode: 'observe', createdAt: session.time?.created, updatedAt: session.time?.updated,
         currentModel: currentModelOf(session), currentAgent: currentAgentOf(session),
         control: opencodePrivateControlState({ canDrive: false }),

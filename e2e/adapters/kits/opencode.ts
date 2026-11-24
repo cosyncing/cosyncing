@@ -1816,6 +1816,13 @@ opencodeV2Kit.extras!.push(
           fake.serve.emit('session.renamed', { sessionID: seeded.id, title: 'Renamed in the terminal' }, true);
           await stream.waitForFrame((frame) => frame.kind === 'session' && frame.info.title === 'Renamed in the terminal', { after: externalFrom });
         } finally { fake.serve.beforeRosterReply = undefined; releaseRoster(); }
+        // Session.Info.title is optional in OpenCode 2: an untitled session shows no title, never its id.
+        const untitled = fake.seedSession();
+        delete fake.serve.session(untitled.id).info.title;
+        await context.client.waitForSession((row) => row.id === untitled.id && row.title === '');
+        const untitledStream = await context.client.attach('opencode', untitled.id, { readOnly: true });
+        expect((await untitledStream.waitForKind('session')).info.title).toBe('');
+        untitledStream.close();
         const second = fake.serve.session(seeded.id).messages.filter((message) => message.type === 'user')[1]!.id;
         const forked = await context.client.post(`/api/sessions/opencode/${seeded.id}/fork`, { messageId: second });
         expect(forked.status, forked.text).toBe(200);

@@ -22,7 +22,7 @@ export function isSession(value: unknown): value is Native {
 export function sessionInfo(value: Native, status: SessionInfo['status']): SessionInfo {
   if (!isSession(value)) throw new V2Error('invalid-response');
   return {
-    id: value.id, nativeId: value.id, tool: 'opencode', title: typeof value.title === 'string' && value.title ? value.title : value.id,
+    id: value.id, nativeId: value.id, tool: 'opencode', title: typeof value.title === 'string' ? value.title : '',
     cwd: value.location.directory, status, attachMode: value.parentID ? 'observe' : 'live',
     ...(value.parentID ? { origin: 'subagent', parentThreadId: value.parentID } : {}),
     ...(value.model ? { model: value.model.id, currentModel: { providerID: value.model.providerID, modelID: value.model.id, ...(typeof value.model.variant === 'string' ? { variant: value.model.variant } : {}) } } : {}),
