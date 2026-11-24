@@ -50,8 +50,10 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   `kimi web` from it once and not again until the installed `kimi` changes. On
   2.7, cosyncing uses the `kimi web` server and ignores Kimi Desktop's, and a
   driven session that another Kimi program holds switches to observe.
-- While omp 19.1.0 waits for background work it started, the session shows
-  Working with "Waiting for background work…" instead of going idle early.
+- While omp 19.1.0 waits for background work it started, a session driven from
+  the app shows Working with "Waiting for background work…" instead of going idle
+  early. In a session running in an omp terminal, background work that ends
+  without a follow-up run leaves the session Working until its next run.
 - Pi is verified against Pi 1.6.0. The minimum version stays 0.78.1.
 - Cline 3.0.75 and the Cline Hub it ships (core 0.2.1) are now measured versions,
   and `cosy doctor` lists them. With Hub core 0.2.1, cosyncing also checks the
