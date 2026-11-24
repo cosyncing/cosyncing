@@ -131,6 +131,30 @@ try {
   renameSync(movedSession, tree.sessionDir);
   rmSync(external, { recursive: true, force: true });
 
+  // The one-id lookup behind findGrokStoredSession's re-reads: the row full discovery returns,
+  // without reading or tracing the other sessions planted above, and still refused when the
+  // id appears under two cwd groups.
+  const fullTraces: string[] = [];
+  const fullRow = (await discoverGrokStore({ root: tree.root, trace: (event) => fullTraces.push(event.detail) }))
+    .find((row) => row.id === tree.id);
+  const onlyTraces: string[] = [];
+  const onlyRows = await discoverGrokStore({ root: tree.root, onlyId: tree.id, trace: (event) => onlyTraces.push(event.detail) });
+  check('a one-id lookup returns the full-discovery row and reads no other session',
+    fullRow !== undefined
+      && onlyRows.length === 1
+      && JSON.stringify(onlyRows[0]) === JSON.stringify(fullRow)
+      && fullTraces.length > 0
+      && onlyTraces.length === 0
+      && (await discoverGrokStore({ root: tree.root, onlyId: '019f9d70-e38e-7591-9a24-74a06ad89477' })).length === 0,
+    JSON.stringify({ fullTraces, onlyTraces, onlyRows }));
+  const duplicateGroup = join(tree.root, 'sessions', encodeURIComponent('/other/cwd'));
+  mkdirSync(join(duplicateGroup, tree.id), { recursive: true });
+  writeFileSync(join(duplicateGroup, tree.id, 'summary.json'), `${JSON.stringify({ info: { id: tree.id, cwd: '/other/cwd' } })}\n`);
+  check('a one-id lookup still refuses an id that appears under two cwd groups',
+    (await discoverGrokStore({ root: tree.root, onlyId: tree.id })).length === 0
+      && (await discoverGrokStore({ root: tree.root })).every((row) => row.id !== tree.id));
+  rmSync(duplicateGroup, { recursive: true, force: true });
+
   const boundedTraces: string[] = [];
   const bounded = await discoverGrokStore({ root: tree.root, maxScanEntries: 1, trace: (event) => boundedTraces.push(event.detail) });
   check('discovery work exhaustion refuses a partial roster', bounded.length === 0 && boundedTraces.some((detail) => detail.includes('refusing partial discovery')), boundedTraces.join(' | '));
@@ -194,6 +218,11 @@ try {
       && linkedChild.currentModel?.modelID === 'grok-4.6'
       && linkedChild.currentModel.reasoningEffort === 'xhigh',
     JSON.stringify(linked.map((session) => ({ id: session.id, origin: session.origin, parent: session.parentThreadId }))));
+  const childOnly = (await discoverGrokStore({ root: lineageTree.root, onlyId: childId }))
+    .find((session) => session.id === childId);
+  check('a one-id lookup of a child also reads its claiming parent and keeps the lineage',
+    childOnly?.parentThreadId === lineageTree.id && JSON.stringify(childOnly) === JSON.stringify(linkedChild),
+    JSON.stringify(childOnly));
 
   rmSync(parentMetaPath, { force: true });
 
@@ -216,7 +245,8 @@ try {
   });
   check('two exact parent claims make the child ambiguous and withhold it',
     ambiguous.every((session) => session.id !== childId)
-      && ambiguousTraces.some((detail) => detail.includes('ambiguous')),
+      && ambiguousTraces.some((detail) => detail.includes('ambiguous'))
+      && (await discoverGrokStore({ root: lineageTree.root, onlyId: childId })).every((session) => session.id !== childId),
     ambiguousTraces.join(' | '));
   rmSync(secondParentDir, { recursive: true, force: true });
 

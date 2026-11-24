@@ -401,6 +401,52 @@ try {
       && (await adapter.discoverSessions()).find((row) => row.id === created.id)?.control?.drive.state === 'driving',
     JSON.stringify({ error: String(rewriteRelaunchError ?? ''), rewrites, driving: drive.driving }));
 
+  // The same saves can leave the summary from before the relaunch in place for a moment, still
+  // naming the previous model. A durable read that lands there must keep reading until the
+  // switched model is saved; refusing it revoked Drive for good. Own store, so the session
+  // above keeps its model for the checks that follow.
+  {
+    const staleStore = join(root, 'stale-home');
+    const staleFake = writeFakeGrokBinary(join(root, 'stale-bin'), staleStore);
+    const staleAdapter = new GrokAdapter({ command: staleFake.path, env: staleFake.env, requestTimeoutMs: 2_000 });
+    let staleDrive: GrokDriveConnection | undefined;
+    try {
+      const staleCreated = await staleAdapter.createSession({
+        directory: cwd,
+        model: { providerID: 'xai', modelID: 'grok-4.6', reasoningEffort: 'high' },
+        permissionMode: 'default',
+      });
+      staleDrive = await staleAdapter.attach(staleCreated.id, 'resume') as GrokDriveConnection;
+      staleFake.env.FAKE_GROK_LOAD_SUMMARY_REWRITE_MS = '300';
+      staleFake.env.FAKE_GROK_LOAD_SUMMARY_STALE_MS = '200';
+      let staleError: unknown;
+      try {
+        await staleDrive.sendPrompt({
+          text: 'switch while Grok still shows the previous model',
+          model: { providerID: 'xai', modelID: 'grok-4.5' },
+          permissionMode: 'default',
+        });
+      } catch (error) { staleError = error; }
+      delete staleFake.env.FAKE_GROK_LOAD_SUMMARY_REWRITE_MS;
+      delete staleFake.env.FAKE_GROK_LOAD_SUMMARY_STALE_MS;
+      const staleDone = await waitFor(
+        () => staleFake.events().some((event) => event.kind === 'summary-rewrites-done'), 3_000);
+      const staleRewrites = staleFake.events().filter((event) => event.kind === 'summary-rewrites-done');
+      const staleDurable = (await discoverGrokStore({ root: staleStore })).find((row) => row.id === staleCreated.id);
+      check('a session/load followed by the previous summary keeps Drive once the switched model is saved',
+        staleError === undefined
+          && staleDrive.driving
+          && staleDrive.info.currentModel?.modelID === 'grok-4.5'
+          && staleDone
+          && staleRewrites.some((event) => typeof event.stale === 'number' && event.stale > 0)
+          && staleDurable?.model === 'grok-4.5'
+          && (await staleAdapter.discoverSessions()).find((row) => row.id === staleCreated.id)?.control?.drive.state === 'driving',
+        JSON.stringify({ error: String(staleError ?? ''), staleRewrites, info: staleDrive.info }));
+    } finally {
+      await staleDrive?.close();
+    }
+  }
+
   const spawnsBeforeSwitch = fake.spawnCount();
   fake.env.FAKE_GROK_DONE_METHOD = 'x.ai/session/update';
   await drive.sendPrompt({

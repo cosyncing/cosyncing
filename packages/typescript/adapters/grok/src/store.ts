@@ -128,6 +128,15 @@ export interface GrokDiscoveryOptions {
   maxSessions?: number;
   maxScanEntries?: number;
   trace?: (event: GrokStoreTrace) => void;
+  /**
+   * Look up this one native id. Every session directory and subagent claim is still
+   * enumerated, because an id must be unique across cwd groups and a parent's subagent
+   * metadata may claim it, but only this session's `summary.json` is read, plus the summary of
+   * any parent that claims it as a subagent. The result is what full discovery would return
+   * for those ids, without the other sessions' reads and their traces. `maxSessions` then
+   * counts only those rows.
+   */
+  onlyId?: string;
 }
 
 export interface GrokUpdatesRead {
@@ -478,6 +487,13 @@ export async function discoverGrokStore(options: GrokDiscoveryOptions = {}): Pro
     if (UUID_V7.test(id)) idCounts.set(id, (idCounts.get(id) ?? 0) + 1);
   }
   const tracedAmbiguousIds = new Set<string>();
+  const wantedIds = options.onlyId === undefined ? undefined : new Set([
+    options.onlyId,
+    ...(lineage.claimsByChild.get(options.onlyId) ?? []).map((claim) => claim.parentId),
+  ]);
+  const readCandidates = wantedIds
+    ? candidates.filter((candidate) => wantedIds.has(basename(candidate.sessionDir)))
+    : candidates;
   // Every candidate's `summary.json`, fetched in bounded batches BEFORE the loop
   // below reads them. The loop itself is untouched and still sequential, so the
   // order of `parsed` and of every trace event is exactly what it was.
@@ -499,8 +515,8 @@ export async function discoverGrokStore(options: GrokDiscoveryOptions = {}): Pro
   // absent log is fine — Grok writes it lazily on the first prompt. Probed in the same batches.
   const unsafeUpdates = new Set<string>();
   const summaryReadBatch = 16;
-  for (let index = 0; index < candidates.length; index += summaryReadBatch) {
-    const batch = candidates.slice(index, index + summaryReadBatch);
+  for (let index = 0; index < readCandidates.length; index += summaryReadBatch) {
+    const batch = readCandidates.slice(index, index + summaryReadBatch);
     const [values, updates] = await Promise.all([
       Promise.all(batch.map(
         (candidate) => readBoundedJson(root, join(candidate.sessionDir, 'summary.json'), GROK_MAX_SUMMARY_BYTES),
@@ -516,7 +532,7 @@ export async function discoverGrokStore(options: GrokDiscoveryOptions = {}): Pro
     });
   }
   const parsed: GrokParsedCandidate[] = [];
-  for (const candidate of candidates) {
+  for (const candidate of readCandidates) {
     const id = basename(candidate.sessionDir);
     if (!UUID_V7.test(id)) {
       options.trace?.({ op: 'schema-refused', path: candidate.sessionDir, detail: 'session directory is not a canonical lowercase UUIDv7 native id' });
@@ -642,12 +658,28 @@ export async function discoverGrokStore(options: GrokDiscoveryOptions = {}): Pro
 export const GROK_DURABLE_READ_ATTEMPTS = 40;
 export const GROK_DURABLE_READ_INTERVAL_MS = 25;
 
-/** One session's discovered row, re-read while Grok may still be saving it; undefined after
- *  {@link GROK_DURABLE_READ_ATTEMPTS} reads that all miss. */
-export async function findGrokStoredSession(root: string, id: string): Promise<GrokStoredSession | undefined> {
+/**
+ * One session's discovered row, re-read while Grok may still be saving it, until a read finds
+ * the row and `accept` takes it. The same saves can also leave the summary from before a
+ * relaunch in place for a moment, still naming the previous model or effort, so a caller that
+ * checks the row passes that check as `accept`. After {@link GROK_DURABLE_READ_ATTEMPTS} reads
+ * it returns the last row found even if `accept` refused it, so the caller can name the
+ * mismatch, or undefined when every read missed. Each read is a discovery limited to this id
+ * (`onlyId`): no other session's summary is read.
+ */
+export async function findGrokStoredSession(
+  root: string,
+  id: string,
+  accept: (session: GrokStoredSession) => boolean = () => true,
+): Promise<GrokStoredSession | undefined> {
+  let found: GrokStoredSession | undefined;
   for (let attempt = 1; ; attempt += 1) {
-    const session = (await discoverGrokStore({ root })).find((candidate) => candidate.id === id);
-    if (session || attempt >= GROK_DURABLE_READ_ATTEMPTS) return session;
+    const session = (await discoverGrokStore({ root, onlyId: id })).find((candidate) => candidate.id === id);
+    if (session) {
+      if (accept(session)) return session;
+      found = session;
+    }
+    if (attempt >= GROK_DURABLE_READ_ATTEMPTS) return found;
     await new Promise((resolve) => setTimeout(resolve, GROK_DURABLE_READ_INTERVAL_MS));
   }
 }

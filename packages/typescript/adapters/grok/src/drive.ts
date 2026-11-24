@@ -457,18 +457,27 @@ class LazyGrokAcpTransport implements GrokAcpTransport {
       && this.desiredMode !== 'default') {
       throw new Error(`Grok session/load omitted requested permission mode ${this.desiredMode}.`);
     }
-    // Re-read, not read once: Grok rewrites summary.json around session/load (see
-    // findGrokStoredSession), and one miss here would revoke Drive for good.
-    const durable = await findGrokStoredSession(this.session.storeRoot, this.session.id);
+    const durableModelMatches = (row: GrokStoredSession): boolean =>
+      this.desiredModel === undefined || row.model === this.desiredModel;
+    // A promptless session's stored effort may lag a load that confirmed the requested one.
+    const durableEffortMatches = (row: GrokStoredSession): boolean =>
+      this.desiredEffort === undefined
+      || row.currentModel?.reasoningEffort === this.desiredEffort
+      || (row.messageCount === 0 && effectiveEffort === this.desiredEffort);
+    // Re-read, not read once: Grok rewrites summary.json around session/load, and a read can
+    // miss the row or still see the summary from before this relaunch (see
+    // findGrokStoredSession). Either would revoke Drive for good, so keep reading, within the
+    // same bound, until the row shows the requested model and effort.
+    const durable = await findGrokStoredSession(
+      this.session.storeRoot,
+      this.session.id,
+      (row) => durableModelMatches(row) && durableEffortMatches(row),
+    );
     if (!durable) throw new Error('Grok session/load did not preserve the durable session identity.');
-    if (this.desiredModel !== undefined && durable.model !== this.desiredModel) {
+    if (!durableModelMatches(durable)) {
       throw new Error(`Grok durable summary reports model ${String(durable.model)}, not requested ${this.desiredModel}.`);
     }
-    const promptlessEffortLag = durable.messageCount === 0
-      && effectiveEffort === this.desiredEffort;
-    if (this.desiredEffort !== undefined
-      && durable.currentModel?.reasoningEffort !== this.desiredEffort
-      && !promptlessEffortLag) {
+    if (!durableEffortMatches(durable)) {
       throw new Error(`Grok durable summary reports reasoning effort ${String(durable.currentModel?.reasoningEffort)}, not requested ${this.desiredEffort}.`);
     }
     this.verifyRelaunchConfiguration = false;

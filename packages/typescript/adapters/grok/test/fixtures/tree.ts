@@ -280,29 +280,50 @@ const handle = (frame) => {
     return;
   }
   if (frame.method === 'session/load') {
-    ensureSession(frame.params.cwd);
-    send({ jsonrpc: '2.0', id: frame.id, result: { models, modes } });
     // Grok 1.0.92 saves summary.json by writing a temp file and renaming it over the old one,
     // five times within ~45 ms of session/load, some after its answer (a 2026-11-24
     // capture). Same mechanism here, repeated for a bounded window so that the client's
     // first read after the answer lands inside it; the event loop is yielded every 5 ms so the
-    // answer is flushed first and later frames are still read.
+    // answer is flushed first and later frames are still read. With
+    // FAKE_GROK_LOAD_SUMMARY_STALE_MS, the summary as it was before this session/load (the
+    // previous model and effort) is what the store holds at the answer and what the rewrites
+    // put back for that long; the summary for this load follows, and is the last one saved.
+    const summaryPath = sessionPaths(frame.params.cwd).summary;
     const rewriteMs = Math.min(1000, Number(process.env.FAKE_GROK_LOAD_SUMMARY_REWRITE_MS || 0) || 0);
+    const staleMs = Math.min(rewriteMs, Number(process.env.FAKE_GROK_LOAD_SUMMARY_STALE_MS || 0) || 0);
+    let previous;
+    if (staleMs > 0) {
+      try { previous = readFileSync(summaryPath); } catch {}
+    }
+    ensureSession(frame.params.cwd);
+    const fresh = rewriteMs > 0 ? readFileSync(summaryPath) : undefined;
+    let count = 0;
+    let stale = 0;
+    const save = (text) => {
+      const temporary = summaryPath + '.' + process.pid + '-' + count + '.tmp';
+      writeFileSync(temporary, text);
+      renameSync(temporary, summaryPath);
+      count += 1;
+    };
+    if (previous) save(previous);
+    send({ jsonrpc: '2.0', id: frame.id, result: { models, modes } });
     if (rewriteMs > 0) {
-      const summaryPath = sessionPaths(frame.params.cwd).summary;
-      const text = readFileSync(summaryPath);
-      const deadline = Date.now() + rewriteMs;
-      let count = 0;
+      const started = Date.now();
+      const deadline = started + rewriteMs;
+      const staleUntil = started + staleMs;
       const rewrite = () => {
         const sliceEnd = Math.min(deadline, Date.now() + 5);
         while (Date.now() < sliceEnd) {
-          const temporary = summaryPath + '.' + process.pid + '-' + count + '.tmp';
-          writeFileSync(temporary, text);
-          renameSync(temporary, summaryPath);
-          count += 1;
+          const useStale = previous !== undefined && Date.now() < staleUntil;
+          save(useStale ? previous : fresh);
+          if (useStale) stale += 1;
         }
-        if (Date.now() < deadline) setTimeout(rewrite, 0);
-        else record({ kind: 'summary-rewrites-done', count, pid: process.pid });
+        if (Date.now() < deadline) {
+          setTimeout(rewrite, 0);
+          return;
+        }
+        save(fresh);
+        record({ kind: 'summary-rewrites-done', count, stale, pid: process.pid });
       };
       setTimeout(rewrite, 0);
     }
