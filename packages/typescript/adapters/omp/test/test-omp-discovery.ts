@@ -477,6 +477,18 @@ default</textarea></label>
   check('one form compiles at most its budget of pattern text, and the rest is left to omp',
     JSON.stringify(budgetForm?.fields.map((field) => field.pattern !== undefined)) === JSON.stringify([true, true, false]),
     JSON.stringify(budgetForm?.fields.map((field) => field.pattern?.length)));
+  // Groups nested past the bound's depth limit count as unbounded: the check is left to omp rather
+  // than recursing, so even an answer that does not match is sent.
+  const deep = patternForm(`${'('.repeat(300)}a${')'.repeat(300)}`);
+  const deepAnswer = deep && piFormAnswer(deep, [['b']]);
+  check('a pattern nested past the depth limit is kept and left to omp',
+    deep?.fields[0]?.pattern?.length === 601 && deepAnswer?.ok === true, JSON.stringify(deepAnswer));
+  // A refusal quotes at most 80 characters of the pattern.
+  const longQuoted = patternForm('a'.repeat(200));
+  const longQuotedAnswer = longQuoted && piFormAnswer(longQuoted, [['b']]);
+  check('a refusal quotes only the start of a long pattern',
+    longQuotedAnswer?.ok === false && longQuotedAnswer.problem === `Value: Must match ${'a'.repeat(80)}…`,
+    JSON.stringify(longQuotedAnswer));
 
   // The parser runs on the broker's event loop: crafted HTML up to the size cap stays linear.
   const megabyte = 1024 * 1024 - 64;

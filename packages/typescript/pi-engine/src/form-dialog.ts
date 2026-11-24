@@ -97,6 +97,8 @@ const PATTERN_CHECK_BUDGET = 1_000_000;
 const PATTERN_MAX_CHARS = 1024;
 /** The most pattern text compiled for one form; patterns past it are likewise left to omp. */
 const PATTERN_FORM_MAX_CHARS = 2048;
+/** Group nesting past this counts as unbounded work, so the bound's recursion stays shallow. */
+const PATTERN_MAX_DEPTH = 256;
 /** Each kept pattern compiled once, when its form is read. */
 const compiledPatterns = new WeakMap<PiFormField, RegExp>();
 
@@ -244,11 +246,13 @@ const BRACE_QUANTIFIER = /\{(\d+)(?:(,)(\d*))?\}/y;
  * steps, times `length + 1` when a backreference compares a captured string.
  *
  * The bound is loose and errs high: `[a-z]+(-[a-z]+)*` counts as exponential, so a long answer to
- * it is left to omp. Linear in the pattern's length.
+ * it is left to omp. Groups nested deeper than {@link PATTERN_MAX_DEPTH} count as Infinity, which
+ * keeps the recursion shallow. Linear in the pattern's length.
  */
 function patternWorkBound(pattern: string, length: number): number {
   const size = pattern.length;
   let at = 0;
+  let depth = 0;
   let backreference = false;
   const cap = (value: number): number => (value > Number.MAX_SAFE_INTEGER ? Infinity : value);
 
@@ -320,6 +324,10 @@ function patternWorkBound(pattern: string, length: number): number {
     const ch = pattern[at]!;
     let paths: number;
     if (ch === '(') {
+      if (++depth > PATTERN_MAX_DEPTH) {
+        at = size;
+        return Infinity;
+      }
       at++;
       if (pattern[at] === '?') {
         at++;
@@ -337,6 +345,7 @@ function patternWorkBound(pattern: string, length: number): number {
         }
       }
       paths = alternation();
+      depth--;
       if (pattern[at] === ')') at++;
     } else if (ch === '[') {
       paths = skipClass();
@@ -383,6 +392,30 @@ function patternWorkBound(pattern: string, length: number): number {
  */
 function patternCheckIsCheap(pattern: string, text: string): boolean {
   return patternWorkBound(pattern, text.length) <= PATTERN_CHECK_BUDGET;
+}
+
+/** At most this much of a pattern is quoted in a refusal; the rest is elided. */
+const PATTERN_QUOTE_MAX_CHARS = 80;
+
+/**
+ * Why `text` fails the field's pattern, or undefined when it matches or is not checked here: the
+ * pattern was not compiled (see {@link PATTERN_MAX_CHARS}), the check is not cheap, or the bound or
+ * the match threw (too deep for the stack). Each of those leaves the pattern to omp; none may keep a
+ * card from being answered.
+ */
+function patternProblem(field: PiFormField, text: string): string | undefined {
+  const compiled = compiledPatterns.get(field);
+  if (!field.pattern || !compiled) return undefined;
+  try {
+    if (!patternCheckIsCheap(field.pattern, text) || compiled.test(text)) return undefined;
+  } catch {
+    return undefined;
+  }
+  const characters = Array.from(field.pattern);
+  const quoted = characters.length > PATTERN_QUOTE_MAX_CHARS
+    ? `${characters.slice(0, PATTERN_QUOTE_MAX_CHARS).join('')}…`
+    : field.pattern;
+  return `Must match ${quoted}`;
 }
 
 /** `^(?:pattern)$` as omp (and HTML) matches `pattern`, or undefined when it does not compile. Only
@@ -714,11 +747,7 @@ function textFieldProblem(field: PiFormField, value: string | number | undefined
   if (field.inputType === 'email' && !/^[^\s@]+@[^\s@]+$/.test(text)) return 'Enter an email address';
   if (field.inputType === 'url' && !canParseUrl(text)) return 'Enter a full URL';
   // Skipped where it is not cheap: omp checks it then, and an answer that fails it fails the dialog.
-  const compiled = compiledPatterns.get(field);
-  if (field.pattern && compiled && patternCheckIsCheap(field.pattern, text) && !compiled.test(text)) {
-    return `Must match ${field.pattern}`;
-  }
-  return undefined;
+  return patternProblem(field, text);
 }
 
 function canParseUrl(text: string): boolean {
