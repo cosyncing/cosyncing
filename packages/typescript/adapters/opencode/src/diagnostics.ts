@@ -261,12 +261,7 @@ export async function diagnoseOpenCodeSetup(
     }
 
     const loopback = ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(server.hostname);
-    if (unsupported) {
-      checks.push({
-        id: 'opencode.managed-serve-eligibility', status: 'skip', detailCode: 'external-v2-service',
-        summary: 'cosyncing does not manage this OpenCode generation.',
-      });
-    } else if (!loopback) {
+    if (!loopback) {
       checks.push({
         id: 'opencode.managed-serve-eligibility',
         status: 'skip',
@@ -292,12 +287,6 @@ export async function diagnoseOpenCodeSetup(
           : 'Managed serve eligibility was not checked because OpenCode is missing.',
       });
     }
-  }
-
-  if (unsupported) {
-    // Setup cannot reconcile a managed serve for an unsupported generation.
-    const serverCheck = checks.find((check) => check.id === 'opencode.server');
-    if (serverCheck) delete serverCheck.remediation;
   }
 
   return {

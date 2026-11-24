@@ -311,7 +311,6 @@ const ZH_HUMAN_TEXT: Readonly<Record<string, string>> = Object.freeze({
   'Registration must be owned by this user and not writable by other users.': '注册信息必须属于当前用户，且其他用户不可写入。',
   'Registration exceeds its size limit.': '注册信息超过大小限制。',
   'Registration is not a readable regular file.': '注册信息不是可读的普通文件。',
-  'cosyncing does not manage this OpenCode generation.': 'cosyncing 不管理此 OpenCode 版本代系。',
   'OpenCode local session storage is readable.': 'OpenCode 本地会话存储可读。',
   'OpenCode local session storage is not present yet.': 'OpenCode 本地会话存储尚不存在。',
   'Start OpenCode once or use a reachable shared server.': '请启动一次 OpenCode，或使用可访问的共享服务器。',
