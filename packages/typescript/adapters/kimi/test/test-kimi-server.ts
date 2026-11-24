@@ -2464,11 +2464,11 @@ try {
 
   // ── 9g. A refused launch is not offered again until the binary changes ────
   //
-  // T1 residual. With no host running the broker starts `kimi web` from the
-  // installed binary; when that binary is a version the gate refuses, every
-  // start produced a refused host and the next pass started it again. The
-  // adapter now attributes the refusal to its own offer and withholds the
-  // launch while the binary is unchanged.
+  // With no host running the broker starts `kimi web` from the installed
+  // binary; when that binary is a version the gate refuses, every start
+  // produced a refused host and the next pass started it again. The adapter
+  // now attributes the refusal to its own offer and withholds the launch while
+  // the binary is unchanged.
   {
     let now = 1_795_507_000_000;
     let identity = 'binary-a';
@@ -2488,8 +2488,17 @@ try {
     const offered = await supervised.describeManagedHost();
     check('with no host running, a launch is offered',
       !!offered?.launch && offered.locator.kind === 'absent', JSON.stringify(offered?.launch));
-    live = [unsupportedHost(now + 1_500)];
-    now += 5_000;
+    // The broker describes the host again while that start is under way (a
+    // readiness poll) before the record appears. Kimi stamps `started_at`
+    // before it writes the record, so this poll lands AFTER the start the
+    // record will report — and must not move the offer past it.
+    const startedAt = now + 1_500;
+    now += 1_800;
+    const polled = await supervised.describeManagedHost();
+    check('a readiness poll before the record appears still offers the same launch',
+      !!polled?.launch && polled.locator.kind === 'absent', JSON.stringify(polled?.launch));
+    live = [unsupportedHost(startedAt)];
+    now += 3_200;
     check('the host that launch produced is refused for its version', !(await supervised.isAvailable()));
     live = [];
     const withheld = await supervised.describeManagedHost();

@@ -819,7 +819,24 @@ export class KimiAdapter implements AgentBackend {
         executable = undefined;
       } else if (!instance && identity !== undefined) {
         // Only an ABSENT host leads to a start, so only then is an offer made.
-        this.launchOffer = { at: (this.options.now ?? Date.now)(), executable: identity };
+        //
+        // One start describes the host several times before its record
+        // appears: once to locate it before the spawn, then on each readiness
+        // poll. Kimi stamps `started_at` before it writes the record, so a poll
+        // in between that moved the offer forward would leave it AFTER the
+        // record's start, and the refusal would no longer be attributed to
+        // this launch. An offer for the same executable that is still inside
+        // its window therefore stands.
+        const now = (this.options.now ?? Date.now)();
+        const offer = this.launchOffer;
+        if (
+          !offer
+          || offer.executable !== identity
+          || now < offer.at
+          || now - offer.at > KIMI_LAUNCH_ATTRIBUTION_MS
+        ) {
+          this.launchOffer = { at: now, executable: identity };
+        }
       }
     }
     return {
