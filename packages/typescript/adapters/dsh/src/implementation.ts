@@ -124,6 +124,22 @@ export const DSH_MANAGED_HOST_READY_MS = 20_000;
 export const DSH_MANAGED_HOST_STOP_MS = 5_000;
 
 /**
+ * How many more readiness probes an owned 0.2 launch may answer "not yet" for
+ * while the host already serves but its launch URL has not been read.
+ *
+ * With a stored cookie the host authenticates before its URL reaches the
+ * broker: in a managed-launch capture on 0.2.2-rc.5 the probe that passed began
+ * 11-19 ms before the URL reached the pipe, and the start loop stops reading
+ * output once readiness passes, so 3 of 14 restarts never adopted the new
+ * token and renewal had nothing current to use. The URL is printed before the
+ * host answers (45-162 ms, captured), so the forward that precedes the next
+ * probe carries it; the rest of the allowance is margin. Counted in probes,
+ * not time, because each probe follows a forward of the latest output, and a
+ * busy broker delays both alike. After it, readiness answers as before.
+ */
+export const DSH_MANAGED_LAUNCH_URL_EXTRA_PROBES = 3;
+
+/**
  * Frames a generation may accumulate while its `host.describe` probe is still
  * in flight, in COUNT and in BYTES. The probe answers in milliseconds against
  * a healthy host; a burst past either cap means the verifier is wedged — or
@@ -591,6 +607,14 @@ export class DshAdapter implements AgentBackend {
   private protocolChoice?: { family: DshContractFamily | null; at: number; detail?: string };
   /** Bytes of child output not yet completed into a line, across announcement chunks. */
   private readonly managedOutput = new DshLaunchScanner();
+  /**
+   * Where the owned launch in progress stands on its launch URL. `awaiting`
+   * lasts from the launch's first forwarded output until its URL is read or
+   * the probe allowance runs out (`settled`); a launch ending resets it.
+   */
+  private managedLaunchUrl: 'none' | 'awaiting' | 'settled' = 'none';
+  /** Probes that found the host serving while the URL was still awaited. */
+  private managedLaunchUrlProbes = 0;
   /** Workspace titles learned from a live `workspace/follow` baseline, with the moment they were read. */
   private remoteWorkspaceBaseline?: { at: number; titles: Map<string, string>; archived: Set<string> };
   private static readonly DSH_WORKSPACE_TITLES_TTL_MS = 5 * 60_000;
@@ -1170,11 +1194,16 @@ export class DshAdapter implements AgentBackend {
   observeManagedOutput(chunk: string): void {
     const baseUrl = this.baseUrlOrUndefined();
     if (baseUrl === undefined) return;
+    if (this.managedLaunchUrl === 'none') {
+      this.managedLaunchUrl = 'awaiting';
+      this.managedLaunchUrlProbes = 0;
+    }
     for (const raw of this.managedOutput.feed(chunk)) {
       try {
         const parsed = parseDshLaunchUrl(raw, baseUrl);
         const auth = this.authSession(baseUrl);
         auth.adoptLaunchToken(parsed.token);
+        this.managedLaunchUrl = 'settled';
         // Kick the exchange off now. Readiness will call `ensure()` too, but an
         // exchange that waits for the first probe is an exchange that spends the
         // host's startup budget on a queue.
@@ -1201,7 +1230,36 @@ export class DshAdapter implements AgentBackend {
    */
   managedLaunchEnded(_reason: string): void {
     this.managedOutput.reset();
+    this.managedLaunchUrl = 'none';
+    this.managedLaunchUrlProbes = 0;
     this.remoteAuth?.releaseLaunchToken(true);
+  }
+
+  /**
+   * Readiness of a host this broker is starting: available, and for an owned
+   * 0.2 launch, its launch URL read too.
+   *
+   * A stored cookie lets the host answer an authenticated roster read before
+   * the URL it printed has been forwarded, and the broker stops forwarding once
+   * readiness passes. Calling it ready then leaves the launch token unadopted,
+   * and a 30-day cookie then expires with nothing to renew it. So while an
+   * owned launch is awaiting its URL, a serving host is "not yet" for up to
+   * {@link DSH_MANAGED_LAUNCH_URL_EXTRA_PROBES} probes; each one follows a
+   * forward of the latest output. Outside an owned launch (a broker that found
+   * the host already running, or the supervision probe), and for the legacy
+   * contract, which prints no URL, this is exactly {@link isAvailable}.
+   */
+  async isManagedHostReady(options?: AvailabilityOptions): Promise<boolean> {
+    const available = await this.isAvailable(options);
+    if (!available || this.managedLaunchUrl !== 'awaiting') return available;
+    // `remoteReadiness` is set only on the 0.2 path; the legacy host prints no URL.
+    if (this.remoteReadiness === undefined
+        || this.managedLaunchUrlProbes >= DSH_MANAGED_LAUNCH_URL_EXTRA_PROBES) {
+      this.managedLaunchUrl = 'settled';
+      return true;
+    }
+    this.managedLaunchUrlProbes += 1;
+    return false;
   }
 
   async isAvailable(options?: AvailabilityOptions): Promise<boolean> {

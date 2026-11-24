@@ -28,7 +28,7 @@ export {};
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DshAdapter, dshCredentialScope } from '@cosyncing/adapter-dsh';
+import { DshAdapter, DSH_MANAGED_LAUNCH_URL_EXTRA_PROBES, dshCredentialScope, type DshCookie } from '@cosyncing/adapter-dsh';
 import {
   ensureManagedHost,
   HOST_ABSENT,
@@ -195,6 +195,145 @@ function fakeEffects(child: { output: string[]; gone: boolean }): {
   return { effects, signals: signals[0]!, launches };
 }
 
+// ── a host that is relaunched, and the machine that relaunches it ──────────
+
+/**
+ * One address, served by a succession of launches. Between launches nothing
+ * answers (503 stands in for a refused connection); during one, the index route
+ * accepts only the token that launch printed. Every token presented there is
+ * logged, accepted, refused or unanswered, which is what lets a check say
+ * "never sent".
+ */
+interface LaunchingHost {
+  readonly baseUrl: string;
+  readonly exchanges: string[];
+  readonly issued: Array<{ name: string; value: string }>;
+  rosterReads: number;
+  up: boolean;
+  accepts: string | undefined;
+  /** Runs while an authenticated roster read is being answered, before the reply. */
+  onServingRoster: (() => void) | undefined;
+  stop(): void;
+}
+
+async function startLaunchingHost(): Promise<LaunchingHost> {
+  let port = 0;
+  const host: LaunchingHost = {
+    get baseUrl() { return `http://127.0.0.1:${String(port)}`; },
+    exchanges: [],
+    issued: [],
+    rosterReads: 0,
+    up: false,
+    accepts: undefined,
+    onServingRoster: undefined,
+    stop() { server.stop(true); },
+  };
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    async fetch(req) {
+      const url = new URL(req.url);
+      // Logged before the liveness check: a token sent to this address counts as
+      // sent whether or not anything was there to refuse it.
+      const token = url.pathname === '/' ? url.searchParams.get('token') : null;
+      if (token !== null) host.exchanges.push(token);
+      if (!host.up) return new Response('no host is serving', { status: 503 });
+      if (url.pathname === '/api/remote.mux') return new Response('unauthorized', { status: 401 });
+      if (url.pathname === '/') {
+        if (token === null || token !== host.accepts) {
+          return new Response('dsh web authentication required; reopen the URL printed by dsh web.', { status: 401 });
+        }
+        const issued = { name: 'dsh-auth-cmVsYXVuY2hlZA', value: `v1.issued-for-${token}` };
+        host.issued.push(issued);
+        return new Response(null, {
+          status: 303,
+          headers: {
+            location: './',
+            'cache-control': 'no-store',
+            'set-cookie': `${issued.name}=${issued.value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000`,
+          },
+        });
+      }
+      if (url.pathname === '/api/session/list') {
+        if (req.headers.get('cookie') === null) return new Response('unauthorized', { status: 401 });
+        host.rosterReads += 1;
+        host.onServingRoster?.();
+        const body = await req.json() as { rpcId: string };
+        return new Response(JSON.stringify({
+          type: 'server-response',
+          rpcId: body.rpcId,
+          result: { ok: true, value: { items: [] } },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response('not found', { status: 404 });
+    },
+  });
+  port = server.port ?? 0;
+  return host;
+}
+
+type Announce = 'at-spawn' | 'during-first-serving-probe' | 'never';
+
+/**
+ * The lifecycle engine's view of a machine that relaunches {@link LaunchingHost},
+ * on a virtual clock: `sleep` advances it and yields one macrotask so real HTTP
+ * can complete, and no probe deadline ever fires on its own. Each spawn is a new
+ * pid that brings the host up with that launch's token; SIGTERM takes it down.
+ */
+function launchMachine(host: LaunchingHost): {
+  effects: ManagedHostEffects;
+  next(launch: { token: string; announce: Announce }): void;
+} {
+  let clock = 1_000_000;
+  let nextPid = 41_600;
+  let pending: { token: string; announce: Announce } | undefined;
+  let current: { pid: number; output: string; gone: boolean } | undefined;
+  const identity = (pid: number): HostProcessIdentity => ({ pid, start: `start-${String(pid)}`, boot: 'boot-fixture', comm: 'dsh' });
+  const effects: ManagedHostEffects = {
+    listener: () => HOST_ABSENT,
+    liveProcess: (pid): LiveProcess => (current && pid === current.pid && !current.gone
+      ? { state: 'running', identity: identity(pid) }
+      : PROCESS_ABSENT),
+    spawn: () => {
+      const launch = pending;
+      if (!launch) throw new Error('the scenario did not say what the next launch prints');
+      pending = undefined;
+      nextPid += 1;
+      const child = { pid: nextPid, output: 'stdout:\ndsh web: starting\n\nstderr:\n', gone: false };
+      current = child;
+      const announced = `stdout:\ndsh web: starting\ndsh web: ${host.baseUrl}/?token=${launch.token}\n\nstderr:\n`;
+      host.up = true;
+      host.accepts = launch.token;
+      if (launch.announce === 'at-spawn') child.output = announced;
+      host.onServingRoster = launch.announce === 'during-first-serving-probe'
+        ? () => { child.output = announced; host.onServingRoster = undefined; }
+        : undefined;
+      return {
+        pid: child.pid,
+        exited: new Promise<number>(() => {}),
+        get exitCode() { return child.gone ? 0 : null; },
+        readOutput: () => child.output,
+      };
+    },
+    signal: (pid, signal) => {
+      if (signal === 'SIGTERM' && current && pid === current.pid) {
+        current.gone = true;
+        host.up = false;
+        host.accepts = undefined;
+        host.onServingRoster = undefined;
+      }
+    },
+    now: () => clock,
+    sleep: async (ms) => {
+      clock += ms;
+      await new Promise<void>((resolve) => { setImmediate(resolve); });
+    },
+    deadline: () => ({ expired: new Promise<void>(() => {}), cancel: () => {} }),
+    selfPid: () => process.pid,
+  };
+  return { effects, next: (launch) => { pending = launch; } };
+}
+
 /** A disposable state home, so no test writes a credential the broker would read. */
 function tempHome(): string {
   const dir = mkdtempSync(join(realpathSync(tmpdir()), 'cosyncing-dsh-managed-launch-'));
@@ -355,6 +494,84 @@ try {
       !existsSync(dshSessionsPath(home))
         || loadDshCookie(dshCredentialScope(host.baseUrl, dshHome), dshSessionsPath(home)) === null,
       '');
+    host.stop();
+    restoreEnv();
+  }
+
+  // ── DS-3a: a relaunch whose host serves before its launch URL is read ─────
+  //
+  // The managed-launch capture on 0.2.2-rc.5 relaunched a host 14 times with a
+  // stored cookie and missed the new launch URL 3 times. The probe that found
+  // the host serving began 11-19 ms before the URL reached the broker's pipe
+  // and passed about 120 ms later, and the start loop stops reading output once
+  // readiness passes. The adapter still held the stopped launch's token, so a
+  // renewal would have sent a token no running host had issued. Here the
+  // relaunched child prints its URL exactly then: while the first probe that
+  // finds the host serving is being answered.
+  {
+    const TOKEN_A = 'launch-token-a-fixture';
+    const TOKEN_B = 'launch-token-b-fixture';
+    const TOKEN_C = 'launch-token-c-fixture';
+    const host = await startLaunchingHost();
+    const home = tempHome();
+    homes.push(home);
+    useEnv({
+      COSYNCING_HOME: home,
+      COSYNCING_DSH_BASE_URL: host.baseUrl,
+      DSH_HOME: join(home, 'dsh-profile'),
+      COSYNCING_DSH_MANAGED_HOST: '1',
+    });
+    // A memory store, so "a day before expiry" is a value to set rather than a
+    // day to wait: the adapter re-reads its enrollment on every readiness call.
+    let enrolled: DshCookie | null = {
+      name: 'dsh-auth-c2VlZGVk', value: 'v1.enrolled-earlier', expiresAt: Date.now() + 10 * 86_400_000,
+    };
+    const adapter = new DshAdapter({
+      credentialStore: {
+        async load() { return enrolled; },
+        async save(_scope, cookie) { enrolled = cookie; },
+        async clear() { enrolled = null; },
+      },
+      resolveExecutable: () => FAKE_EXECUTABLE,
+      readExecutableVersion: () => MANAGED_VERSION,
+    });
+    const machine = launchMachine(host);
+    const store = managedHostStore(home);
+    const gate = { COSYNCING_DSH_MANAGED_HOST: '1' };
+
+    // Launch A prints its URL first, the ordinary order, and is then stopped.
+    machine.next({ token: TOKEN_A, announce: 'at-spawn' });
+    const launchA = await ensureManagedHost(adapter, machine.effects, store, gate);
+    const stopA = await releaseManagedHost(adapter, machine.effects, store);
+    const sentBeforeStop = host.exchanges.length;
+
+    // A day before expiry, renewal is due. Launch B serves first and prints
+    // its URL during that first serving probe.
+    enrolled = { ...enrolled!, expiresAt: Date.now() + 3_600_000 };
+    machine.next({ token: TOKEN_B, announce: 'during-first-serving-probe' });
+    const launchB = await ensureManagedHost(adapter, machine.effects, store, gate);
+    await adapter.isAvailable();
+    check('a relaunch that serves before its URL is read still adopts the new launch token',
+      launchA.action === 'started' && launchB.action === 'started'
+        && host.exchanges.includes(TOKEN_B) && enrolled?.value === `v1.issued-for-${TOKEN_B}`,
+      JSON.stringify({ launchA, launchB, exchanges: host.exchanges, enrolled: enrolled?.value }));
+    check('a stopped launch\'s token is never sent for renewal',
+      (stopA.action === 'stopped' || stopA.action === 'already-gone')
+        && !host.exchanges.slice(sentBeforeStop).includes(TOKEN_A),
+      JSON.stringify({ stopA, exchanges: host.exchanges, sentBeforeStop }));
+
+    // Launch C never prints a URL at all. The wait for it is bounded, and the
+    // start succeeds on the stored cookie as it did before.
+    await releaseManagedHost(adapter, machine.effects, store);
+    const readsBefore = host.rosterReads;
+    machine.next({ token: TOKEN_C, announce: 'never' });
+    const launchC = await ensureManagedHost(adapter, machine.effects, store, gate);
+    check('a relaunch that never prints its URL is ready after the bounded allowance',
+      launchC.action === 'started'
+        && host.rosterReads - readsBefore === DSH_MANAGED_LAUNCH_URL_EXTRA_PROBES + 1
+        && !host.exchanges.includes(TOKEN_C),
+      JSON.stringify({ launchC, reads: host.rosterReads - readsBefore }));
+    await releaseManagedHost(adapter, machine.effects, store);
     host.stop();
     restoreEnv();
   }
