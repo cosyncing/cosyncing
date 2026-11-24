@@ -268,6 +268,30 @@ process.exit(73);
   check('the refused file stays readable through Observe',
     newerHistory.some((message) => message.type === 'user-message' && message.text === 'written by omp 19.1.0'));
   await newerObserve.close();
+  // Fork runs the configured omp as well. omp 17.4.2 has no RPC fork, so the refusal shows with omp
+  // 19.1.0 configured and a later omp's entry (the captured shape, a version past the captured ones).
+  const olderCanFork = olderAdapter.canForkSession();
+  const nineteenBin = join(root, 'omp-nineteen');
+  const nineteenSpawnMarker = join(root, 'nineteen-runtime-spawned');
+  writeFileSync(nineteenBin, `#!/usr/bin/env bun
+import { writeFileSync } from 'node:fs';
+if (process.argv.includes('--version')) { console.log('omp/19.1.0'); process.exit(0); }
+writeFileSync(${JSON.stringify(nineteenSpawnMarker)}, 'spawned');
+process.exit(73);
+`);
+  chmodSync(nineteenBin, 0o755);
+  process.env.COSYNCING_OMP_BIN = nineteenBin;
+  resetOmpRuntimeReadinessCache();
+  appendFileSync(sessionD, JSON.stringify({ type: 'message', id: 'd3', parentId: 'd2', timestamp: '2026-11-24T08:26:01.120Z', runtime: { version: '19.2.0' }, message: { role: 'user', content: [{ type: 'text', text: 'written by a later omp' }] } }) + '\n');
+  const nineteenAdapter = new OmpAdapter({ brokerUrl: 'http://127.0.0.1:7734' });
+  const newerFork = await refusalOf(() => nineteenAdapter.forkSession(idOf(sessionD)));
+  check('omp 17.4.2 offers no fork, and omp 19.1.0 refuses to fork a file a later omp wrote (unresumable: the broker answers 409), before spawning',
+    olderCanFork === false
+      && nineteenAdapter.canForkSession() === true
+      && newerFork.name === 'NativeSessionUnresumableError'
+      && /written by omp 19\.2\.0, which is newer than the omp 19\.1\.0/.test(newerFork.message)
+      && !existsSync(nineteenSpawnMarker),
+    JSON.stringify(newerFork));
   rmSync(sessionD, { force: true });
   delete process.env.COSYNCING_OMP_BIN;
   resetOmpRuntimeReadinessCache();

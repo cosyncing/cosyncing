@@ -84,9 +84,9 @@ service reconfiguration instead of leaving omp without its bridge.
   extension form dialogs still reach the app.
 - The v1 adapter deliberately omits native subagent events.
 - A session written by a newer omp than the one cosyncing runs stays
-  readable, but cosyncing does not resume or rename it natively: an older omp
-  could continue it on the wrong branch. Continue it in a terminal with the
-  omp that wrote it, or update the omp cosyncing uses.
+  readable, but cosyncing does not resume, fork or rename it natively: an
+  older omp could continue it on the wrong branch. Continue it in a terminal
+  with the omp that wrote it, or update the omp cosyncing uses.
 - The terminal/bridge and installed browser physical passes are complete for
   omp 17.4.2; omp 19.1.0 is measured from RPC and bridge captures. The
   integration remains experimental because omp's upstream RPC and store

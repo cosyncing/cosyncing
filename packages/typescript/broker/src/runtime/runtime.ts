@@ -24,6 +24,7 @@ import {
   isAgentOwnedSessionError,
   isHistorySnapshotRefusal,
   isNativeSessionRenameUnsupportedError,
+  isNativeSessionUnresumableError,
   isOwnershipConflictError,
   OwnershipConflictError,
   isSessionCreateTemporarilyUnavailableError,
@@ -7325,6 +7326,8 @@ server = Bun.serve<WsData>({
         }
         // An id the adapter's store or native server does not publish is a permanent answer too.
         if (isSessionNotFoundError(err)) return json({ ok: false, error: 'session not found', code: 'NOT_FOUND' }, 404);
+        // So is a session the configured runtime must not continue (omp: a newer omp wrote it).
+        if (isNativeSessionUnresumableError(err)) return json({ error: err.message }, 409);
         return json({ error: 'native session fork failed' }, 502);
       }
       const base = nativeSession || await discoverSession(tool, id);
