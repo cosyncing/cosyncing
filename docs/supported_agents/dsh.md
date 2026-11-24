@@ -1,15 +1,18 @@
 # DeepSeek Harness (experimental)
 
 The provisional DeepSeek Harness adapter is intended for source contributors.
-It connects to a `dsh web` host. It supports exactly two `@deepseek-ai/dsh`
-versions: 0.2.0-rc.2, the current contract, and 0.1.0-rc.6, the older legacy
-contract. Those are two different wire contracts, not one contract with an older
-build behind it, and cosyncing selects between them by reading the host.
+It connects to a `dsh web` host. It supports exactly three `@deepseek-ai/dsh`
+versions: 0.2.0-rc.2 and 0.2.2-rc.5, two builds of the current contract, and
+0.1.0-rc.6, the older legacy contract. The 0.2 and 0.1 contracts are different
+wire contracts, not one contract with an older build behind it, and cosyncing
+selects between them by reading the host.
 
 Every other version is refused until it is qualified, including other 0.2 and
-0.1 builds. A newer 0.2 build keeps the routes and sign-in of 0.2.0-rc.2 but
-changes some of its messages, so accepting it would lose live updates and image
-previews without saying so. See [Version check](#version-check).
+0.1 builds. 0.2 builds keep the same routes and sign-in but can change their
+messages. 0.2.2-rc.5 changed how live updates and image previews are sent, and
+it is supported because the adapter now reads both forms. Another build could
+change them again, and accepting it unqualified would lose those updates without
+saying so. See [Version check](#version-check).
 
 cosyncing never installs or configures that host, but it can start, supervise,
 and stop one it owns — see [Managed hosts](#managed-hosts).
@@ -30,6 +33,10 @@ Install the exact version globally with npm, so that `dsh` lands on your PATH:
 ```bash
 npm install -g @deepseek-ai/dsh@0.2.0-rc.2
 ```
+
+0.2.2-rc.5 is supported too (`npm install -g @deepseek-ai/dsh@0.2.2-rc.5`).
+Its package asks for Node.js 24.9.0 or later, which the 0.2.0-rc.2 package does
+not, so the command above stays the recommended install.
 
 Or pin the older contract, which keeps its separate legacy code path:
 
@@ -66,7 +73,7 @@ restore it afterward.
 ## Version check
 
 cosyncing checks the version of the `dsh` installed on this machine. If that
-version is not 0.2.0-rc.2 or 0.1.0-rc.6:
+version is not 0.2.0-rc.2, 0.2.2-rc.5 or 0.1.0-rc.6:
 
 - cosyncing does not start a managed host, and does not use a host at an address
   on this machine, whoever started it. DeepSeek Harness lists no sessions and
@@ -202,11 +209,12 @@ re-enrolling when what actually went wrong is something else.
 
 ## What is verified on 0.2, and what is not
 
-"0.2" here means one build: `0.2.0-rc.2`, the version the contract was captured
-from and the version every 0.2 result below was re-checked against. A different
-0.2 build, including stable 0.2.0 or another release
-candidate, has not been qualified, is not covered by the statements below, and
-is refused (see [Version check](#version-check)).
+"0.2" here means `0.2.0-rc.2`, the version the contract was captured from and
+the version every 0.2 result below was re-checked against. `0.2.2-rc.5` was
+captured separately, with the narrower scope described below; no other
+statement here covers it. Any other 0.2 build, including stable 0.2.0
+or another release candidate, has not been qualified and is refused (see
+[Version check](#version-check)).
 
 What was captured from a running `0.2.0-rc.2` host and re-checked against one:
 starting a host without a browser window opening, becoming authenticated to it
@@ -245,6 +253,17 @@ output, and an approval answered through cosyncing. Model-backed browser outcome
 and the remaining browser recovery and interaction scenarios remain acceptance
 work. A successful login, roster read, or transport test does not qualify those
 scenarios. The adapter remains experimental pending that evidence.
+
+`0.2.2-rc.5` was qualified from one disposable host with a local scripted
+provider and no real model requests: signing in with the launch URL, a live
+rename, a model selection, a `/permission read-only` command, an image prompt
+and its durable readback, and the roster and projection reads of a cold session
+after a host restart. The same steps were repeated on a `0.2.0-rc.2` host for
+comparison. Two messages differ, and the adapter reads both forms: a live
+update can carry several values under one sequence number, and an image readback
+request names the whole stored image reference rather than only its id. Managed launch,
+Windows and macOS, provider-backed turns, approvals, questions and the browser
+passes above have not been repeated on `0.2.2-rc.5`.
 
 Forwarded native errors preserve both scalar messages and error-chain details.
 A model-provider failure leaves a healthy authenticated host eligible for the
