@@ -650,7 +650,7 @@ export function piFamilyExtras(dialect: PiFamilyDialect): ConformanceExtra[] {
   });
 
   if (omp) extras.push({
-    title: 'an omp run that yields to background work stays running until it wakes and ends, and one whose work ends without waking settles idle',
+    title: 'an omp run that yields to background work stays running until it wakes and ends, one whose work ends without waking settles idle, and Stop ends the wait',
     async run(context) {
       const fake = asFake(context);
       const session = await context.drivableSession('omp background');
@@ -681,6 +681,18 @@ export function piFamilyExtras(dialect: PiFamilyDialect): ConformanceExtra[] {
       expect(owner.frames.slice(goneFrom).some((frame) => isStatus(frame, 'idle'))).toBe(false);
       fake.release('omp-bg-gone');
       await owner.waitForFrame((frame) => isStatus(frame, 'idle'), { after: goneFrom, what: 'session_settled ending the yield' });
+
+      // Stop while yielded. What omp emits after aborting a yield is not captured (its source says
+      // the abort ends the wait), so the engine ends the wait itself: the session is idle at once,
+      // with no terminal agent_end or session_settled from the runtime, and the abort reached it.
+      const stopFrom = owner.frames.length;
+      expect((await context.prompt(owner, '[[backgroundgone:omp-bg-stop]] start a third')).kind).toBe('ack');
+      await owner.waitForFrame(waiting, { after: stopFrom, what: 'the third yield' });
+      const stopMark = fake.ledger.mark();
+      expect((await owner.sendAndAwait({ kind: 'command', name: 'stop' })).kind).toBe('ack');
+      await owner.waitForFrame((frame) => isStatus(frame, 'idle'), { after: stopFrom, what: 'Stop ending the yield' });
+      expect(fake.ledger.since(stopMark).some((entry) => entry.kind === 'abort')).toBe(true);
+      fake.release('omp-bg-stop');
       expect(fake.ledger.faults(mark)).toEqual([]);
       owner.close();
     },

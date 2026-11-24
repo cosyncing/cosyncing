@@ -37,7 +37,7 @@
  *                    `agent_end{awaitingAsyncWork}`; once `release-TAG` appears the runtime wakes
  *                    itself (async-result message, answer, terminal agent_end) and settles
  *   [[backgroundgone:TAG]] the same yield, but the work ends without a wake-up run: only
- *                    `session_settled` follows `release-TAG`
+ *                    `session_settled` follows `release-TAG` (source-modelled; no capture had it)
  *   [[hold:TAG]]     keep the run open until the control file `release-TAG` appears, or `abort`
  *   [[retry]]        one failed attempt (`auto_retry_start`/`auto_retry_end`) before the answer
  *   [[tool]]         a bash tool call and its result before the answer
@@ -497,6 +497,9 @@ function runFakePi(): void {
       emit({ type: 'agent_end', messages: [], isTerminal: false, yielded: true, awaitingAsyncWork: true });
       running = false;
       await released(background[2]!);
+      // `[[backgroundgone]]` is source-modelled, not captured: omp's async-job manager settles the
+      // session without a wake-up run when no result is left to deliver (a killed job, or a result
+      // another turn already took). Every capture woke up.
       if (!background[1]) {
         running = true;
         emit({ type: 'agent_start' });

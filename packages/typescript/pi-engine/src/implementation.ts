@@ -2835,10 +2835,16 @@ class PiConnection implements SessionConnection {
    *  invokes by sending '/name' as a prompt (rpc.md get_commands). */
   async runCommand(name: string, args?: string, input?: CommandInput): Promise<CommandResult | void> {
     if (name === 'stop' || name === 'abort') {
+      const yielded = this.awaitingAsyncWork;
       this.write({ type: 'abort' });
       // The run's dialogs end with it: one Pi tied to the run is already settled, and one it was
       // not would hold the stopped run open until someone answered it.
       this.withdrawPendingUi((ui) => ui.duringRun);
+      // A run yielded to background work has no live turn left to end with a terminal agent_end,
+      // and what omp emits after aborting that wait is not captured (its source says the abort
+      // ends the wait). So Stop ends it here: the session goes idle now, and a wake-up run omp
+      // still starts shows as running again.
+      if (yielded) this.finishRun({});
       return { notice: 'Stopped the turn.' };
     }
     if (this.closed) throw new Error(`${this.rt.dialect.displayName} Drive connection is closed.`);
