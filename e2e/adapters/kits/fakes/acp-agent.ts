@@ -28,7 +28,7 @@
  *   reasonix  sessions/<id>.jsonl + .jsonl.meta, .display-index.json,
  *             .event-index.json, .acp.json
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 export interface FakeAcpConfig {
@@ -138,7 +138,7 @@ export function writeReasonixFiles(
   storeRoot: string,
   session: NativeSession,
   rows: readonly ReasonixRow[],
-  options: { title?: string; model?: string; mode?: string; state?: string } = {},
+  options: { title?: string; model?: string; mode?: string; state?: string; transcriptByRename?: boolean } = {},
 ): void {
   const sessions = join(storeRoot, 'sessions');
   mkdirSync(sessions, { recursive: true });
@@ -166,7 +166,13 @@ export function writeReasonixFiles(
   const model = options.model ?? previousAcp.model ?? 'provider/model';
   const mode = options.mode ?? previousAcp.toolApprovalMode;
   const now = new Date().toISOString();
-  writeFileSync(`${base}.jsonl`, transcript);
+  if (options.transcriptByRename) {
+    // Reasonix 2.61.0 republishes the transcript through a temporary file and a rename.
+    writeFileSync(`${base}.jsonl.tmp`, transcript);
+    renameSync(`${base}.jsonl.tmp`, `${base}.jsonl`);
+  } else {
+    writeFileSync(`${base}.jsonl`, transcript);
+  }
   writeFileSync(`${base}.display-index.json`, `${JSON.stringify({
     schema_version: 1, revision, revision_known: true,
     transcript_size: Buffer.byteLength(transcript), message_count: rows.length, entries,

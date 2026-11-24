@@ -36,6 +36,7 @@ import {
   readReasonixTranscript,
   readReasonixAcpPosture,
   reasonixHistorySourceIdentity,
+  reasonixSettlementExtendsPrefix,
   reasonixSessionUsageValue,
   type ReasonixApprovalMode,
   type ReasonixSessionUsage,
@@ -208,6 +209,8 @@ export class ReasonixObserveConnection implements SessionConnection {
   private recordCount = 0;
   private durablePrefixValue: Buffer<ArrayBufferLike> = Buffer.alloc(0);
   private displayPrefixValue = '[]';
+  /** The accepted display entries behind `displayPrefixValue`, for the settled-row comparison. */
+  private displayPrefixEntries: ReasonixDisplayEntry[] = [];
   private sourceId?: string;
   private appendPosition = 0;
   private revision?: string;
@@ -258,6 +261,7 @@ export class ReasonixObserveConnection implements SessionConnection {
     if (interrupted) messages.push(interrupted);
     const usage = reasonixSessionUsageValue(this.session.usage);
     if (usage) messages.push({ type: 'metadata-update', key: 'sessionUsage', value: usage });
+    messages.push(...this.snapshotLiveState());
     this.onHistorySnapshot(read.records, read.displayEntries, messages, read.byteLength, snapshot);
     this.applySnapshotCorrelations(read, identity, messages);
     this.markCorrelationReplaySynchronized();
@@ -357,6 +361,7 @@ export class ReasonixObserveConnection implements SessionConnection {
       }
       const usage = reasonixSessionUsageValue(this.session.usage);
       if (usage) messages.push({ type: 'metadata-update', key: 'sessionUsage', value: usage });
+      messages.push(...this.snapshotLiveState());
       this.onHistorySnapshot(read.records, read.displayEntries, messages, read.byteLength, {
         read,
         identity: identityBefore,
@@ -835,14 +840,39 @@ export class ReasonixObserveConnection implements SessionConnection {
     read: ReasonixTranscriptRead,
     identity: HistorySourceIdentity | undefined,
   ): boolean {
-    return read.records.length < this.recordCount
-      || (this.sourceId !== undefined && identity?.sourceId !== this.sourceId)
-      || (identity?.appendPosition ?? read.byteLength) < this.appendPosition
-      || !sameDurablePrefix(read.durablePrefixBytes, this.durablePrefixValue)
-      || displayPrefix(read.displayEntries, this.recordCount) !== this.displayPrefixValue
-      || (read.records.length === this.recordCount
-        && this.revision !== undefined
-        && identity?.revision !== this.revision);
+    if (read.records.length < this.recordCount
+      || (this.sourceId !== undefined && identity?.sourceId !== this.sourceId)) return true;
+    const bytesExtend = (identity?.appendPosition ?? read.byteLength) >= this.appendPosition
+      && sameDurablePrefix(read.durablePrefixBytes, this.durablePrefixValue)
+      && displayPrefix(read.displayEntries, this.recordCount) === this.displayPrefixValue;
+    // Reasonix 2.61.0 settles a cancelled or failed turn by rewriting that turn's user row in place
+    // (store.ts `reasonixSettlementExtendsPrefix`). The rows a reader showed are unchanged, so the
+    // settled transcript continues this cursor; anything else that moves the prefix is a rewrite.
+    if (!bytesExtend) {
+      if (!reasonixSettlementExtendsPrefix(
+        this.durablePrefixValue,
+        this.recordCount,
+        this.displayPrefixEntries,
+        read,
+      )) return true;
+      this.onSettledHistory(read, this.recordCount);
+      return false;
+    }
+    return read.records.length === this.recordCount
+      && this.revision !== undefined
+      && identity?.revision !== this.revision;
+  }
+
+  /**
+   * A settled read was accepted as continuing the cursor's first `acceptedCount` records, which now
+   * end earlier in the file. It can be reported more than once before the cursor advances, so an
+   * override must be idempotent.
+   */
+  protected onSettledHistory(_read: ReasonixTranscriptRead, _acceptedCount: number): void {}
+
+  /** Live state a history snapshot carries beside the durable rows; Observe has none. */
+  protected snapshotLiveState(): AgentMessage[] {
+    return [];
   }
 
   private setTailCursor(
@@ -852,6 +882,7 @@ export class ReasonixObserveConnection implements SessionConnection {
     this.recordCount = read.records.length;
     this.durablePrefixValue = read.durablePrefixBytes;
     this.displayPrefixValue = displayPrefix(read.displayEntries, this.recordCount);
+    this.displayPrefixEntries = read.displayEntries.filter((entry) => entry.index < this.recordCount);
     this.sourceId = identity?.sourceId;
     this.appendPosition = identity?.appendPosition ?? read.byteLength;
     this.revision = identity?.revision;

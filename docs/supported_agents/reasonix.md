@@ -1,17 +1,20 @@
 # Reasonix (experimental)
 
-Reasonix 1.25.2 is the only supported version. Reasonix 2.x, and 1.x releases
-after 1.25.2, open stored sessions in Observe mode only until support for
-Reasonix 2.61.0 lands. Upstream development has ended: 2.61.0 is the final
-release and the Reasonix repository is archived.
+Reasonix 2.61.0 and 1.25.2 are supported. Upstream development has ended:
+2.61.0 is the final release and the Reasonix repository is archived.
 
-`npm install --global reasonix` and `reasonix upgrade` now move to a newer
-release, so pin the version. The installed broker/client physical pass completed
-against 1.25.2. Install the pinned CLI, then confirm that a new login shell can
-find it:
+Version rule: Drive, Create and Resume need exactly 2.61.0 or 1.25.2. Every
+other version opens stored sessions in Observe mode only. 1.x releases after
+1.25.2 were not measured, and from 1.38.8 they keep new sessions in a
+`sessions-v4` store this adapter does not list. 2.x releases before 2.61.0 were
+not measured. `cosy doctor` reports any other version as `version-unverified`
+and recommends 2.61.0.
+
+`npm install --global reasonix` installs 2.61.0 now that no later release will
+appear. Pin it anyway, then confirm that a new login shell can find it:
 
 ```bash
-npm install --global reasonix@1.25.2
+npm install --global reasonix@2.61.0
 type -a reasonix
 reasonix --version
 cosyncing setup
@@ -20,14 +23,28 @@ cosy doctor
 ```
 
 Setup does not install Reasonix, edit its configuration, or start a daemon.
-Cosyncing keeps stored sessions available in Observe mode when another
-Reasonix version is installed, but Create and Resume stay disabled on any
-version other than 1.25.2. `cosy doctor` reports such an install as
-`version-unverified`.
 The adapter reads Reasonix's local session store and starts a workspace-scoped
 `reasonix acp` child when a resumed app connection requests the native command
 catalog. Observe-only connections do not start Reasonix.
 `REASONIX_HOME` is honored when Reasonix uses a non-default store root.
+The broker checks the installed version about once an hour, and again on the
+next refresh after the `reasonix` executable is reinstalled or replaced. When
+`reasonix` on the `PATH` is a version-manager shim, the broker sees the shim,
+which does not change when the manager switches versions behind it: after such
+a switch, run `cosy restart` or allow up to an hour before Drive follows the
+new version.
+
+## Moving from 1.25.2 to 2.61.0
+
+Both versions share the same session store, so sessions keep their ids. A
+1.25.2 session continued from the app on 2.61.0 keeps its id and its files.
+Reasonix's own upgrade notes say its terminal interface moves a continued 1.x
+session to a new session; the ACP connection the app uses did not do this when
+measured. If a turn is ever answered from another session's transcript, Drive
+stops and the session stays readable in Observe mode.
+
+Sessions that a 1.x release from 1.38.8 on keeps in `sessions-v4/`, and the
+`v4-<id>.jsonl` copies 2.x makes when its terminal opens one, are not listed.
 
 ## Current behavior
 
@@ -42,7 +59,14 @@ catalog. Observe-only connections do not start Reasonix.
 - Answer and reasoning output stream in separate lanes. Per-turn runtime,
   cumulative token counters, and USD cost are shown when ACP attributes them to
   the session. Partial usage updates merge without lowering token counters or
-  double-counting cache buckets.
+  double-counting cache buckets. A cost Reasonix states in another currency is
+  not shown.
+- On 2.61.0 a driven session also shows its context-window use, which
+  Reasonix reports before each answer.
+- A turn that fails at the model provider ends with an error message and the
+  session stays writable; the next prompt can retry.
+- Continuation instructions Reasonix writes into the transcript on 2.61.0 are
+  shown as context, not as user messages.
 - Per-tool ACP permission requests can be approved once, approved as a rule, or
   rejected from the app.
 - Protocol-shaped ACP slash commands are offered when the resumed child
@@ -64,12 +88,16 @@ catalog. Observe-only connections do not start Reasonix.
 - Existing-session model switching, files, images, artifact delivery, question
   dialogs, task lists, subagent rows, rename, fork, and export
   are not exposed by this adapter.
+- The app offers the Ask, Auto and Yolo approval modes. The `readOnly` and
+  `dontAsk` modes Reasonix 2.61.0 has only under `reasonix acp
+  --permission-mode` are not offered, and a session saved in one of them shows
+  no current mode.
 - The installed-version capture confirms the command-update event but does not
   yet pin its catalog payload or a native command result; command support stays provisional.
 - Durable tool rows replay their bounded result, name, and call id. They do not
   retain the live tool-call arguments, so a reattached client cannot reconstruct
   the earlier tool-call card in full.
-- The store has no attributable per-session token or context totals. Live ACP
-  can report tokens and cost, but no measured context-window maximum exists.
+- The store has no attributable per-session context totals, so Observe-only
+  connections and 1.25.2 show no context-window use.
 
 See the [official Reasonix site](https://reasonix.io/).

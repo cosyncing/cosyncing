@@ -1,5 +1,6 @@
 /**
- * Reasonix adapter contract — probed 2026-08-27/30 against Reasonix v1.25.2.
+ * Reasonix adapter contract — probed 2026-08-27/30 against Reasonix v1.25.2 and
+ * 2026-11-24 against 2.61.0 (point 18).
  *
  *  1. Model identity comes from store meta as provider/model; no host display
  *     label is invented.
@@ -35,7 +36,18 @@
  *     support evidence, and public docs.
  * 17. R1 proved store/ACP identity, so create is exposed only for the pinned
  *     binary; first-prompt durable id/cwd/model mismatch fails closed.
+ * 18. 2.61.0 (the final release, measured 2026-11-24) shares the 1.25.2 store
+ *     and the points above, with these differences: it sends status updates
+ *     only on the initialize opt-in; it ends a provider failure with a
+ *     `turn_failed` JSON-RPC error instead of stopReason `error`; it sends
+ *     `usage_update` (context window and cost); it writes `host_authored` user
+ *     rows; it republishes the transcript by rename, rewriting an
+ *     interrupted turn's user row to its raw prompt; and it writes a created
+ *     session's transcript when the first turn starts but its `.acp.json` only
+ *     after that turn. A continued 1.25.2 session keeps its id over ACP. 1.x
+ *     releases after 1.25.2 stay Observe-only.
  */
+import { statSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import {
@@ -50,14 +62,15 @@ import {
   type ModeOption,
   type ModelOption,
   type PromptInput,
+  type ResolvedInvocation,
   type SessionConnection,
   type SessionInfo,
   type SetupDiagnosisContext,
 } from '@cosyncing/adapter-api';
 import {
   diagnoseReasonixSetup,
-  REASONIX_NEWER_VERSIONS_NOTE,
-  REASONIX_VERIFIED_VERSION,
+  reasonixVersionAllowsDrive,
+  REASONIX_VERSION_RULE,
 } from './diagnostics.ts';
 import { ReasonixCorrelationRegistry } from './correlation.ts';
 import { ReasonixDriveConnection } from './drive.ts';
@@ -95,6 +108,8 @@ export interface ReasonixAdapterOptions {
   requestTimeoutMs?: number;
   /** Bounded ownership lease for a created empty session before its first Resume attach. */
   pendingCreateTimeoutMs?: number;
+  /** Clock for the binary version-probe cache; fixtures pass a controlled one. */
+  now?: () => number;
 }
 
 interface PendingCreatedOwner {
@@ -104,8 +119,35 @@ interface PendingCreatedOwner {
 }
 
 const DEFAULT_PENDING_CREATE_TIMEOUT_MS = 60_000;
-const VERSION_SUCCESS_TTL_MS = 5 * 60_000;
+/**
+ * How long a SUCCESSFUL version probe is trusted for one executable identity: an hour, the same rule
+ * as the Cline adapter's version check. It can be that long because the key changes whenever the resolved file is rewritten or
+ * replaced, which is what an install, update or downgrade does; the TTL only bounds what the key
+ * cannot see (the npm launcher's platform binary changing while the launcher stays untouched).
+ */
+export const REASONIX_VERSION_SUCCESS_TTL_MS = 60 * 60_000;
 const VERSION_FAILURE_TTL_MS = 30_000;
+
+/**
+ * The identity of the file `resolveInvocation` landed on: path, device, inode, size, mtime and ctime.
+ * A reinstall writes a new file (new inode), an in-place write moves ctime, and no installer can set
+ * ctime back, so a replaced binary is probed again on the next refresh whatever its file times say.
+ */
+function invocationCacheKey(invocation: ResolvedInvocation): string | undefined {
+  try {
+    const info = statSync(invocation.originalPath);
+    return [
+      invocation.originalPath,
+      info.dev,
+      info.ino,
+      info.size,
+      info.mtimeMs,
+      info.ctimeMs,
+    ].join('\0');
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * `writerAvailable` is the same exact-version gate `attach(…, 'resume')`
@@ -126,8 +168,7 @@ function control(driving: boolean, writerAvailable: boolean): SessionInfo['contr
           state: 'observing',
           supported: writerAvailable,
           ...(writerAvailable ? { takeoverAvailable: true } : {
-            reason: `Reasonix Drive needs Reasonix ${REASONIX_VERIFIED_VERSION}, the only supported version, `
-              + `on this host. ${REASONIX_NEWER_VERSIONS_NOTE}`,
+            reason: `Reasonix Drive needs a supported Reasonix on this host. ${REASONIX_VERSION_RULE}`,
           }),
         },
     terminalSync: {
@@ -174,8 +215,9 @@ export class ReasonixAdapter implements AgentBackend {
   private readonly pendingCreatedOwners = new Map<string, PendingCreatedOwner>();
   private readonly correlationRegistry = new ReasonixCorrelationRegistry();
   private readonly pendingCreateTimeoutMs: number;
-  private pinnedBinaryVersion?: { result: boolean; expiresAt: number };
-  private pinnedBinaryProbe?: Promise<boolean>;
+  private pinnedBinaryVersion?: { key: string; result: boolean; expiresAt: number };
+  private pinnedBinaryProbe?: { key: string | undefined; operation: Promise<boolean> };
+  private readonly now: () => number;
 
   constructor(options: ReasonixAdapterOptions = {}) {
     this.command = options.command ?? 'reasonix';
@@ -186,6 +228,7 @@ export class ReasonixAdapter implements AgentBackend {
       && (options.pendingCreateTimeoutMs ?? 0) > 0
       ? options.pendingCreateTimeoutMs!
       : DEFAULT_PENDING_CREATE_TIMEOUT_MS;
+    this.now = options.now ?? Date.now;
   }
 
   /** The store alone is enough: a removed binary leaves sessions the broker can still read, and the
@@ -200,51 +243,57 @@ export class ReasonixAdapter implements AgentBackend {
   }
 
   /**
-   * The exact-version gate, cached with ASYMMETRIC TTLs.
+   * The exact-version gate (1.25.2 or 2.61.0), cached per executable identity with ASYMMETRIC TTLs.
    *
-   * The asynchronous one-second probe is shared by concurrent callers. A
-   * success lasts five minutes, a failure only thirty seconds; expiry starts
-   * when the answer arrives, not before native startup.
+   * The asynchronous one-second probe is shared by concurrent callers on the same identity. A success
+   * lasts {@link REASONIX_VERSION_SUCCESS_TTL_MS}, a failure only thirty seconds; expiry starts when
+   * the answer arrives, not before native startup. A different identity (a reinstall, an update, a
+   * downgrade) is never served the old answer, so it is probed on the next refresh.
    *
-   * It used to cache for the life of the broker process and to write a probe
-   * FAILURE — a 1s timeout, an EAGAIN, an EMFILE — into that cache as a
-   * definite `false`. One slow `reasonix --version` therefore disabled
-   * `canCreateSession`, `listModels`, `listModes`, `createSession` and Resume
-   * until the process was restarted, the last two throwing a message asserting
-   * the binary is not 1.25.2 — which the probe never established. Cline and
-   * kilo already used 300s/30s for exactly this reason: a success is stable, a
-   * failure usually is not, and holding a failure is how a healthy binary stays
-   * locked out.
+   * It once cached for the life of the broker process and wrote a probe FAILURE — a 1s timeout, an
+   * EAGAIN, an EMFILE — into that cache as a definite `false`, which locked a healthy binary out of
+   * Create and Resume until a restart. It then used five minutes for a success, shorter than the
+   * roster's own sweep cadence, so nearly every sweep spawned `reasonix --version` again.
    */
   private async hasPinnedBinaryVersion(): Promise<boolean> {
-    const now = Date.now();
-    if (this.pinnedBinaryVersion && this.pinnedBinaryVersion.expiresAt > now) {
-      return this.pinnedBinaryVersion.result;
+    const invocation = resolveInvocation(this.command, { env: this.env });
+    if (!invocation) {
+      this.pinnedBinaryVersion = undefined;
+      return false;
     }
-    if (this.pinnedBinaryProbe) return this.pinnedBinaryProbe;
+    const key = invocationCacheKey(invocation);
+    const cached = this.pinnedBinaryVersion;
+    if (cached && key !== undefined && cached.key === key && cached.expiresAt > this.now()) {
+      return cached.result;
+    }
+    if (this.pinnedBinaryProbe && this.pinnedBinaryProbe.key === key) return this.pinnedBinaryProbe.operation;
     const remember = (result: boolean): boolean => {
-      this.pinnedBinaryVersion = {
+      // No identity, no cache: an answer that cannot be tied to a file is not reused.
+      this.pinnedBinaryVersion = key === undefined ? undefined : {
+        key,
         result,
-        expiresAt: Date.now() + (result ? VERSION_SUCCESS_TTL_MS : VERSION_FAILURE_TTL_MS),
+        expiresAt: this.now() + (result ? REASONIX_VERSION_SUCCESS_TTL_MS : VERSION_FAILURE_TTL_MS),
       };
       return result;
     };
-    const invocation = resolveInvocation(this.command, { env: this.env });
-    if (!invocation) return remember(false);
-    const operation = (async () => {
-      const probe = await probeResolvedInvocation(invocation, ['--version'], {
-        env: this.env,
-        timeout: 1_000,
-        maxBuffer: 64 * 1024,
-      });
-      if (probe.error || probe.status !== 0) return remember(false);
-      return remember(
-        reportedProductVersion(`${probe.stdout}\n${probe.stderr}`, ['reasonix'])
-          === REASONIX_VERIFIED_VERSION,
-      );
-    })().catch(() => remember(false)).finally(() => { this.pinnedBinaryProbe = undefined; });
-    this.pinnedBinaryProbe = operation;
-    return operation;
+    const probe: { key: string | undefined; operation: Promise<boolean> } = {
+      key,
+      operation: (async () => {
+        const answer = await probeResolvedInvocation(invocation, ['--version'], {
+          env: this.env,
+          timeout: 1_000,
+          maxBuffer: 64 * 1024,
+        });
+        if (answer.error || answer.status !== 0) return remember(false);
+        return remember(reasonixVersionAllowsDrive(
+          reportedProductVersion(`${answer.stdout}\n${answer.stderr}`, ['reasonix']),
+        ));
+      })().catch(() => remember(false)).finally(() => {
+        if (this.pinnedBinaryProbe === probe) this.pinnedBinaryProbe = undefined;
+      }),
+    };
+    this.pinnedBinaryProbe = probe;
+    return probe.operation;
   }
 
   diagnoseSetup(context: SetupDiagnosisContext): Promise<AgentSetupDiagnosis> {
@@ -300,7 +349,7 @@ export class ReasonixAdapter implements AgentBackend {
     // (`collectSessionOptions` softens it to `[]`, `client-message-policy`
     // reports MODEL_UNSUPPORTED), so the honest channel is reachable at last.
     if (!await this.hasPinnedBinaryVersion()) {
-      throw new Error(`Reasonix model catalog needs Reasonix ${REASONIX_VERIFIED_VERSION}, the only supported version.`);
+      throw new Error(`Reasonix model catalog needs a supported Reasonix. ${REASONIX_VERSION_RULE}`);
     }
     const invocation = resolveInvocation(this.command, { env: this.env });
     if (!invocation) throw new Error('Reasonix is not installed or is not visible to the broker.');
@@ -371,8 +420,7 @@ export class ReasonixAdapter implements AgentBackend {
   } = {}): Promise<SessionInfo> {
     if (!await this.hasPinnedBinaryVersion()) {
       throw new NativeSessionUnresumableError(
-        `Reasonix Create needs Reasonix ${REASONIX_VERIFIED_VERSION}, the only supported version. `
-          + REASONIX_NEWER_VERSIONS_NOTE,
+        `Reasonix Create needs a supported Reasonix. ${REASONIX_VERSION_RULE}`,
       );
     }
     const cwd = options.directory ?? process.cwd();
@@ -507,8 +555,7 @@ export class ReasonixAdapter implements AgentBackend {
     }
     if (!await this.hasPinnedBinaryVersion()) {
       throw new NativeSessionUnresumableError(
-        `Reasonix Resume needs Reasonix ${REASONIX_VERIFIED_VERSION}, the only supported version; `
-          + `Observe remains available. ${REASONIX_NEWER_VERSIONS_NOTE}`,
+        `Reasonix Resume needs a supported Reasonix; Observe remains available. ${REASONIX_VERSION_RULE}`,
       );
     }
     if (this.drivenSessions.get(sessionId)?.driving || this.pendingDriveOpens.has(sessionId)) {

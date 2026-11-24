@@ -260,7 +260,7 @@ export const SUPPORT_MATRIX_CLAIMS: SupportClaim[] = [
   claim('opencode', 'F15', 'full', 'runtime/status/tokens; context meter follow-up'),
   claim('pi', 'F15', 'full', 'runtime/status/tokens plus exact native used/max context stats'),
   claim('omp', 'F15', 'full', 'runtime/status/tokens plus exact native used/max context stats'),
-  claim('reasonix', 'F15', 'partial', 'assistant runtime, status, cumulative tokens, and cost map with monotonic partial-update merging; no measured context maximum exists'),
+  claim('reasonix', 'F15', 'partial', 'assistant runtime, status, cumulative tokens, and cost map with monotonic partial-update merging; context used/max on 2.61.0 Drive only (ACP usage_update)'),
   claim('grok', 'F15', 'partial', 'turn completion, status, per-turn tokens, run summaries, and aggregate context usage map without fabricated cumulative totals'),
   claim('cline', 'F15', 'partial', 'live Hub status/tokens plus durable run summaries, cache-inclusive token metrics, and cost render without double-counting; no trustworthy context maximum exists'),
   claim('kilo', 'F15', 'partial', 'live status, run summaries, model identity, cache-aware tokens, and cost render; no measured context used/max pair exists'),

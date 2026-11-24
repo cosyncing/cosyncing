@@ -77,6 +77,11 @@ export interface AcpClientOptions {
   signal?: AbortSignal;
   /** How a normal `close()` escalates. Default: stdin EOF, 2s, SIGKILL. */
   closeEscalation?: AcpCloseEscalation;
+  /**
+   * Agent-specific extension opt-ins, sent verbatim as `clientCapabilities._meta` in initialize.
+   * Unset (the default) sends `clientCapabilities: {}` exactly as before. Never adds fs or terminal.
+   */
+  clientCapabilitiesMeta?: Record<string, unknown>;
 }
 
 export class AcpRpcError extends Error {
@@ -230,8 +235,10 @@ export class AcpClient {
       if (options.signal?.aborted) throw new Error('ACP connect aborted');
       const result = (await client.request('initialize', {
         protocolVersion: ACP_PROTOCOL_MAJOR,
-        // v1 offers neither fs nor terminal: both keys stay absent.
-        clientCapabilities: {} satisfies AcpClientCapabilities,
+        // v1 offers neither fs nor terminal: both keys stay absent. `_meta` only on opt-in.
+        clientCapabilities: (options.clientCapabilitiesMeta
+          ? { _meta: options.clientCapabilitiesMeta }
+          : {}) satisfies AcpClientCapabilities,
         clientInfo: options.clientInfo ?? { name: '@cosyncing/acp-client', version: '0.0.0' },
       })) as AcpInitializeResult;
       if (options.signal?.aborted) throw new Error('ACP connect aborted');

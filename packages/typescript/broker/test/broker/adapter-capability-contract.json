@@ -147,7 +147,7 @@
         "createSessionPresent": true,
         "dynamicHook": true,
         "hookReads": "local-installation",
-        "reason": "canCreateSession() resolves the local Reasonix executable and runs a bounded --version probe; Create is offered only for exact v1.25.2, whose R1 probe proved session/new returns the same durable store id. The resolved boolean remains host-dependent."
+        "reason": "canCreateSession() resolves the local Reasonix executable and runs a bounded --version probe; Create is offered only for exact v1.25.2 or v2.61.0 (the final release): the R1 probe on 1.25.2 and a 2026-11-24 capture of 2.61.0 proved session/new returns the same durable store id. The version answer is cached per executable identity for an hour. The resolved boolean remains host-dependent."
       },
       "terminalSyncHint": {
         "status": "unsupported",
@@ -159,14 +159,14 @@
       },
       "reflectionSurfaces": {
         "supported": ["createModelPropagation", "createPermissionModePropagation", "currentMode", "tokenUsage", "runSummary"],
+        "conditional": ["contextUsage"],
         "partial": ["costUsage", "slashCommands"],
         "unsupported": {
           "subagentNesting": "No measured native child-session identity proves origin and parentThreadId for this adapter.",
           "nativeRename": "The shipped adapter has no renameSession hook backed by a measured native rename operation.",
-          "contextUsage": "No native used/max context-window reading is mapped; prompt-token totals are not substituted.",
           "modelLabels": "Reasonix publishes no human model name to carry. listModels is built from doctor --json, whose providers list bare model id strings, so every catalog entry's label IS its modelID -- measured on the installed candidate as qwen3.8-flash-next, deepseek-v4-pro, glm-5.2. The client refuses to render an id as a human name, so the composer shows the generic Model chip with the exact id in its tooltip. test-reasonix-identity pins label === modelID over a fixture catalogue so this denial fails the moment a real name appears."
         },
-        "reason": "Reasonix store, Drive, identity, and cross-client suites pin the supported and deliberately absent surfaces. createModelPropagation was declared unsupported while listModels shipped a bounded doctor --json catalog: physical review selected vllm-hpc/qwen3.8-flash-next in the New Session sheet and the create request, native session, attached metadata, prompt and token report all retained that exact pair. The same review measured that catalog's labels and found them to be the ids themselves, which is why modelLabels stays unsupported."
+        "reason": "Reasonix store, Drive, identity, and cross-client suites pin the supported and deliberately absent surfaces. createModelPropagation was declared unsupported while listModels shipped a bounded doctor --json catalog: physical review selected vllm-hpc/qwen3.8-flash-next in the New Session sheet and the create request, native session, attached metadata, prompt and token report all retained that exact pair. The same review measured that catalog's labels and found them to be the ids themselves, which is why modelLabels stays unsupported. contextUsage is conditional: a Drive connection on Reasonix 2.61.0 maps the ACP usage_update used/size reading (captured 2026-11-24, test-reasonix-drive); 1.25.2 sends no usage_update and the store keeps no context totals, so Observe and 1.25.2 report none."
       }
     },
     "grok": {

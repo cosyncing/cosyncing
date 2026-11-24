@@ -153,7 +153,9 @@ const config = JSON.parse(readFileSync(process.env.FAKE_REASONIX_CONFIG, 'utf8')
 const record = (value) => appendFileSync(config.ledger, JSON.stringify(value) + '\\n');
 const send = (value) => process.stdout.write(JSON.stringify(value) + '\\n');
 if (process.argv.includes('--version')) {
-  process.stdout.write('reasonix ' + config.version + '\\n');
+  // Measured 2026-11-24 on fresh 1.25.2 and 2.61.0 downloads: \`reasonix v1.25.2\`, \`reasonix v2.61.0\`.
+  record({ kind: 'version-probe', script: process.argv[1] });
+  process.stdout.write('reasonix v' + config.version + '\\n');
   process.exit(0);
 }
 // The shape \`listModels\` reads, modelled on the catalogue measured on the
@@ -180,10 +182,21 @@ const modelArg = process.argv.indexOf('--model');
 let currentModel = modelArg >= 0 ? process.argv[modelArg + 1] : 'provider/model';
 let currentEffort = 'auto';
 let currentMode = 'ask';
-const persistMaterializedRows = (rows, revision) => {
+const persistAcpMetadata = (state) => {
+  const durableCwd = process.env.FAKE_REASONIX_MATERIALIZED_CWD || sessionCwd;
+  const durableModel = process.env.FAKE_REASONIX_MATERIALIZED_MODEL || currentModel;
+  writeFileSync(join(process.env.REASONIX_HOME, 'sessions', config.sessionId + '.acp.json'), JSON.stringify({
+    sessionId: config.sessionId,
+    cwd: durableCwd,
+    title: 'Created Reasonix fixture',
+    model: durableModel,
+    toolApprovalMode: currentMode,
+    status: { state },
+  }) + '\\n');
+};
+const persistMaterializedRows = (rows, revision, state = 'idle', withAcpMetadata = true) => {
   const sessions = join(process.env.REASONIX_HOME, 'sessions');
   mkdirSync(sessions, { recursive: true });
-  const durableCwd = process.env.FAKE_REASONIX_MATERIALIZED_CWD || sessionCwd;
   const durableModel = process.env.FAKE_REASONIX_MATERIALIZED_MODEL || currentModel;
   const lines = rows.map((row) => JSON.stringify(row));
   let offset = 0;
@@ -210,14 +223,7 @@ const persistMaterializedRows = (rows, revision) => {
     turns: rows.some((row) => row.role === 'user') ? 1 : 0,
     revision,
   }) + '\\n');
-  writeFileSync(base + '.acp.json', JSON.stringify({
-    sessionId: config.sessionId,
-    cwd: durableCwd,
-    title: 'Created Reasonix fixture',
-    model: durableModel,
-    toolApprovalMode: currentMode,
-    status: { state: 'idle' },
-  }) + '\\n');
+  if (withAcpMetadata) persistAcpMetadata(state);
   writeFileSync(base + '.display-index.json', JSON.stringify({
     schema_version: 1,
     revision,
@@ -246,6 +252,19 @@ const materialize = (text) => {
     { role: 'user', content: durableText, raw_content: durableText, createdAt: Date.now() },
     { role: 'assistant', content: 'created answer', reasoning_content: '', workDurationMs: 1 },
   ];
+  if (process.env.FAKE_REASONIX_RUNNING_FIRST_WRITE === '1') {
+    // Reasonix 2.61.0's order (2026-11-24 capture): the created session's transcript and meta land
+    // with the user row when the first turn STARTS; \`.acp.json\` follows after the turn. With
+    // FAKE_REASONIX_ACP_METADATA_DELAY_MS it is written mid-turn in state \`running\`, as an
+    // upstream mode or approval drift save does.
+    persistMaterializedRows(complete.slice(0, -1), 1, 'running', false);
+    if (process.env.FAKE_REASONIX_ACP_METADATA_DELAY_MS) {
+      setTimeout(() => persistAcpMetadata('running'), Number(process.env.FAKE_REASONIX_ACP_METADATA_DELAY_MS));
+    }
+    const stageDelayMs = Number(process.env.FAKE_REASONIX_STAGE_DELAY_MS || 150);
+    setTimeout(() => persistMaterializedRows(complete, 2), stageDelayMs);
+    return;
+  }
   if (process.env.FAKE_REASONIX_STAGED_MATERIALIZE === '1') {
     persistMaterializedRows([system], 1);
     const stageDelayMs = Number(process.env.FAKE_REASONIX_STAGE_DELAY_MS || 150);
@@ -369,7 +388,8 @@ process.stdin.on('data', (chunk) => {
           send({ jsonrpc: '2.0', method: '_reasonix.io/session/status_update', params: {
             sessionId: config.sessionId,
             sequence: 8,
-            status: { state: 'idle', turnUsage: {
+            // The wire envelope measured on 1.25.2 and 2.61.0: totals under \`status.usage\`.
+            status: { state: 'idle', usage: { turn: {
               promptTokens: 11,
               completionTokens: 4,
               reasoningTokens: 0,
@@ -391,7 +411,7 @@ process.stdin.on('data', (chunk) => {
               estimatedCost: 0,
               source: 'executor',
               costComplete: false,
-            } },
+            } } },
           } });
           send({ jsonrpc: '2.0', id: frame.id, result: { stopReason: 'end_turn' } });
         }, 150);

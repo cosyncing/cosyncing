@@ -32,11 +32,15 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Changed
 
-- Reasonix: 1.25.2 is the only supported version. Reasonix development has ended
-  (2.61.0 is the final release), and `npm install --global reasonix` now installs
-  2.x. Reasonix 2.x and 1.x releases after 1.25.2 keep opening sessions in Observe
-  mode only until support for 2.61.0 lands. `cosy doctor`, the read-only session
-  reason and the setup guide say so and give the pinned install command.
+- Reasonix: 2.61.0, the final release, is supported alongside 1.25.2. Drive,
+  Create and Resume work on exactly these two versions; every other version opens
+  sessions in Observe mode only, and `cosy doctor` recommends
+  `npm install -g reasonix@2.61.0`. A 1.25.2 session continued from the app on
+  2.61.0 keeps its id. On 2.61.0 a driven session shows its context-window use, a
+  turn that fails at the model provider no longer ends Drive, and continuation
+  instructions Reasonix writes itself are shown as context, not as your messages.
+  The installed version is checked about once an hour, and again right after
+  `reasonix` is reinstalled.
 - DeepSeek Harness: cosyncing supports `dsh` 0.2.0-rc.2, 0.2.2-rc.5 and
   0.1.0-rc.6, and refuses every other version instead of accepting every 0.2 or
   0.1 build. Later 0.2 builds changed messages that live updates and image
