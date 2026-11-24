@@ -11,7 +11,7 @@
 import { expect } from 'bun:test';
 import { BROKER_CONTRACT_REVISION } from '../../../packages/typescript/protocol/src/index.ts';
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { eventually, type SessionStream } from '../../harness/index.ts';
 import type { ConformanceContext, ConformanceExtra } from './kit.ts';
 import { type PiFake, type PiFamilyDialect, promptText, piFileOf, piRowId, piUuidOf } from './pi-family.ts';
@@ -311,6 +311,8 @@ export function piFamilyExtras(dialect: PiFamilyDialect): ConformanceExtra[] {
           expect('entryId' in bareFrame).toBe(false);
           expect(fake.ledger.commands('clone', bareMark)).toEqual([]);
           expect(fake.ledger.spawns(bareMark).some((entry) => entry.pid === bareCommands[0]!.pid && entry.session === sourceFile)).toBe(true);
+          // The copy is written inside omp's own store, the only place an omp session id may name.
+          expect(piFileOf(bare.body.session.id)).toStartWith(`${fake.sessionsRoot}${sep}`);
           expect(await userTexts(bare.body.session.id)).toEqual([stored.texts[0]!, stored.texts[2]!]);
 
           // A fork at a chosen entry: omp keeps that entry in the copy, where Pi forks just before it.

@@ -222,8 +222,10 @@ function runFakePi(): void {
   // ------------------------------------------------------------- the RPC process
   const cwd = process.cwd();
   const sessionArg = argValue('--session');
-  const sessionsRoot = argValue('--session-dir')
-    ?? process.env.PI_CODING_AGENT_SESSION_DIR
+  // Pi 1.6.0 and omp 19.1.0 (captured) take the session directory from `--session-dir`, else from a
+  // non-empty PI_CODING_AGENT_SESSION_DIR.
+  const sessionDir = argValue('--session-dir') ?? (process.env.PI_CODING_AGENT_SESSION_DIR || undefined);
+  const sessionsRoot = sessionDir
     ?? join(process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? '.', '.pi', 'agent'), 'sessions');
   record({
     kind: 'spawn',
@@ -683,7 +685,9 @@ function runFakePi(): void {
         }
         if (config.cancelFork) return ok(command, { cancelled: true });
         const copyId = crypto.randomUUID();
-        const copy = piSessionFilePath(sessionsRoot, cwd, copyId);
+        // Captured `SessionManager.open` (Pi 1.6.0, omp 19.1.0): the copy goes flat into the session
+        // directory, and a session opened without one writes beside its own file.
+        const copy = join(sessionDir ?? dirname(sessionArg ?? file), `${fileStamp(Date.now())}_${copyId}.jsonl`);
         mkdirSync(dirname(copy), { recursive: true });
         const lines = existsSync(file) ? readFileSync(file, 'utf8').split('\n').filter((line) => line.trim()) : [];
         let kept = lines;
