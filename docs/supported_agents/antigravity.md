@@ -29,6 +29,15 @@ cannot decode would cost them their whole agent list.
   variants collapse into one model with selectable low, medium, and high
   efforts; the CLI's frozen cockpit cache is only a fallback when the binary
   is missing.
+- The mode picker offers the CLI's execution modes: Default, Accept edits,
+  Auto (CLI 1.3.5 and later; 1.4.4 on Windows) and Plan. Every Drive launch
+  names its mode, and a session nobody chose a mode for runs in Default. Since
+  CLI 1.5.7 the CLI itself starts in Auto when no mode is named, and 1.5.16
+  no longer accepts `--mode default`, so on 1.5.7 and later Default is pinned
+  with the CLI's session-only `--settings '{"agentMode":""}'` (the CLI does
+  not save it to your `settings.json`). Where the CLI does not offer Auto (some
+  accounts, or a machine without its terminal sandbox), it says so and the
+  session continues in Default; the app shows Default and a notice.
 - Checkpoint summaries and stripped user-row metadata replay as context
   events instead of raw notices.
 - `cosy doctor` diagnoses the installation.
@@ -36,6 +45,10 @@ cannot decode would cost them their whole agent list.
 ## Limits
 
 - Image and file attachments are not supported.
+- Approvals cannot be answered from the app: the CLI's stream-json mode has no
+  approval channel. An action the session's mode would ask about is decided
+  by the CLI's own policy (see its headless-mode documentation), so choose
+  the mode accordingly.
 - The store is the CLI's own; cosyncing never writes to it. History appears as
   the CLI records it, so a conversation the CLI has not flushed yet can trail
   the terminal by a moment.
