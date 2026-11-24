@@ -1569,13 +1569,7 @@ export async function releaseManagedHost(
   // the adapter drops whatever it derived from that launch's output. A host
   // left running (preserved) has not, and keeps it.
   const ended = (outcome: ManagedHostStopOutcome): ManagedHostStopOutcome => {
-    if (outcome.action === 'stopped' || outcome.action === 'already-gone') {
-      try {
-        backend.managedLaunchEnded?.('stopped');
-      } catch {
-        /* an adapter's reaction never changes what the stop did */
-      }
-    }
+    if (outcome.action === 'stopped' || outcome.action === 'already-gone') noteLaunchEnded(backend, 'stopped');
     return outcome;
   };
   if (!descriptor) {
@@ -1598,6 +1592,20 @@ export async function releaseManagedHost(
     store,
     () => locatorLocation(descriptor, effects),
   ));
+}
+
+/**
+ * Tell the adapter a launch is over, from outside a start: release and
+ * recovery, which stop a host or find it gone. A start says it through the
+ * plan. Only an adapter that implements the hook hears it, and its reaction
+ * never changes what the broker did.
+ */
+function noteLaunchEnded(backend: { managedLaunchEnded?(reason: string): void }, reason: string): void {
+  try {
+    backend.managedLaunchEnded?.(reason);
+  } catch {
+    /* an adapter's reaction never changes what the stop did */
+  }
 }
 
 
@@ -1892,10 +1900,17 @@ export async function recoverManagedHost(
       effects, store, () => locatorLocation(descriptor, effects),
     );
     if (stopped.action === 'preserved') return { action: 'declined', reason: 'unproven' };
+    // Said here and not left to the next spawn: the restart below may spawn
+    // nothing (budget spent, address taken, nothing to launch), and a launch
+    // whose exit was never watched (a launcher-shaped start, or one whose
+    // server was never proven) has said it nowhere else.
+    noteLaunchEnded(backend, 'stopped');
   } else {
     // 'absent': the recorded process is gone and nothing is serving. The record
-    // describes nothing, so it goes before a replacement is started.
+    // describes nothing, so it goes before a replacement is started, and so
+    // does anything the adapter took from that launch's output.
     store.clear(backend.id);
+    noteLaunchEnded(backend, 'host-exited');
   }
   return await restart(backend, effects, store, ledger, env, budget);
 }

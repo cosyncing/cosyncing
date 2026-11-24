@@ -1628,6 +1628,47 @@ try {
       JSON.stringify({ outcome, signals, spawns: spawns.length }));
   }
   {
+    // Recovery that stops our host, or finds it gone, ends that launch for the
+    // adapter itself. The restart after it may spawn nothing, here because
+    // there is nothing to launch, so no later spawn would say it instead.
+    const unlaunchable = (ended: string[]) => backend({
+      isAvailable: async () => false,
+      managedLaunchEnded: (reason: string) => { ended.push(reason); },
+      describeManagedHost: async () => ({
+        identityKey: KEY,
+        locator: { kind: 'tcp-port' as const, port: 59999 },
+        launch: null,
+        readyTimeoutMs: 300,
+        stopGraceMs: 100,
+      }),
+    });
+    const stoppedEnded: string[] = [];
+    const listeners = new Map([[59999, hostAt(HOST_PID)]]);
+    const wedged = fakeEffects({
+      identities: new Map([[HOST_PID, OWNED]]), missingProcess: PROCESS_ABSENT, listeners,
+      onSignal: (pid, signal, tbl) => {
+        if (signal === 'SIGTERM') { tbl.delete(pid); listeners.set(59999, HOST_ABSENT); }
+      },
+    });
+    const wedgedStore = memoryStore();
+    wedgedStore.records.set(AGENT, ownership());
+    const stopped = await recoverManagedHost(unlaunchable(stoppedEnded) as never,
+      wedged.effects, wedgedStore.store, managedHostRestartLedger(), AUTHORIZED);
+
+    const goneEnded: string[] = [];
+    const crashed = fakeEffects({ missingProcess: PROCESS_ABSENT, listeners: new Map([[59999, HOST_ABSENT]]) });
+    const crashedStore = memoryStore();
+    crashedStore.records.set(AGENT, ownership());
+    const gone = await recoverManagedHost(unlaunchable(goneEnded) as never,
+      crashed.effects, crashedStore.store, managedHostRestartLedger(), AUTHORIZED);
+    check('recovery ends the launch of a host it stopped or found gone, even when it starts no other',
+      stopped.action === 'declined' && wedged.signals.length === 1 && wedged.spawns.length === 0
+        && JSON.stringify(stoppedEnded) === JSON.stringify(['stopped'])
+        && gone.action === 'declined' && crashed.spawns.length === 0
+        && JSON.stringify(goneEnded) === JSON.stringify(['host-exited']),
+      JSON.stringify({ stopped, stoppedEnded, gone, goneEnded }));
+  }
+  {
     // A stranger's unresponsive host is not ours to restart FOR them.
     const { effects, signals, spawns } = fakeEffects({
       identities: new Map([[HOST_PID, OWNED]]),
