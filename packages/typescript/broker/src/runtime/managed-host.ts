@@ -409,7 +409,11 @@ export interface ManagedHostPlan {
    * that can start a host it cannot authenticate to.
    */
   observeOutput?(text: string): void;
-  /** This launch is over and its process is gone or disowned: drop anything derived from its output. */
+  /**
+   * A launch is over and its process is gone or disowned: drop anything derived
+   * from its output. Said when a start fails, when a child proven to be the
+   * server exits, and before every spawn (for whatever launch came before).
+   */
   launchEnded?(reason: string): void;
   /** How long a freshly spawned host has to become ready before it is a failure. */
   readyTimeoutMs: number;
@@ -622,6 +626,17 @@ export async function startManagedHost(
   // started, not a side fact alongside some other outcome.
   if (stranded !== undefined) return { action: 'preserved-predecessor', verdict: stranded };
 
+  // Whatever an earlier launch handed the adapter ended with that launch, which
+  // is over by now: stopped as a predecessor above, gone, or never ours. Said
+  // here, before the new child exists, so nothing derived from the old output
+  // (a launch token, for one host) is still held when the new output arrives,
+  // or worse, when it never does. Only an adapter that implements the hook
+  // hears this.
+  try {
+    plan.launchEnded?.('superseded-by-new-launch');
+  } catch {
+    /* an adapter's reaction is never a reason not to start */
+  }
   // A missing or non-executable command throws synchronously rather than
   // producing a child, and that must read as a reported start failure like any
   // other — it is the ordinary case of "the tool is not installed", and letting
@@ -691,6 +706,20 @@ export async function startManagedHost(
     } catch {
       /* same: the broker's own bookkeeping wins over an adapter's reaction */
     }
+  };
+  // A started host's launch also ends when its process does. Only for a child
+  // proven to BE the server: a launcher that exits while its server keeps
+  // serving has not ended anything. And only while the ownership record still
+  // names this process, so an exit noticed late cannot end a newer launch
+  // (whose record names a new process) or repeat a stop that already said so
+  // (which clears the record).
+  const endLaunchOnExit = (): void => {
+    if (!plan.launchEnded) return;
+    const launched = spawned.state === 'running' ? spawned.identity : undefined;
+    void child.exited.then(() => {
+      const current = store.read(plan.agent);
+      if (launched && current?.pid === launched.pid && current.start === launched.start) endLaunch('host-exited');
+    }, () => {});
   };
   // Written BEFORE readiness, deliberately. The record's claim is "this broker
   // spawned this process", which is proven right now; it is not a claim about
@@ -871,6 +900,7 @@ export async function startManagedHost(
           return { action: 'started', pid: child.pid, servingProven: false };
         }
         await recordObserved();
+        if (serving.pid === child.pid) endLaunchOnExit();
         return { action: 'started', pid: serving.pid, servingProven: true };
       }
       if (serving.state === 'identified') {
@@ -1531,6 +1561,19 @@ export async function releaseManagedHost(
   // otherwise flipping a variable strands a process nothing will ever reap.
   // Ownership is still what authorizes the signal.
   const descriptor = await backend.describeManagedHost();
+  // A host this broker stopped, or found already gone, has ended its launch, so
+  // the adapter drops whatever it derived from that launch's output. A host
+  // left running (preserved) has not, and keeps it.
+  const ended = (outcome: ManagedHostStopOutcome): ManagedHostStopOutcome => {
+    if (outcome.action === 'stopped' || outcome.action === 'already-gone') {
+      try {
+        backend.managedLaunchEnded?.('stopped');
+      } catch {
+        /* an adapter's reaction never changes what the stop did */
+      }
+    }
+    return outcome;
+  };
   if (!descriptor) {
     // THE RECORD IS THE PRIMARY INPUT, not the description.
     //
@@ -1543,14 +1586,14 @@ export async function releaseManagedHost(
     // everything a stop needs; the description was only ever a convenience.
     const record = store.read(backend.id);
     if (!record) return { action: 'undescribed' };
-    return await stopRecordedManagedHost(record, effects, store);
+    return ended(await stopRecordedManagedHost(record, effects, store));
   }
-  return await stopManagedHost(
+  return ended(await stopManagedHost(
     { agent: backend.id, identityKey: descriptor.identityKey, stopGraceMs: descriptor.stopGraceMs },
     effects,
     store,
     () => locatorLocation(descriptor, effects),
-  );
+  ));
 }
 
 

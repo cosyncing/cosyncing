@@ -293,7 +293,8 @@ export interface AgentBackend {
    *
    * The counterpart to {@link observeManagedOutput}: whatever the adapter derived
    * from those bytes has a lifetime no longer than the launch that produced them,
-   * and this is the notification that lets it let go.
+   * and this is the notification that lets it let go. The broker also says it
+   * before every spawn, so nothing from an earlier launch is held into the next.
    */
   managedLaunchEnded?(reason: string): void;
   /**
