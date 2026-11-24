@@ -78,6 +78,10 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   the daemon by the process identity Codex records, where Codex provides one. When
   the daemon still cannot be verified, the restart is refused with the reason and
   how to restart Codex yourself.
+- Codex: **Restart** works again for a Codex daemon that runs with saved feature
+  overrides (`codex app-server daemon start --enable <feature>`, Codex 0.169 and
+  newer), and the restarted daemon keeps those overrides. Before, cosyncing could
+  not confirm it managed such a daemon and refused to restart it.
 - Automatic managed-runtime restarts pause after three identical failures instead
   of retrying every minute. They resume when the runtime or its configuration
   changes, and **Restart** still tries immediately.
