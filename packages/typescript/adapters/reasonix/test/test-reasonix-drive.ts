@@ -1225,7 +1225,9 @@ try {
   // every priced event has one); the status update carries the session totals at
   // `status.usage.cumulative`, as 1.25.2's does.
   const usageTransport = new FakeTransport();
-  const usageConnection = new TestDriveConnection(session, info, usageTransport);
+  // Its own session object: a connection records cumulative usage on `session.usage`, and the
+  // captured totals would otherwise outrank, by the monotone rule, every later suite's smaller ones.
+  const usageConnection = new TestDriveConnection({ ...session }, info, usageTransport);
   const usageSeen: AgentMessage[] = [];
   usageConnection.subscribe((message) => usageSeen.push(message));
   const asThisSession = <T extends { sessionId?: unknown }>(params: T): T => ({ ...params, sessionId: id });
