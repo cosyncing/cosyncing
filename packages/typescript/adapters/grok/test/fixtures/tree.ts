@@ -252,8 +252,8 @@ const handle = (frame) => {
     } });
     if (process.env.FAKE_GROK_VENDOR_NOTICES === '1') {
       // _x.ai/mcp/servers_updated and its params are as Grok 1.0.92 sends them after every
-      // initialize (GK-3 capture). The other two are deliberately unknown, so a client must
-      // still trace them.
+      // initialize (a 2026-11-24 capture). The other two are deliberately unknown, so a client
+      // must still trace them.
       send({ jsonrpc: '2.0', method: '_x.ai/mcp/servers_updated', params: { mcpServers: [] } });
       for (const method of ['_vendor.test/notice', 'fake/unknown_notice']) {
         send({ jsonrpc: '2.0', method, params: {} });
@@ -268,7 +268,8 @@ const handle = (frame) => {
   }
   if (frame.method === 'session/new') {
     if (process.env.FAKE_GROK_VENDOR_NOTICES === '1') {
-      // Grok 1.0.92 reports session/new progress phases this way, a dozen per create (GK-3 capture).
+      // Grok 1.0.92 reports session/new progress phases this way, a dozen per create (a
+      // 2026-11-24 capture).
       for (const phase of ['auth', 'persistence_init', 'response_ready']) {
         send({ jsonrpc: '2.0', method: '_x.ai/session/setup', params: { method: 'session/new', phase, sessionId: phase === 'auth' ? null : config.sessionId } });
       }
@@ -282,8 +283,8 @@ const handle = (frame) => {
     ensureSession(frame.params.cwd);
     send({ jsonrpc: '2.0', id: frame.id, result: { models, modes } });
     // Grok 1.0.92 saves summary.json by writing a temp file and renaming it over the old one,
-    // five times within ~45 ms of session/load, some after its answer (GK-3 capture,
-    // 2026-11-24). Same mechanism here, repeated for a bounded window so that the client's
+    // five times within ~45 ms of session/load, some after its answer (a 2026-11-24
+    // capture). Same mechanism here, repeated for a bounded window so that the client's
     // first read after the answer lands inside it; the event loop is yielded every 5 ms so the
     // answer is flushed first and later frames are still read.
     const rewriteMs = Math.min(1000, Number(process.env.FAKE_GROK_LOAD_SUMMARY_REWRITE_MS || 0) || 0);
@@ -323,7 +324,7 @@ const handle = (frame) => {
     };
     const echoDelay = Math.max(0, Math.min(2000, Number(process.env.FAKE_GROK_ECHO_DELAY_MS || 0) || 0));
     if (process.env.FAKE_GROK_VENDOR_NOTICES === '1') {
-      // Shapes as Grok 1.0.92 sends them during a turn (GK-3 capture): one
+      // Shapes as Grok 1.0.92 sends them during a turn (a 2026-11-24 capture): one
       // tool_call_delta_chunk per streamed tool-argument chunk, and the prompt queue.
       send({ jsonrpc: '2.0', method: '_x.ai/queue/changed', params: { sessionId: config.sessionId, entries: [] } });
       send({ jsonrpc: '2.0', method: '_x.ai/session_notification', params: { sessionId: config.sessionId,

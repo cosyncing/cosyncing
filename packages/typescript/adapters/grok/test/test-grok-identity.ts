@@ -374,7 +374,7 @@ try {
     }));
 
   // Grok 1.0.92 renames a fresh summary.json over the old one several times around
-  // session/load, some after the answer (GK-3 capture). The relaunch's durable-identity read
+  // session/load, some after the answer (a 2026-11-24 capture). The relaunch's durable read
   // lands in that window; a single read there found no session and revoked Drive for good.
   fake.env.FAKE_GROK_LOAD_SUMMARY_REWRITE_MS = '150';
   const spawnsBeforeRewrites = fake.spawnCount();

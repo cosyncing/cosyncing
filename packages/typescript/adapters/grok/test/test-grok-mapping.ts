@@ -371,7 +371,7 @@ check('session aggregate emits only derived context usage, not a token-count rea
     && (usage.value as { used?: number }).used === 15,
   JSON.stringify(usage));
 
-// A real Grok 1.0.92 updates.jsonl (GK-3 capture, 2026-11-24, scrubbed of paths, host and the
+// A real Grok 1.0.92 updates.jsonl (a 2026-11-24 capture, scrubbed of paths, host and the
 // custom model's name). Six prompts through the adapter: a plain answer, a write that was
 // approved, a write that was rejected, a long answer stopped mid-turn, one more answer, and
 // one after a fresh adapter resumed the session, as after a broker restart. Grok ended the

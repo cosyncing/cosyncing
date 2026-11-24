@@ -246,14 +246,14 @@ try {
   lineageTree.cleanup();
 }
 
-// The store files of a real Grok 1.0.92 session (GK-3 capture, 2026-11-24, scrubbed of paths,
+// The store files of a real Grok 1.0.92 session (a 2026-11-24 capture, scrubbed of paths,
 // host, agent ids and the custom model's name), in the layout Grok wrote them. 1.0.92 also writes
 // chat_history.jsonl, events.jsonl, usage.json and other files beside these; discovery reads
 // only these three.
 const capturedRoot = mkdtempSync(join(tmpdir(), 'cosyncing-grok-1092-'));
 try {
   const capturedId = '01a20cf4-7344-7f02-ace8-e17183132705';
-  const capturedDir = join(capturedRoot, 'sessions', encodeURIComponent('/workspace/gk3'), capturedId);
+  const capturedDir = join(capturedRoot, 'sessions', encodeURIComponent('/workspace/capture'), capturedId);
   mkdirSync(capturedDir, { recursive: true });
   for (const file of ['summary.json', 'updates.jsonl', 'signals.json']) {
     copyFileSync(join(import.meta.dir, 'fixtures', 'grok-1.0.92', file), join(capturedDir, file));
@@ -265,7 +265,7 @@ try {
     captured.length === 1
       && capturedTraces.length === 0
       && capturedSession?.id === capturedId
-      && capturedSession.cwd === '/workspace/gk3'
+      && capturedSession.cwd === '/workspace/capture'
       && capturedSession.model === 'byok-model'
       && capturedSession.title === 'Reply with exactly the single word PONG and nothing else.'
       && capturedSession.messageCount === 32
