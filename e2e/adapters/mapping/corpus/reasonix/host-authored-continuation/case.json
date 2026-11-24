@@ -3,7 +3,7 @@
   "description": "a 1.25.2 session (history: three rows written by 1.25.2) continued on 2.61.0 over ACP (tail): a reasoning-only step, then a host_authored user row Reasonix wrote itself asking for a visible answer, then the answer. The host row is context, never a user bubble, and starts no turn. Scrubbed with same-length replacements (paths, provider and model ids, time zone) and an equal-length filler for the system prompt; see packages/typescript/adapters/reasonix/test/fixtures/reasonix-v2.61.0-capture.json.",
   "userTexts": [
     "Reply with exactly COSYNCING_REASONIX_BROWSER_OK_0901_cf62ba11ba984fe9a213dae937b1016e",
-    "Reply with exactly RX4_MIGRATED_OK. Do not use tools."
+    "Reply with exactly CAP_MIGRATED_OK. Do not use tools."
   ],
   "display": [
     {
