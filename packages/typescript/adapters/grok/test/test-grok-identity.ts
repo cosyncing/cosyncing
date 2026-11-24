@@ -154,7 +154,8 @@ try {
   // Create's child and a Drive child read the same way. Grok 1.0.92 sends a dozen
   // `_x.ai/session/setup` notices per create and, during a turn, one
   // `_x.ai/session_notification` per streamed tool-argument chunk (a captured Drive session
-  // traced 275). None is read, and none may become a broker log line.
+  // traced 275). None is read, and none may become a broker log line. An
+  // `_x.ai/session/update` is read, so one whose params cannot be read is still traced.
   {
     const noticeFake = writeFakeGrokBinary(join(root, 'notice-bin'), join(root, 'notice-home'));
     const noticeAdapter = new GrokAdapter({ command: noticeFake.path, env: noticeFake.env, requestTimeoutMs: 2_000 });
@@ -174,9 +175,12 @@ try {
         sentAt.includes('session/new')
           && sentAt.includes('session/prompt')
           && noticeLive.some((message) => message.type === 'run-summary' && message.status === 'done')
-          && !logged.some((line) => line.includes('op=_x.ai/'))
+          && !logged.some((line) => line.includes('op=_x.ai/') && !line.includes('op=_x.ai/session/update:'))
           && logged.some((line) => line.includes('unhandled-extension op=_vendor.test/notice')),
         JSON.stringify({ sentAt, logged }));
+      check('a Drive child still traces an _x.ai/session/update whose params it cannot read',
+        logged.some((line) => line.includes('unhandled-extension op=_x.ai/session/update:')),
+        JSON.stringify(logged));
     } finally {
       delete noticeFake.env.FAKE_GROK_VENDOR_NOTICES;
       await noticeDrive?.close();

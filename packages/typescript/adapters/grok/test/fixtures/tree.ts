@@ -350,6 +350,9 @@ const handle = (frame) => {
       send({ jsonrpc: '2.0', method: '_x.ai/queue/changed', params: { sessionId: config.sessionId, entries: [] } });
       send({ jsonrpc: '2.0', method: '_x.ai/session_notification', params: { sessionId: config.sessionId,
         update: { sessionUpdate: 'tool_call_delta_chunk', tool_call_id: 'call-' + promptId, tool_index: 0, name: 'run_terminal_command' } } });
+      // Not a captured shape: an _x.ai/session/update whose params cannot be read, which a
+      // client must still trace rather than drop with the other _x.ai/ notices.
+      send({ jsonrpc: '2.0', method: '_x.ai/session/update', params: 'malformed' });
       record({ kind: 'vendor-notices', at: 'session/prompt', pid: process.pid });
     }
     setTimeout(() => {

@@ -392,8 +392,13 @@ class LazyGrokAcpTransport implements GrokAcpTransport {
                 // `_x.ai/session_notification`, mostly a `tool_call_delta_chunk` per streamed
                 // tool-argument chunk, plus `queue/changed`, `sessions/changed` and
                 // `session/prompt_complete`), and each one was a broker log line. Dropped here
-                // as the probe clients drop them; requests and other namespaces are still traced.
-                return event.kind === 'notification' && event.method.startsWith('_x.ai/') ? null : undefined;
+                // as the probe clients drop them. Still traced: requests, other namespaces, and
+                // an `_x.ai/session/update` whose params the branch above could not read.
+                return event.kind === 'notification'
+                  && event.method.startsWith('_x.ai/')
+                  && event.method !== '_x.ai/session/update'
+                  ? null
+                  : undefined;
               },
             },
           },
