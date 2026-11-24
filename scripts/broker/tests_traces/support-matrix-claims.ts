@@ -150,7 +150,7 @@ export const SUPPORT_MATRIX_CLAIMS: SupportClaim[] = [
   claim('codex', 'F07', 'full', 'app-server tool/MCP questions'),
   claim('opencode', 'F07', 'full', 'SSE/REST question channel'),
   claim('pi', 'F07', 'partial', 'resume/RPC select works; live bridge ask_user works; native TUI dialogs terminal-only'),
-  claim('omp', 'F07', 'partial', 'resume/RPC select works; live bridge ask_user works; native TUI dialogs terminal-only'),
+  claim('omp', 'F07', 'partial', 'resume/RPC select and 19.1.0 HTML forms work, and withdrawn forms close; live bridge ask_user works; native TUI dialogs terminal-only'),
   claim('reasonix', 'F07', 'n/a', 'no measured ACP question request route; unknown requests fail closed'),
   claim('grok', 'F07', 'n/a', 'no measured Grok ACP question request route; unknown requests fail closed'),
   claim('cline', 'F07', 'n/a', 'no measured Cline snapshot block or hub route represents an actionable question request'),

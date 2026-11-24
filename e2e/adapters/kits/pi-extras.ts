@@ -5,7 +5,8 @@
  * kit's fake runtime, and asserts what a client receives, what the runtime receives (its ledger) and
  * what lands in the session file the product reads back. Pi and omp share the engine, so most extras
  * run for both dialects; the few that differ (fork and clone exist only on Pi, omp persists the
- * app's prompt correlation, omp rejects empty names) branch on the dialect, never on a tool name.
+ * app's prompt correlation, omp rejects empty names, omp 19.1.0 sends forms and yields to
+ * background work) branch on the dialect, never on a tool name.
  */
 import { expect } from 'bun:test';
 import { BROKER_CONTRACT_REVISION } from '../../../packages/typescript/protocol/src/index.ts';
@@ -547,6 +548,91 @@ export function piFamilyExtras(dialect: PiFamilyDialect): ConformanceExtra[] {
       const skipped = stream.messages().find((message) => message.type === 'event' && message.name === 'dialog-skipped');
       expect(skipped?.payload?.method).toBe('custom-widget');
       stream.close();
+    },
+  });
+
+  // ------------------------------------------------- omp 19.1.0 forms and background work
+  if (omp) extras.push({
+    title: 'an omp form is one question card per control, answered in the shape omp validates, and a form omp withdraws closes its card unanswered',
+    async run(context) {
+      const fake = asFake(context);
+      const session = await context.drivableSession('omp form');
+      const owner = await context.openDrive(session);
+      const replies = (from: number) => fake.ledger.commands('extension_ui_response', from).map((entry) => entry.frame);
+      const mark = fake.ledger.mark();
+
+      // The HTML a real omp 19.1.0 `ask` sent: a radio group, a checkbox group and a text field.
+      const asked = context.prompt(owner, '[[form]] fill the form');
+      const card = await owner.waitForMessage((message) => message.type === 'question-request' && String(message.requestId).startsWith('form-')
+        && !String(message.requestId).endsWith('-expiring'));
+      // Worded as omp's own answer summary words them (captured): legend, legend, label.
+      expect(card.questions).toMatchObject([
+        { question: 'Color', options: [{ label: 'Red' }, { label: 'Blue' }], freeText: false },
+        { question: 'Extras', options: [{ label: 'Cheese' }, { label: 'Ham' }, { label: 'Olives' }], multiple: true, freeText: false },
+        { question: 'Note', options: [], kind: 'text' },
+      ]);
+      expect(card.questions[0].multiple ?? false).toBe(false);
+      expect((await owner.sendAndAwait({ kind: 'answer', requestId: card.requestId, answers: [['Blue'], ['Cheese', 'Olives'], ['ship it']] })).kind).toBe('ack');
+      await owner.waitForMessage((message) => message.type === 'question-resolved' && message.requestId === card.requestId);
+      expect((await asked).kind).toBe('ack');
+      // Option values, an array for the checkbox group, text as typed: what omp's validator takes.
+      const answered = { color: 'blue', extras: ['cheese', 'olives'], note: 'ship it' };
+      await owner.waitForMessage((message) => message.type === 'model-output' && text(message).includes(`form ${JSON.stringify(answered)}`));
+      expect(replies(mark)).toEqual([{ type: 'extension_ui_response', id: card.requestId, data: answered }]);
+
+      // omp withdraws a form at its timeout with cancel{targetId} and goes on with the defaults: the
+      // card closes, nothing is sent back, and a late answer is refused.
+      const expiringMark = fake.ledger.mark();
+      const expiring = context.prompt(owner, '[[expiringform:omp-form-expiry]] deploy?');
+      const lapsed = await owner.waitForMessage((message) => message.type === 'question-request' && String(message.requestId).endsWith('-expiring'));
+      expect(lapsed.questions).toMatchObject([
+        { question: 'Proceed with the deploy?', options: [{ label: 'Yes' }, { label: 'No' }], freeText: false },
+      ]);
+      fake.release('omp-form-expiry');
+      await owner.waitForMessage((message) => message.type === 'question-resolved' && message.requestId === lapsed.requestId);
+      expect((await expiring).kind).toBe('ack');
+      await owner.waitForMessage((message) => message.type === 'model-output' && text(message).includes('form timed out: proceed=yes'));
+      expect((await owner.sendAndAwait({ kind: 'answer', requestId: lapsed.requestId, answers: [['No']] })).kind).toBe('nack');
+      expect(replies(expiringMark)).toEqual([]);
+      expect(fake.ledger.faults(mark)).toEqual([]);
+      owner.close();
+    },
+  });
+
+  if (omp) extras.push({
+    title: 'an omp run that yields to background work stays running until it wakes and ends, and one whose work ends without waking settles idle',
+    async run(context) {
+      const fake = asFake(context);
+      const session = await context.drivableSession('omp background');
+      const owner = await context.openDrive(session);
+      const isStatus = (frame: any, status: string) => frame.kind === 'message' && frame.message?.type === 'status' && frame.message.status === status;
+      const waiting = (frame: any) => isStatus(frame, 'running') && frame.message.detail === 'Waiting for background work…';
+      const mark = fake.ledger.mark();
+
+      const from = owner.frames.length;
+      expect((await context.prompt(owner, '[[background:omp-bg-wake]] start the job')).kind).toBe('ack');
+      await owner.waitForFrame(waiting, { after: from, what: 'the yield to background work' });
+      await owner.waitForMessage((message) => message.type === 'model-output' && text(message) === 'answer: start the job');
+      // Yielded is not settled: omp will write the job's result and its own answer to the file.
+      expect(owner.frames.slice(from).some((frame) => isStatus(frame, 'idle'))).toBe(false);
+      fake.release('omp-bg-wake');
+      await owner.waitForMessage((message) => message.type === 'model-output' && text(message) === 'background done');
+      await owner.waitForFrame((frame) => isStatus(frame, 'idle'), { after: from, what: 'the woken run ending' });
+      const wokeAt = owner.frames.findIndex((frame, index) => index >= from && frame.kind === 'message'
+        && frame.message?.type === 'model-output' && text(frame.message) === 'background done');
+      const idleAt = owner.frames.findIndex((frame, index) => index >= from && isStatus(frame, 'idle'));
+      expect(wokeAt).toBeGreaterThan(-1);
+      expect(idleAt).toBeGreaterThan(wokeAt);
+
+      // The work ends and omp does not wake: only session_settled says so, and the session goes idle.
+      const goneFrom = owner.frames.length;
+      expect((await context.prompt(owner, '[[backgroundgone:omp-bg-gone]] start another')).kind).toBe('ack');
+      await owner.waitForFrame(waiting, { after: goneFrom, what: 'the second yield' });
+      expect(owner.frames.slice(goneFrom).some((frame) => isStatus(frame, 'idle'))).toBe(false);
+      fake.release('omp-bg-gone');
+      await owner.waitForFrame((frame) => isStatus(frame, 'idle'), { after: goneFrom, what: 'session_settled ending the yield' });
+      expect(fake.ledger.faults(mark)).toEqual([]);
+      owner.close();
     },
   });
 

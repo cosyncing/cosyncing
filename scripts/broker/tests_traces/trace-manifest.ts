@@ -223,6 +223,7 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
       { fn: 'F08', level: 'L2', agents: ['omp'], note: 'get_state model identity maps through the shared engine' },
       { fn: 'F09', level: 'L2', agents: ['omp'], note: 'fake native RPC requires get_available_commands and refuses pi-only get_commands' },
       { fn: 'F12', level: 'L2', agents: ['omp'], note: 'file input writes byte-exact inbox content and sends its absolute path in the same turn' },
+      { fn: 'F07', level: 'L2', agents: ['omp'], note: 'omp 19.1.0 HTML form dialogs map onto question cards with validated answers, and a withdrawn form closes its card' },
       { fn: 'F14', level: 'L2', agents: ['omp'], note: 'native create/name path and explicit no-fork/no-clone surface' },
     ],
   },
@@ -246,7 +247,7 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
   },
   {
     file: 'packages/typescript/adapters/omp/test/test-omp-protocol-parity.ts',
-    title: 'omp 17.4.2 fixture/adapter protocol lock with optional native source audit',
+    title: 'omp 17.4.2 and 19.1.0 fixture/adapter protocol lock with optional native source audit',
     nativeVersion: '17.4.2',
     coverage: [
       { fn: 'F04', level: 'L2', agents: ['omp'], note: 'reviewed fixture matches the shared engine consumed-event set; installed native source audit is optional' },

@@ -28,6 +28,16 @@
  *   [[question]]     an `extension_ui_request` select (Left / Right); the choice rides the reply
  *   [[expiringconfirm]] a confirm the runtime stops waiting on by itself, without a word to the
  *                    client (as Pi's dialog timeout or the run's abort settles one); the turn goes on
+ *   [[form]]         an omp `extension_ui_request` form (the HTML a real omp 19.1.0 `ask` sent); the
+ *                    reply's `data` rides the answer
+ *   [[expiringform:TAG]] an omp form the runtime stops waiting on once `release-TAG` appears: it says
+ *                    so with `cancel{targetId}`, as omp 19.1.0 does at a dialog's timeout, and goes on
+ *                    with the form's defaults
+ *   [[background:TAG]] omp 19.1.0's yield to background work: the run ends with a non-terminal
+ *                    `agent_end{awaitingAsyncWork}`; once `release-TAG` appears the runtime wakes
+ *                    itself (async-result message, answer, terminal agent_end) and settles
+ *   [[backgroundgone:TAG]] the same yield, but the work ends without a wake-up run: only
+ *                    `session_settled` follows `release-TAG`
  *   [[hold:TAG]]     keep the run open until the control file `release-TAG` appears, or `abort`
  *   [[retry]]        one failed attempt (`auto_retry_start`/`auto_retry_end`) before the answer
  *   [[tool]]         a bash tool call and its result before the answer
@@ -73,6 +83,12 @@ export interface FakePiConfig {
   /** Fail the next prompt RPC with this error text. */
   failNextPrompt?: string;
 }
+
+/** Form HTML a real omp 19.1.0 `ask` sent (captured 2026-11-24 under `--mode rpc-ui`; an extension's
+ *  `formDialog` sends the same frame under Drive's `--mode rpc`): radio, checkbox and text. */
+export const OMP_CAPTURED_FORM_HTML = "<form>\n  <fieldset>\n    <legend>Color</legend>\n    <label><input type=\"radio\" name=\"color\" value=\"red\" checked> Red</label>\n    <label><input type=\"radio\" name=\"color\" value=\"blue\"> Blue</label>\n  </fieldset>\n  <fieldset>\n    <legend>Extras</legend>\n    <label><input type=\"checkbox\" name=\"extras\" value=\"cheese\"> Cheese</label>\n    <label><input type=\"checkbox\" name=\"extras\" value=\"ham\"> Ham</label>\n    <label><input type=\"checkbox\" name=\"extras\" value=\"olives\"> Olives</label>\n  </fieldset>\n  <label>Note <input type=\"text\" name=\"note\" required></label>\n</form>";
+/** The form a real omp 19.1.0 `ask` sent with `timeout: 20000`, then withdrew with `cancel{targetId}`. */
+export const OMP_CAPTURED_EXPIRING_FORM_HTML = "<form>\n  <p>Proceed with the deploy?</p>\n  <label><input type=\"radio\" name=\"proceed\" value=\"yes\" checked> Yes</label>\n  <label><input type=\"radio\" name=\"proceed\" value=\"no\"> No</label>\n</form>";
 
 export const PI_FAKE_VERSION = '0.84.0';
 export const OMP_FAKE_VERSION = '17.4.2';
@@ -388,6 +404,21 @@ function runFakePi(): void {
       const reply = await ui({ id: `question-${process.pid}-${turnNumber}`, method: 'select', title: 'Path', message: 'Which path?', options: ['Left', 'Right'] });
       outcome = typeof reply.value === 'string' && reply.value ? ` (answered ${reply.value})` : ' (question unanswered)';
     }
+    if (text.includes('[[form]]')) {
+      const reply = await ui({ id: `form-${process.pid}-${turnNumber}`, method: 'form', html: OMP_CAPTURED_FORM_HTML });
+      outcome = reply.cancelled === true ? ' (form cancelled)' : ` (form ${JSON.stringify(reply.data ?? null)})`;
+    }
+    const expiring = /\[\[expiringform:([\w-]+)\]\]/.exec(text)?.[1];
+    if (expiring) {
+      // omp settles the form itself at its timeout: it tells the client to close the dialog, takes
+      // the form's defaults, and ignores any later reply (one here is recorded as a fault).
+      const id = `form-${process.pid}-${turnNumber}-expiring`;
+      awaiting.set(id, () => record({ kind: 'fault', message: `reply to a form the runtime already settled: ${id}` }));
+      emit({ type: 'extension_ui_request', id, method: 'form', html: OMP_CAPTURED_EXPIRING_FORM_HTML, timeout: 20000 });
+      await released(expiring);
+      emit({ type: 'extension_ui_request', id: `cancel-${process.pid}-${turnNumber}`, method: 'cancel', targetId: id });
+      outcome = ' (form timed out: proceed=yes)';
+    }
     if (text.includes('[[tool]]')) {
       const call = { type: 'toolCall', id: `call-${process.pid}-${turnNumber}`, name: 'bash', arguments: { command: 'echo fixture' } };
       const step = assistant([call], 'toolUse');
@@ -458,6 +489,34 @@ function runFakePi(): void {
       emit({ type: 'turn_end', toolResults: [] });
       if (aborted) steers.length = 0;
       input = steers.shift();
+    }
+    const background = /\[\[background(gone)?:([\w-]+)\]\]/.exec(first.text);
+    if (background && !aborted) {
+      // omp 19.1.0 (captured): the run yields to work it started in the background. The session
+      // accepts prompts meanwhile, and is settled only once that work is done.
+      emit({ type: 'agent_end', messages: [], isTerminal: false, yielded: true, awaitingAsyncWork: true });
+      running = false;
+      await released(background[2]!);
+      if (!background[1]) {
+        running = true;
+        emit({ type: 'agent_start' });
+        turnNumber += 1;
+        emit({ type: 'turn_start' });
+        const notice: Json = {
+          role: 'custom', customType: 'async-result', display: true, attribution: 'agent',
+          content: '<system-notice>\nBackground job bg_1 (fixture) has completed.\n</system-notice>', timestamp: tick(),
+        };
+        emit({ type: 'message_start', message: snapshot(notice) });
+        emit({ type: 'message_end', message: snapshot(notice) });
+        persistMessage(notice);
+        assistant([{ type: 'text', text: 'background done' }], 'stop');
+        record({ kind: 'turn-end', text: 'background wake-up', session: file, aborted: false });
+        emit({ type: 'turn_end', toolResults: [] });
+        emit({ type: 'agent_end', messages: [], isTerminal: true, yielded: true });
+        running = false;
+      }
+      emit({ type: 'session_settled' });
+      return;
     }
     emit({ type: 'agent_end', messages: [] });
     running = false;
