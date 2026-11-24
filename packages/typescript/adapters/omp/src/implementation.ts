@@ -1,21 +1,28 @@
 /**
  * omp (oh-my-pi) adapter — the shared Pi engine composed with the omp dialect.
  *
- * `OmpAdapter` IS `PiEngineAdapter` bound to `OMP_RUNTIME`; it carries no engine code of its own.
- * omp removed the RPC fork/clone commands, so the base class's omitted forkSession/cloneSession
- * hooks are exactly right here: the broker derives canFork/canClone=false from their absence.
+ * `OmpAdapter` IS `PiEngineAdapter` bound to `OMP_RUNTIME`; it carries no engine code of its own
+ * beyond the fork hook. omp has no RPC `clone`, so cloneSession stays absent (canClone=false). Its
+ * RPC `fork` was removed and came back: 17.4.2 has none, 19.1.0 has it (measured), so forkSession is
+ * present and `canForkSession` answers from the configured omp's version.
  */
 import {
   inspectDialectBridgeAsset,
   PiEngineAdapter,
   resolvePiDialectRuntime,
+  runPiLifecycleAction,
   type PiAdapterOptions,
   type PiDialectRuntime,
 } from '@cosyncing/pi-engine';
-import { CLIENT_REVISION_WITH_OMP_ROSTER_IDENTITY } from '@cosyncing/adapter-api';
+import { CLIENT_REVISION_WITH_OMP_ROSTER_IDENTITY, type SessionInfo } from '@cosyncing/adapter-api';
 import { inspectOmpPathCollision, OMP_DIALECT } from './dialect.ts';
 import { OMP_BRIDGE_EMBEDDED_SHA256, OMP_BRIDGE_EMBEDDED_SOURCE } from './bridge-asset.ts';
-import { currentOmpRuntimeReadiness } from './runtime-readiness.ts';
+import {
+  currentOmpRuntimeReadiness,
+  OMP_RPC_FORK_MINIMUM_VERSION,
+  ompSupportsRpcFork,
+  type OmpRuntimeReadiness,
+} from './runtime-readiness.ts';
 import { diagnoseOmpSetup } from './diagnostics.ts';
 
 /**
@@ -61,6 +68,26 @@ export class OmpAdapter extends PiEngineAdapter {
 
   constructor(opts: OmpAdapterOptions = {}) {
     super(OMP_RUNTIME, opts);
+  }
+
+  /** Fork is offered only while the configured omp is ready and is a build whose RPC has `fork`. */
+  canForkSession(): boolean {
+    const readiness = this.rt.hooks.readiness() as OmpRuntimeReadiness;
+    return readiness.ready && ompSupportsRpcFork(readiness.packageVersion);
+  }
+
+  async forkSession(sessionId: string, opts: { messageId?: string | null } = {}): Promise<SessionInfo> {
+    const readiness = this.rt.hooks.readiness() as OmpRuntimeReadiness;
+    if (!readiness.ready) throw new Error(readiness.message);
+    if (!ompSupportsRpcFork(readiness.packageVersion)) {
+      const installed = readiness.packageVersion ? `omp ${readiness.packageVersion}` : 'This omp';
+      throw new Error(`${installed} has no RPC fork; forking needs omp ${OMP_RPC_FORK_MINIMUM_VERSION}.`);
+    }
+    return runPiLifecycleAction(this.rt, sessionId, 'fork', {
+      messageId: opts.messageId,
+      brokerUrl: this.brokerUrl,
+      bridgeUsesIntegrationFile: this.bridgeUsesIntegrationFile,
+    });
   }
 }
 

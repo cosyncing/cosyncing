@@ -11,7 +11,7 @@ export {};
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { OMP_DIALECT } from '../src/dialect.ts';
-import { OMP_VERIFIED_VERSION, OMP_VERIFIED_VERSIONS } from '../src/runtime-readiness.ts';
+import { OMP_VERIFIED_VERSION, OMP_VERIFIED_VERSIONS, ompSupportsRpcFork } from '../src/runtime-readiness.ts';
 
 interface SurfaceFixture {
   schemaVersion: number;
@@ -79,7 +79,7 @@ check('one reviewed fixture per verified version, schema pinned',
     && fixtures.every((fixture, index) => fixture.schemaVersion === 1 && fixture.nativeVersion === OMP_VERIFIED_VERSIONS[index]),
   fixtures.map((fixture) => fixture.nativeVersion).join(','));
 check('omp command alias is get_available_commands', OMP_DIALECT.rpcAliases.getCommands === 'get_available_commands');
-check('omp advertises neither fork nor clone RPC lifecycle', !OMP_DIALECT.lifecycleCommands.fork && !OMP_DIALECT.lifecycleCommands.clone);
+check('omp advertises RPC fork and never clone', OMP_DIALECT.lifecycleCommands.fork && !OMP_DIALECT.lifecycleCommands.clone);
 
 // The engine consumes exactly the newest captured surface; an older build's events are a subset
 // (17.4.2 has no session_settled), so it is driven by the same handler.
@@ -101,7 +101,14 @@ for (const fixture of fixtures) {
   }
   for (const command of fixture.absentCommands) {
     if (command === 'get_commands') continue;
-    check(`omp ${fixture.nativeVersion} dialect refuses absent RPC ${command}`, OMP_DIALECT.lifecycleCommands[command as 'fork' | 'clone'] === false);
+    // fork is gated per version (OmpAdapter.canForkSession); clone is never offered.
+    const refused = command === 'fork'
+      ? !ompSupportsRpcFork(fixture.nativeVersion)
+      : OMP_DIALECT.lifecycleCommands[command as 'fork' | 'clone'] === false;
+    check(`omp ${fixture.nativeVersion} is never sent absent RPC ${command}`, refused);
+  }
+  if (fixture.adapterCommands.includes('fork')) {
+    check(`omp ${fixture.nativeVersion} offers its RPC fork`, ompSupportsRpcFork(fixture.nativeVersion));
   }
 }
 

@@ -238,8 +238,8 @@ export const SUPPORT_MATRIX_CLAIMS: SupportClaim[] = [
     capabilityIds: ['pi.rpc.set_session_name', 'pi.rpc.fork', 'pi.rpc.clone', 'pi.rpc.export_html'],
     reviewedNativeVersions: { pi: '0.78.1' },
   }),
-  claim('omp', 'F14', 'partial', 'create/reload/quit/name/export covered; fork and clone are unavailable through RPC', undefined, {
-    reviewedNativeVersions: { omp: '17.4.2' },
+  claim('omp', 'F14', 'partial', 'create/reload/quit/name/export covered; fork on omp 19.1.0 (bare fork copies the whole session), none on 17.4.2; clone is unavailable through RPC', undefined, {
+    reviewedNativeVersions: { omp: '19.1.0' },
   }),
   claim('reasonix', 'F14', 'partial', 'durable create/load/cancel and rewrite reset; rename, fork, and export are unsupported', undefined, {
     reviewedNativeVersions: { reasonix: '1.25.2' },

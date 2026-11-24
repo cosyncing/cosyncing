@@ -7284,6 +7284,9 @@ server = Bun.serve<WsData>({
       const backend = registry.get(tool);
       if (!backend) return json({ error: `unknown tool: ${tool}` }, 404);
       if (!backend.forkSession) return json({ error: 'native session fork is not available for this agent' }, 501);
+      if (backend.canForkSession && !(await Promise.resolve(backend.canForkSession()).catch(() => false))) {
+        return json({ error: 'native session fork is not available for this agent' }, 501);
+      }
       // A session an AGENT spawned (`SessionInfo.origin === 'subagent'`) is not a user-initiated fork
       // point: its only writer is the parent run, so the fork could only be another Observe-only thread
       // the user is then dropped into. Refuse with a typed code rather than letting it become the
@@ -8575,7 +8578,9 @@ server = Bun.serve<WsData>({
           canRenameNative:
             typeof b.renameSession === 'function' &&
             (typeof b.canRenameNative === 'function' ? await Promise.resolve(b.canRenameNative()).catch(() => false) : true),
-          canFork: typeof b.forkSession === 'function',
+          canFork:
+            typeof b.forkSession === 'function' &&
+            (typeof b.canForkSession === 'function' ? await Promise.resolve(b.canForkSession()).catch(() => false) : true),
           canClone: typeof b.cloneSession === 'function',
           // Command-surface export availability = adapter hook presence AND the reviewed R2 registry
           // (per-tier default-deny is still enforced at the export route). Never an agent-name branch.

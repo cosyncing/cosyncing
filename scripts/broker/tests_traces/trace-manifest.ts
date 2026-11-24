@@ -224,7 +224,7 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
       { fn: 'F09', level: 'L2', agents: ['omp'], note: 'fake native RPC requires get_available_commands and refuses pi-only get_commands' },
       { fn: 'F12', level: 'L2', agents: ['omp'], note: 'file input writes byte-exact inbox content and sends its absolute path in the same turn' },
       { fn: 'F07', level: 'L2', agents: ['omp'], note: 'omp 19.1.0 HTML form dialogs map onto question cards with validated answers, and a withdrawn form closes its card' },
-      { fn: 'F14', level: 'L2', agents: ['omp'], note: 'native create/name path and explicit no-fork/no-clone surface' },
+      { fn: 'F14', level: 'L2', agents: ['omp'], note: 'native create/name path; no fork on 17.4.2; bare and entry fork on 19.1.0; no clone' },
     ],
   },
   {
@@ -253,7 +253,7 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
       { fn: 'F04', level: 'L2', agents: ['omp'], note: 'reviewed fixture matches the shared engine consumed-event set; installed native source audit is optional' },
       { fn: 'F08', level: 'L2', agents: ['omp'], note: 'reviewed fixture requires the RPC model commands used by the adapter' },
       { fn: 'F09', level: 'L2', agents: ['omp'], note: 'reviewed fixture carries get_available_commands and omits get_commands' },
-      { fn: 'F14', level: 'L2', agents: ['omp'], note: 'reviewed fixture carries set_session_name/export and omits fork/clone' },
+      { fn: 'F14', level: 'L2', agents: ['omp'], note: 'reviewed fixtures carry set_session_name/export, omit clone, and carry fork only from 19.1.0' },
     ],
   },
   {

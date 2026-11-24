@@ -287,7 +287,7 @@ function decodeCwdDir(dir: string): string | undefined {
 
 /**
  * The dialect-parameterized Pi engine adapter. Carries every AgentBackend hook EXCEPT
- * forkSession/cloneSession — a dialect without RPC lifecycle commands (omp) omits those hooks so
+ * forkSession/cloneSession — a dialect without RPC lifecycle commands omits those hooks so
  * the broker derives canFork/canClone=false from hook presence.
  */
 export class PiEngineAdapter implements AgentBackend {
@@ -659,9 +659,9 @@ export class PiEngineAdapter implements AgentBackend {
 
 /**
  * One fork/clone lifecycle round: resolve the session, run the dialect's lifecycle RPC, and build
- * the child SessionInfo from `get_state`. Only dialects with RPC lifecycle commands (pi) expose
- * this — an adapter subclass wires it to forkSession/cloneSession so the broker derives
- * canFork/canClone from hook presence.
+ * the child SessionInfo from `get_state`. Only adapters whose runtime has RPC lifecycle commands
+ * expose this (pi; omp's fork from 19.1.0) — an adapter subclass wires it to
+ * forkSession/cloneSession so the broker derives canFork/canClone from hook presence.
  */
 export async function runPiLifecycleAction(
   rt: PiDialectRuntime,
@@ -1045,9 +1045,17 @@ async function runPiLifecycleRpc(
      * A BARE fork — no message chosen — has no fork RPC of its own. Pi's `clone` is exactly that
      * operation (it forks at the current leaf), so a bare fork issues it rather than sending an
      * incomplete `fork` Pi can only refuse.
+     *
+     * omp has no `clone`, and its `fork` without `entryId` copies the whole session (measured on
+     * 19.1.0), so there a bare fork is that `fork`. omp keeps the chosen entry in the copy, where Pi
+     * forks just before it.
      */
     const forkPoint = action === 'fork' && opts.messageId ? opts.messageId : undefined;
-    const cmd: Record<string, unknown> = forkPoint ? { type: 'fork', entryId: forkPoint } : { type: 'clone' };
+    const cmd: Record<string, unknown> = forkPoint
+      ? { type: 'fork', entryId: forkPoint }
+      : action === 'fork' && !rt.dialect.lifecycleCommands.clone
+        ? { type: 'fork' }
+        : { type: 'clone' };
     const actionResp = await rpc(cmd, 15000);
     if (actionResp?.success !== true) throw new Error(piLifecycleFailure(rt.dialect, action, actionResp));
     // `success: true` is not the same as `it happened`: Pi reports an extension-cancelled fork as a

@@ -4,9 +4,9 @@
  * Every extra drives the broker over HTTP and the session socket the way the app does, against the
  * kit's fake runtime, and asserts what a client receives, what the runtime receives (its ledger) and
  * what lands in the session file the product reads back. Pi and omp share the engine, so most extras
- * run for both dialects; the few that differ (fork and clone exist only on Pi, omp persists the
- * app's prompt correlation, omp rejects empty names, omp 19.1.0 sends forms and yields to
- * background work) branch on the dialect, never on a tool name.
+ * run for both dialects; the few that differ (clone exists only on Pi and omp's fork only on the
+ * builds whose RPC has it, omp persists the app's prompt correlation, omp rejects empty names, omp
+ * 19.1.0 sends forms and yields to background work) branch on the dialect, never on a tool name.
  */
 import { expect } from 'bun:test';
 import { BROKER_CONTRACT_REVISION } from '../../../packages/typescript/protocol/src/index.ts';
@@ -265,19 +265,69 @@ export function piFamilyExtras(dialect: PiFamilyDialect): ConformanceExtra[] {
   // ------------------------------------------------------------- fork and clone
   if (omp) {
     extras.push({
-      title: 'omp offers neither fork nor clone: both are refused before any runtime starts',
+      title: 'omp forks only on a build whose RPC has fork: 17.4.2 refuses before any runtime starts, 19.1.0 copies the whole session bare and keeps a chosen entry, and clone is never offered',
       async run(context) {
         const fake = asFake(context);
-        const stored = fake.seedSession({ title: 'no fork on omp' });
+        const stored = fake.seedSession({ title: 'fork on omp', turns: 2 });
         await context.client.waitForSession((row) => row.id === stored.id);
+        const agentRow = async (): Promise<any> => {
+          const agents = (await context.client.get(`/api/agents?contractRevision=${BROKER_CONTRACT_REVISION}`)).body;
+          return (Array.isArray(agents) ? agents : agents.agents).find((candidate: any) => candidate.id === agent);
+        };
+        const userTexts = async (rowId: string): Promise<string[]> => {
+          const stream = await context.client.attach(agent, rowId);
+          const messages = (await stream.waitForKind('history')).messages as any[];
+          stream.close();
+          return messages.filter((message) => message.type === 'user-message').map(text);
+        };
         const mark = fake.ledger.mark();
         const fork = await post(context, `/api/sessions/${agent}/${stored.id}/fork`, { messageId: 'any' });
         const clone = await post(context, `/api/sessions/${agent}/${stored.id}/clone`);
         expect([fork.status, clone.status]).toEqual([501, 501]);
         expect(fake.ledger.spawns(mark)).toEqual([]);
-        const agents = (await context.client.get(`/api/agents?contractRevision=${BROKER_CONTRACT_REVISION}`)).body;
-        const row = (Array.isArray(agents) ? agents : agents.agents).find((candidate: any) => candidate.id === agent);
-        expect([row.canFork, row.canClone]).toEqual([false, false]);
+        const old = await agentRow();
+        expect([old.canFork, old.canClone]).toEqual([false, false]);
+
+        // omp 19.1.0 answers `--version` as `omp/19.1.0` (captured), and its RPC has fork again.
+        fake.setVersion('19.1.0', 'omp/19.1.0\n');
+        await context.restart();
+        try {
+          await context.client.waitForSession((row) => row.id === stored.id);
+          const current = await agentRow();
+          expect([current.canFork, current.canClone]).toEqual([true, false]);
+          const sourceFile = piFileOf(stored.id);
+          const before = readFileSync(sourceFile, 'utf8');
+          const userEntries = readEntries(sourceFile).filter((entry) => entry.type === 'message' && entry.message?.role === 'user');
+
+          // No clone on omp: a bare fork is omp's own bare `fork`, a copy of the whole session.
+          const bareMark = fake.ledger.mark();
+          const bare = await post(context, `/api/sessions/${agent}/${stored.id}/fork`);
+          expect(bare.status, bare.text).toBe(200);
+          const bareCommands = fake.ledger.commands('fork', bareMark);
+          expect(bareCommands.length).toBe(1);
+          expect(bareCommands[0]!.frame.type).toBe('fork');
+          expect('entryId' in bareCommands[0]!.frame).toBe(false);
+          expect(fake.ledger.commands('clone', bareMark)).toEqual([]);
+          expect(fake.ledger.spawns(bareMark).some((entry) => entry.pid === bareCommands[0]!.pid && entry.session === sourceFile)).toBe(true);
+          expect(await userTexts(bare.body.session.id)).toEqual([stored.texts[0]!, stored.texts[2]!]);
+
+          // A fork at a chosen entry: omp keeps that entry in the copy, where Pi forks just before it.
+          const atMark = fake.ledger.mark();
+          const at = await post(context, `/api/sessions/${agent}/${stored.id}/fork`, { messageId: userEntries[1].id });
+          expect(at.status, at.text).toBe(200);
+          expect(fake.ledger.commands('fork', atMark)[0]!.frame).toMatchObject({ type: 'fork', entryId: userEntries[1].id });
+          expect(await userTexts(at.body.session.id)).toEqual([stored.texts[0]!, stored.texts[2]!]);
+          const atEntries = readEntries(piFileOf(at.body.session.id));
+          expect(atEntries.at(-1)?.id).toBe(userEntries[1].id);
+
+          expect((await post(context, `/api/sessions/${agent}/${stored.id}/clone`)).status).toBe(501);
+          expect(new Set([stored.id, bare.body.session.id, at.body.session.id]).size).toBe(3);
+          expect(readFileSync(sourceFile, 'utf8')).toBe(before);
+          expect(fake.ledger.faults(mark)).toEqual([]);
+        } finally {
+          fake.setVersion(dialect.version.current);
+          await context.restart();
+        }
       },
     });
   } else {

@@ -166,11 +166,15 @@ process.exit(73);
   let futureRenameRefusal = '';
   try { await futureAdapter.attach(idOf(sessionA), 'resume'); } catch (error) { futureResumeRefusal = String(error); }
   try { await futureAdapter.renameSession(idOf(sessionA), 'must not persist'); } catch (error) { futureRenameRefusal = String(error); }
-  check('future omp refuses Resume and native rename before spawning the unverified runtime',
+  let futureForkRefusal = '';
+  try { await futureAdapter.forkSession(idOf(sessionA)); } catch (error) { futureForkRefusal = String(error); }
+  check('future omp refuses Resume, native rename and fork before spawning the unverified runtime',
     /verified only for omp 17\.4\.2 and 19\.1\.0/.test(futureResumeRefusal)
       && /verified only for omp 17\.4\.2 and 19\.1\.0/.test(futureRenameRefusal)
+      && /verified only for omp 17\.4\.2 and 19\.1\.0/.test(futureForkRefusal)
+      && futureAdapter.canForkSession() === false
       && !existsSync(futureSpawnMarker),
-    JSON.stringify({ futureResumeRefusal, futureRenameRefusal }));
+    JSON.stringify({ futureResumeRefusal, futureRenameRefusal, futureForkRefusal }));
   check('future omp discovery does not auto-install its bridge',
     !existsSync(join(root, '.omp', 'agent', 'extensions', 'cosyncing-bridge', 'index.ts')));
   delete process.env.COSYNCING_OMP_BIN;

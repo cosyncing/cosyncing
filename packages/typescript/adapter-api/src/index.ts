@@ -416,6 +416,9 @@ export interface AgentBackend {
   /** Optional native session fork/branch. The adapter owns native fork-point semantics; messageId is
    *  supplied only when the client selected a specific parent message. */
   forkSession?(sessionId: string, opts?: { messageId?: string | null }): Promise<SessionInfo | void>;
+  /** Whether forkSession can run now, for an agent whose fork depends on the installed build. When
+   *  this hook is absent, a present forkSession is always offered. */
+  canForkSession?(): Promise<boolean> | boolean;
   /** Optional native session clone. Kept distinct from fork because clone/head-copy semantics are not
    *  the same as a user-selected fork point. */
   cloneSession?(sessionId: string): Promise<SessionInfo | void>;

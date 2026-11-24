@@ -629,16 +629,24 @@ function runFakePi(): void {
       }
       case 'fork':
       case 'clone': {
+        // omp has no clone, and its RPC fork exists only from 19 on (17.4.2 has none).
+        const ompFork = dialect === 'omp' && Number(String(config.version).split('.')[0]) >= 19;
+        if (dialect === 'omp' && (command.type === 'clone' || !ompFork)) {
+          record({ kind: 'unimplemented', what: String(command.type) });
+          return fail(command, `Unknown command: ${String(command.type)}`);
+        }
         if (config.cancelFork) return ok(command, { cancelled: true });
         const copyId = crypto.randomUUID();
         const copy = piSessionFilePath(sessionsRoot, cwd, copyId);
         mkdirSync(dirname(copy), { recursive: true });
         const lines = existsSync(file) ? readFileSync(file, 'utf8').split('\n').filter((line) => line.trim()) : [];
         let kept = lines;
-        if (command.type === 'fork') {
+        // Pi forks just before the chosen user entry and needs one; omp 19.1.0 (captured) keeps the
+        // chosen entry, and a bare fork copies the whole session.
+        if (command.type === 'fork' && (dialect !== 'omp' || command.entryId !== undefined)) {
           const at = lines.findIndex((line) => { try { return JSON.parse(line).id === command.entryId; } catch { return false; } });
           if (at < 0) return fail(command, 'Invalid entry ID for forking');
-          kept = lines.slice(0, at);
+          kept = lines.slice(0, dialect === 'omp' ? at + 1 : at);
         }
         const rewritten = kept.map((line) => {
           const entry = JSON.parse(line);
@@ -647,7 +655,7 @@ function runFakePi(): void {
         if (!rewritten.length) rewritten.push(JSON.stringify(piHeader(dialect, copyId, cwd, Date.now())[0]));
         writeFileSync(copy, `${rewritten.join('\n')}\n`);
         switchTo(copy, copyId);
-        return ok(command, command.type === 'fork' ? { cancelled: false, text: '' } : { cancelled: false });
+        return ok(command, command.type === 'fork' && dialect !== 'omp' ? { cancelled: false, text: '' } : { cancelled: false });
       }
       case 'export_html': {
         const target = String(command.outputPath ?? '');

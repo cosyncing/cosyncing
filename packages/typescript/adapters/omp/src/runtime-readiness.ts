@@ -38,6 +38,19 @@ export function isOmpVerifiedVersion(version: unknown): boolean {
   return OMP_VERIFIED_VERSIONS.some((verified) => compareSemanticVersions(version, verified) === 0);
 }
 
+/**
+ * The first captured omp whose RPC has `fork` again (upstream restored it in 18.4.11; 17.4.2 has
+ * none). A bare fork copies the whole session; `entryId` keeps that entry (measured on 19.1.0).
+ */
+export const OMP_RPC_FORK_MINIMUM_VERSION = '19.1.0';
+
+/** Whether this omp build's RPC can fork: a verified version at or above the first one measured. */
+export function ompSupportsRpcFork(version: unknown): boolean {
+  if (typeof version !== 'string' || !isOmpVerifiedVersion(version)) return false;
+  const comparison = compareSemanticVersions(version, OMP_RPC_FORK_MINIMUM_VERSION);
+  return comparison !== undefined && comparison >= 0;
+}
+
 /** The verified versions as prose: `17.4.2 and 19.1.0`. */
 export function ompVerifiedVersionsText(): string {
   const versions = [...OMP_VERIFIED_VERSIONS];

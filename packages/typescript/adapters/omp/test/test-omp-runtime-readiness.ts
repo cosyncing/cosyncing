@@ -27,6 +27,7 @@ import {
   OMP_MINIMUM_SUPPORTED_VERSION,
   OMP_VERIFIED_VERSION_BUN_FLOOR,
   ompIdentityVersion,
+  ompSupportsRpcFork,
   type OmpRuntimeHost,
 } from '../src/index.ts';
 
@@ -250,6 +251,8 @@ try {
   assert.equal(native19.packageVersion, '19.1.0');
 
   assert.deepEqual(['17.4.2', '19.1.0', '18.2.0', '19.1.1', '17.4.1'].map(isOmpVerifiedVersion), [true, true, false, false, false]);
+  assert.deepEqual(['17.4.2', '19.1.0', '18.2.0', undefined].map(ompSupportsRpcFork), [false, true, false, false],
+    'only a captured build whose RPC has fork offers it');
 
   // Doctor reads a version list too: 19.1.0 passes, a release between the captured ones does not,
   // and the remediation names the newest captured build with the Bun it needs.
