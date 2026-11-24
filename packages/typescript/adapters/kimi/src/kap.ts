@@ -182,6 +182,11 @@ export function kapTurnRef(turn: Row): number | undefined {
  * The 0.x listing activity of a KAP session row. A pending interaction wins
  * over the running turn — on KAP the turn stays `turn` while it waits on an
  * approval, and 0.x reported that state as the interaction (`needs-input`).
+ *
+ * KAP `background` (no turn running, background shell tasks or subagents still
+ * working) maps to idle on purpose. On 0.x `busy` meant a running TURN, and
+ * the working badge, the drive's idle gate and Stop all follow the turn, so a
+ * session whose turn ended reads idle while its background work continues.
  */
 function legacyActivity(row: Row): 'running' | 'approval' | 'question' | 'idle' {
   const pending = row.pending_interaction;

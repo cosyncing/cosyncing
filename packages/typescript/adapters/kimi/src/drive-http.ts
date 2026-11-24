@@ -356,6 +356,11 @@ export class KimiDriveHttp {
     // KAP renamed the action `:cancel` (2.7.2 answers `:abort` with 40001
     // "unsupported action", captured) and answers `{cancelled}` — false on an
     // idle session, captured — which is the 0.x `{aborted}` under another name.
+    //
+    // The body is deliberately empty: `include_background` is left unset, so
+    // Stop ends the running turn only. Background shell tasks and subagents
+    // the turn started keep running, the same as Stop on the other agents
+    // (Claude's Stop ends the turn, not its background work).
     const outcome = await this.#post(`/api/v1/sessions/${encodeURIComponent(sessionId)}:cancel`, {});
     const cancelled = (outcome.data as { cancelled?: unknown } | null | undefined)?.cancelled;
     return typeof cancelled === 'boolean' ? { ...outcome, data: { aborted: cancelled } } : outcome;

@@ -49,6 +49,11 @@ cosyncing maps Kimi Code 2.7's protocol onto the behavior described under
   Kimi refuses writes to it while the other program holds it. If cosyncing is
   driving such a session, it stops driving it and switches to observing, the
   same as when it detects another writer.
+- Stop ends the running turn only. Background shell commands and subagents
+  that the turn started keep running.
+- A session shows as working while a turn runs. Once the turn ends it shows as
+  idle, even while background commands or subagents it started are still
+  working.
 - The model, effort and context-window details of a session appear once the
   session is open in cosyncing, not on the session list.
 - An attached file shows as a notice with its name, type and size.
