@@ -897,7 +897,12 @@ try {
         && below.evidence?.installedVersion === '2.1.4' && below.evidence?.minimumVersion === '2.2.0',
       JSON.stringify(below));
     // A current CLI whose registered, running service is still older only needs that service restarted.
-    const fixture = makeFixtureContext(join(testRoot, 'opencode-v2-stale-service'), 'opencode', '2.3.2');
+    // The registration's owner and mode check reads this host's real file modes, which a Windows host
+    // reports as writable by everyone, so there the fixture is judged as the Windows platform it runs on.
+    const fixture = {
+      ...makeFixtureContext(join(testRoot, 'opencode-v2-stale-service'), 'opencode', '2.3.2'),
+      ...(process.platform === 'win32' ? { platform: 'win32' } : {}),
+    };
     const state = join(fixture.homeDir, '.local', 'state', 'opencode');
     mkdirSync(state, { recursive: true });
     writeFileSync(join(state, 'service.json'), JSON.stringify({ url: 'http://127.0.0.1:47999', pid: 4242, version: '2.1.4', password: 'fixture-password' }), { mode: 0o600 });
