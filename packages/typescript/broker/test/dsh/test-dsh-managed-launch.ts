@@ -28,10 +28,11 @@ export {};
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DshAdapter, DSH_MANAGED_LAUNCH_URL_EXTRA_PROBES, dshCredentialScope, type DshCookie } from '@cosyncing/adapter-dsh';
+import { DshAdapter, dshCredentialScope, type DshCookie } from '@cosyncing/adapter-dsh';
 import {
   ensureManagedHost,
   HOST_ABSENT,
+  MANAGED_LAUNCH_OUTPUT_EXTRA_POLLS,
   startManagedHost,
   managedHostStore,
   PROCESS_ABSENT,
@@ -498,13 +499,13 @@ try {
     restoreEnv();
   }
 
-  // ── DS-3a: a relaunch whose host serves before its launch URL is read ─────
+  // ── A relaunch whose host serves before its launch URL is read ─────────────
   //
   // The managed-launch capture on 0.2.2-rc.5 relaunched a host 14 times with a
   // stored cookie and missed the new launch URL 3 times. The probe that found
   // the host serving began 11-19 ms before the URL reached the broker's pipe
-  // and passed about 120 ms later, and the start loop stops reading output once
-  // readiness passes. The adapter still held the stopped launch's token, so a
+  // and passed about 120 ms later, and output used to stop being read once
+  // readiness passed. The adapter still held the stopped launch's token, so a
   // renewal would have sent a token no running host had issued. Here the
   // relaunched child prints its URL exactly then: while the first probe that
   // finds the host serving is being answered.
@@ -560,17 +561,22 @@ try {
         && !host.exchanges.slice(sentBeforeStop).includes(TOKEN_A),
       JSON.stringify({ stopA, exchanges: host.exchanges, sentBeforeStop }));
 
-    // Launch C never prints a URL at all. The wait for it is bounded, and the
-    // start succeeds on the stored cookie as it did before.
+    // Launch C never prints a URL at all. It is ready on its first serving
+    // probe, as before; the wait for its URL after that is bounded, and the
+    // start succeeds on the stored cookie.
     await releaseManagedHost(adapter, machine.effects, store);
     const readsBefore = host.rosterReads;
+    const clockBefore = machine.effects.now();
     machine.next({ token: TOKEN_C, announce: 'never' });
     const launchC = await ensureManagedHost(adapter, machine.effects, store, gate);
-    check('a relaunch that never prints its URL is ready after the bounded allowance',
+    const waited = machine.effects.now() - clockBefore;
+    check('a relaunch that never prints its URL is started after a bounded wait, on one readiness probe',
       launchC.action === 'started'
-        && host.rosterReads - readsBefore === DSH_MANAGED_LAUNCH_URL_EXTRA_PROBES + 1
+        && host.rosterReads - readsBefore === 1
+        // 150 ms is the engine's default poll interval.
+        && waited <= MANAGED_LAUNCH_OUTPUT_EXTRA_POLLS * 150
         && !host.exchanges.includes(TOKEN_C),
-      JSON.stringify({ launchC, reads: host.rosterReads - readsBefore }));
+      JSON.stringify({ launchC, reads: host.rosterReads - readsBefore, waited }));
     await releaseManagedHost(adapter, machine.effects, store);
     host.stop();
     restoreEnv();

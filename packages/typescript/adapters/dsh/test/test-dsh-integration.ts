@@ -16,7 +16,7 @@
  */
 export {};
 import type { SessionInfo } from '@cosyncing/adapter-api';
-import { DshAdapter, DSH_MANAGED_LAUNCH_URL_EXTRA_PROBES } from '../src/implementation.ts';
+import { DshAdapter } from '../src/implementation.ts';
 import type { DshCookie, DshCredentialStore } from '../src/auth.ts';
 import type { DshFetch, DshFetchResponse } from '../src/envelope.ts';
 import type { DshMuxSocketFactory, DshMuxSocketLike } from '../src/mux.ts';
@@ -448,12 +448,11 @@ const COOKIE: DshCookie = { name: 'dsh-auth-fixture', value: 'v1.stored-cookie',
 }
 
 {
-  // Managed readiness waits for the launch URL. With a stored cookie a host
-  // serves before the URL it printed has been forwarded, and the broker stops
-  // forwarding once readiness passes; ready then would leave the new launch
-  // token unadopted. So during an owned launch a serving host is "not yet"
-  // until its URL is read, for a bounded number of probes. Outside a launch it
-  // is plain availability.
+  // With a stored cookie a host passes readiness before the URL it printed has
+  // been forwarded, and nothing is forwarded once the start returns. So an
+  // owned launch says it is still waiting for its URL, and the broker forwards
+  // the output a few more polls after readiness. Readiness itself is plain
+  // availability, during a launch and outside one.
   const host = await startHost();
   const scope = dshCredentialScope(host.baseUrl, '/fixture/dsh-home');
   const adapter = new DshAdapter({
@@ -465,24 +464,33 @@ const COOKIE: DshCookie = { name: 'dsh-auth-fixture', value: 'v1.stored-cookie',
       'session/list': () => ({ items: [] }),
     })),
   });
-  const outside = await adapter.isManagedHostReady();
-  check('outside an owned launch, managed readiness is availability', outside === true);
-
+  const outside = adapter.awaitingManagedOutput();
   adapter.observeManagedOutput('stdout:\nstarting\n');
-  const answers: boolean[] = [];
-  for (let probe = 0; probe <= DSH_MANAGED_LAUNCH_URL_EXTRA_PROBES; probe += 1) answers.push(await adapter.isManagedHostReady());
-  check('a serving launch whose URL never arrives becomes ready after the bounded allowance',
-    JSON.stringify(answers) === JSON.stringify([...Array<boolean>(DSH_MANAGED_LAUNCH_URL_EXTRA_PROBES).fill(false), true]),
-    JSON.stringify(answers));
+  const booting = adapter.awaitingManagedOutput();
+  const readyWhileWaiting = await adapter.isAvailable();
+  check('an owned launch awaits its URL from its first output, and readiness does not wait with it',
+    outside === false && booting === true && readyWhileWaiting === true,
+    JSON.stringify({ outside, booting, readyWhileWaiting }));
 
-  // The next launch. Its URL is forwarded after one "not yet", as in the capture.
+  // The capture is forwarded whole on every poll, so the same URL arrives again.
+  const announced = `stdout:\nstarting\ndsh web: ${host.baseUrl}/?token=${host.token}\n`;
+  adapter.observeManagedOutput(announced);
+  const afterUrl = adapter.awaitingManagedOutput();
+  adapter.observeManagedOutput(announced);
+  const reforwarded = adapter.awaitingManagedOutput();
+  check('the launch stops awaiting once its URL is read, and a re-forwarded capture does not restart the wait',
+    afterUrl === false && reforwarded === false, JSON.stringify({ afterUrl, reforwarded }));
+
   adapter.managedLaunchEnded('superseded-by-new-launch');
+  const afterEnd = adapter.awaitingManagedOutput();
   adapter.observeManagedOutput('stdout:\nstarting\n');
-  const beforeUrl = await adapter.isManagedHostReady();
-  adapter.observeManagedOutput(`stdout:\nstarting\ndsh web: ${host.baseUrl}/?token=${host.token}\n`);
-  const afterUrl = await adapter.isManagedHostReady();
-  check('the launch is ready on the probe after its URL is read',
-    beforeUrl === false && afterUrl === true, JSON.stringify({ beforeUrl, afterUrl }));
+  const nextLaunch = adapter.awaitingManagedOutput();
+  adapter.managedLaunchEnded('stopped');
+  const afterStop = adapter.awaitingManagedOutput();
+  check('a launch end clears the wait, and the next launch awaits its own URL',
+    afterEnd === false && nextLaunch === true && afterStop === false,
+    JSON.stringify({ afterEnd, nextLaunch, afterStop }));
+  await flush(2);
   host.stop();
 }
 
