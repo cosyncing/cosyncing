@@ -4418,10 +4418,14 @@ export class ClaudeResumeConnection implements SessionConnection {
 
   /**
    * Stop the running turn and keep the child. Claude ends every background command and agent with
-   * its process; its own interrupt leaves them running (verified on 2.1.310). The `result` that
-   * follows settles the turn as cancelled, and `cancel_queued` drops prompts queued behind it, as
-   * ending the child did. A child that has not settled the turn within the grace is ended instead.
-   * With no turn of ours running, the interrupt still reaches whatever the child is doing.
+   * its process, so a Stop never ends the process while the turn can still be interrupted. An
+   * interrupt alone ends background agents and workflows too on current builds (2.1.312 and 2.1.330
+   * stop them unless the host declared a per-task stop); `spare_background_tasks` (2.1.330) keeps them,
+   * so a Stop ends only the turn, as it did when this was verified on 2.1.310. An older build ignores
+   * the member. The `result` that follows settles the turn as cancelled, and `cancel_queued` drops
+   * prompts queued behind it, as ending the child did. A child that has not settled the turn within
+   * the grace is ended instead. With no turn of ours running, the interrupt still reaches whatever
+   * the child is doing.
    */
   private interruptTurn(): void {
     const proc = this.proc;
@@ -4437,7 +4441,7 @@ export class ClaudeResumeConnection implements SessionConnection {
     this.writeLine({
       type: 'control_request',
       request_id: `cosyncing-${this.connNonce}-${++this.controlSeq}`,
-      request: { subtype: 'interrupt', cancel_queued: true },
+      request: { subtype: 'interrupt', cancel_queued: true, spare_background_tasks: true },
     });
     if (!this.running) return;
     let settle!: () => void;

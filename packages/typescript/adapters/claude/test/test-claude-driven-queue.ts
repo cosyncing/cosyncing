@@ -757,6 +757,10 @@ async function main(): Promise<void> {
     (h.conn as any).handleEvent({ type: 'result', subtype: 'error_during_execution', is_error: true, terminal_reason: 'aborted_tools' });
     (h.conn as any).finishLiveAbnormally('cancelled');
     const closed = h.msgs.filter((m: any) => m.type === 'run-summary' && m.status !== 'running') as any[];
+    check('Stop asks the child to end the turn and spare its background agents and workflows',
+      h.stdin.some((line: any) => line.type === 'control_request' && line.request?.subtype === 'interrupt'
+        && line.request.cancel_queued === true && line.request.spare_background_tasks === true),
+      JSON.stringify(h.stdin.filter((line: any) => line.type === 'control_request')));
     check('abnormal close: Stop emits exactly one cancelled summary before Idle',
       h.stdin.some((line: any) => line.type === 'control_request' && line.request?.subtype === 'interrupt')
         && closed.length === 1 && closed[0].status === 'cancelled'
