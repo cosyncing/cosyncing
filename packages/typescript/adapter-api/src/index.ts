@@ -301,12 +301,13 @@ export interface AgentBackend {
   /**
    * Is the adapter still waiting for something in the owned launch's output?
    *
-   * Asked only after the host has passed readiness, because that is the one
-   * moment output can be left unread: a host may answer before what it printed
-   * has been forwarded, and nothing is forwarded once the start returns. While
-   * this says yes, the broker forwards the output a few more polls, bounded
-   * and never past the start's deadline, and then reports the start as it would
-   * have. It cannot make a ready host fail. Absent means no wait.
+   * Asked only after the host has passed readiness, for a start the broker is
+   * about to report as its own, because that is the one moment output can be
+   * left unread: a host may answer before what it printed has been forwarded,
+   * and nothing is forwarded once the start returns. While this says yes, the
+   * broker forwards the output a few more polls, bounded and never past the
+   * start's deadline, and then reports the start as it would have. It cannot
+   * make a host that is still running fail. Absent means no wait.
    */
   awaitingManagedOutput?(): boolean;
   /**

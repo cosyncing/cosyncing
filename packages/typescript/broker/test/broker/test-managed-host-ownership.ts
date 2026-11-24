@@ -696,10 +696,12 @@ try {
   {
     // The same race, seen from the adapter. Anything it took from our child's
     // output (a launch token, for one host) belongs to a process that never
-    // served this address, so it must not be used against the host that does.
+    // served this address, so it must not be used against the host that does,
+    // and the losing child's output is not waited for after readiness either.
     const spawnPid = 5160;
     const table = new Map([[spawnPid, { pid: spawnPid, start: '9', boot: BOOT, comm: 'host' }], [HOST_PID, OWNED]]);
     let locates = 0;
+    let asked = 0;
     const ended: string[] = [];
     const { effects } = fakeEffects({
       identities: table, spawnPid, childDiesOn: 'SIGTERM', missingProcess: PROCESS_ABSENT,
@@ -709,13 +711,14 @@ try {
         ready: async () => locates > 0,
         locate: async () => (locates++ === 0 ? HOST_ABSENT : hostAt(HOST_PID)),
         launchEnded: (reason) => { ended.push(reason); },
+        awaitingOutput: () => { asked += 1; return true; },
       }),
       effects, memoryStore().store,
     );
-    check('a child that loses the address to another host ends its launch',
-      outcome.action === 'already-serving'
+    check('a child that loses the address to another host ends its launch, and its output is not awaited',
+      outcome.action === 'already-serving' && asked === 0
         && JSON.stringify(ended) === JSON.stringify(['superseded-by-new-launch', 'address-taken']),
-      JSON.stringify({ outcome, ended }));
+      JSON.stringify({ outcome, asked, ended }));
   }
   {
     // Ready, but this machine will not say which process serves it. Killing our
@@ -1554,6 +1557,67 @@ try {
         && never.forwarded.length === MANAGED_LAUNCH_OUTPUT_EXTRA_POLLS + 2
         && never.elapsed === MANAGED_LAUNCH_OUTPUT_EXTRA_POLLS * 150,
       JSON.stringify({ outcome: never.outcome, forwards: never.forwarded.length, elapsed: never.elapsed }));
+  }
+  // The wait comes after the ownership decision, so what happens to the child
+  // during it is judged against a decision already made.
+  const waitAcrossExit = async (shape: 'launcher' | 'host' | 'unlocatable') => {
+    const LAUNCHER = 5170;
+    const SERVER = 5171;
+    const table = new Map<number, HostProcessIdentity>([
+      [LAUNCHER, { pid: LAUNCHER, start: '21', boot: BOOT, comm: 'launcher' }],
+      [SERVER, { pid: SERVER, start: '22', boot: BOOT, comm: 'host' }],
+    ]);
+    // The child exits after the first sleep of the wait (the first sleep is
+    // the yield before the readiness loop).
+    const { effects } = fakeEffects({
+      identities: table, spawnPid: LAUNCHER, missingProcess: PROCESS_ABSENT, childExitsAfter: 2,
+    });
+    let child: ManagedHostChild | undefined;
+    const alive = (): boolean => child !== undefined && child.exitCode === null;
+    const spawn = effects.spawn.bind(effects);
+    effects.spawn = (launch) => {
+      child = spawn(launch);
+      return child;
+    };
+    // What serves the address: nothing before the spawn; after it, the
+    // launcher's server, or the child itself while it lives, or something
+    // this machine will not name.
+    effects.listener = () => {
+      if (child === undefined) return HOST_ABSENT;
+      if (shape === 'launcher') return hostAt(SERVER);
+      if (shape === 'host') return alive() ? hostAt(LAUNCHER) : HOST_ABSENT;
+      return HOST_UNKNOWN;
+    };
+    // Ancestry is provable only while the launcher lives.
+    effects.descendsFrom = (pid, ancestorPid) => {
+      if (pid === ancestorPid) return 'yes';
+      return alive() && pid === SERVER && ancestorPid === LAUNCHER ? 'yes' : 'unknown';
+    };
+    const ended: string[] = [];
+    const memory = memoryStore();
+    const outcome = await ensureManagedHost(backend({
+      isAvailable: async () => child !== undefined,
+      awaitingManagedOutput: () => true,
+      managedLaunchEnded: (reason: string) => { ended.push(reason); },
+    }) as never, effects, memory.store, AUTHORIZED);
+    return { outcome, ended, recorded: memory.records.get(AGENT)?.pid, SERVER };
+  };
+  {
+    const launcher = await waitAcrossExit('launcher');
+    check('a launcher that exits during the wait leaves its proven server ours, and ends nothing',
+      launcher.outcome.action === 'started' && launcher.outcome.pid === launcher.SERVER
+        && launcher.outcome.servingProven === true && launcher.recorded === launcher.SERVER
+        && JSON.stringify(launcher.ended) === JSON.stringify(['superseded-by-new-launch']),
+      JSON.stringify(launcher));
+    const host = await waitAcrossExit('host');
+    const unlocatable = await waitAcrossExit('unlocatable');
+    const failedStart = (result: typeof host): boolean => result.outcome.action === 'start-failed'
+      && (result.outcome as { detailCode: string }).detailCode === 'host-exited-during-start'
+      && result.recorded === undefined
+      && JSON.stringify(result.ended) === JSON.stringify(['superseded-by-new-launch', 'host-exited-during-start']);
+    check('a child that is the host and dies during the wait is a failed start that ends its launch',
+      failedStart(host) && failedStart(unlocatable),
+      JSON.stringify({ host, unlocatable }));
   }
   {
     // Read-only by construction: an adapter that throws on its own intake must

@@ -418,11 +418,12 @@ export interface ManagedHostPlan {
   launchEnded?(reason: string): void;
   /**
    * Whether the adapter is still waiting for something in this launch's
-   * output. Asked only after readiness has passed: while it says yes, the
-   * output is forwarded again for at most
-   * {@link MANAGED_LAUNCH_OUTPUT_EXTRA_POLLS} more polls, never past the
-   * deadline, and then the start goes on as it would have. Readiness is not
-   * asked again, so this can delay a start but never fail one.
+   * output. Asked only for a start about to be reported, after readiness and
+   * the ownership decision: while it says yes, the output is forwarded again
+   * for at most {@link MANAGED_LAUNCH_OUTPUT_EXTRA_POLLS} more polls, never
+   * past the deadline, and then the start is reported as it would have been.
+   * Readiness is not asked again, so the wait never fails a host that is still
+   * running; a child that is the host and dies meanwhile is a failed start.
    */
   awaitingOutput?(): boolean;
   /** How long a freshly spawned host has to become ready before it is a failure. */
@@ -881,8 +882,8 @@ export async function startManagedHost(
   // output is forwarded once the start returns. An adapter that says it is
   // still waiting gets the output again at once, then once per poll for at
   // most MANAGED_LAUNCH_OUTPUT_EXTRA_POLLS polls, never past the deadline.
-  // Readiness has already passed and is not asked again, so this can delay a
-  // start but never fail one. An adapter without the hook is not delayed.
+  // Readiness is not asked again. An adapter without the hook is not delayed.
+  // Answers whether the adapter was waiting at all.
   const awaitingOutput = (): boolean => {
     try {
       return plan.awaitingOutput?.() === true;
@@ -890,13 +891,38 @@ export async function startManagedHost(
       return false;
     }
   };
-  const awaitLaunchOutput = async (): Promise<void> => {
+  const awaitLaunchOutput = async (): Promise<boolean> => {
+    let waited = false;
     for (let extra = 0; awaitingOutput(); extra += 1) {
+      waited = true;
       forwardOutput();
       if (!awaitingOutput() || extra >= MANAGED_LAUNCH_OUTPUT_EXTRA_POLLS || childGone()
-        || deadline - effects.now() < pollMs) return;
+        || deadline - effects.now() < pollMs) break;
       await effects.sleep(pollMs);
     }
+    return waited;
+  };
+  // Every start is reported through here, and only after ownership is
+  // decided: the proof is taken while a launcher is still alive to give it,
+  // and the path where another host won the address never waits, so our
+  // losing child's output is not read after readiness. `childIsHost` is true
+  // when the record names the child as the host. A child that dies during the
+  // wait is then a host that died during its start, and is reported as one
+  // that dies before readiness is. A launcher whose proven server serves on
+  // may exit by design, so its exit ends nothing.
+  const reportStarted = async (
+    pid: number,
+    servingProven: boolean,
+    childIsHost: boolean,
+  ): Promise<ManagedHostStartOutcome> => {
+    if (await awaitLaunchOutput() && childIsHost && childGone()) {
+      store.clear(plan.agent);
+      endLaunch('host-exited-during-start');
+      return { action: 'start-failed', detailCode: 'host-exited-during-start', capturedOutput: child.readOutput() };
+    }
+    await recordObserved();
+    if (childIsHost && servingProven) endLaunchOnExit();
+    return { action: 'started', pid, servingProven };
   };
   let polls = 0;
   for (;;) {
@@ -913,7 +939,6 @@ export async function startManagedHost(
     // and idempotent, and the first poll still primes the exchange.
     forwardOutput();
     if (await probeReady(plan, effects, deadline - effects.now())) {
-      await awaitLaunchOutput();
       const serving = await plan.locate();
       // Ours if it IS the child, or if two fresh walks both prove it descends
       // from the child. Only 'yes' counts: 'no' and 'unknown' both fall through
@@ -930,20 +955,16 @@ export async function startManagedHost(
           // Proven ours, but its identity could not be read, so the record keeps
           // naming the child. The start succeeded; what is unproven is which
           // process serves, and that is exactly what `servingProven: false` says.
-          await recordObserved();
-          return { action: 'started', pid: child.pid, servingProven: false };
+          return await reportStarted(child.pid, false, false);
         }
-        await recordObserved();
-        if (serving.pid === child.pid) endLaunchOnExit();
-        return { action: 'started', pid: serving.pid, servingProven: true };
+        return await reportStarted(serving.pid, true, serving.pid === child.pid);
       }
       if (serving.state === 'identified') {
         const adopted = provenListenerDescendant(record, serving.pid, effects);
         if (adopted) {
           record = adopted;
           store.write(record);
-          await recordObserved();
-          return { action: 'started', pid: serving.pid, servingProven: true };
+          return await reportStarted(serving.pid, true, false);
         }
         // Another host won the address while ours was starting. Ours is proven
         // ours and is demonstrably not the one serving, so it is stopped rather
@@ -959,8 +980,9 @@ export async function startManagedHost(
           verdict: classifyManagedHost(store.read(plan.agent), live, plan.identityKey),
         };
       }
-      await recordObserved();
-      return { action: 'started', pid: child.pid, servingProven: false };
+      // Unless a serving descendant was adopted while readiness was awaited,
+      // the record still names the child, so the child is the host.
+      return await reportStarted(child.pid, false, record.pid === child.pid);
     }
     if (childGone()) {
       // Exited — but a LAUNCHER exiting is not the same event as a host dying.
