@@ -8,7 +8,7 @@
     "comparison": "0.2.0-rc.2 host captured the same way, same run sequence (rc2Comparison)",
     "readbackNote": "readback.data is the answer to a ref-shaped read that carried one extra key; the plain ref-shaped read in the same run returned the identical attachment and 1816 data characters",
     "scrubbed": [
-      "launch token and cookie value (placeholders)",
+      "launch token, cookie value and cookie-name hash suffix (placeholders)",
       "disposable home path (/captured-home)",
       "runtime-context, system and skill-catalog events (carry the installation path); only the user image event is kept"
     ]
@@ -18,8 +18,8 @@
       "status": 303,
       "location": "./",
       "cacheControl": "no-store",
-      "setCookie": "dsh-auth-MuQFNbBUfbBOklf3Qvhvp039je_c-hT8vba43XDadis=<redacted-cookie-value>; Max-Age=2592000; Path=/; Expires=Thu, 24 Dec 2026 08:09:52 GMT; HttpOnly; SameSite=Strict",
-      "cookieName": "dsh-auth-MuQFNbBUfbBOklf3Qvhvp039je_c-hT8vba43XDadis"
+      "setCookie": "dsh-auth-FIXTURECOOKIEVALUE=<redacted-cookie-value>; Max-Age=2592000; Path=/; Expires=Thu, 24 Dec 2026 08:09:52 GMT; HttpOnly; SameSite=Strict",
+      "cookieName": "dsh-auth-FIXTURECOOKIEVALUE"
     },
     "cookiePayloadFields": [
       "authority",
