@@ -709,11 +709,9 @@ async function createPiSessionViaRpc(
   const bin = resolveBin(rt);
   if (!bin) throw new Error(`${rt.dialect.displayName} CLI is not available on PATH; cannot create a ${rt.dialect.displayName} session.`);
   const args = ['--mode', 'rpc'];
+  // piProcessEnv already sets PI_CODING_AGENT_SESSION_DIR to this override, and only to it.
   const env = piProcessEnv(rt, { COSYNCING_NO_BRIDGE: '1' });
-  if (rt.sessionsRootOverride) {
-    args.push('--session-dir', rt.sessionsRootOverride);
-    env.PI_CODING_AGENT_SESSION_DIR = rt.sessionsRootOverride;
-  }
+  if (rt.sessionsRootOverride) args.push('--session-dir', rt.sessionsRootOverride);
   // Before the process exists: a session file born before this instant is not the one it creates.
   const startedAt = Date.now();
   const proc = await spawnPi(rt.dialect, bin, args, {
@@ -4995,10 +4993,21 @@ function resolveBin(rt: PiDialectRuntime): string | null {
   }
 }
 
-/** Translate a dialect-specific agent-dir override back to the native Pi-family variable. */
+/**
+ * Translate this dialect's own path overrides back to the native Pi-family variables.
+ *
+ * Pi (1.6.0) and omp (19.1.0) both read PI_CODING_AGENT_SESSION_DIR as the directory a
+ * `--session` child writes new files to, a fork's copy included, ahead of the opened file's own
+ * directory. The broker's environment can carry that variable for the OTHER dialect: Pi's store,
+ * while omp's comes from COSYNCING_OMP_SESSIONS_ROOT. Passed through, an omp fork landed in Pi's
+ * store, outside every path omp's session ids may name, so the new session could not be opened.
+ * A child gets this dialect's own sessions root override, or no value at all.
+ */
 function piProcessEnv(rt: PiDialectRuntime, extra: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env = { ...process.env, ...extra };
   if (rt.agentDirOverride) env.PI_CODING_AGENT_DIR = rt.agentDir;
+  if (rt.sessionsRootOverride) env.PI_CODING_AGENT_SESSION_DIR = rt.sessionsRootOverride;
+  else delete env.PI_CODING_AGENT_SESSION_DIR;
   return env;
 }
 
