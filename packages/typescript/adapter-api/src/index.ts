@@ -293,9 +293,23 @@ export interface AgentBackend {
    *
    * The counterpart to {@link observeManagedOutput}: whatever the adapter derived
    * from those bytes has a lifetime no longer than the launch that produced them,
-   * and this is the notification that lets it let go.
+   * and this is the notification that lets it let go. The broker also says it
+   * before every spawn, so nothing from an earlier launch is held into the next.
    */
   managedLaunchEnded?(reason: string): void;
+
+  /**
+   * Is the adapter still waiting for something in the owned launch's output?
+   *
+   * Asked only after the host has passed readiness, for a start the broker is
+   * about to report as its own, because that is the one moment output can be
+   * left unread: a host may answer before what it printed has been forwarded,
+   * and nothing is forwarded once the start returns. While this says yes, the
+   * broker forwards the output a few more polls, bounded and never past the
+   * start's deadline, and then reports the start as it would have. It cannot
+   * make a host that is still running fail. Absent means no wait.
+   */
+  awaitingManagedOutput?(): boolean;
   /**
    * WHICH host a given environment points this adapter at, as an opaque identity
    * key — the same key {@link import('./integration.ts').ManagedHostDescriptor}
@@ -416,6 +430,9 @@ export interface AgentBackend {
   /** Optional native session fork/branch. The adapter owns native fork-point semantics; messageId is
    *  supplied only when the client selected a specific parent message. */
   forkSession?(sessionId: string, opts?: { messageId?: string | null }): Promise<SessionInfo | void>;
+  /** Whether forkSession can run now, for an agent whose fork depends on the installed build. When
+   *  this hook is absent, a present forkSession is always offered. */
+  canForkSession?(): Promise<boolean> | boolean;
   /** Optional native session clone. Kept distinct from fork because clone/head-copy semantics are not
    *  the same as a user-selected fork point. */
   cloneSession?(sessionId: string): Promise<SessionInfo | void>;

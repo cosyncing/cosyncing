@@ -1,28 +1,34 @@
 #!/usr/bin/env bun
 /**
- * OMP 17.4.2 protocol lock.
+ * OMP protocol lock: one reviewed surface per captured build (17.4.2 and 19.1.0).
  *
- * The checked-in fixture is reviewed L2 compatibility evidence, not a deterministic native drift
- * gate. This suite always diffs it against the dialect and shared engine. When matching OMP source
- * is installed (or supplied with COSYNCING_OMP_PACKAGE_ROOT), it also performs an optional audit.
+ * The checked-in fixtures are reviewed L2 compatibility evidence, not a deterministic native drift
+ * gate. This suite always diffs them against the dialect, the version list and the shared engine.
+ * When matching OMP source is installed (or supplied with COSYNCING_OMP_PACKAGE_ROOT), it also
+ * audits that build against its own fixture.
  */
 export {};
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { OMP_DIALECT } from '../src/dialect.ts';
+import { OMP_VERIFIED_VERSION, OMP_VERIFIED_VERSIONS, ompSupportsRpcFork } from '../src/runtime-readiness.ts';
 
 interface SurfaceFixture {
   schemaVersion: number;
   package: string;
   nativeVersion: string;
-  source: { commandTypes: string; eventForwarder: string };
+  /** `eventForwarderPattern`: how that build forwards session events to RPC stdout (17.4.2's
+   *  verbatim `output(event)` when absent). */
+  source: { commandTypes: string; eventForwarder: string; eventForwarderPattern?: string };
   adapterCommands: string[];
   absentCommands: string[];
   consumedEvents: string[];
 }
 
-const fixturePath = join(import.meta.dir, 'fixtures', 'omp-rpc-surface-17.4.2.json');
-const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as SurfaceFixture;
+const fixtures = OMP_VERIFIED_VERSIONS.map((version) => JSON.parse(
+  readFileSync(join(import.meta.dir, 'fixtures', `omp-rpc-surface-${version}.json`), 'utf8'),
+) as SurfaceFixture);
+const newest = fixtures.find((fixture) => fixture.nativeVersion === OMP_VERIFIED_VERSION)!;
 const enginePath = resolve(import.meta.dir, '../../../pi-engine/src/implementation.ts');
 const engineSource = readFileSync(enginePath, 'utf8');
 const results: Array<{ name: string; ok: boolean; detail: string }> = [];
@@ -68,33 +74,55 @@ function candidatePackageRoots(): string[] {
   return [...new Set(roots)];
 }
 
-check('fixture schema and reviewed version are pinned', fixture.schemaVersion === 1 && fixture.nativeVersion === '17.4.2');
+check('one reviewed fixture per verified version, schema pinned',
+  fixtures.length === OMP_VERIFIED_VERSIONS.length
+    && fixtures.every((fixture, index) => fixture.schemaVersion === 1 && fixture.nativeVersion === OMP_VERIFIED_VERSIONS[index]),
+  fixtures.map((fixture) => fixture.nativeVersion).join(','));
 check('omp command alias is get_available_commands', OMP_DIALECT.rpcAliases.getCommands === 'get_available_commands');
-check('omp advertises neither fork nor clone RPC lifecycle', !OMP_DIALECT.lifecycleCommands.fork && !OMP_DIALECT.lifecycleCommands.clone);
+check('omp advertises RPC fork and never clone', OMP_DIALECT.lifecycleCommands.fork && !OMP_DIALECT.lifecycleCommands.clone);
 
+// The engine consumes exactly the newest captured surface; an older build's events are a subset
+// (17.4.2 has no session_settled), so it is driven by the same handler.
 const consumed = engineConsumedEvents(engineSource);
 check(
-  'audited event fixture exactly matches the shared engine consumed set',
-  sameStrings(consumed, fixture.consumedEvents),
-  `fixture=${sorted(fixture.consumedEvents).join(',')} engine=${sorted(consumed).join(',')}`,
+  'newest audited event fixture exactly matches the shared engine consumed set',
+  sameStrings(consumed, newest.consumedEvents),
+  `fixture=${sorted(newest.consumedEvents).join(',')} engine=${sorted(consumed).join(',')}`,
 );
-for (const command of fixture.adapterCommands) {
-  const carried = command === 'get_available_commands'
-    ? engineSource.includes('dialect.rpcAliases.getCommands')
-      && OMP_DIALECT.rpcAliases.getCommands === command
-    : engineSource.includes(`'${command}'`) || engineSource.includes(`"${command}"`);
-  check(`shared engine carries required omp RPC ${command}`, carried);
-}
-for (const command of fixture.absentCommands) {
-  if (command === 'get_commands') continue;
-  check(`omp dialect refuses absent RPC ${command}`, OMP_DIALECT.lifecycleCommands[command as 'fork' | 'clone'] === false);
+for (const fixture of fixtures) {
+  const missing = fixture.consumedEvents.filter((event) => !consumed.has(event));
+  check(`omp ${fixture.nativeVersion} events are all consumed by the shared engine`, missing.length === 0, missing.join(','));
+  for (const command of fixture.adapterCommands) {
+    const carried = command === 'get_available_commands'
+      ? engineSource.includes('dialect.rpcAliases.getCommands')
+        && OMP_DIALECT.rpcAliases.getCommands === command
+      : engineSource.includes(`'${command}'`) || engineSource.includes(`"${command}"`);
+    check(`shared engine carries required omp ${fixture.nativeVersion} RPC ${command}`, carried);
+  }
+  for (const command of fixture.absentCommands) {
+    if (command === 'get_commands') continue;
+    // fork is gated per version (OmpAdapter.canForkSession); clone is never offered.
+    const refused = command === 'fork'
+      ? !ompSupportsRpcFork(fixture.nativeVersion)
+      : OMP_DIALECT.lifecycleCommands[command as 'fork' | 'clone'] === false;
+    check(`omp ${fixture.nativeVersion} is never sent absent RPC ${command}`, refused);
+  }
+  if (fixture.adapterCommands.includes('fork')) {
+    check(`omp ${fixture.nativeVersion} offers its RPC fork`, ompSupportsRpcFork(fixture.nativeVersion));
+  }
 }
 
 const packageRoot = candidatePackageRoots().find((candidate) => existsSync(join(candidate, 'package.json')));
 if (packageRoot) {
   const packageJson = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8')) as { name?: string; version?: string };
+  const fixture = fixtures.find((candidate) => candidate.nativeVersion === packageJson.version);
+  check('installed package version matches an audited fixture', fixture !== undefined, String(packageJson.version));
+  if (!fixture) {
+    const failed = results.filter((result) => !result.ok).length;
+    console.log(`\n${results.length - failed} passed, ${failed} failed`);
+    process.exit(1);
+  }
   check('installed package identity matches the audited fixture', packageJson.name === fixture.package, String(packageJson.name));
-  check('installed package version matches the audited fixture', packageJson.version === fixture.nativeVersion, String(packageJson.version));
   const typesSource = readFileSync(join(packageRoot, fixture.source.commandTypes), 'utf8');
   const nativeCommands = commandTypes(typesSource);
   for (const command of fixture.adapterCommands) {
@@ -104,10 +132,10 @@ if (packageRoot) {
     check(`native ${fixture.nativeVersion} omits ${command}`, !nativeCommands.has(command));
   }
   const forwarderSource = readFileSync(join(packageRoot, fixture.source.eventForwarder), 'utf8');
-  check(
-    'native RPC mode forwards session events verbatim',
-    /session\.subscribe\(event\s*=>\s*\{\s*output\(event\);\s*\}\);/s.test(forwarderSource),
-  );
+  const forwarder = fixture.source.eventForwarderPattern
+    ? new RegExp(fixture.source.eventForwarderPattern, 's')
+    : /session\.subscribe\(event\s*=>\s*\{\s*output\(event\);\s*\}\);/s;
+  check('native RPC mode forwards every session event', forwarder.test(forwarderSource));
 } else {
   console.log('SKIP  matching OMP package source is not installed; L2 fixture/adapter parity still enforced');
 }

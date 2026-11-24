@@ -425,6 +425,14 @@ export function mapGrokUpdate(record: GrokUpdateRecord, context: GrokMapContext)
     if (update.sessionUpdate === 'task_backgrounded' || update.sessionUpdate === 'task_completed') {
       return taskMessages(update, key);
     }
+    if (update.sessionUpdate === 'background_tasks'
+      && Array.isArray(update.tasks) && update.tasks.length === 0) {
+      // Grok 1.0.92 stores this snapshot with an empty `tasks` list on every `session/load`,
+      // Create's own load included (a 2026-11-24 capture): nothing is running, so nothing is
+      // shown.
+      // A non-empty snapshot has not been captured and stays named neutral context below.
+      return [];
+    }
 
     context.trace?.({
       op: 'unknown-session-update',

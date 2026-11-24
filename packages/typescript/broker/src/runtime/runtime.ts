@@ -24,6 +24,7 @@ import {
   isAgentOwnedSessionError,
   isHistorySnapshotRefusal,
   isNativeSessionRenameUnsupportedError,
+  isNativeSessionUnresumableError,
   isOwnershipConflictError,
   OwnershipConflictError,
   isSessionCreateTemporarilyUnavailableError,
@@ -62,7 +63,8 @@ import {
   inspectOmpPathCollision,
   OmpAdapter,
   OMP_DIALECT,
-  OMP_VERIFIED_VERSION,
+  isOmpVerifiedVersion,
+  ompVerifiedVersionsText,
 } from '@cosyncing/adapter-omp';
 import { ReasonixAdapter } from '@cosyncing/adapter-reasonix';
 import { GrokAdapter } from '@cosyncing/adapter-grok';
@@ -7283,6 +7285,9 @@ server = Bun.serve<WsData>({
       const backend = registry.get(tool);
       if (!backend) return json({ error: `unknown tool: ${tool}` }, 404);
       if (!backend.forkSession) return json({ error: 'native session fork is not available for this agent' }, 501);
+      if (backend.canForkSession && !(await Promise.resolve(backend.canForkSession()).catch(() => false))) {
+        return json({ error: 'native session fork is not available for this agent' }, 501);
+      }
       // A session an AGENT spawned (`SessionInfo.origin === 'subagent'`) is not a user-initiated fork
       // point: its only writer is the parent run, so the fork could only be another Observe-only thread
       // the user is then dropped into. Refuse with a typed code rather than letting it become the
@@ -7321,6 +7326,8 @@ server = Bun.serve<WsData>({
         }
         // An id the adapter's store or native server does not publish is a permanent answer too.
         if (isSessionNotFoundError(err)) return json({ ok: false, error: 'session not found', code: 'NOT_FOUND' }, 404);
+        // So is a session the configured runtime must not continue (omp: a newer omp wrote it).
+        if (isNativeSessionUnresumableError(err)) return json({ error: err.message }, 409);
         return json({ error: 'native session fork failed' }, 502);
       }
       const base = nativeSession || await discoverSession(tool, id);
@@ -7853,11 +7860,11 @@ server = Bun.serve<WsData>({
       const b: any = decodedBridgeBody ?? await req.json().catch(() => ({}));
       if (b?.epoch !== undefined && (typeof b.epoch !== 'string' || !/^[A-Za-z0-9-]{1,80}$/.test(b.epoch))) return json({ error: 'invalid bridge generation' }, 400);
       if (ompBridge.isClosed(b?.epoch)) return json({ error: 'closed bridge generation' }, 410);
-      if (b?.nativeVersion !== OMP_VERIFIED_VERSION) {
+      if (!isOmpVerifiedVersion(b?.nativeVersion)) {
         return json({
           ok: false,
           code: 'OMP_BRIDGE_NATIVE_VERSION_UNVERIFIED',
-          error: `OMP bridge registration requires native version ${OMP_VERIFIED_VERSION}.`,
+          error: `OMP bridge registration requires a verified native version (${ompVerifiedVersionsText()}).`,
         }, 409);
       }
       const readiness = currentOmpRuntimeReadiness();
@@ -8574,7 +8581,9 @@ server = Bun.serve<WsData>({
           canRenameNative:
             typeof b.renameSession === 'function' &&
             (typeof b.canRenameNative === 'function' ? await Promise.resolve(b.canRenameNative()).catch(() => false) : true),
-          canFork: typeof b.forkSession === 'function',
+          canFork:
+            typeof b.forkSession === 'function' &&
+            (typeof b.canForkSession === 'function' ? await Promise.resolve(b.canForkSession()).catch(() => false) : true),
           canClone: typeof b.cloneSession === 'function',
           // Command-surface export availability = adapter hook presence AND the reviewed R2 registry
           // (per-tier default-deny is still enforced at the export route). Never an agent-name branch.

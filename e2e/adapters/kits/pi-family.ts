@@ -388,7 +388,7 @@ export function piFamilyProfile(dialect: PiFamilyDialect): ConformanceProfile {
       doctor: {
         current: { check: 'version', status: 'pass', detailCode: 'version-supported' },
         below: { check: 'version', status: 'fail', detailCode: 'version-below-minimum' },
-        // omp drives exactly its verified build, so doctor does not call a newer one supported.
+        // omp drives only its captured builds, so doctor does not call an uncaptured newer one supported.
         newer: omp
           ? { check: 'version', status: 'fail', detailCode: 'version-unverified' }
           : { check: 'version', status: 'pass', detailCode: 'version-supported' },

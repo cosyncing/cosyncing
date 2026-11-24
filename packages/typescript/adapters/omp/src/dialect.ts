@@ -3,7 +3,8 @@
  *
  * Every value here is a measured delta from the pi dialect (see the investigation's facts section
  * in docs-internal): the `omp` binary, `~/.omp/agent` (honoring PI_CONFIG_DIR), the XDG sessions
- * redirect, `get_available_commands`, no RPC fork/clone, omp-owned title entries, and the combined
+ * redirect, `get_available_commands`, RPC fork without clone (fork is back in the RPC of the
+ * builds that have it; the adapter gates it per version), omp-owned title entries, and the combined
  * `provider/modelId` model_change shape. The engine itself is unchanged — it reads this descriptor.
  */
 import { homedir } from 'node:os';
@@ -30,7 +31,9 @@ export const OMP_DIALECT: PiDialect = {
   bridgeAutoinstallEnvOverride: 'COSYNCING_OMP_BRIDGE_AUTOINSTALL',
   bridgeRoutePrefix: '/omp/bridge',
   rpcAliases: { getCommands: 'get_available_commands' },
-  lifecycleCommands: { fork: false, clone: false },
+  // omp has no `clone`; its RPC `fork` exists again in 19.1.0 (not in 17.4.2), so OmpAdapter
+  // offers it only while the configured omp is a build that has it.
+  lifecycleCommands: { fork: true, clone: false },
   // omp owns its title natively: the durable leading `title` slot plus `title_change` events,
   // read last-write-wins. session_info stays readable for migrated/pi-shaped files.
   titleEntryTypes: ['session_info', 'title', 'title_change'],

@@ -22,6 +22,7 @@ import { SessionTitleCache, sessionPromptPreview, isSessionInstruction } from '@
 import { homedir } from 'node:os';
 import { isOwnershipConflictError } from '@cosyncing/adapter-api';
 import { assertNoPiNativeOwner } from './native-presence.ts';
+import { parsePiFormDialog, piFormAnswer, piFormQuestions, type PiFormDialog } from './form-dialog.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   closeSync,
@@ -78,6 +79,8 @@ import {
   commandSemantic,
   ControlRefusedError,
   containedStorePath,
+  NativeSessionRenameUnsupportedError,
+  NativeSessionUnresumableError,
   fileReadSemantic,
   openRegularFileSync,
   readRegularFileSync,
@@ -230,6 +233,12 @@ export function inspectDialectBridgeAsset(rt: PiDialectRuntime, agentDir = rt.ag
  *  as blocking dialogs (replying is needless wire noise). The blocking ones (confirm/select/input/
  *  editor) are handled explicitly; only a genuinely-unknown method is cancelled as the anti-hang guard. */
 const FIRE_AND_FORGET_UI = new Set(['notify', 'setStatus', 'setWidget', 'setTitle', 'set_editor_text']);
+/** The running status detail while an omp run has yielded to background work it will wake for. */
+const PI_AWAITING_ASYNC_WORK_DETAIL = 'Waiting for background work…';
+
+/** A dialog the runtime waits on: its method, a select's options, a form's fields, and whether the
+ *  run that was streaming when it arrived owns it. */
+type PiPendingUi = { method: string; options?: string[]; form?: PiFormDialog; duringRun: boolean };
 const PI_THINKING_LEVELS = [
   { effort: 'off', label: 'Off' },
   { effort: 'minimal', label: 'Minimal' },
@@ -280,7 +289,7 @@ function decodeCwdDir(dir: string): string | undefined {
 
 /**
  * The dialect-parameterized Pi engine adapter. Carries every AgentBackend hook EXCEPT
- * forkSession/cloneSession — a dialect without RPC lifecycle commands (omp) omits those hooks so
+ * forkSession/cloneSession — a dialect without RPC lifecycle commands omits those hooks so
  * the broker derives canFork/canClone=false from hook presence.
  */
 export class PiEngineAdapter implements AgentBackend {
@@ -545,6 +554,8 @@ export class PiEngineAdapter implements AgentBackend {
         ? `${this.rt.dialect.displayName} CLI is not available on PATH, so ${PRODUCT_IDENTITY.productName} cannot Drive this session.`
         : readiness.message);
     }
+    const writeRefusal = await this.rt.hooks.nativeWriteRefusal?.(path);
+    if (writeRefusal) throw new NativeSessionUnresumableError(writeRefusal);
     const conn = new PiConnection(this.rt, path, cwd, info, this.userEchoRegistry(path));
     await conn.start();
     return conn;
@@ -583,6 +594,9 @@ export class PiEngineAdapter implements AgentBackend {
     if (piParentSessionFile(path)) {
       throw new Error(`${this.rt.dialect.displayName} subagent sessions are owned by their parent and cannot be renamed independently.`);
     }
+    // The broker keeps the name as its own alias instead.
+    const writeRefusal = await this.rt.hooks.nativeWriteRefusal?.(path);
+    if (writeRefusal) throw new NativeSessionRenameUnsupportedError(writeRefusal);
     const cwd = readSessionCwd(path) ?? decodeCwdDir(baseDir(path));
     const requested = title == null ? '' : Array.from(title.trim()).slice(0, 160).join('');
     const state = await renamePiSessionViaRpc(this.rt, path, requested);
@@ -652,9 +666,9 @@ export class PiEngineAdapter implements AgentBackend {
 
 /**
  * One fork/clone lifecycle round: resolve the session, run the dialect's lifecycle RPC, and build
- * the child SessionInfo from `get_state`. Only dialects with RPC lifecycle commands (pi) expose
- * this — an adapter subclass wires it to forkSession/cloneSession so the broker derives
- * canFork/canClone from hook presence.
+ * the child SessionInfo from `get_state`. Only adapters whose runtime has RPC lifecycle commands
+ * expose this (pi; omp's fork from 19.1.0) — an adapter subclass wires it to
+ * forkSession/cloneSession so the broker derives canFork/canClone from hook presence.
  */
 export async function runPiLifecycleAction(
   rt: PiDialectRuntime,
@@ -663,6 +677,8 @@ export async function runPiLifecycleAction(
   opts: { messageId?: string | null; brokerUrl: string; bridgeUsesIntegrationFile: boolean },
 ): Promise<SessionInfo> {
   const path = sessionFileOf(rt, sessionId);
+  const writeRefusal = await rt.hooks.nativeWriteRefusal?.(path);
+  if (writeRefusal) throw new NativeSessionUnresumableError(writeRefusal);
   const cwd = readSessionCwd(path) ?? decodeCwdDir(baseDir(path));
   const state = await runPiLifecycleRpc(rt, path, action, { messageId: opts.messageId });
   return piSessionInfoFromState(rt, state, path, cwd, rt.dialect.toolId, opts.brokerUrl, opts.bridgeUsesIntegrationFile, action);
@@ -693,11 +709,9 @@ async function createPiSessionViaRpc(
   const bin = resolveBin(rt);
   if (!bin) throw new Error(`${rt.dialect.displayName} CLI is not available on PATH; cannot create a ${rt.dialect.displayName} session.`);
   const args = ['--mode', 'rpc'];
+  // piProcessEnv already sets PI_CODING_AGENT_SESSION_DIR to this override, and only to it.
   const env = piProcessEnv(rt, { COSYNCING_NO_BRIDGE: '1' });
-  if (rt.sessionsRootOverride) {
-    args.push('--session-dir', rt.sessionsRootOverride);
-    env.PI_CODING_AGENT_SESSION_DIR = rt.sessionsRootOverride;
-  }
+  if (rt.sessionsRootOverride) args.push('--session-dir', rt.sessionsRootOverride);
   // Before the process exists: a session file born before this instant is not the one it creates.
   const startedAt = Date.now();
   const proc = await spawnPi(rt.dialect, bin, args, {
@@ -1038,9 +1052,17 @@ async function runPiLifecycleRpc(
      * A BARE fork — no message chosen — has no fork RPC of its own. Pi's `clone` is exactly that
      * operation (it forks at the current leaf), so a bare fork issues it rather than sending an
      * incomplete `fork` Pi can only refuse.
+     *
+     * omp has no `clone`, and its `fork` without `entryId` copies the whole session (measured on
+     * 19.1.0), so there a bare fork is that `fork`. omp keeps the chosen entry in the copy, where Pi
+     * forks just before it.
      */
     const forkPoint = action === 'fork' && opts.messageId ? opts.messageId : undefined;
-    const cmd: Record<string, unknown> = forkPoint ? { type: 'fork', entryId: forkPoint } : { type: 'clone' };
+    const cmd: Record<string, unknown> = forkPoint
+      ? { type: 'fork', entryId: forkPoint }
+      : action === 'fork' && !rt.dialect.lifecycleCommands.clone
+        ? { type: 'fork' }
+        : { type: 'clone' };
     const actionResp = await rpc(cmd, 15000);
     if (actionResp?.success !== true) throw new Error(piLifecycleFailure(rt.dialect, action, actionResp));
     // `success: true` is not the same as `it happened`: Pi reports an extension-cancelled fork as a
@@ -1368,7 +1390,7 @@ class PiConnection implements SessionConnection {
   /** extension UI requests awaiting a user decision: requestId → method, and whether the run that
    *  was streaming when it arrived owns it (Pi settles such a dialog silently when the run aborts,
    *  and emits nothing that says so). */
-  private readonly pendingUi = new Map<string, { method: string; options?: string[]; duringRun: boolean }>();
+  private readonly pendingUi = new Map<string, PiPendingUi>();
   /** The exact permission/question-request frames still UNRESOLVED — replayed on attach via
    *  {@link getPending} so a client joining a blocked Pi session sees the box, not just the badge.
    *  Tracked centrally in {@link emit} and cleared on the matching *-resolved frame. (Issue G.) */
@@ -1462,6 +1484,16 @@ class PiConnection implements SessionConnection {
    * same native user turn. The run remains keyed to that user until a later
    * successful assistant or explicit retry exhaustion closes it. */
   private retryActive = false;
+  /** omp yielded the run with a non-terminal `agent_end{awaitingAsyncWork}`: background work it
+   *  started (async bash, subagents) is still running, and omp starts its own wake-up run when that
+   *  lands. The session is not settled, so it stays running; `session_settled` is the end when no
+   *  wake-up run comes. */
+  private awaitingAsyncWork = false;
+  /** Stop ended a yielded run here, and omp's own close of it has not arrived yet: once the abort
+   *  unwinds, omp ends the run with the `agent_end` it stored, encoded terminal, then settles
+   *  (omp 19.1.0 source: `abort`, `#checkRun`, `#closeRun`, `loop-end-wire.ts`). Cleared by that
+   *  close, or by the next `agent_start` when a run begins first. */
+  private stoppedYieldCloses = false;
   /** What this Drive has proved its session file holds. Made once the runtime has answered (so it
    *  has loaded the file, and its own load-time migration is not taken for a rewrite), or at the
    *  first prompt when it never answered at start. */
@@ -1709,7 +1741,7 @@ class PiConnection implements SessionConnection {
 
   /** Close the dialogs Pi is waiting on that `which` selects: the runtime is told each was
    *  cancelled, and every client that it is no longer open. */
-  private withdrawPendingUi(which: (ui: { method: string; options?: string[]; duringRun: boolean }) => boolean): void {
+  private withdrawPendingUi(which: (ui: PiPendingUi) => boolean): void {
     for (const [requestId, ui] of [...this.pendingUi]) {
       if (!which(ui)) continue;
       this.pendingUi.delete(requestId);
@@ -1718,6 +1750,15 @@ class PiConnection implements SessionConnection {
         ? { type: 'question-resolved', requestId }
         : { type: 'permission-resolved', requestId, decision: 'external' });
     }
+  }
+
+  /** The runtime closed a dialog itself (omp `cancel{targetId}`: its timeout, or the run's abort):
+   *  every client is told it is no longer open. The runtime already settled it, so nothing is sent. */
+  private releasePendingUi(requestId: string): void {
+    if (!this.pendingUi.delete(requestId)) return;
+    this.emit(this.pendingFrames.get(requestId)?.type === 'question-request'
+      ? { type: 'question-resolved', requestId }
+      : { type: 'permission-resolved', requestId, decision: 'external' });
   }
 
   private write(obj: unknown): void {
@@ -1946,10 +1987,38 @@ class PiConnection implements SessionConnection {
     this.pendingNativePromptAcks.get(userKey)?.resolve();
   }
 
+  /** The end of a run the runtime will not continue: a terminal `agent_end`, or `session_settled`
+   *  after a yield whose background work ended without a wake-up run. */
+  private finishRun(ev: any): void {
+    this.streaming = false;
+    this.awaitingAsyncWork = false;
+    this.retryActive = false;
+    this.runStartedAt = undefined;
+    // Their echoes stay in the registry: upstream Pi delivers a steer that arrived while the run
+    // was ending in a continuation run after this event (`_handlePostAgentRun`), and a history
+    // read then keys its entry by that echo.
+    this.pendingUserTurns.length = 0; // unconsumed queue entries died with the run
+    this.pendingUserEchoes.clear();
+    // Whatever is still open closes at the run's end clock. A degraded stream that
+    // streamed assistant output but forwards no message_end still gets its summary; a
+    // prompt the agent truly never answered is suppressed, exactly as the mapper does.
+    this.closeCurrentRun(nativeTimeMs(ev.timestamp) ?? Date.now());
+    // A dialog the run raised cannot outlive it: Pi settled it with the run (an abort or its
+    // timeout resolves it without a word), so its card must close too. Pi ignores a reply for a
+    // dialog it no longer holds.
+    this.withdrawPendingUi((ui) => ui.duringRun);
+    this.emit({ type: 'status', status: 'idle' });
+    void this.emitSessionStats();
+    // Changes watched during the run were left to its end.
+    this.scheduleGuardCheck(PI_DRIVE_GUARD_DEBOUNCE_MS);
+  }
+
   private handleEvent(ev: any): void {
     switch (ev.type) {
       case 'agent_start':
         this.streaming = true;
+        this.awaitingAsyncWork = false;
+        this.stoppedYieldCloses = false;
         // The run's start clock — consumed only by the FALLBACK turn anchor below; the
         // authoritative anchor is the opening user message itself (message_start).
         this.runStartedAt = nativeTimeMs(ev.timestamp) ?? Date.now();
@@ -2071,35 +2140,39 @@ class PiConnection implements SessionConnection {
         return;
       }
       case 'agent_end':
+        if (this.stoppedYieldCloses && !this.streaming && ev.isTerminal !== false) {
+          // omp's close of a yield Stop already ended. Ending the run again would repeat its idle
+          // and stats, and drop the correlation of a prompt sent since Stop.
+          this.stoppedYieldCloses = false;
+          return;
+        }
         this.streaming = false;
         this.toolArgs.clear(); // turn boundary — drop args of any tool-call whose result never arrived (abort/block)
         if (ev.isTerminal === false || this.retryActive) {
           // Pi/OMP ends each failed attempt before maintenance schedules the
           // automatic retry. This is not the user-turn boundary: preserve the
-          // summary key, queued correlation, usage, and run clock.
+          // summary key, queued correlation, usage, and run clock. omp 19 also
+          // yields a run this way while background work it started is pending
+          // (`awaitingAsyncWork`, measured): it wakes itself when the work lands,
+          // and the session file keeps changing until then.
           this.streaming = true;
-          this.emit({ type: 'status', status: 'running' });
+          this.awaitingAsyncWork = ev.awaitingAsyncWork === true && !this.retryActive;
+          this.emit(this.awaitingAsyncWork
+            ? { type: 'status', status: 'running', detail: PI_AWAITING_ASYNC_WORK_DETAIL }
+            : { type: 'status', status: 'running' });
           return;
         }
-        this.retryActive = false;
-        this.runStartedAt = undefined;
-        // Their echoes stay in the registry: upstream Pi delivers a steer that arrived while the run
-        // was ending in a continuation run after this event (`_handlePostAgentRun`), and a history
-        // read then keys its entry by that echo.
-        this.pendingUserTurns.length = 0; // unconsumed queue entries died with the run
-        this.pendingUserEchoes.clear();
-        // Whatever is still open closes at the run's end clock. A degraded stream that
-        // streamed assistant output but forwards no message_end still gets its summary; a
-        // prompt the agent truly never answered is suppressed, exactly as the mapper does.
-        this.closeCurrentRun(nativeTimeMs(ev.timestamp) ?? Date.now());
-        // A dialog the run raised cannot outlive it: Pi settled it with the run (an abort or its
-        // timeout resolves it without a word), so its card must close too. Pi ignores a reply for a
-        // dialog it no longer holds.
-        this.withdrawPendingUi((ui) => ui.duringRun);
-        this.emit({ type: 'status', status: 'idle' });
-        void this.emitSessionStats();
-        // Changes watched during the run were left to its end.
-        this.scheduleGuardCheck(PI_DRIVE_GUARD_DEBOUNCE_MS);
+        this.finishRun(ev);
+        return;
+      case 'session_settled':
+        // omp's "nothing is live, queued or scheduled" (measured after every terminal agent_end).
+        // It only ends something here when a yielded run's background work finished without the
+        // wake-up run that would have ended it (a job killed, or its result taken by another turn).
+        if (this.stoppedYieldCloses && !this.streaming) {
+          this.stoppedYieldCloses = false;
+          return;
+        }
+        if (this.awaitingAsyncWork) this.finishRun(ev);
         return;
       case 'message_update': {
         const e = ev.assistantMessageEvent ?? {};
@@ -2236,6 +2309,23 @@ class PiConnection implements SessionConnection {
             requestId: ev.id,
             questions: [{ question: ev.message ?? ev.title ?? 'Enter a value', header: ev.title, options: [] }],
           });
+        } else if (ev.method === 'form') {
+          // omp's HTML form (its native `ask` tool, or an extension's formDialog): one question per
+          // control on the existing card. A form the card cannot carry faithfully is cancelled like
+          // any dialog this build cannot answer.
+          const form = parsePiFormDialog(ev.html);
+          if (!form) {
+            this.write({ type: 'extension_ui_response', id: ev.id, cancelled: true });
+            this.emit({ type: 'event', name: 'dialog-skipped', payload: { method: ev.method } });
+            return;
+          }
+          this.pendingUi.set(ev.id, { method: 'form', form, duringRun: this.streaming });
+          this.emit({ type: 'question-request', requestId: ev.id, questions: piFormQuestions(form) });
+        } else if (ev.method === 'cancel') {
+          // omp stopped waiting on one of its dialogs (its timeout, or the run's abort) and says
+          // which: close that card. It is not a dialog, so it is never answered.
+          if (typeof ev.targetId === 'string') this.releasePendingUi(ev.targetId);
+          return;
         } else if (FIRE_AND_FORGET_UI.has(ev.method)) {
           // Fire-and-forget UI call (notify/setStatus/…), NOT a blocking dialog — Pi awaits no
           // response, so don't reply; replying would be needless wire traffic.
@@ -2668,9 +2758,17 @@ class PiConnection implements SessionConnection {
         'request-not-pending',
       );
     }
+    // An approval of a form carries no values: the form goes back with its own defaults, and only
+    // when omp would accept them; otherwise the dialog stays open for an answer.
+    const defaults = decision !== 'reject' && ui.form ? piFormAnswer(ui.form, undefined) : undefined;
+    if (defaults && !defaults.ok) {
+      throw new Error(`${this.rt.dialect.displayName} form needs an answer: ${defaults.problem}`);
+    }
     this.pendingUi.delete(requestId);
     if (decision === 'reject') {
       this.write({ type: 'extension_ui_response', id: requestId, cancelled: true });
+    } else if (defaults?.ok) {
+      this.write({ type: 'extension_ui_response', id: requestId, data: defaults.data });
     } else if (ui.method === 'confirm') {
       this.write({ type: 'extension_ui_response', id: requestId, confirmed: true });
     } else {
@@ -2681,7 +2779,7 @@ class PiConnection implements SessionConnection {
 
   /** The question dialog Pi waits on under this id. Never asked, already answered by any client,
    *  withdrawn with its run, or a confirm (a permission, answered as one): refused, never acked. */
-  private pendingQuestion(requestId: string): { method: string; options?: string[] } {
+  private pendingQuestion(requestId: string): PiPendingUi {
     const ui = this.pendingUi.get(requestId);
     if (!ui || ui.method === 'confirm') {
       throw new ControlRefusedError(
@@ -2692,9 +2790,25 @@ class PiConnection implements SessionConnection {
     return ui;
   }
 
-  /** Answer a `select` dialog with the user's ACTUAL choice (was: always options[0]). */
+  /** Answer a `select` dialog with the user's ACTUAL choice (was: always options[0]), or an omp
+   *  `form` with one value per control, in the shape omp validates.
+   *
+   *  A form answer omp would refuse (`required`, a length or range, an email or URL shape, and a
+   *  `pattern` where that check is cheap; see form-dialog.ts) is never sent: omp rejects the
+   *  extension's whole dialog on one, after the card would already show it answered. It is
+   *  refused here instead, before anything changes, so the card stays open. That refusal is a
+   *  plain error (a `CLIENT_MESSAGE_FAILED` nack): neither ControlRefusedError reason fits, since
+   *  the request IS pending and answering IS supported. */
   async answerQuestion(requestId: string, answers: string[][]): Promise<void> {
     const ui = this.pendingQuestion(requestId);
+    if (ui.form) {
+      const answer = piFormAnswer(ui.form, answers);
+      if (!answer.ok) throw new Error(`${this.rt.dialect.displayName} form answer not accepted: ${answer.problem}`);
+      this.pendingUi.delete(requestId);
+      this.write({ type: 'extension_ui_response', id: requestId, data: answer.data });
+      this.emit({ type: 'question-resolved', requestId });
+      return;
+    }
     this.pendingUi.delete(requestId);
     const choice = answers?.[0]?.[0];
     this.write({ type: 'extension_ui_response', id: requestId, value: choice ?? ui.options?.[0] ?? '' });
@@ -2736,10 +2850,19 @@ class PiConnection implements SessionConnection {
    *  invokes by sending '/name' as a prompt (rpc.md get_commands). */
   async runCommand(name: string, args?: string, input?: CommandInput): Promise<CommandResult | void> {
     if (name === 'stop' || name === 'abort') {
+      const yielded = this.awaitingAsyncWork;
       this.write({ type: 'abort' });
       // The run's dialogs end with it: one Pi tied to the run is already settled, and one it was
       // not would hold the stopped run open until someone answered it.
       this.withdrawPendingUi((ui) => ui.duringRun);
+      // A run yielded to background work ends here, at once. omp 19.1.0's source shows the rest:
+      // the abort sets `autoResumeSuppressed`, so no wake-up run follows, and only once the abort
+      // has unwound does omp close the run with its stored agent_end (terminal) and
+      // session_settled. That close ends nothing here any more (see `stoppedYieldCloses`).
+      if (yielded) {
+        this.finishRun({});
+        this.stoppedYieldCloses = true;
+      }
       return { notice: 'Stopped the turn.' };
     }
     if (this.closed) throw new Error(`${this.rt.dialect.displayName} Drive connection is closed.`);
@@ -3437,10 +3560,32 @@ function parsePiJsonlRows(lines: string[], firstIndex = 0): ParsedPiJsonlRow[] {
   return rows;
 }
 
+/**
+ * The leaf a reload of the file selects, by omp's replay rule (`resolveSessionLeafId`,
+ * `session-entries.ts`, omp 19.1.0): an entry written off the active branch (late model usage, a
+ * result routed back to the branch it started on) records the leaf it interrupted as
+ * `activeLeafId`, and replaying it selects that leaf, not the entry. `null` records a cleared leaf.
+ * A captured leaf that no longer exists falls back to the newest entry that selects itself. Pi
+ * never writes the field, so for Pi this is the last entry, as before.
+ */
+function piReplayedLeaf(identified: ParsedPiJsonlRow[], byId: Map<string, ParsedPiJsonlRow>): ParsedPiJsonlRow | undefined {
+  const last = identified[identified.length - 1];
+  if (!last || !Object.prototype.hasOwnProperty.call(last.obj, 'activeLeafId')) return last;
+  const captured = last.obj.activeLeafId;
+  if (captured === null) return undefined;
+  if (typeof captured === 'string' && byId.has(captured)) return byId.get(captured);
+  for (let index = identified.length - 1; index >= 0; index -= 1) {
+    const row = identified[index]!;
+    if (!Object.prototype.hasOwnProperty.call(row.obj, 'activeLeafId') || row.obj.activeLeafId === row.obj.id) return row;
+  }
+  return undefined;
+}
+
 /** Reconstruct SessionManager.getBranch() from an on-disk append-only tree. Current Pi/OMP rows
- *  carry id/parentId; the last appended entry is the durable leaf. Legacy linear fixtures without
- *  parentId fall back to their complete row order. Duplicate ids are structurally ambiguous and
- *  likewise fall back, where correlation uniqueness still fails closed. */
+ *  carry id/parentId; the leaf a reload replays ({@link piReplayedLeaf}) is the durable leaf.
+ *  Legacy linear fixtures without parentId fall back to their complete row order. Duplicate ids
+ *  are structurally ambiguous and likewise fall back, where correlation uniqueness still fails
+ *  closed. */
 function activePiJsonlRows(rows: ParsedPiJsonlRow[]): ParsedPiJsonlRow[] {
   // The session header carries the session's id and no parentId, but it is not a tree entry (Pi's
   // own index skips it too): counted as one, every real file looked parentless and kept every
@@ -3458,7 +3603,7 @@ function activePiJsonlRows(rows: ParsedPiJsonlRow[]): ParsedPiJsonlRow[] {
     byId.set(id, row);
   }
   const activeIds = new Set<string>();
-  let cursor: ParsedPiJsonlRow | undefined = identified[identified.length - 1];
+  let cursor: ParsedPiJsonlRow | undefined = piReplayedLeaf(identified, byId);
   while (cursor) {
     const id = String(cursor.obj.id);
     if (activeIds.has(id)) break; // cycle: retain only the bounded leaf walk
@@ -4848,10 +4993,21 @@ function resolveBin(rt: PiDialectRuntime): string | null {
   }
 }
 
-/** Translate a dialect-specific agent-dir override back to the native Pi-family variable. */
+/**
+ * Translate this dialect's own path overrides back to the native Pi-family variables.
+ *
+ * Pi (1.6.0) and omp (19.1.0) both read PI_CODING_AGENT_SESSION_DIR as the directory a
+ * `--session` child writes new files to, a fork's copy included, ahead of the opened file's own
+ * directory. The broker's environment can carry that variable for the OTHER dialect: Pi's store,
+ * while omp's comes from COSYNCING_OMP_SESSIONS_ROOT. Passed through, an omp fork landed in Pi's
+ * store, outside every path omp's session ids may name, so the new session could not be opened.
+ * A child gets this dialect's own sessions root override, or no value at all.
+ */
 function piProcessEnv(rt: PiDialectRuntime, extra: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env = { ...process.env, ...extra };
   if (rt.agentDirOverride) env.PI_CODING_AGENT_DIR = rt.agentDir;
+  if (rt.sessionsRootOverride) env.PI_CODING_AGENT_SESSION_DIR = rt.sessionsRootOverride;
+  else delete env.PI_CODING_AGENT_SESSION_DIR;
   return env;
 }
 

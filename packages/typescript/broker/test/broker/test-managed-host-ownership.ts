@@ -32,6 +32,7 @@ import {
   managedHostGateEnv,
   managedHostOwnerPath,
   MANAGED_HOST_ACTIONS,
+  MANAGED_LAUNCH_OUTPUT_EXTRA_POLLS,
   MANAGED_HOST_RESTART_BUDGET,
   managedHostRestartLedger,
   managedHostStartupReport,
@@ -693,6 +694,33 @@ try {
       JSON.stringify({ outcome, signals, records: records.size }));
   }
   {
+    // The same race, seen from the adapter. Anything it took from our child's
+    // output (a launch token, for one host) belongs to a process that never
+    // served this address, so it must not be used against the host that does,
+    // and the losing child's output is not waited for after readiness either.
+    const spawnPid = 5160;
+    const table = new Map([[spawnPid, { pid: spawnPid, start: '9', boot: BOOT, comm: 'host' }], [HOST_PID, OWNED]]);
+    let locates = 0;
+    let asked = 0;
+    const ended: string[] = [];
+    const { effects } = fakeEffects({
+      identities: table, spawnPid, childDiesOn: 'SIGTERM', missingProcess: PROCESS_ABSENT,
+    });
+    const outcome = await startManagedHost(
+      plan({
+        ready: async () => locates > 0,
+        locate: async () => (locates++ === 0 ? HOST_ABSENT : hostAt(HOST_PID)),
+        launchEnded: (reason) => { ended.push(reason); },
+        awaitingOutput: () => { asked += 1; return true; },
+      }),
+      effects, memoryStore().store,
+    );
+    check('a child that loses the address to another host ends its launch, and its output is not awaited',
+      outcome.action === 'already-serving' && asked === 0
+        && JSON.stringify(ended) === JSON.stringify(['superseded-by-new-launch', 'address-taken']),
+      JSON.stringify({ outcome, asked, ended }));
+  }
+  {
     // Ready, but this machine will not say which process serves it. Killing our
     // child here would destroy a working host over a failure to LOOK, so it is
     // kept — recorded, provably ours, and reported as unproven.
@@ -1121,11 +1149,13 @@ try {
       observeManagedOutput: (text: string) => { forwarded.push(text); },
       managedLaunchEnded: (reason: string) => { ended.push(reason); },
     }) as never, effects, store, AUTHORIZED);
+    // The one launch-ended notice is the one every spawn is preceded by, about
+    // launches before this one; this launch did not end.
     check('an announcement printed after the first poll still reaches the adapter',
       outcome.action === 'started' && spawns.length === 1 && probes > 5
         && forwarded.length > 2
         && forwarded.some((text) => text.includes('late-arrival'))
-        && ended.length === 0,
+        && JSON.stringify(ended) === JSON.stringify(['superseded-by-new-launch']),
       JSON.stringify({
         outcome, probes, forwards: forwarded.length,
         got: forwarded.some((text) => text.includes('late-arrival')),
@@ -1301,8 +1331,293 @@ try {
     check('a start that ran out of time tells the adapter its launch is over',
       outcome.action === 'start-failed'
         && (outcome as { detailCode: string }).detailCode === 'host-not-ready-in-time'
-        && forwarded.length > 1 && ended.length === 1,
+        && forwarded.length > 1
+        && JSON.stringify(ended) === JSON.stringify(['superseded-by-new-launch', 'host-not-ready-in-time']),
       JSON.stringify({ outcome, forwards: forwarded.length, ended }));
+  }
+  // ── Every launch end reaches the adapter, not only a failed start ─────────
+  //
+  // A launch token printed by a process that has stopped must not be held into
+  // the next launch: a renewal would send it to a host that never issued it.
+  // The engine says a launch is over before every spawn, when a child proven
+  // to be the server exits, and when release stops the host.
+  const settle = async (): Promise<void> => { for (let turn = 0; turn < 8; turn += 1) await Promise.resolve(); };
+  const launchOnce = async (order: string[]) => {
+    let exit: (code: number) => void = () => {};
+    const listeners = new Map<number, ManagedHostLocation>([[59999, HOST_ABSENT]]);
+    const { effects } = fakeEffects({
+      spawnPid: SPAWN_PID,
+      identities: new Map([[SPAWN_PID, SPAWNED]]),
+      missingProcess: PROCESS_ABSENT,
+      listeners,
+      // SIGTERM ends the child, as a real one would: it leaves the table and
+      // the address, and its exit is observed.
+      onSignal: (pid, signal, table) => {
+        if (signal !== 'SIGTERM') return;
+        table.delete(pid);
+        listeners.set(59999, HOST_ABSENT);
+        exit(143);
+      },
+    });
+    const spawn = effects.spawn.bind(effects);
+    effects.spawn = (launch) => {
+      order.push('spawn');
+      listeners.set(59999, hostAt(SPAWN_PID));
+      const child = spawn(launch);
+      return {
+        ...child,
+        get exitCode() { return child.exitCode; },
+        exited: new Promise<number>((resolve) => { exit = resolve; }),
+      };
+    };
+    const memory = memoryStore();
+    const launcher = backend({
+      isAvailable: async () => order.includes('spawn'),
+      managedLaunchEnded: (reason: string) => { order.push(`ended:${reason}`); },
+    });
+    const outcome = await ensureManagedHost(launcher as never, effects, memory.store, AUTHORIZED);
+    return {
+      outcome,
+      exit: (code: number) => exit(code),
+      records: memory.records,
+      release: () => releaseManagedHost(launcher as never, effects, memory.store),
+    };
+  };
+  {
+    const order: string[] = [];
+    const { outcome, exit } = await launchOnce(order);
+    check('a new launch says earlier launches are over before it spawns, and nothing else while it serves',
+      outcome.action === 'started' && outcome.servingProven === true
+        && JSON.stringify(order) === JSON.stringify(['ended:superseded-by-new-launch', 'spawn']),
+      JSON.stringify({ outcome, order }));
+    exit(0);
+    await settle();
+    check('the launch ends when the child proven to be serving exits',
+      JSON.stringify(order.slice(2)) === JSON.stringify(['ended:host-exited']), JSON.stringify(order));
+  }
+  {
+    // The record now names a newer launch's process. An exit noticed late
+    // belongs to the old launch and must not end the new one.
+    const order: string[] = [];
+    const { outcome, exit, records } = await launchOnce(order);
+    records.set(AGENT, { ...records.get(AGENT)!, pid: SPAWN_PID + 1, start: 'a-newer-launch' });
+    exit(0);
+    await settle();
+    check('an exit noticed after a newer launch took the record does not end the newer launch',
+      outcome.action === 'started' && !order.includes('ended:host-exited'), JSON.stringify(order));
+  }
+  {
+    // A start and a release in one broker. The stop's SIGTERM ends the child,
+    // and its exit is seen while the record still names it, so the adapter
+    // hears the end twice: once from the exit and once from the stop. Each
+    // notice only lets go of what the launch left, so the second changes
+    // nothing.
+    const order: string[] = [];
+    const { outcome, release } = await launchOnce(order);
+    const stopped = await release();
+    await settle();
+    check('a start then a release in one broker ends the launch on its exit and again on the stop',
+      outcome.action === 'started' && stopped.action === 'stopped'
+        && JSON.stringify(order) === JSON.stringify([
+          'ended:superseded-by-new-launch', 'spawn', 'ended:host-exited', 'ended:stopped',
+        ]),
+      JSON.stringify({ outcome, stopped, order }));
+  }
+  {
+    const ended: string[] = [];
+    const listeners = new Map<number, ManagedHostLocation>([[59999, hostAt(HOST_PID)]]);
+    const { effects, signals } = fakeEffects({
+      identities: new Map([[HOST_PID, OWNED]]),
+      listeners,
+      missingProcess: PROCESS_ABSENT,
+      onSignal: (pid, _signal, table) => { table.delete(pid); listeners.set(59999, HOST_ABSENT); },
+    });
+    const owned = memoryStore();
+    owned.records.set(AGENT, ownership());
+    const stopped = await releaseManagedHost(backend({
+      managedLaunchEnded: (reason: string) => { ended.push(reason); },
+    }) as never, effects, owned.store);
+    const foreignEnded: string[] = [];
+    const stranger = fakeEffects({
+      identities: new Map([[HOST_PID, OWNED]]),
+      listeners: new Map([[59999, hostAt(HOST_PID)]]),
+    });
+    const preserved = await releaseManagedHost(backend({
+      managedLaunchEnded: (reason: string) => { foreignEnded.push(reason); },
+    }) as never, stranger.effects, memoryStore().store);
+    check('release ends the launch of a host it stopped, and not of one it left running',
+      stopped.action === 'stopped' && signals.length === 1 && JSON.stringify(ended) === JSON.stringify(['stopped'])
+        && preserved.action === 'preserved' && stranger.signals.length === 0 && foreignEnded.length === 0,
+      JSON.stringify({ stopped, ended, preserved, foreignEnded }));
+  }
+  {
+    // Every other managed host implements none of these hooks. Nothing changes
+    // for it: the same start, the same stop, readiness from isAvailable alone,
+    // and no wait for output once it is ready.
+    let spawned = false;
+    let spawnedAt = 0;
+    const listeners = new Map<number, ManagedHostLocation>([[59999, HOST_ABSENT]]);
+    const { effects, spawns, signals } = fakeEffects({
+      spawnPid: SPAWN_PID,
+      identities: new Map([[SPAWN_PID, SPAWNED]]),
+      missingProcess: PROCESS_ABSENT,
+      listeners,
+      onSignal: (pid, _signal, table) => { table.delete(pid); listeners.set(59999, HOST_ABSENT); },
+    });
+    const spawn = effects.spawn.bind(effects);
+    effects.spawn = (launch) => {
+      spawned = true;
+      spawnedAt = effects.now();
+      listeners.set(59999, hostAt(SPAWN_PID));
+      return spawn(launch);
+    };
+    const { store } = memoryStore();
+    const plain = backend({ isAvailable: async () => spawned });
+    const started = await ensureManagedHost(plain as never, effects, store, AUTHORIZED);
+    const startedAfter = effects.now() - spawnedAt;
+    await settle();
+    const stopped = await releaseManagedHost(plain as never, effects, store);
+    check('a managed host without the launch hooks starts and stops exactly as before',
+      started.action === 'started' && started.servingProven === true && spawns.length === 1
+        && startedAfter === 0
+        && stopped.action === 'stopped' && signals.length === 1,
+      JSON.stringify({ started, startedAfter, stopped, signals }));
+  }
+  // ── Output an adapter still awaits once the host is ready ─────────────────
+  //
+  // A host can pass readiness before what it printed has been forwarded, and
+  // nothing is forwarded after the start returns. An adapter that says it is
+  // still waiting gets the output a few more polls. Readiness is not asked
+  // again, so the wait can delay a ready host but never fail it.
+  const startAwaiting = async (options: {
+    readyTimeoutMs: number;
+    readyAfterMs: number;
+    output: string[];
+    awaiting: (forwarded: string[]) => boolean;
+  }) => {
+    let spawnedAt: number | undefined;
+    const forwarded: string[] = [];
+    const listeners = new Map<number, ManagedHostLocation>([[59999, HOST_ABSENT]]);
+    const { effects } = fakeEffects({
+      spawnPid: SPAWN_PID,
+      identities: new Map([[SPAWN_PID, SPAWNED]]),
+      missingProcess: PROCESS_ABSENT,
+      listeners,
+      outputScript: options.output,
+    });
+    const spawn = effects.spawn.bind(effects);
+    effects.spawn = (launch) => {
+      spawnedAt = effects.now();
+      listeners.set(59999, hostAt(SPAWN_PID));
+      return spawn(launch);
+    };
+    const outcome = await ensureManagedHost(backend({
+      describeManagedHost: async () => ({
+        identityKey: KEY,
+        locator: { kind: 'tcp-port' as const, port: 59999 },
+        launch: { command: '/fixture/bin/host', args: ['web'] },
+        readyTimeoutMs: options.readyTimeoutMs,
+        stopGraceMs: 100,
+      }),
+      isAvailable: async () => spawnedAt !== undefined && effects.now() - spawnedAt >= options.readyAfterMs,
+      observeManagedOutput: (text: string) => { forwarded.push(text); },
+      awaitingManagedOutput: () => options.awaiting(forwarded),
+    }) as never, effects, memoryStore().store, AUTHORIZED);
+    return { outcome, forwarded, elapsed: spawnedAt === undefined ? -1 : effects.now() - spawnedAt };
+  };
+  const BOOTING = 'stdout:\nbooting\nstderr:\n';
+  {
+    // Ready on the last probe before the deadline (300 ms at 150 ms polls),
+    // and the adapter never stops waiting. Before the wait existed this host
+    // was started; it still is, and the wait stops at the deadline.
+    const { outcome, forwarded, elapsed } = await startAwaiting({
+      readyTimeoutMs: 300, readyAfterMs: 150, output: [BOOTING], awaiting: () => true,
+    });
+    check('a host ready just before the deadline is started while its adapter still awaits output',
+      outcome.action === 'started' && elapsed <= 300 && forwarded.length > 2,
+      JSON.stringify({ outcome, elapsed, forwards: forwarded.length }));
+  }
+  {
+    const announced = 'stdout:\nbooting\nannounced\nstderr:\n';
+    const late = await startAwaiting({
+      readyTimeoutMs: 3_000,
+      readyAfterMs: 0,
+      output: [BOOTING, BOOTING, BOOTING, announced],
+      awaiting: (forwarded) => !forwarded.includes(announced),
+    });
+    check('output still awaited after readiness is forwarded on the following polls until it arrives',
+      late.outcome.action === 'started' && late.forwarded.length === 4
+        && late.forwarded.at(-1) === announced && late.elapsed === 2 * 150,
+      JSON.stringify({ outcome: late.outcome, forwards: late.forwarded.length, elapsed: late.elapsed }));
+    const never = await startAwaiting({
+      readyTimeoutMs: 3_000, readyAfterMs: 0, output: [BOOTING], awaiting: () => true,
+    });
+    check('the wait for output after readiness is bounded',
+      never.outcome.action === 'started'
+        && never.forwarded.length === MANAGED_LAUNCH_OUTPUT_EXTRA_POLLS + 2
+        && never.elapsed === MANAGED_LAUNCH_OUTPUT_EXTRA_POLLS * 150,
+      JSON.stringify({ outcome: never.outcome, forwards: never.forwarded.length, elapsed: never.elapsed }));
+  }
+  // The wait comes after the ownership decision, so what happens to the child
+  // during it is judged against a decision already made.
+  const waitAcrossExit = async (shape: 'launcher' | 'host' | 'unlocatable') => {
+    const LAUNCHER = 5170;
+    const SERVER = 5171;
+    const table = new Map<number, HostProcessIdentity>([
+      [LAUNCHER, { pid: LAUNCHER, start: '21', boot: BOOT, comm: 'launcher' }],
+      [SERVER, { pid: SERVER, start: '22', boot: BOOT, comm: 'host' }],
+    ]);
+    // The child exits after the first sleep of the wait (the first sleep is
+    // the yield before the readiness loop).
+    const { effects } = fakeEffects({
+      identities: table, spawnPid: LAUNCHER, missingProcess: PROCESS_ABSENT, childExitsAfter: 2,
+    });
+    let child: ManagedHostChild | undefined;
+    const alive = (): boolean => child !== undefined && child.exitCode === null;
+    const spawn = effects.spawn.bind(effects);
+    effects.spawn = (launch) => {
+      child = spawn(launch);
+      return child;
+    };
+    // What serves the address: nothing before the spawn; after it, the
+    // launcher's server, or the child itself while it lives, or something
+    // this machine will not name.
+    effects.listener = () => {
+      if (child === undefined) return HOST_ABSENT;
+      if (shape === 'launcher') return hostAt(SERVER);
+      if (shape === 'host') return alive() ? hostAt(LAUNCHER) : HOST_ABSENT;
+      return HOST_UNKNOWN;
+    };
+    // Ancestry is provable only while the launcher lives.
+    effects.descendsFrom = (pid, ancestorPid) => {
+      if (pid === ancestorPid) return 'yes';
+      return alive() && pid === SERVER && ancestorPid === LAUNCHER ? 'yes' : 'unknown';
+    };
+    const ended: string[] = [];
+    const memory = memoryStore();
+    const outcome = await ensureManagedHost(backend({
+      isAvailable: async () => child !== undefined,
+      awaitingManagedOutput: () => true,
+      managedLaunchEnded: (reason: string) => { ended.push(reason); },
+    }) as never, effects, memory.store, AUTHORIZED);
+    return { outcome, ended, recorded: memory.records.get(AGENT)?.pid, SERVER };
+  };
+  {
+    const launcher = await waitAcrossExit('launcher');
+    check('a launcher that exits during the wait leaves its proven server ours, and ends nothing',
+      launcher.outcome.action === 'started' && launcher.outcome.pid === launcher.SERVER
+        && launcher.outcome.servingProven === true && launcher.recorded === launcher.SERVER
+        && JSON.stringify(launcher.ended) === JSON.stringify(['superseded-by-new-launch']),
+      JSON.stringify(launcher));
+    const host = await waitAcrossExit('host');
+    const unlocatable = await waitAcrossExit('unlocatable');
+    const failedStart = (result: typeof host): boolean => result.outcome.action === 'start-failed'
+      && (result.outcome as { detailCode: string }).detailCode === 'host-exited-during-start'
+      && result.recorded === undefined
+      && JSON.stringify(result.ended) === JSON.stringify(['superseded-by-new-launch', 'host-exited-during-start']);
+    check('a child that is the host and dies during the wait is a failed start that ends its launch',
+      failedStart(host) && failedStart(unlocatable),
+      JSON.stringify({ host, unlocatable }));
   }
   {
     // Read-only by construction: an adapter that throws on its own intake must
@@ -1487,6 +1802,47 @@ try {
       outcome.action === 'recovered' && signals.some((entry) => entry.pid === HOST_PID)
         && spawns.length === 1 && records.get(AGENT)?.pid === 6002,
       JSON.stringify({ outcome, signals, spawns: spawns.length }));
+  }
+  {
+    // Recovery that stops our host, or finds it gone, ends that launch for the
+    // adapter itself. The restart after it may spawn nothing, here because
+    // there is nothing to launch, so no later spawn would say it instead.
+    const unlaunchable = (ended: string[]) => backend({
+      isAvailable: async () => false,
+      managedLaunchEnded: (reason: string) => { ended.push(reason); },
+      describeManagedHost: async () => ({
+        identityKey: KEY,
+        locator: { kind: 'tcp-port' as const, port: 59999 },
+        launch: null,
+        readyTimeoutMs: 300,
+        stopGraceMs: 100,
+      }),
+    });
+    const stoppedEnded: string[] = [];
+    const listeners = new Map([[59999, hostAt(HOST_PID)]]);
+    const wedged = fakeEffects({
+      identities: new Map([[HOST_PID, OWNED]]), missingProcess: PROCESS_ABSENT, listeners,
+      onSignal: (pid, signal, tbl) => {
+        if (signal === 'SIGTERM') { tbl.delete(pid); listeners.set(59999, HOST_ABSENT); }
+      },
+    });
+    const wedgedStore = memoryStore();
+    wedgedStore.records.set(AGENT, ownership());
+    const stopped = await recoverManagedHost(unlaunchable(stoppedEnded) as never,
+      wedged.effects, wedgedStore.store, managedHostRestartLedger(), AUTHORIZED);
+
+    const goneEnded: string[] = [];
+    const crashed = fakeEffects({ missingProcess: PROCESS_ABSENT, listeners: new Map([[59999, HOST_ABSENT]]) });
+    const crashedStore = memoryStore();
+    crashedStore.records.set(AGENT, ownership());
+    const gone = await recoverManagedHost(unlaunchable(goneEnded) as never,
+      crashed.effects, crashedStore.store, managedHostRestartLedger(), AUTHORIZED);
+    check('recovery ends the launch of a host it stopped or found gone, even when it starts no other',
+      stopped.action === 'declined' && wedged.signals.length === 1 && wedged.spawns.length === 0
+        && JSON.stringify(stoppedEnded) === JSON.stringify(['stopped'])
+        && gone.action === 'declined' && crashed.spawns.length === 0
+        && JSON.stringify(goneEnded) === JSON.stringify(['host-exited']),
+      JSON.stringify({ stopped, stoppedEnded, gone, goneEnded }));
   }
   {
     // A stranger's unresponsive host is not ours to restart FOR them.

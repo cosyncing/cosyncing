@@ -23,15 +23,15 @@ import {
 
 export const CLINE_MINIMUM_VERSION: AgentMinimumVersion = Object.freeze({
   // The FLOOR, which is now DERIVED rather than chosen: the lowest measured CLI
-  // whose own `@cline/core` clears the Hub floor. That currently coincides with
-  // `CLINE_VERIFIED_VERSION` at 3.0.61, but the two answer different questions
-  // -- VERIFIED names the newest snapshot FORMAT this adapter reads -- so this
-  // must keep reading the floor. Naming the format constant here once told
+  // whose own `@cline/core` clears the Hub floor (3.0.61). It once coincided
+  // with `CLINE_VERIFIED_VERSION`, but the two answer different questions --
+  // VERIFIED names the newest snapshot FORMAT this adapter reads (3.0.75) -- so
+  // this must keep reading the floor. Naming the format constant here once told
   // operators the minimum was 3.0.61 while 3.0.60 was still accepted.
   version: CLINE_MINIMUM_SUPPORTED_VERSION,
   requiredFeature: 'the rewritten session/message snapshot layout used by the Observe adapter',
   evidenceUrl: 'https://docs.cline.bot/cline-cli/overview',
-  evidenceNote: `Physically measured: ${CLINE_MEASURED_VERSIONS.join(', ')}. Local store plus OpenAI-compatible CLI and ACP surfaces were recorded against Cline 3.0.60 on 2026-08-30/31; 3.0.61 followed on 2026-09-08 after Cline self-updated. Newer builds are supported without being enumerated -- the ACP protocol major, Hub protocol v1, Hub epoch and app-created ownership each fail closed on their own. Snapshot FORMATS remain enumerated (${CLINE_OBSERVE_VERSIONS.join(', ')}), so sessions written by a newer build are not replayed until captured.`,
+  evidenceNote: `Physically measured: ${CLINE_MEASURED_VERSIONS.join(', ')}. Local store plus OpenAI-compatible CLI and ACP surfaces were recorded against Cline 3.0.60 on 2026-08-30/31; 3.0.61 followed on 2026-09-08 after Cline self-updated; 3.0.75 (Hub core 0.2.1) on 2026-11-24, its CLI store writes and its managed Hub (Create, prompts, approval, Stop, failed run, subagent) in an isolated home. Newer builds are supported without being enumerated -- the ACP protocol major, Hub protocol v1, Hub epoch and app-created ownership each fail closed on their own. Snapshot FORMATS remain enumerated (${CLINE_OBSERVE_VERSIONS.join(', ')}), so sessions written by a newer build are not replayed until captured.`,
 });
 
 function storageCheck(context: SetupDiagnosisContext, binaryPresent: boolean): SetupCheck {

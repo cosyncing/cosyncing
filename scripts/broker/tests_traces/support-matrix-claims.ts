@@ -141,7 +141,7 @@ export const SUPPORT_MATRIX_CLAIMS: SupportClaim[] = [
   // session/update), so `clientCapabilities: {}` is honest and Grok runs every tool in-process
   // with nothing to ask this client about. The round-trip is real but is exercised only by
   // `writeFakeGrokBinary`, which does send the request; the shipped agent does not.
-  claim('grok', 'F06', 'partial', 'the adapter maps allow-once and reject option ids and settles cards, but shipped Grok issues no permission request through this client: cosyncing delegates no fs/terminal execution, so tools run in-process'),
+  claim('grok', 'F06', 'partial', '1.0.92 asks permission for file writes in the default mode; allow-once and reject settle the card, and a reject ends the turn as cancelled (measured 2026-11-24); 1.0.13 and 1.0.24 issued no permission request'),
   claim('cline', 'F06', 'full', 'managed-Hub per-tool approval cards round-trip approve/reject and are cancelled on stop, close, or ownership loss'),
   claim('kilo', 'F06', 'full', 'authenticated per-tool HTTP/SSE permission requests and replies preserve actionable ownership'),
 
@@ -150,7 +150,7 @@ export const SUPPORT_MATRIX_CLAIMS: SupportClaim[] = [
   claim('codex', 'F07', 'full', 'app-server tool/MCP questions'),
   claim('opencode', 'F07', 'full', 'SSE/REST question channel'),
   claim('pi', 'F07', 'partial', 'resume/RPC select works; live bridge ask_user works; native TUI dialogs terminal-only'),
-  claim('omp', 'F07', 'partial', 'resume/RPC select works; live bridge ask_user works; native TUI dialogs terminal-only'),
+  claim('omp', 'F07', 'partial', 'resume/RPC select and 19.1.0 HTML forms work, and withdrawn forms close; live bridge ask_user works; native TUI dialogs terminal-only'),
   claim('reasonix', 'F07', 'n/a', 'no measured ACP question request route; unknown requests fail closed'),
   claim('grok', 'F07', 'n/a', 'no measured Grok ACP question request route; unknown requests fail closed'),
   claim('cline', 'F07', 'n/a', 'no measured Cline snapshot block or hub route represents an actionable question request'),
@@ -236,10 +236,10 @@ export const SUPPORT_MATRIX_CLAIMS: SupportClaim[] = [
   }),
   claim('pi', 'F14', 'partial', 'create/reload/quit/fork/clone/name covered; switch excluded by review; export mapped (needs L2)', undefined, {
     capabilityIds: ['pi.rpc.set_session_name', 'pi.rpc.fork', 'pi.rpc.clone', 'pi.rpc.export_html'],
-    reviewedNativeVersions: { pi: '0.78.1' },
+    reviewedNativeVersions: { pi: '1.6.0' },
   }),
-  claim('omp', 'F14', 'partial', 'create/reload/quit/name/export covered; fork and clone are unavailable through RPC', undefined, {
-    reviewedNativeVersions: { omp: '17.4.2' },
+  claim('omp', 'F14', 'partial', 'create/reload/quit/name/export covered; fork on omp 19.1.0 (bare fork copies the whole session), none on 17.4.2; clone is unavailable through RPC', undefined, {
+    reviewedNativeVersions: { omp: '19.1.0' },
   }),
   claim('reasonix', 'F14', 'partial', 'durable create/load/cancel and rewrite reset; rename, fork, and export are unsupported', undefined, {
     reviewedNativeVersions: { reasonix: '1.25.2' },
@@ -248,7 +248,7 @@ export const SUPPORT_MATRIX_CLAIMS: SupportClaim[] = [
     reviewedNativeVersions: { grok: '1.0.13' },
   }),
   claim('cline', 'F14', 'partial', 'managed create/resume/stop, Observe rewrite reset, native rename, and exact-id terminal handoff ship; replacement-Hub resume, fork, clone, and export are unsupported', undefined, {
-    reviewedNativeVersions: { cline: '3.0.61' },
+    reviewedNativeVersions: { cline: '3.0.75' },
   }),
   claim('kilo', 'F14', 'partial', 'create, live attach, cancel, native rename, and retained-history reset ship; terminal handoff, fork, clone, and export are unsupported', undefined, {
     reviewedNativeVersions: { kilo: '7.4.23' },

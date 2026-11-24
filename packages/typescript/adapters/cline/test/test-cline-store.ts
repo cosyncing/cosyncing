@@ -1,6 +1,9 @@
 #!/usr/bin/env bun
 export {};
-import { readFileSync, renameSync, symlinkSync } from 'node:fs';
+import { readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
+import { clineMessageKey, mapClineTranscript } from '../src/mapping.ts';
 import {
   clineDataRoot,
   clinePathContained,
@@ -8,7 +11,7 @@ import {
   discoverClineStore,
   readClineMessages,
 } from '../src/store.ts';
-import { buildClineFixtureTree, fixtureParentMessages } from './fixtures/tree.ts';
+import { buildClineFixtureTree, fixtureChildMessages, fixtureParentMessages } from './fixtures/tree.ts';
 
 const results: Array<{ name: string; ok: boolean; detail: string }> = [];
 function check(name: string, ok: boolean, detail = ''): void {
@@ -66,6 +69,115 @@ try {
       && legacyObserved.some((session) => session.id === tree.childId));
   tree.writeParent(fixtureParentMessages());
   tree.writeChild([]);
+
+  // Cline 3.0.75 (core 0.2.1), captured from its own CLI writes: the same document, stamped
+  // `origin.version: 3.0.75`, and subagent files named `agent_<uuid>` instead of
+  // `agent_<epoch ms>_<base36>`. Before it was listed, the parent was refused outright and the
+  // child never matched the sibling pattern, so the session vanished from the roster.
+  // The parent carries two messages exactly as 3.0.75 wrote them (fixture `messages`), so the
+  // replay below also covers 3.0.75's message and block format, not only its labels.
+  const captured = JSON.parse(readFileSync(new URL('./fixtures/cline-3.0.75-redacted.json', import.meta.url), 'utf8'));
+  const capturedChild = captured.subagent.origin.subagent as string;
+  const capturedAssistant = captured.messages.assistant;
+  const capturedToolResult = captured.messages.toolResult;
+  check('the redacted 3.0.75 fixture pins the captured CLI parent and agent_<uuid> child discriminators',
+    captured.nativeVersion === '3.0.75'
+      && captured.parent.agent === 'lead' && captured.parent.origin.version === '3.0.75'
+      && captured.subagent.agent === 'subagent' && captured.subagent.taskType === 'subagent_task'
+      && captured.subagent.file === `${capturedChild}.messages.json`
+      && /^agent_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(capturedChild));
+  const uuidChildId = `${tree.id}__${capturedChild}`;
+  const uuidChildPath = join(tree.sessionDir, captured.subagent.file);
+  const writeCapturedTree = (version: string): void => {
+    tree.writeParent([capturedAssistant, capturedToolResult], undefined, {
+      origin: { ...captured.parent.origin, sessionId: tree.id, version },
+    });
+    writeFileSync(uuidChildPath, `${JSON.stringify({
+      version: captured.messagesDocumentVersion,
+      agent: captured.subagent.agent,
+      taskType: captured.subagent.taskType,
+      sessionId: uuidChildId,
+      updated_at: '2026-08-23T10:00:05.000Z',
+      origin: { ...captured.subagent.origin, sessionId: uuidChildId, parentThreadId: tree.id, version },
+      messages: fixtureChildMessages(),
+    })}\n`);
+  };
+  writeCapturedTree('3.0.75');
+  const observed075 = await discoverClineStore({ env: { CLINE_DIR: tree.root }, processAlive: () => false });
+  const parent075 = observed075.find((session) => session.id === tree.id);
+  const child075 = observed075.find((session) => session.id === uuidChildId);
+  check('a 3.0.75 parent and its agent_<uuid> subagent are observed with their linkage',
+    parent075 !== undefined
+      && child075?.origin === 'subagent'
+      && child075.parentThreadId === tree.id
+      && child075.nativeId === uuidChildId
+      && child075.messagesPath === uuidChildPath,
+    observed075.map((session) => session.id).join(','));
+  const replay075 = parent075 ? await readClineMessages(parent075) : undefined;
+  check('the captured 3.0.75 parent messages replay in full, with their model',
+    replay075?.issues.length === 0
+      && isDeepStrictEqual(replay075.messageIds, ['msg_qugSRVT2', 'msg_2esI7L81'])
+      && replay075.model === 'openai-compatible/qwen3:4b',
+    JSON.stringify(replay075 && { issues: replay075.issues, ids: replay075.messageIds, model: replay075.model }));
+  // The rows a client sees for the captured spawn_agent call and its result.
+  const mapped075 = replay075 ? mapClineTranscript(tree.id, replay075.messages) : [];
+  const capturedResultBody = '{"text":"SUB","iterations":1,"finishReason":"completed","usage":{"inputTokens":1802,"outputTokens":241}}';
+  const expected075 = [
+    {
+      type: 'thinking',
+      text: capturedAssistant.content[0].thinking,
+      key: `${clineMessageKey(tree.id, 'msg_qugSRVT2')}:block:0:thinking`,
+    },
+    {
+      type: 'tool-call',
+      callId: 'call_yxzge3uw',
+      toolName: 'spawn_agent',
+      title: 'spawn_agent',
+      toolClass: 'other',
+      args: { systemPrompt: 'You are a helper.', task: 'Reply with the single word SUB.' },
+    },
+    {
+      type: 'agent-activity',
+      key: 'agent:call_yxzge3uw',
+      kind: 'subagent',
+      title: 'Reply with the single word SUB.',
+      status: 'running',
+      startedAtMs: 1795508115392,
+      agentsDone: 0,
+      agentsTotal: 1,
+    },
+    { type: 'token-count', input: 3669, output: 441, cacheRead: 0, cacheWrite: 0 },
+    {
+      type: 'tool-result',
+      callId: 'call_yxzge3uw',
+      toolName: 'spawn_agent',
+      title: 'spawn_agent',
+      toolClass: 'other',
+      result: capturedResultBody,
+      isError: false,
+    },
+    {
+      type: 'agent-activity',
+      key: 'agent:call_yxzge3uw',
+      kind: 'subagent',
+      title: 'Cline subagent',
+      status: 'done',
+      agentsDone: 1,
+      agentsTotal: 1,
+    },
+  ];
+  check('the captured 3.0.75 assistant and tool messages map to thinking, call, subagent activity, tokens and result rows',
+    isDeepStrictEqual(mapped075, expected075)
+      && capturedToolResult.content[0].content === capturedResultBody,
+    JSON.stringify(mapped075).slice(0, 800));
+  // Still an enumeration: the next, uncaptured build is not read on the strength of ordering.
+  writeCapturedTree('3.0.76');
+  const unmeasured = await discoverClineStore({ env: { CLINE_DIR: tree.root }, processAlive: () => false });
+  check('a snapshot stamped by an uncaptured newer build is still refused, parent and child',
+    !unmeasured.some((session) => session.id === tree.id || session.id === uuidChildId),
+    unmeasured.map((session) => session.id).join(','));
+  rmSync(uuidChildPath);
+  tree.writeParent(fixtureParentMessages());
 
   const dead = await discoverClineStore({ env: { CLINE_DIR: tree.root }, processAlive: () => false });
   check('dead-pid running metadata is interrupted and never live',

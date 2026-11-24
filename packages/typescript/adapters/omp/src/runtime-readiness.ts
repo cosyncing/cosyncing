@@ -6,6 +6,7 @@ import {
   realpathSync,
   statSync,
 } from 'node:fs';
+import { open as openFile, type FileHandle } from 'node:fs/promises';
 import { dirname, join, parse, win32 } from 'node:path';
 import {
   compareSemanticVersions,
@@ -20,9 +21,296 @@ import {
 } from '@cosyncing/adapter-api';
 
 export const OMP_DEFAULT_BUN_MINIMUM_VERSION = '1.3.14';
-/** The mutable RPC/event contract physically captured by the parity fixture. */
-export const OMP_VERIFIED_VERSION = '17.4.2';
+/**
+ * The omp versions whose mutable RPC/event/session contract was physically captured (the parity
+ * fixtures). Readiness, doctor and the broker's bridge hello accept exactly these; every other
+ * version, including one between two listed releases, stays Observe-only until it is captured too.
+ */
+export const OMP_VERIFIED_VERSIONS: readonly string[] = Object.freeze(['17.4.2', '19.1.0']);
+/** The newest verified version: the one remediation recommends installing. */
+export const OMP_VERIFIED_VERSION = '19.1.0';
+/** `engines.bun` of {@link OMP_VERIFIED_VERSION}; omp 19 does not start on an older Bun. */
+export const OMP_VERIFIED_VERSION_BUN_FLOOR = '1.4.4';
 export const OMP_MINIMUM_SUPPORTED_VERSION = '17.4.2';
+
+/** Whether `version` is exactly one of the captured omp versions. */
+export function isOmpVerifiedVersion(version: unknown): boolean {
+  if (typeof version !== 'string') return false;
+  return OMP_VERIFIED_VERSIONS.some((verified) => compareSemanticVersions(version, verified) === 0);
+}
+
+/**
+ * The first captured omp whose RPC has `fork` again (upstream restored it in 18.4.11; 17.4.2 has
+ * none). A bare fork copies the whole session; `entryId` keeps that entry (measured on 19.1.0).
+ */
+export const OMP_RPC_FORK_MINIMUM_VERSION = '19.1.0';
+
+/** Whether this omp build's RPC can fork: a verified version at or above the first one measured. */
+export function ompSupportsRpcFork(version: unknown): boolean {
+  if (typeof version !== 'string' || !isOmpVerifiedVersion(version)) return false;
+  const comparison = compareSemanticVersions(version, OMP_RPC_FORK_MINIMUM_VERSION);
+  return comparison !== undefined && comparison >= 0;
+}
+
+/** A `runtime` key as omp serializes it, in any key order; only a line that has one is read. */
+const OMP_WRITER_MARKER = '"runtime":';
+const OMP_WRITER_SCAN_CHUNK_BYTES = 1024 * 1024;
+const OMP_WRITER_CACHE_LIMIT = 64;
+/** A top-level `runtime` value longer than this is not read: omp's writer stamp is a few dozen. */
+const OMP_WRITER_RUNTIME_MAX_CHARS = 4096;
+
+const isJsonSpace = (code: number): boolean => code === 32 || code === 9 || code === 10 || code === 13;
+
+/** Where the JSON string opening at `open` ends (past its closing quote), or the line's end. */
+function jsonStringEnd(line: string, open: number): number {
+  let at = open + 1;
+  while (at < line.length) {
+    const code = line.charCodeAt(at);
+    if (code === 92 /* \ */) at += 2;
+    else if (code === 34 /* " */) return at + 1;
+    else at++;
+  }
+  return line.length;
+}
+
+/** Where the JSON value starting at `start` ends, or -1 when it runs past `max` characters or the
+ *  line ends first (a torn last line). */
+function jsonValueEnd(line: string, start: number, max: number): number {
+  const limit = Math.min(line.length, start + max);
+  let depth = 0;
+  let at = start;
+  while (at < limit) {
+    const code = line.charCodeAt(at);
+    if (code === 34) {
+      at = jsonStringEnd(line, at);
+      if (depth === 0) return at <= limit ? at : -1;
+      continue;
+    }
+    if (code === 123 || code === 91) depth++;
+    else if (code === 125 || code === 93) {
+      // A scalar ends at the brace that closes its entry; an object or array at its own last brace.
+      if (depth === 0) return at;
+      if (--depth === 0) return at + 1;
+    } else if (code === 44 && depth === 0) return at;
+    at++;
+  }
+  return -1;
+}
+
+/**
+ * The top-level `runtime` value of one serialized entry, without parsing the rest of it: one forward
+ * walk that skips strings and nested values, stopping at the entry's own `runtime` key, so an entry
+ * of any size costs one linear pass and allocates only that value. Undefined when the entry has no
+ * top-level `runtime`, or its value is longer than {@link OMP_WRITER_RUNTIME_MAX_CHARS} or does not
+ * parse (a torn last line): neither is a writer stamp this reader can use.
+ */
+function topLevelRuntime(line: string): unknown {
+  const length = line.length;
+  let at = 0;
+  while (at < length && isJsonSpace(line.charCodeAt(at))) at++;
+  if (line.charCodeAt(at) !== 123 /* { */) return undefined;
+  let depth = 0;
+  while (at < length) {
+    const code = line.charCodeAt(at);
+    if (code === 34) {
+      const start = at;
+      at = jsonStringEnd(line, at);
+      if (depth !== 1) continue;
+      // A string at the entry's own level followed by `:` is one of its keys.
+      let colon = at;
+      while (colon < length && isJsonSpace(line.charCodeAt(colon))) colon++;
+      if (line.charCodeAt(colon) !== 58 /* : */ || at - start !== 9 || line.slice(start, at) !== '"runtime"') continue;
+      let value = colon + 1;
+      while (value < length && isJsonSpace(line.charCodeAt(value))) value++;
+      const end = jsonValueEnd(line, value, OMP_WRITER_RUNTIME_MAX_CHARS);
+      if (end < 0) return undefined;
+      try {
+        return JSON.parse(line.slice(value, end));
+      } catch {
+        return undefined;
+      }
+    }
+    if (code === 123 || code === 91) depth++;
+    else if (code === 125 || code === 93) depth--;
+    at++;
+  }
+  return undefined;
+}
+
+/** The omp writer stamps of one session file. */
+export interface OmpWriterStamps {
+  /** The newest version among the stamps that compare; undefined when there is none. */
+  newest?: string;
+  /** Some stamp's version does not compare, so no configured omp can be shown to be as new. */
+  incomparable: boolean;
+}
+
+const ompWriterStampCache = new Map<string, { size: number; mtimeMs: number; stamps: OmpWriterStamps }>();
+
+/**
+ * The writer stamps of a session file, from the `runtime.version` omp 19.1.0 sets on every entry it
+ * appends (measured; `SessionEntryBase.runtime`). omp 17.4.2 writes none, so a file only it wrote
+ * has no newest version. Only an entry's own top-level `runtime` counts, with its keys in any
+ * order: a line that carries a `runtime` key is walked to its top-level one
+ * ({@link topLevelRuntime}), so an object of the same shape nested in it (a tool's `details`) is not
+ * taken for a writer, and a large entry is never parsed whole. The file is read asynchronously in
+ * bounded chunks, linear in its size, and the result is cached by path, size and mtime, so the
+ * broker reads each version of a file once. An unreadable file has no stamps.
+ */
+export async function readOmpWriterStamps(sessionFile: string): Promise<OmpWriterStamps> {
+  let handle: FileHandle | undefined;
+  try {
+    handle = await openFile(sessionFile, 'r');
+    const { size, mtimeMs } = await handle.stat();
+    const cached = ompWriterStampCache.get(sessionFile);
+    if (cached && cached.size === size && cached.mtimeMs === mtimeMs) return cached.stamps;
+    const stamps: OmpWriterStamps = { incomparable: false };
+    const take = (line: string): void => {
+      if (!line.includes(OMP_WRITER_MARKER)) return;
+      const runtime = topLevelRuntime(line);
+      const version = runtime !== null && typeof runtime === 'object' ? (runtime as { version?: unknown }).version : undefined;
+      if (typeof version !== 'string') return;
+      if (compareSemanticVersions(version, version) === undefined) {
+        stamps.incomparable = true;
+        return;
+      }
+      if (stamps.newest === undefined || (compareSemanticVersions(version, stamps.newest) ?? 0) > 0) stamps.newest = version;
+    };
+    const buffer = Buffer.alloc(OMP_WRITER_SCAN_CHUNK_BYTES);
+    const decoder = new TextDecoder('utf-8');
+    // The line still open at the end of the last chunk, in pieces, so a long line stays linear.
+    let pieces: string[] = [];
+    let position = 0;
+    for (;;) {
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+      if (bytesRead <= 0) break;
+      position += bytesRead;
+      const text = decoder.decode(buffer.subarray(0, bytesRead), { stream: true });
+      let start = 0;
+      for (let newline = text.indexOf('\n'); newline >= 0; newline = text.indexOf('\n', start)) {
+        pieces.push(text.slice(start, newline));
+        take(pieces.join(''));
+        pieces = [];
+        start = newline + 1;
+      }
+      if (start < text.length) pieces.push(text.slice(start));
+    }
+    pieces.push(decoder.decode());
+    take(pieces.join(''));
+    ompWriterStampCache.delete(sessionFile);
+    if (ompWriterStampCache.size >= OMP_WRITER_CACHE_LIMIT) {
+      const oldest = ompWriterStampCache.keys().next().value;
+      if (oldest !== undefined) ompWriterStampCache.delete(oldest);
+    }
+    ompWriterStampCache.set(sessionFile, { size, mtimeMs, stamps });
+    return stamps;
+  } catch {
+    return { incomparable: false };
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+/**
+ * Why the configured omp must not continue or change a session file: a newer omp wrote it, or a
+ * stamp's version cannot be compared with the configured one. An older omp does not know the newer
+ * one's replay rules (omp 17.4.2 ignores the `activeLeafId` that omp 19.1.0 records for entries
+ * written off the active branch), so it could continue on the wrong branch. Undefined when the
+ * configured omp is at least as new as every writer, or its version is unknown (readiness refuses
+ * that case on its own).
+ */
+export async function ompNativeWriteRefusal(sessionFile: string, configuredVersion: string | undefined): Promise<string | undefined> {
+  if (!configuredVersion) return undefined;
+  const stamps = await readOmpWriterStamps(sessionFile);
+  const outcome = 'so cosyncing will not continue or change it. Continue it in a terminal with the omp that wrote it, or update the omp cosyncing uses; it stays readable here.';
+  if (stamps.incomparable) {
+    return `This omp session carries an omp version that cosyncing cannot compare with the omp ${configuredVersion} it runs, ${outcome}`;
+  }
+  if (stamps.newest === undefined) return undefined;
+  const comparison = compareSemanticVersions(stamps.newest, configuredVersion);
+  if (comparison !== undefined && comparison <= 0) return undefined;
+  return `This omp session was written by omp ${stamps.newest}, which is newer than the omp ${configuredVersion} cosyncing runs, ${outcome}`;
+}
+
+/** The verified versions as prose: `17.4.2 and 19.1.0`. */
+export function ompVerifiedVersionsText(): string {
+  const versions = [...OMP_VERIFIED_VERSIONS];
+  return versions.length > 1 ? `${versions.slice(0, -1).join(', ')} and ${versions.at(-1)}` : versions[0] ?? '';
+}
+
+/** What to install instead, with the newest version's Bun floor (omp 19 refuses an older Bun). */
+export function ompVerifiedInstallHint(): string {
+  const older = OMP_VERIFIED_VERSIONS.filter((version) => version !== OMP_VERIFIED_VERSION);
+  return `Install omp ${OMP_VERIFIED_VERSION} (it needs Bun ${OMP_VERIFIED_VERSION_BUN_FLOOR} or newer)${older.length ? ` or omp ${older.join(' or ')}` : ''}`;
+}
+
+/**
+ * Where a parsed omp version stands: one of the captured versions, below the floor, or newer than
+ * the floor without a capture (above the newest, or between two captured releases). `undefined`
+ * when the version does not compare.
+ */
+export function ompVersionVerdict(version: string): 'verified' | 'below-minimum' | 'unverified' | undefined {
+  const floor = compareSemanticVersions(version, OMP_MINIMUM_SUPPORTED_VERSION);
+  if (floor === undefined) return undefined;
+  if (floor < 0) return 'below-minimum';
+  return isOmpVerifiedVersion(version) ? 'verified' : 'unverified';
+}
+
+/** The readiness refusal for an omp `subject` (`The installed omp package is 18.2.0`). */
+function unsupportedOmpVersionMessage(subject: string, verdict: 'below-minimum' | 'unverified'): string {
+  return verdict === 'unverified'
+    ? `${subject}, but mutable sync is verified only for omp ${ompVerifiedVersionsText()}. ${ompVerifiedInstallHint()}, or wait for a new protocol capture, then restart cosyncing.`
+    : `${subject}, but ${OMP_MINIMUM_SUPPORTED_VERSION} is required. ${ompVerifiedInstallHint()}, then restart cosyncing.`;
+}
+
+/**
+ * The omp to install on the Bun that would run it, as a runnable command: the newest captured build
+ * when that Bun meets its floor, otherwise the older captured build (and say Bun must be upgraded
+ * first for the newer one). An unknown Bun gets the build that runs on the default floor.
+ */
+export function ompInstallAdvice(bunVersion: string | undefined): { command: string; message: string } {
+  const install = (version: string) => `bun install -g @oh-my-pi/pi-coding-agent@${version}`;
+  const comparison = bunVersion ? compareSemanticVersions(bunVersion, OMP_VERIFIED_VERSION_BUN_FLOOR) : undefined;
+  if (comparison !== undefined && comparison >= 0) {
+    return { command: install(OMP_VERIFIED_VERSION), message: `Install omp ${OMP_VERIFIED_VERSION}, which Bun ${bunVersion} runs` };
+  }
+  const older = OMP_VERIFIED_VERSIONS.filter((version) => version !== OMP_VERIFIED_VERSION).at(-1) ?? OMP_MINIMUM_SUPPORTED_VERSION;
+  const upgrade = `omp ${OMP_VERIFIED_VERSION} needs Bun ${OMP_VERIFIED_VERSION_BUN_FLOOR} or newer, so upgrade Bun first to use it`;
+  return {
+    command: install(older),
+    message: bunVersion && comparison !== undefined
+      ? `Install omp ${older}, which runs on Bun ${bunVersion} (${upgrade})`
+      : `Install omp ${older} (${upgrade})`,
+  };
+}
+
+/** The doctor check for an omp version that is not one of the captured ones. */
+function unsupportedOmpVersionDiagnosis(
+  detailCode: string,
+  subject: string,
+  version: string,
+  verdict: 'below-minimum' | 'unverified',
+  bunVersion: string | undefined,
+): SetupCheck {
+  const advice = ompInstallAdvice(bunVersion);
+  return {
+    id: 'omp.bun-runtime',
+    status: 'fail',
+    detailCode,
+    summary: verdict === 'unverified'
+      ? `${subject} is omp ${version}, but mutable sync is verified only for omp ${ompVerifiedVersionsText()}.`
+      : `${subject} is omp ${version}, but ${OMP_MINIMUM_SUPPORTED_VERSION} is required.`,
+    evidence: { installedVersion: version, verifiedVersion: OMP_VERIFIED_VERSION },
+    remediation: {
+      kind: 'command',
+      message: verdict === 'unverified'
+        ? `${advice.message}, or wait for a new protocol capture, then rerun doctor.`
+        : `${advice.message}, then rerun doctor.`,
+      command: advice.command,
+    },
+  };
+}
+
 const OMP_PACKAGE_NAMES: readonly string[] = [
   '@oh-my-pi/pi-coding-agent',
 ];
@@ -308,14 +596,15 @@ function boundedVersionProbe(
 
 /**
  * Recognize omp's `--version` answer. omp 17.4.2 prints a BARE version (`17.4.2\n`) with no name
- * token, so the pi-style "name on the version line" rule alone would reject a genuine omp. Accept
- * either an omp/oh-my-pi name line carrying the version, or output that IS exactly one version.
+ * token, so the pi-style "name on the version line" rule alone would reject a genuine omp; omp
+ * 19.1.0 prints `omp/19.1.0\n` (measured). Accept an omp/oh-my-pi name line carrying the version
+ * (including the `name/version` form), or output that IS exactly one version.
  */
-function ompIdentityVersion(output: string): string | undefined {
+export function ompIdentityVersion(output: string): string | undefined {
   const version = semanticVersionFromText(output);
   if (!version) return undefined;
   const identifiesOmp = output.split(/\r?\n/).some((line) =>
-    /(?:^|[\s/@-])(?:omp|oh-my-pi)(?:$|[\s:@-])/i.test(line) && line.includes(version));
+    /(?:^|[\s/@-])(?:omp|oh-my-pi)(?:$|[\s:@/-])/i.test(line) && line.includes(version));
   if (identifiesOmp) return version;
   return output.trim() === version ? version : undefined;
 }
@@ -396,15 +685,12 @@ export function inspectOmpRuntimeReadiness(
         { executable, packageVersion: identity.contract.version },
       );
     }
-    const supportedOmp = compareSemanticVersions(reportedVersion, OMP_MINIMUM_SUPPORTED_VERSION);
-    if (supportedOmp === undefined || supportedOmp !== 0) {
+    const batchVerdict = ompVersionVerdict(reportedVersion);
+    if (batchVerdict !== 'verified') {
+      const verdict = batchVerdict === 'unverified' ? 'unverified' : 'below-minimum';
       return unsupportedReadiness(
-        supportedOmp !== undefined && supportedOmp > 0
-          ? 'omp-batch-version-above-verified'
-          : 'omp-batch-version-below-minimum',
-        supportedOmp !== undefined && supportedOmp > 0
-          ? `The resolved omp launcher is omp ${reportedVersion}, but mutable sync is verified only for ${OMP_VERIFIED_VERSION}. Use the verified version or wait for a new protocol capture, then restart cosyncing.`
-          : `The resolved omp launcher is omp ${reportedVersion}, but ${OMP_MINIMUM_SUPPORTED_VERSION} is required. Upgrade omp, then restart cosyncing.`,
+        verdict === 'unverified' ? 'omp-batch-version-above-verified' : 'omp-batch-version-below-minimum',
+        unsupportedOmpVersionMessage(`The resolved omp launcher is omp ${reportedVersion}`, verdict),
         { executable, packageVersion: reportedVersion },
       );
     }
@@ -437,15 +723,12 @@ export function inspectOmpRuntimeReadiness(
           { executable },
         );
       }
-      const comparison = compareSemanticVersions(version, OMP_MINIMUM_SUPPORTED_VERSION);
-      if (comparison === undefined || comparison !== 0) {
+      const nativeVerdict = ompVersionVerdict(version);
+      if (nativeVerdict !== 'verified') {
+        const verdict = nativeVerdict === 'unverified' ? 'unverified' : 'below-minimum';
         return unsupportedReadiness(
-          comparison !== undefined && comparison > 0
-            ? 'omp-native-version-above-verified'
-            : 'omp-native-version-below-minimum',
-          comparison !== undefined && comparison > 0
-            ? `The configured omp executable is omp ${version}, but mutable sync is verified only for ${OMP_VERIFIED_VERSION}. Use the verified version or wait for a new protocol capture, then restart cosyncing.`
-            : `The configured omp executable is omp ${version}, but ${OMP_MINIMUM_SUPPORTED_VERSION} is required. Upgrade omp, then restart cosyncing.`,
+          verdict === 'unverified' ? 'omp-native-version-above-verified' : 'omp-native-version-below-minimum',
+          unsupportedOmpVersionMessage(`The configured omp executable is omp ${version}`, verdict),
           { executable, packageVersion: version },
         );
       }
@@ -485,37 +768,30 @@ export function inspectOmpRuntimeReadiness(
           { executable },
         );
       }
-      const supportedOmp = compareSemanticVersions(launcherVersion, OMP_MINIMUM_SUPPORTED_VERSION);
-      if (supportedOmp === undefined || supportedOmp !== 0) {
+      const launcherVerdict = ompVersionVerdict(launcherVersion);
+      if (launcherVerdict !== 'verified') {
+        const verdict = launcherVerdict === 'unverified' ? 'unverified' : 'below-minimum';
         return unsupportedReadiness(
-          supportedOmp !== undefined && supportedOmp > 0
-            ? 'omp-posix-version-above-verified'
-            : 'omp-posix-version-below-minimum',
-          supportedOmp !== undefined && supportedOmp > 0
-            ? `The configured Bun launcher is omp ${launcherVersion}, but mutable sync is verified only for ${OMP_VERIFIED_VERSION}. Use the verified version or wait for a new protocol capture, then restart cosyncing.`
-            : `The configured Bun launcher is omp ${launcherVersion}, but ${OMP_MINIMUM_SUPPORTED_VERSION} is required. Upgrade omp, then restart cosyncing.`,
+          verdict === 'unverified' ? 'omp-posix-version-above-verified' : 'omp-posix-version-below-minimum',
+          unsupportedOmpVersionMessage(`The configured Bun launcher is omp ${launcherVersion}`, verdict),
           { executable, packageVersion: launcherVersion },
         );
       }
       contract = { ...contract, version: launcherVersion };
     } else {
       const packageVersion = semanticVersionFromText(contract.version);
-      const supportedOmp = packageVersion
-        ? compareSemanticVersions(packageVersion, OMP_MINIMUM_SUPPORTED_VERSION)
-        : undefined;
-      if (!packageVersion || supportedOmp === undefined) {
+      const packageVerdict = packageVersion ? ompVersionVerdict(packageVersion) : undefined;
+      if (!packageVersion || packageVerdict === undefined) {
         return unsupportedReadiness(
           'omp-package-version-unverified',
           'The installed omp package has an invalid version, so its RPC/session compatibility cannot be verified. Reinstall omp with bun, then restart cosyncing.',
           { executable, packageVersion: contract.version },
         );
       }
-      if (supportedOmp !== 0) {
+      if (packageVerdict !== 'verified') {
         return unsupportedReadiness(
-          supportedOmp > 0 ? 'omp-package-version-above-verified' : 'omp-package-version-below-minimum',
-          supportedOmp > 0
-            ? `The installed omp package is ${packageVersion}, but mutable sync is verified only for ${OMP_VERIFIED_VERSION}. Use the verified version or wait for a new protocol capture, then restart cosyncing.`
-            : `The installed omp package is ${packageVersion}, but ${OMP_MINIMUM_SUPPORTED_VERSION} is required. Upgrade omp, then restart cosyncing.`,
+          packageVerdict === 'unverified' ? 'omp-package-version-above-verified' : 'omp-package-version-below-minimum',
+          unsupportedOmpVersionMessage(`The installed omp package is ${packageVersion}`, packageVerdict),
           { executable, packageVersion },
         );
       }
@@ -611,6 +887,35 @@ async function boundedDoctorProbe(
   return context.runReadOnly(executable, ['--version'], 3_000);
 }
 
+/** The version of the first of `candidates` that resolves and answers, or undefined. */
+async function doctorBunVersion(context: SetupDiagnosisContext, candidates: readonly string[]): Promise<string | undefined> {
+  for (const candidate of candidates) {
+    const bun = context.resolveExecutable(candidate);
+    if (!bun) continue;
+    const probe = await boundedDoctorProbe(context, bun);
+    return probe.status === 'ok' ? semanticVersionFromText(`${probe.stdout}\n${probe.stderr}`) : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * The Bun version an omp launcher would run on, for advice on which omp to install: the Bun beside
+ * a Windows shim, or the one a POSIX launcher's shebang names. Undefined for a native executable,
+ * an unreadable launcher, or a Bun that does not answer.
+ */
+export async function detectOmpBunVersion(context: SetupDiagnosisContext, executable: string): Promise<string | undefined> {
+  if (resolvedInvocationKind(executable, context.platform) === 'batch') {
+    return doctorBunVersion(context, batchBunCandidates(executable));
+  }
+  const launcherPath = canonical(executable);
+  const launcher = context.readTextPrefix
+    ? context.readTextPrefix(launcherPath, LAUNCHER_PREFIX_MAX_BYTES)
+    : context.readText(launcherPath, LAUNCHER_PREFIX_MAX_BYTES);
+  if (!launcher.ok) return undefined;
+  const bunCommand = bunCommandFromShebang(launcher.text);
+  return bunCommand ? doctorBunVersion(context, [bunCommand]) : undefined;
+}
+
 /** The only diagnosis a timed-out probe supports: nothing is known, and the fix is to try again. */
 function ompProbeTimedOutDiagnosis(what: 'launcher' | 'interpreter', executable: string): SetupCheck {
   return {
@@ -683,9 +988,7 @@ export async function diagnoseOmpBunRuntime(
     const reportedVersion = launcherProbe.status === 'ok'
       ? semanticVersionFromText(`${launcherProbe.stdout}\n${launcherProbe.stderr}`)
       : undefined;
-    const ompFloor = reportedVersion
-      ? compareSemanticVersions(reportedVersion, OMP_MINIMUM_SUPPORTED_VERSION)
-      : undefined;
+    const ompVerdict = reportedVersion ? ompVersionVerdict(reportedVersion) : undefined;
     if (!declaredVersion || !reportedVersion) {
       return {
         id: 'omp.bun-runtime',
@@ -712,21 +1015,15 @@ export async function diagnoseOmpBunRuntime(
         },
       };
     }
-    if (ompFloor === undefined || ompFloor !== 0) {
-      return {
-        id: 'omp.bun-runtime',
-        status: 'fail',
-        detailCode: ompFloor !== undefined && ompFloor > 0
-          ? 'bun-runtime-launcher-above-verified'
-          : 'bun-runtime-launcher-below-minimum',
-        summary: ompFloor !== undefined && ompFloor > 0
-          ? `The resolved omp launcher is omp ${reportedVersion}, but mutable sync is verified only for ${OMP_VERIFIED_VERSION}.`
-          : `The resolved omp launcher is omp ${reportedVersion}, but ${OMP_MINIMUM_SUPPORTED_VERSION} is required.`,
-        evidence: { installedVersion: reportedVersion, verifiedVersion: OMP_VERIFIED_VERSION },
-        remediation: ompFloor !== undefined && ompFloor > 0
-          ? { kind: 'manual', message: `Use omp ${OMP_VERIFIED_VERSION} or wait for a new protocol capture, then rerun doctor.` }
-          : { kind: 'command', message: 'Update omp to the verified version, then rerun doctor.', command: `bun install -g @oh-my-pi/pi-coding-agent@${OMP_VERIFIED_VERSION}` },
-      };
+    if (ompVerdict !== 'verified') {
+      const verdict = ompVerdict === 'unverified' ? 'unverified' : 'below-minimum';
+      return unsupportedOmpVersionDiagnosis(
+        verdict === 'unverified' ? 'bun-runtime-launcher-above-verified' : 'bun-runtime-launcher-below-minimum',
+        'The resolved omp launcher',
+        reportedVersion,
+        verdict,
+        await doctorBunVersion(context, batchBunCandidates(executable)),
+      );
     }
     contract = identity.contract;
     bunCandidates = batchBunCandidates(executable);
@@ -756,19 +1053,19 @@ export async function diagnoseOmpBunRuntime(
         return ompProbeTimedOutDiagnosis('launcher', context.displayPath(executable));
       }
       const version = probe.status === 'ok' ? ompIdentityVersion(`${probe.stdout}\n${probe.stderr}`) : undefined;
-      const comparison = version ? compareSemanticVersions(version, OMP_MINIMUM_SUPPORTED_VERSION) : undefined;
-      if (!version || comparison === undefined || comparison !== 0) {
+      const nativeVerdict = version ? ompVersionVerdict(version) : undefined;
+      if (!version || nativeVerdict !== 'verified') {
         return {
           id: 'omp.bun-runtime',
           status: 'fail',
           detailCode: version
-            ? comparison !== undefined && comparison > 0
+            ? nativeVerdict === 'unverified'
               ? 'native-runtime-version-above-verified'
               : 'native-runtime-version-below-minimum'
             : 'native-runtime-identity-unverified',
           summary: version
-            ? comparison !== undefined && comparison > 0
-              ? `The configured omp executable is omp ${version}, but mutable sync is verified only for ${OMP_VERIFIED_VERSION}.`
+            ? nativeVerdict === 'unverified'
+              ? `The configured omp executable is omp ${version}, but mutable sync is verified only for omp ${ompVerifiedVersionsText()}.`
               : `The configured omp executable is omp ${version}, but ${OMP_MINIMUM_SUPPORTED_VERSION} is required.`
             : 'The configured omp executable did not provide a recognizable omp version response.',
           ...(version ? { evidence: { installedVersion: version, minimumVersion: OMP_MINIMUM_SUPPORTED_VERSION } } : {}),
@@ -822,42 +1119,39 @@ export async function diagnoseOmpBunRuntime(
           },
         };
       }
-      const launcherComparison = compareSemanticVersions(launcherVersion, OMP_VERIFIED_VERSION);
-      if (launcherComparison === undefined || launcherComparison !== 0) {
-        const above = launcherComparison !== undefined && launcherComparison > 0;
-        return {
-          id: 'omp.bun-runtime',
-          status: 'fail',
-          detailCode: above ? 'bun-runtime-launcher-above-verified' : 'bun-runtime-launcher-below-minimum',
-          summary: above
-            ? `The omp Bun launcher is omp ${launcherVersion}, but mutable sync is verified only for ${OMP_VERIFIED_VERSION}.`
-            : `The omp Bun launcher is omp ${launcherVersion}, but ${OMP_MINIMUM_SUPPORTED_VERSION} is required.`,
-          evidence: { installedVersion: launcherVersion, verifiedVersion: OMP_VERIFIED_VERSION },
-          remediation: above
-            ? { kind: 'manual', message: `Use omp ${OMP_VERIFIED_VERSION} or wait for a new protocol capture, then rerun doctor.` }
-            : { kind: 'command', message: 'Update omp to the verified version, then rerun doctor.', command: `bun install -g @oh-my-pi/pi-coding-agent@${OMP_VERIFIED_VERSION}` },
-        };
+      const launcherVerdict = ompVersionVerdict(launcherVersion);
+      if (launcherVerdict !== 'verified') {
+        const verdict = launcherVerdict === 'unverified' ? 'unverified' : 'below-minimum';
+        return unsupportedOmpVersionDiagnosis(
+          verdict === 'unverified' ? 'bun-runtime-launcher-above-verified' : 'bun-runtime-launcher-below-minimum',
+          'The omp Bun launcher',
+          launcherVersion,
+          verdict,
+          await doctorBunVersion(context, [bunCommand]),
+        );
       }
       contract = { ...contract, version: launcherVersion };
     }
     const packageVersion = semanticVersionFromText(contract.version ?? '');
-    const packageComparison = packageVersion
-      ? compareSemanticVersions(packageVersion, OMP_VERIFIED_VERSION)
-      : undefined;
-    if (!packageVersion || packageComparison === undefined || packageComparison !== 0) {
+    const packageVerdict = packageVersion ? ompVersionVerdict(packageVersion) : undefined;
+    if (packageVersion && packageVerdict !== undefined && packageVerdict !== 'verified') {
+      return unsupportedOmpVersionDiagnosis(
+        packageVerdict === 'unverified' ? 'bun-runtime-package-above-verified' : 'bun-runtime-package-version-unverified',
+        'The installed omp package',
+        packageVersion,
+        packageVerdict,
+        await doctorBunVersion(context, [bunCommand]),
+      );
+    }
+    if (!packageVersion || packageVerdict === undefined) {
       return {
         id: 'omp.bun-runtime',
         status: 'fail',
-        detailCode: packageVersion && packageComparison !== undefined && packageComparison > 0
-          ? 'bun-runtime-package-above-verified'
-          : 'bun-runtime-package-version-unverified',
-        summary: packageVersion
-          ? `The installed omp package is ${packageVersion}, but mutable sync is verified only for ${OMP_VERIFIED_VERSION}.`
-          : 'The installed omp package version could not be verified.',
-        ...(packageVersion ? { evidence: { installedVersion: packageVersion, verifiedVersion: OMP_VERIFIED_VERSION } } : {}),
+        detailCode: 'bun-runtime-package-version-unverified',
+        summary: 'The installed omp package version could not be verified.',
         remediation: {
           kind: 'manual',
-          message: `Use omp ${OMP_VERIFIED_VERSION} or wait for a new protocol capture, then rerun doctor.`,
+          message: `${ompVerifiedInstallHint()}, then rerun doctor.`,
         },
       };
     }

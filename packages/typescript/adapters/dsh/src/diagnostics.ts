@@ -31,6 +31,7 @@ import {
   probeDshContract,
   DSH_CURRENT_VERSION,
   DSH_QUALIFIED_VERSION_LIST,
+  DSH_QUALIFIED_VERSIONS,
   DSH_UPGRADE_REQUIRED_STATUS,
   type DshContractProbe,
 } from './compatibility.ts';
@@ -112,6 +113,9 @@ function hostRemediation(
   }
   return { kind: 'command', message: 'Start the DeepSeek Harness host, then rerun doctor.', command: 'dsh web' };
 }
+
+/** The 0.2 builds the carrier contract was captured from; the host itself names none. */
+const DSH_REMOTE_VERIFIED_AGAINST = DSH_QUALIFIED_VERSIONS['remote-0.2'].join(', ');
 
 export const DSH_MINIMUM_VERSION: AgentMinimumVersion = Object.freeze({
   version: '0.1.0-rc.6',
@@ -232,7 +236,7 @@ function contractCheck(probe: DshContractProbe, baseUrl: string): SetupCheck {
         status: 'fail',
         detailCode: 'remote-carrier-refused',
         summary: 'The DeepSeek Harness host refused this request before routing it.',
-        evidence: { baseUrl, verifiedAgainst: DSH_CURRENT_VERSION },
+        evidence: { baseUrl, verifiedAgainst: DSH_REMOTE_VERIFIED_AGAINST },
         remediation: {
           kind: 'manual',
           message: 'The host fences on the address a request claims. Confirm '
@@ -248,7 +252,7 @@ function contractCheck(probe: DshContractProbe, baseUrl: string): SetupCheck {
       summary: probe.authenticated
         ? 'The host answers the 0.2 DeepSeek Harness carrier contract.'
         : 'The host answers the 0.2 DeepSeek Harness carrier and authenticates every request.',
-      evidence: { baseUrl, verifiedAgainst: DSH_CURRENT_VERSION },
+      evidence: { baseUrl, verifiedAgainst: DSH_REMOTE_VERIFIED_AGAINST },
     };
   }
   const unreachable = probe.reason === 'no-listener' || probe.reason === 'probe-failed';

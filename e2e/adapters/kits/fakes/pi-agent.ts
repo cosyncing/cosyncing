@@ -28,6 +28,20 @@
  *   [[question]]     an `extension_ui_request` select (Left / Right); the choice rides the reply
  *   [[expiringconfirm]] a confirm the runtime stops waiting on by itself, without a word to the
  *                    client (as Pi's dialog timeout or the run's abort settles one); the turn goes on
+ *   [[form]]         an omp `extension_ui_request` form (the HTML a real omp 19.1.0 `ask` sent); the
+ *                    reply's `data` rides the answer
+ *   [[expiringform:TAG]] an omp form the runtime stops waiting on once `release-TAG` appears: it says
+ *                    so with `cancel{targetId}`, as omp 19.1.0 does at a dialog's timeout, and goes on
+ *                    with the form's defaults
+ *   [[background:TAG]] omp 19.1.0's yield to background work: the run ends with a non-terminal
+ *                    `agent_end{awaitingAsyncWork}`; once `release-TAG` appears the runtime wakes
+ *                    itself (async-result message, answer, terminal agent_end) and settles
+ *   [[backgroundgone:TAG]] the same yield, but the work ends without a wake-up run: only
+ *                    `session_settled` follows `release-TAG` (source-modelled; no capture had it)
+ *                    An `abort` during either yield ends it without a wake-up run; the runtime then
+ *                    closes the run (terminal `agent_end`, `session_settled`) once `release-TAG`
+ *                    appears, and a prompt that arrives before that close runs after it
+ *                    (source-modelled from omp 19.1.0, see the `abort` command)
  *   [[hold:TAG]]     keep the run open until the control file `release-TAG` appears, or `abort`
  *   [[retry]]        one failed attempt (`auto_retry_start`/`auto_retry_end`) before the answer
  *   [[tool]]         a bash tool call and its result before the answer
@@ -73,6 +87,12 @@ export interface FakePiConfig {
   /** Fail the next prompt RPC with this error text. */
   failNextPrompt?: string;
 }
+
+/** Form HTML a real omp 19.1.0 `ask` sent (captured 2026-11-24 under `--mode rpc-ui`; an extension's
+ *  `formDialog` sends the same frame under Drive's `--mode rpc`): radio, checkbox and text. */
+export const OMP_CAPTURED_FORM_HTML = "<form>\n  <fieldset>\n    <legend>Color</legend>\n    <label><input type=\"radio\" name=\"color\" value=\"red\" checked> Red</label>\n    <label><input type=\"radio\" name=\"color\" value=\"blue\"> Blue</label>\n  </fieldset>\n  <fieldset>\n    <legend>Extras</legend>\n    <label><input type=\"checkbox\" name=\"extras\" value=\"cheese\"> Cheese</label>\n    <label><input type=\"checkbox\" name=\"extras\" value=\"ham\"> Ham</label>\n    <label><input type=\"checkbox\" name=\"extras\" value=\"olives\"> Olives</label>\n  </fieldset>\n  <label>Note <input type=\"text\" name=\"note\" required></label>\n</form>";
+/** The form a real omp 19.1.0 `ask` sent with `timeout: 20000`, then withdrew with `cancel{targetId}`. */
+export const OMP_CAPTURED_EXPIRING_FORM_HTML = "<form>\n  <p>Proceed with the deploy?</p>\n  <label><input type=\"radio\" name=\"proceed\" value=\"yes\" checked> Yes</label>\n  <label><input type=\"radio\" name=\"proceed\" value=\"no\"> No</label>\n</form>";
 
 export const PI_FAKE_VERSION = '0.84.0';
 export const OMP_FAKE_VERSION = '17.4.2';
@@ -202,8 +222,10 @@ function runFakePi(): void {
   // ------------------------------------------------------------- the RPC process
   const cwd = process.cwd();
   const sessionArg = argValue('--session');
-  const sessionsRoot = argValue('--session-dir')
-    ?? process.env.PI_CODING_AGENT_SESSION_DIR
+  // Pi 1.6.0 and omp 19.1.0 (captured) take the session directory from `--session-dir`, else from a
+  // non-empty PI_CODING_AGENT_SESSION_DIR.
+  const sessionDir = argValue('--session-dir') ?? (process.env.PI_CODING_AGENT_SESSION_DIR || undefined);
+  const sessionsRoot = sessionDir
     ?? join(process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? '.', '.pi', 'agent'), 'sessions');
   record({
     kind: 'spawn',
@@ -295,6 +317,10 @@ function runFakePi(): void {
   let running = false;
   let aborted = false;
   let stopHold: (() => void) | undefined;
+  /** The tag of the background wait the open yield is in, while it is in one. */
+  let yieldTag: string | undefined;
+  /** Set from an abort during a yield until the runtime has closed that run. */
+  let abortClosing: Promise<void> | undefined;
   let turnNumber = 0;
   const steers: Input[] = [];
   const awaiting = new Map<string, (response: Json) => void>();
@@ -372,6 +398,15 @@ function runFakePi(): void {
     tickRelease();
   });
 
+  /** `release-TAG` appearing, whatever else happens meanwhile. */
+  const untilReleased = (tag: string): Promise<void> => new Promise((resolve) => {
+    const tickRelease = (): void => {
+      if (existsSync(join(config.controlDir, `release-${tag}`))) return resolve();
+      setTimeout(tickRelease, 20);
+    };
+    tickRelease();
+  });
+
   const ui = (request: Json): Promise<Json> => new Promise((resolve) => {
     awaiting.set(request.id, resolve);
     emit({ type: 'extension_ui_request', ...request });
@@ -387,6 +422,21 @@ function runFakePi(): void {
     if (text.includes('[[question]]')) {
       const reply = await ui({ id: `question-${process.pid}-${turnNumber}`, method: 'select', title: 'Path', message: 'Which path?', options: ['Left', 'Right'] });
       outcome = typeof reply.value === 'string' && reply.value ? ` (answered ${reply.value})` : ' (question unanswered)';
+    }
+    if (text.includes('[[form]]')) {
+      const reply = await ui({ id: `form-${process.pid}-${turnNumber}`, method: 'form', html: OMP_CAPTURED_FORM_HTML });
+      outcome = reply.cancelled === true ? ' (form cancelled)' : ` (form ${JSON.stringify(reply.data ?? null)})`;
+    }
+    const expiring = /\[\[expiringform:([\w-]+)\]\]/.exec(text)?.[1];
+    if (expiring) {
+      // omp settles the form itself at its timeout: it tells the client to close the dialog, takes
+      // the form's defaults, and ignores any later reply (one here is recorded as a fault).
+      const id = `form-${process.pid}-${turnNumber}-expiring`;
+      awaiting.set(id, () => record({ kind: 'fault', message: `reply to a form the runtime already settled: ${id}` }));
+      emit({ type: 'extension_ui_request', id, method: 'form', html: OMP_CAPTURED_EXPIRING_FORM_HTML, timeout: 20000 });
+      await released(expiring);
+      emit({ type: 'extension_ui_request', id: `cancel-${process.pid}-${turnNumber}`, method: 'cancel', targetId: id });
+      outcome = ' (form timed out: proceed=yes)';
     }
     if (text.includes('[[tool]]')) {
       const call = { type: 'toolCall', id: `call-${process.pid}-${turnNumber}`, name: 'bash', arguments: { command: 'echo fixture' } };
@@ -459,6 +509,41 @@ function runFakePi(): void {
       if (aborted) steers.length = 0;
       input = steers.shift();
     }
+    const background = /\[\[background(gone)?:([\w-]+)\]\]/.exec(first.text);
+    if (background && !aborted) {
+      // omp 19.1.0 (captured): the run yields to work it started in the background. The session
+      // accepts prompts meanwhile, and is settled only once that work is done.
+      emit({ type: 'agent_end', messages: [], isTerminal: false, yielded: true, awaitingAsyncWork: true });
+      running = false;
+      yieldTag = background[2]!;
+      await released(background[2]!);
+      // An abort ended the wait: the `abort` command closes the run, and nothing wakes it.
+      if (aborted) return;
+      yieldTag = undefined;
+      // `[[backgroundgone]]` is source-modelled, not captured: omp's async-job manager settles the
+      // session without a wake-up run when no result is left to deliver (a killed job, or a result
+      // another turn already took). Every capture woke up.
+      if (!background[1]) {
+        running = true;
+        emit({ type: 'agent_start' });
+        turnNumber += 1;
+        emit({ type: 'turn_start' });
+        const notice: Json = {
+          role: 'custom', customType: 'async-result', display: true, attribution: 'agent',
+          content: '<system-notice>\nBackground job bg_1 (fixture) has completed.\n</system-notice>', timestamp: tick(),
+        };
+        emit({ type: 'message_start', message: snapshot(notice) });
+        emit({ type: 'message_end', message: snapshot(notice) });
+        persistMessage(notice);
+        assistant([{ type: 'text', text: 'background done' }], 'stop');
+        record({ kind: 'turn-end', text: 'background wake-up', session: file, aborted: false });
+        emit({ type: 'turn_end', toolResults: [] });
+        emit({ type: 'agent_end', messages: [], isTerminal: true, yielded: true });
+        running = false;
+      }
+      emit({ type: 'session_settled' });
+      return;
+    }
     emit({ type: 'agent_end', messages: [] });
     running = false;
   };
@@ -486,6 +571,11 @@ function runFakePi(): void {
   };
 
   const handle = (command: Json): void => {
+    // Read only after an aborted yield's close (see `abort`): recorded when it is handled.
+    if (abortClosing && command.type === 'prompt') {
+      void abortClosing.then(() => handle(command));
+      return;
+    }
     record({ kind: 'recv', session: file, model: model.id, frame: command });
     switch (command.type) {
       case 'get_state':
@@ -559,6 +649,23 @@ function runFakePi(): void {
         record({ kind: 'abort', session: file, midTurn: running });
         aborted = true;
         stopHold?.();
+        if (yieldTag && !running) {
+          // omp 19.1.0 source (source-modelled, not captured): `abort` awaits `session.abort`
+          // (rpc-mode.ts). A paused run counts as stoppable, so the abort sets
+          // `autoResumeSuppressed` and the awaited work wakes nothing; once the abort has unwound,
+          // `#checkRun` closes the run and emits its stored agent_end, which the wire encodes
+          // terminal (`#closeRun`, loop-end-wire.ts), and the session settles. Prompts start through
+          // the serial command queue behind the abort, so one sent meanwhile runs after the close.
+          // The fake holds that close until `release-TAG`.
+          const tag = yieldTag;
+          yieldTag = undefined;
+          abortClosing = untilReleased(tag).then(() => {
+            abortClosing = undefined;
+            record({ kind: 'yield-closed', session: file });
+            emit({ type: 'agent_end', messages: [], isTerminal: true, yielded: true });
+            emit({ type: 'session_settled' });
+          });
+        }
         return ok(command);
       }
       case 'compact': {
@@ -570,16 +677,26 @@ function runFakePi(): void {
       }
       case 'fork':
       case 'clone': {
+        // omp has no clone, and its RPC fork exists only from 19 on (17.4.2 has none).
+        const ompFork = dialect === 'omp' && Number(String(config.version).split('.')[0]) >= 19;
+        if (dialect === 'omp' && (command.type === 'clone' || !ompFork)) {
+          record({ kind: 'unimplemented', what: String(command.type) });
+          return fail(command, `Unknown command: ${String(command.type)}`);
+        }
         if (config.cancelFork) return ok(command, { cancelled: true });
         const copyId = crypto.randomUUID();
-        const copy = piSessionFilePath(sessionsRoot, cwd, copyId);
+        // Captured `SessionManager.open` (Pi 1.6.0, omp 19.1.0): the copy goes flat into the session
+        // directory, and a session opened without one writes beside its own file.
+        const copy = join(sessionDir ?? dirname(sessionArg ?? file), `${fileStamp(Date.now())}_${copyId}.jsonl`);
         mkdirSync(dirname(copy), { recursive: true });
         const lines = existsSync(file) ? readFileSync(file, 'utf8').split('\n').filter((line) => line.trim()) : [];
         let kept = lines;
-        if (command.type === 'fork') {
+        // Pi forks just before the chosen user entry and needs one; omp 19.1.0 (captured) keeps the
+        // chosen entry, and a bare fork copies the whole session.
+        if (command.type === 'fork' && (dialect !== 'omp' || command.entryId !== undefined)) {
           const at = lines.findIndex((line) => { try { return JSON.parse(line).id === command.entryId; } catch { return false; } });
           if (at < 0) return fail(command, 'Invalid entry ID for forking');
-          kept = lines.slice(0, at);
+          kept = lines.slice(0, dialect === 'omp' ? at + 1 : at);
         }
         const rewritten = kept.map((line) => {
           const entry = JSON.parse(line);
@@ -588,7 +705,7 @@ function runFakePi(): void {
         if (!rewritten.length) rewritten.push(JSON.stringify(piHeader(dialect, copyId, cwd, Date.now())[0]));
         writeFileSync(copy, `${rewritten.join('\n')}\n`);
         switchTo(copy, copyId);
-        return ok(command, command.type === 'fork' ? { cancelled: false, text: '' } : { cancelled: false });
+        return ok(command, command.type === 'fork' && dialect !== 'omp' ? { cancelled: false, text: '' } : { cancelled: false });
       }
       case 'export_html': {
         const target = String(command.outputPath ?? '');

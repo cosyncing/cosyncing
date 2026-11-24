@@ -303,6 +303,13 @@ export class DshAuthSession {
   private cookie?: DshCookie;
   /** Private-memory-only credential. Never persisted, never logged, never returned. */
   private launchToken?: string;
+  /**
+   * Set by {@link releaseLaunchToken}, so the next token adopted is treated as
+   * the new launch it is. The broker ends every launch before it spawns the
+   * next one, so "released, then adopted" is the ordinary order of a restart,
+   * and it must reset what "replaced while held" resets.
+   */
+  private launchTokenReleased = false;
   private generation = 0;
   /**
    * Launch/ownership revision. Separate from {@link generation} because the two
@@ -466,13 +473,17 @@ export class DshAuthSession {
    *
    * Replaces any previous token outright: one owned launch at a time, and a
    * replacement host's token invalidates the one from the host it replaced.
+   * The first token after a release is a replacement too.
    */
   adoptLaunchToken(token: string): void {
     if (!token) return;
-    if (this.launchToken !== undefined && this.launchToken !== token) {
-      // A second token while one is already held means the host was restarted or
-      // taken over. Anything being exchanged with the old one is stale, and a
-      // cookie it produces is for a launch that no longer exists.
+    const newLaunch = this.launchToken !== undefined ? this.launchToken !== token : this.launchTokenReleased;
+    this.launchTokenReleased = false;
+    if (newLaunch) {
+      // A second token while one is already held, or a token after the last
+      // launch was released, means the host was restarted or taken over.
+      // Anything being exchanged with the old one is stale, and a cookie it
+      // produces is for a launch that no longer exists.
       this.ownership += 1;
       this.inFlight = undefined;
       // The replacement republishes the state rather than the attempt it just
@@ -505,6 +516,7 @@ export class DshAuthSession {
     this.ownership += 1;
     this.inFlight = undefined;
     this.launchToken = undefined;
+    this.launchTokenReleased = true;
     if (keepCookie) return;
     this.publishCredential(undefined);
     this.setState('absent', 'no-credential', 'no DeepSeek Harness credential has been exchanged for this endpoint yet');
@@ -540,6 +552,9 @@ export class DshAuthSession {
     this.generation += 1;
     this.ownership += 1;
     this.inFlight = undefined;
+    // A refusal seen after a release is about the host now at the address,
+    // whose launch token comes next, so adopting that token must not lift it.
+    this.launchTokenReleased = false;
     if (reason === 'credential-refused') {
       const cookie = this.cookie;
       this.enrollmentWithdrawn = true;
@@ -600,10 +615,11 @@ export class DshAuthSession {
    *
    * A Host/Origin refusal is a statement about the ADDRESS, and the address is
    * fixed for the life of this session, so firing the same request again is a
-   * loop with no premise behind it. Every other block is a statement about a
-   * credential or about being able to read it, and both are re-observable —
-   * which is precisely how a repaired enrollment recovers a blocked session
-   * without anyone restarting the broker.
+   * loop with no premise behind it. A new launch is a new fact, though: its
+   * token lifts the block in {@link adoptLaunchToken}. Every other block is a
+   * statement about a credential or about being able to read it, and both are
+   * re-observable — which is precisely how a repaired enrollment recovers a
+   * blocked session without anyone restarting the broker.
    */
   private refusalStands(): boolean {
     return this.stateValue === 'blocked' && this.reasonValue === 'host-or-origin-refused';

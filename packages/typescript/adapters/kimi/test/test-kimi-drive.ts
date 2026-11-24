@@ -76,6 +76,15 @@ function check(name: string, ok: boolean, detail = ''): void {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
 }
 
+/**
+ * The Kimi Code 2.7.2 capture, for the one KAP answer this 0.x-shaped suite
+ * serves verbatim: the 40931 session-lock refusal. The rest of the KAP surface
+ * is pinned in `test-kimi-server.ts`.
+ */
+const KAP_CAPTURE = await Bun.file(new URL('./fixtures/kimi-2.7.2.json', import.meta.url)).json() as {
+  rest: Record<string, { response: unknown } | undefined>;
+};
+
 // ── Fake kap-server ─────────────────────────────────────────────────────────
 
 const SERVER_ID = 'srv_drive_fixture';
@@ -2046,6 +2055,42 @@ try {
     const reattach = await threw(() => adapter.attach(CREATED_ID, 'live'));
     check('a demoted session refuses a fresh live attach',
       isOwnershipConflictError(reattach), `${reattach?.name}`);
+    await conn.close();
+  }
+
+  {
+    // THE SERVER CAN PROVE THE SECOND WRITER ITSELF. Kimi Code 2.7+ refuses a
+    // write to a session another Kimi Code process holds — a terminal `kimi`,
+    // or Kimi Desktop — with envelope code 40931. That is the same verdict the
+    // detector above reaches from rows, delivered by the server, so it demotes
+    // the same way, at once. The envelope is the one 2.7.2 answered a prompt
+    // with while a terminal held the session, served verbatim from the capture.
+    const locked = KAP_CAPTURE.rest.promptWhileLocked!.response;
+    const { adapter, conn, rows } = await drivenSession();
+    const savedPrompt = promptAnswer;
+    promptAnswer = locked;
+    const beforeWrites = writes().length;
+    const refused = await threw(() => conn.sendPrompt({ text: 'while a terminal holds it' }));
+    check('a session-locked refusal (40931) demotes the connection and refuses with the demoted refusal',
+      refused?.message === KIMI_DEMOTED_REFUSAL
+        && conn.demotedToObserve === true
+        && conn.info.attachMode === 'observe'
+        && conn.info.control?.drive.supported === false
+        && writes().length === beforeWrites + 1,
+      `${refused?.message} demoted=${conn.demotedToObserve} writes=${writes().length - beforeWrites}`);
+    check('...and says why exactly once',
+      rows.filter((row) => row.type === 'error' && row.message === KIMI_DIVERGENCE_MESSAGE).length === 1);
+    const again = await threw(() => conn.sendPrompt({ text: 'again' }));
+    const stop = await threw(() => conn.runCommand('stop'));
+    check('every later write refuses with ZERO HTTP, the stop included',
+      again?.message === KIMI_DEMOTED_REFUSAL && stop?.message === KIMI_DEMOTED_REFUSAL
+        && writes().length === beforeWrites + 1,
+      `writes=${writes().length - beforeWrites}`);
+    const roster = await adapter.discoverSessions();
+    check('the locked session is foreign again on the roster',
+      roster.find((row) => row.id === CREATED_ID)?.control?.drive.supported === false,
+      JSON.stringify(roster.find((row) => row.id === CREATED_ID)?.control));
+    promptAnswer = savedPrompt;
     await conn.close();
   }
 

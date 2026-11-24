@@ -94,6 +94,7 @@ import {
   type SessionInfo,
   type SetupDiagnosisContext,
 } from '@cosyncing/adapter-api';
+import { statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { homedir } from 'node:os';
 import { diagnoseKimiSetup, KIMI_SUPPORTED_RANGE } from './diagnostics.ts';
@@ -112,8 +113,10 @@ import {
   type KimiInstanceRefusal,
   type KimiInstanceScan,
   type KimiVerifiedInstance,
+  type KimiWire,
 } from './server.ts';
 import { KimiDriveHttp, type KimiWriteFetch } from './drive-http.ts';
+import { KimiKapHub } from './kap.ts';
 import {
   KIMI_FOREIGN_DRIVE_REASON,
   KIMI_OBSERVE_ONLY_REASON,
@@ -129,7 +132,7 @@ import {
   type KimiV1Session,
   type KimiV2SessionPage,
 } from './mapping.ts';
-import { KimiObserveConnection, type KimiObserveOptions } from './observe.ts';
+import { KimiObserveConnection, defaultSocketFactory, type KimiObserveOptions } from './observe.ts';
 import { KimiDriveConnection, type KimiDriveOptions } from './drive.ts';
 import { kimiSessionWireRoot } from './usage.ts';
 import {
@@ -322,8 +325,8 @@ const ATTACH_REFUSAL: Record<KimiInstanceRefusal, string> = {
   'startup-mismatch': 'the Kimi server on this port did not start when its registry record says it did',
   'version-mismatch': 'the Kimi server on this port reports a different version from the one its registry record records',
   incomplete: 'the Kimi instance registry holds more records than the bounded scan examines; cosyncing will not pick a server from a partial view',
-  'unsupported-version': `the running Kimi Code server is a version cosyncing does not support yet: it supports Kimi Code ${KIMI_SUPPORTED_RANGE}, and Kimi Code 2.x replaced the local server protocol`,
-  'unsupported-protocol': `the running Kimi Code server speaks the Kimi Agent Protocol, which cosyncing does not support yet: it supports Kimi Code ${KIMI_SUPPORTED_RANGE}`,
+  'unsupported-version': `the running Kimi Code server is a version cosyncing does not support: it supports Kimi Code ${KIMI_SUPPORTED_RANGE}`,
+  'unsupported-protocol': `the running Kimi Code server speaks a local server protocol cosyncing does not support for its version: it supports Kimi Code ${KIMI_SUPPORTED_RANGE}`,
 };
 
 /**
@@ -433,7 +436,39 @@ export interface KimiAdapterOptions {
    * describe a machine with or without Kimi installed without having either.
    */
   resolveExecutable?: (command: string) => string | undefined;
+  /**
+   * What identifies an installed executable's CONTENT, injected so a suite can
+   * stand in for an upgrade without writing binaries. Production stats the
+   * file; see {@link kimiExecutableIdentity}.
+   */
+  executableIdentity?: (path: string) => string | undefined;
+  /** Injected clock for the launch attribution below; production uses `Date.now`. */
+  now?: () => number;
 }
+
+/**
+ * The installed executable as a value that changes when the file is replaced:
+ * path, size, modification time and inode. An upgrade or reinstall rewrites at
+ * least one of them, which is what lifts {@link KimiAdapter}'s launch
+ * suppression. Undefined when the file cannot be read, which suppresses
+ * nothing.
+ */
+export function kimiExecutableIdentity(path: string): string | undefined {
+  try {
+    const stat = statSync(path);
+    return `${path}|${stat.size}|${stat.mtimeMs}|${stat.ino}`;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * How long after a launch was offered a registry record may say it started and
+ * still be read as THAT launch. `kimi web` writes its record within a second of
+ * starting; the broker's readiness budget is {@link KIMI_MANAGED_HOST_READY_MS}.
+ * A record started before the offer is a host somebody else launched.
+ */
+const KIMI_LAUNCH_ATTRIBUTION_MS = 60_000;
 
 export class KimiAdapter implements AgentBackend {
   readonly id = 'kimi';
@@ -669,9 +704,10 @@ export class KimiAdapter implements AgentBackend {
    * and a write is the one operation where landing on the wrong server cannot
    * be undone.
    */
-  private driveClient(instance: KimiDiscoveredInstance, token: string | undefined): KimiDriveHttp {
+  private driveClient(instance: KimiDiscoveredInstance, token: string | undefined, wire: KimiWire): KimiDriveHttp {
     return new KimiDriveHttp({
       baseUrl: instance.baseUrl,
+      wire,
       ...(token ? { token } : {}),
       ...(this.options.writeFetchImpl ? { fetchImpl: this.options.writeFetchImpl } : {}),
     });
@@ -694,8 +730,51 @@ export class KimiAdapter implements AgentBackend {
    */
   private async verifiedInstance(cancel?: AbortSignal): Promise<{ resolved: KimiVerifiedInstance; token: string | undefined }> {
     const token = this.token();
-    const resolved = await resolveVerifiedInstance(this.scan(), (instance) => this.client(instance, token, cancel));
+    const scan = this.scan();
+    const resolved = await resolveVerifiedInstance(scan, (instance) => this.client(instance, token, cancel), this.kap);
+    if (!resolved.ok && isUnsupportedHost(resolved.reason)) this.noteUnsupportedHost(scan.live[0]);
     return { resolved, token };
+  }
+
+  /**
+   * This adapter's Kimi Agent Protocol state (Kimi Code 2.7.0+): which wire the
+   * gate verified at which origin, and the per-session live state the KAP
+   * socket hears and the translated reads answer from. See `kap.ts`.
+   */
+  private readonly kap = new KimiKapHub();
+
+  // ── Launch suppression for an installed version this adapter refuses ──────
+  //
+  // With no host running the broker starts `kimi web` from the installed
+  // binary. When that binary is a version the gate refuses, the host it starts
+  // is refused too, the start is abandoned after its readiness window, and the
+  // next supervision pass sees no host and starts it again — until the restart
+  // budget suspends the agent. Each cycle runs an unsupported Kimi for nothing.
+  //
+  // So a refusal is ATTRIBUTED: when the refused host's registry record started
+  // after this adapter last offered a launch (within {@link
+  // KIMI_LAUNCH_ATTRIBUTION_MS}), it is the host that launch produced, and the
+  // executable it was offered from is remembered. While that executable is
+  // unchanged, {@link describeManagedHost} offers no launch at all; replacing
+  // it (an upgrade, a reinstall) changes its identity and lifts the hold. A
+  // host the user started themselves is never attributed, so it suppresses
+  // nothing. Doctor names the installed version and the supported range.
+
+  /** When a launch was last offered, and from which executable. */
+  private launchOffer?: { at: number; executable: string };
+  /** The executable whose launches the gate refused. */
+  private refusedExecutable?: string;
+
+  private noteUnsupportedHost(instance: KimiDiscoveredInstance | undefined): void {
+    const offer = this.launchOffer;
+    if (!offer || instance?.startedAt === undefined) return;
+    const after = instance.startedAt - offer.at;
+    if (after < 0 || after > KIMI_LAUNCH_ATTRIBUTION_MS) return;
+    this.refusedExecutable = offer.executable;
+  }
+
+  private executableIdentity(path: string): string | undefined {
+    return (this.options.executableIdentity ?? kimiExecutableIdentity)(path);
   }
 
   /**
@@ -732,7 +811,34 @@ export class KimiAdapter implements AgentBackend {
     const scan = this.scan();
     if (scan.truncated || scan.live.length > 1) return null;
     const instance = scan.live[0];
-    const executable = this.hostExecutable();
+    let executable = this.hostExecutable();
+    if (executable) {
+      const identity = this.executableIdentity(executable);
+      if (identity !== undefined && identity === this.refusedExecutable) {
+        // See "Launch suppression" above: this binary's last host was refused.
+        executable = undefined;
+      } else if (!instance && identity !== undefined) {
+        // Only an ABSENT host leads to a start, so only then is an offer made.
+        //
+        // One start describes the host several times before its record
+        // appears: once to locate it before the spawn, then on each readiness
+        // poll. Kimi stamps `started_at` before it writes the record, so a poll
+        // in between that moved the offer forward would leave it AFTER the
+        // record's start, and the refusal would no longer be attributed to
+        // this launch. An offer for the same executable that is still inside
+        // its window therefore stands.
+        const now = (this.options.now ?? Date.now)();
+        const offer = this.launchOffer;
+        if (
+          !offer
+          || offer.executable !== identity
+          || now < offer.at
+          || now - offer.at > KIMI_LAUNCH_ATTRIBUTION_MS
+        ) {
+          this.launchOffer = { at: now, executable: identity };
+        }
+      }
+    }
     return {
       // The HOME, not a base URL: `kimi web` chooses its own port, so the home
       // is what decides which registry — and therefore which server — this
@@ -1349,7 +1455,7 @@ export class KimiAdapter implements AgentBackend {
     if (!resolved.ok) {
       throw new Error(ATTACH_REFUSAL[resolved.reason]);
     }
-    const { instance, http } = resolved;
+    const { instance, http, wire } = resolved;
     const known = (await this.discoverFrom(http)).find((session) => session.id === sessionId);
     // A promotion is authorized against a session the user could see. The
     // synthesized fallback below is deliberately foreign-shaped and exists for
@@ -1468,10 +1574,13 @@ export class KimiAdapter implements AgentBackend {
           http: current.http,
           wsUrl: wsUrlFor(current.instance),
           ...(currentToken !== undefined ? { token: currentToken } : {}),
-          ...(drive ? { driveHttp: this.driveClient(current.instance, currentToken) } : {}),
+          ...(drive ? { driveHttp: this.driveClient(current.instance, currentToken, current.wire) } : {}),
         };
       },
       ...(this.options.observe ?? {}),
+      // Every socket goes through the KAP shim, which speaks KAP to a server the
+      // gate last verified as KAP and passes every other socket through as-is.
+      socketFactory: this.kap.socketFactory(this.options.observe?.socketFactory ?? defaultSocketFactory),
     };
     if (!drive) {
       return new KimiObserveConnection(info, http, wsUrlFor(instance), token, options);
@@ -1487,7 +1596,7 @@ export class KimiAdapter implements AgentBackend {
       ...(this.options.writeStreamWaitMs !== undefined
         ? { writeStreamWaitMs: this.options.writeStreamWaitMs }
         : {}),
-      driveHttp: this.driveClient(instance, token),
+      driveHttp: this.driveClient(instance, token, wire),
       ...(pendingModel ? { pendingModel } : {}),
       // Demotion is the adapter's business too: the owned set is the single
       // source of drive eligibility, so a proven foreign writer has to remove
@@ -1613,7 +1722,7 @@ export class KimiAdapter implements AgentBackend {
     const { resolved, token } = await this.verifiedInstance();
     if (!resolved.ok) throw createRefusal(resolved.reason);
     const title = opts?.title?.trim();
-    const outcome = await this.driveClient(resolved.instance, token).createSession({
+    const outcome = await this.driveClient(resolved.instance, token, resolved.wire).createSession({
       ...(title ? { title } : {}),
       metadata: { cwd: directory },
     });
@@ -1668,7 +1777,7 @@ export class KimiAdapter implements AgentBackend {
     const known = (await this.discoverFrom(resolved.http)).find((session) => session.id === sessionId);
     const name = title?.trim() || '';
     if (!name) return;
-    await this.driveClient(resolved.instance, token).renameSession(sessionId, { title: name });
+    await this.driveClient(resolved.instance, token, resolved.wire).renameSession(sessionId, { title: name });
     if (known) return { ...known, title: name, titlePending: undefined };
     return {
       id: sessionId,

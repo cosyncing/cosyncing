@@ -1271,7 +1271,7 @@ export class DshSessionConnection implements SessionConnection {
           const abort = new AbortController(); this.imageAborts.add(abort);
           const timer = setTimeout(() => abort.abort(), 2000);
           let outcome: Awaited<ReturnType<NonNullable<DshSessionChannel['attachment']>>>;
-          try { outcome = await this.channel.attachment!(this.info.id, ref.attachmentId, abort.signal); }
+          try { outcome = await this.channel.attachment!(this.info.id, ref.ref, abort.signal); }
           finally { clearTimeout(timer); this.imageAborts.delete(abort); }
           if (!outcome.ok || epoch !== this.imageEpoch || this.closed) return undefined;
           const attachment = outcome.value.attachment as { attachmentId?: unknown; mediaType?: unknown; bytes?: unknown } | undefined;

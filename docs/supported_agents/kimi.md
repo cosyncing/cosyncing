@@ -1,9 +1,9 @@
 # Kimi Code (experimental)
 
 cosyncing talks to the local server Kimi Code starts with `kimi web --no-open`,
-over its REST and WebSocket API. It was verified against Kimi Code 0.38.0; the
-server API is marked experimental upstream, so the floor is the exact tested
-version rather than an inferred earlier one.
+over its REST and WebSocket API. It was verified against Kimi Code 0.38.0 and
+2.7.2; the server API is marked experimental upstream, so each bound is a tested
+version rather than an inferred one.
 
 The adapter is registered for every broker. Clients built before the contract
 revision that added tolerant agent decoding are not shown it — one row they
@@ -11,20 +11,52 @@ cannot decode would cost them their whole agent list.
 
 ## Supported versions
 
-cosyncing supports Kimi Code 0.35.0 and newer, below 2.0.0. Kimi Code 2.x
-replaced the local server protocol with the Kimi Agent Protocol, which cosyncing
-does not speak yet. When the running `kimi web` reports 2.0.0 or newer
-(prereleases included), cosyncing sends it nothing; when a server's metadata
-announces the Kimi Agent Protocol, cosyncing stops after reading it. Either way,
-Kimi shows as unavailable, its sessions are not listed, new sessions cannot be
-created, and `cosyncing doctor` names the version it found and the supported
-range.
+cosyncing supports two ranges of Kimi Code:
 
-Kimi Code 0.43 can update itself to the newest release, which is 2.x, when you
-start it interactively, and `kimi update` installs 2.x as well. To stay on a
-supported version, set `KIMI_CODE_NO_AUTO_UPDATE=1` in the environment you
-start Kimi Code from. cosyncing sets that variable itself when it starts
-`kimi web` and when doctor reads the installed version.
+- 0.35.0 and newer, below 2.0.0, over the 0.x local server protocol.
+- 2.7.0 and newer, over the Kimi Agent Protocol 1.x, which Kimi Code 2.7.0
+  introduced.
+
+Kimi Code 2.0.0 to 2.6.x predate the Kimi Agent Protocol 1.0 and differ from
+the 0.x protocol, so they are not supported. When the running `kimi web` reports one of those versions
+(prereleases included), cosyncing sends it nothing. cosyncing also checks that
+the protocol a server announces in its metadata is the one its version speaks,
+and stops after that read when it is not. Either way, Kimi shows as unavailable,
+its sessions are not listed, new sessions cannot be created, and
+`cosyncing doctor` names the version it found and the supported ranges.
+
+When the Kimi Code installed on the machine is a version cosyncing does not
+support, the cosyncing service starts `kimi web` from it once. After that start
+is refused, the service does not start it again until the installed `kimi`
+changes, for example after an upgrade or a reinstall.
+
+Kimi Code can update itself when you start it interactively, and `kimi update`
+installs the newest release, which may be one cosyncing does not support yet.
+To stay on a version you know works, set `KIMI_CODE_NO_AUTO_UPDATE=1` in the
+environment you start Kimi Code from. cosyncing sets that variable itself when
+it starts `kimi web` and when doctor reads the installed version.
+
+## Kimi Code 2.7 and newer
+
+cosyncing maps Kimi Code 2.7's protocol onto the behavior described under
+"Current behavior". The differences:
+
+- cosyncing uses the server `kimi web` starts and ignores the separate server
+  Kimi Desktop runs, even when both use the same Kimi home.
+- A session that a terminal `kimi` or Kimi Desktop has open is listed and can
+  be observed through `kimi web`, but Kimi only shows that session's state as
+  it was last saved, so it can look idle while the other program works in it.
+  Kimi refuses writes to it while the other program holds it. If cosyncing is
+  driving such a session, it stops driving it and switches to observing, the
+  same as when it detects another writer.
+- Stop ends the running turn only. Background shell commands and subagents
+  that the turn started keep running.
+- A session shows as working while a turn runs. Once the turn ends it shows as
+  idle, even while background commands or subagents it started are still
+  working.
+- The model, effort and context-window details of a session appear once the
+  session is open in cosyncing, not on the session list.
+- An attached file shows as a notice with its name, type and size.
 
 ## Current behavior
 

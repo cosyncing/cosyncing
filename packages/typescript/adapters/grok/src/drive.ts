@@ -43,7 +43,7 @@ import {
   type GrokTerminalSummary,
 } from './observe.ts';
 import {
-  discoverGrokStore,
+  findGrokStoredSession,
   type GrokStoredSession,
   type GrokUpdatesRead,
 } from './store.ts';
@@ -386,7 +386,19 @@ class LazyGrokAcpTransport implements GrokAcpTransport {
                   this.hooks.onUpdate(event.method, event.params as AcpSessionUpdateParams);
                   return null;
                 }
-                return undefined;
+                // Grok's other notices in its `_x.ai/` wire namespace carry nothing this child
+                // reads: turns settle from `session/prompt`, `_x.ai/session/update` and the
+                // durable log. Grok 1.0.92 sends many of them (one Drive capture: 275
+                // `_x.ai/session_notification`, mostly a `tool_call_delta_chunk` per streamed
+                // tool-argument chunk, plus `queue/changed`, `sessions/changed` and
+                // `session/prompt_complete`), and each one was a broker log line. Dropped here
+                // as the probe clients drop them. Still traced: requests, other namespaces, and
+                // an `_x.ai/session/update` whose params the branch above could not read.
+                return event.kind === 'notification'
+                  && event.method.startsWith('_x.ai/')
+                  && event.method !== '_x.ai/session/update'
+                  ? null
+                  : undefined;
               },
             },
           },
@@ -450,17 +462,27 @@ class LazyGrokAcpTransport implements GrokAcpTransport {
       && this.desiredMode !== 'default') {
       throw new Error(`Grok session/load omitted requested permission mode ${this.desiredMode}.`);
     }
-    const durable = (await discoverGrokStore({ root: this.session.storeRoot }))
-      .find((candidate) => candidate.id === this.session.id);
+    const durableModelMatches = (row: GrokStoredSession): boolean =>
+      this.desiredModel === undefined || row.model === this.desiredModel;
+    // A promptless session's stored effort may lag a load that confirmed the requested one.
+    const durableEffortMatches = (row: GrokStoredSession): boolean =>
+      this.desiredEffort === undefined
+      || row.currentModel?.reasoningEffort === this.desiredEffort
+      || (row.messageCount === 0 && effectiveEffort === this.desiredEffort);
+    // Re-read, not read once: Grok rewrites summary.json around session/load, and a read can
+    // miss the row or still see the summary from before this relaunch (see
+    // findGrokStoredSession). Either would revoke Drive for good, so keep reading, within the
+    // same bound, until the row shows the requested model and effort.
+    const durable = await findGrokStoredSession(
+      this.session.storeRoot,
+      this.session.id,
+      (row) => durableModelMatches(row) && durableEffortMatches(row),
+    );
     if (!durable) throw new Error('Grok session/load did not preserve the durable session identity.');
-    if (this.desiredModel !== undefined && durable.model !== this.desiredModel) {
+    if (!durableModelMatches(durable)) {
       throw new Error(`Grok durable summary reports model ${String(durable.model)}, not requested ${this.desiredModel}.`);
     }
-    const promptlessEffortLag = durable.messageCount === 0
-      && effectiveEffort === this.desiredEffort;
-    if (this.desiredEffort !== undefined
-      && durable.currentModel?.reasoningEffort !== this.desiredEffort
-      && !promptlessEffortLag) {
+    if (!durableEffortMatches(durable)) {
       throw new Error(`Grok durable summary reports reasoning effort ${String(durable.currentModel?.reasoningEffort)}, not requested ${this.desiredEffort}.`);
     }
     this.verifyRelaunchConfiguration = false;

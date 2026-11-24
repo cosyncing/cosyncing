@@ -63,6 +63,11 @@ export interface KimiInstanceRecord {
   startedAt?: number;
   heartbeatAt?: number;
   hostVersion?: string;
+  /**
+   * Which Kimi product wrote the record (`kimi-code-cli` for `kimi web`), from
+   * Kimi Code 2.7.0. Absent on every 0.x record. See {@link KIMI_CLI_PRODUCT}.
+   */
+  product?: string;
 }
 
 /**
@@ -92,6 +97,7 @@ export function decodeKimiInstanceRecord(raw: unknown): KimiInstanceRecord | und
   const startedAt = record.started_at;
   const heartbeatAt = record.heartbeat_at;
   const hostVersion = record.host_version;
+  const product = record.product;
   if (startedAt !== undefined && (typeof startedAt !== 'number' || !Number.isFinite(startedAt) || startedAt <= 0)) {
     return undefined;
   }
@@ -99,6 +105,7 @@ export function decodeKimiInstanceRecord(raw: unknown): KimiInstanceRecord | und
     return undefined;
   }
   if (hostVersion !== undefined && (typeof hostVersion !== 'string' || !hostVersion)) return undefined;
+  if (product !== undefined && (typeof product !== 'string' || !product)) return undefined;
   return {
     serverId,
     pid,
@@ -107,8 +114,24 @@ export function decodeKimiInstanceRecord(raw: unknown): KimiInstanceRecord | und
     ...(startedAt === undefined ? {} : { startedAt }),
     ...(heartbeatAt === undefined ? {} : { heartbeatAt }),
     ...(hostVersion === undefined ? {} : { hostVersion }),
+    ...(product === undefined ? {} : { product }),
   };
 }
+
+/**
+ * The `product` a `kimi web` (Kimi Code CLI) server writes into its registry
+ * record. Captured from a real 2.7.2 record: `"product":"kimi-code-cli"`.
+ *
+ * Kimi Code Desktop runs the same server in-process and registers in the SAME
+ * `<home>/server/instances/` directory with `product:"kimi-code-desktop"`
+ * (upstream `apps/desktop/src/shared/identity.ts`, `embedded-server.ts` at tag
+ * `@moonshot-ai/kimi-code@2.7.2`). This adapter addresses only the CLI server —
+ * the one the broker can start and supervise — so a record naming any other
+ * product is set aside by the scan rather than counted as a second live server.
+ * Sessions Desktop holds are still listed and observed through the CLI server,
+ * and a write to one is refused by Kimi's own session lock (`40931`).
+ */
+export const KIMI_CLI_PRODUCT = 'kimi-code-cli';
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 
@@ -160,6 +183,8 @@ export interface KimiDiscoveredInstance {
   hostVersion?: string;
   /** Registry `started_at`, epoch ms. The load-bearing half of the identity binding. */
   startedAt?: number;
+  /** The record's `product`, when it carried one (2.7.0 and newer). */
+  product?: string;
 }
 
 /**
@@ -186,6 +211,11 @@ export interface KimiInstanceScan {
    * server from a partial view.
    */
   truncated: boolean;
+  /**
+   * Live records written by a Kimi product other than the CLI server (Kimi Code
+   * Desktop). Set aside, not counted in {@link live}; see {@link KIMI_CLI_PRODUCT}.
+   */
+  otherProducts?: number;
 }
 
 /** A bounded directory read: at most the requested entries, truncation reported. */
@@ -306,6 +336,10 @@ export function scanKimiInstances(home: string, io: KimiInstanceScanIo): KimiIns
       scan.stale += 1;
       continue;
     }
+    if (record.product !== undefined && record.product !== KIMI_CLI_PRODUCT) {
+      scan.otherProducts = (scan.otherProducts ?? 0) + 1;
+      continue;
+    }
     const baseUrl = kimiInstanceBaseUrl(record);
     if (!baseUrl) {
       scan.invalid += 1;
@@ -318,6 +352,7 @@ export function scanKimiInstances(home: string, io: KimiInstanceScanIo): KimiIns
       serverId: record.serverId,
       ...(record.hostVersion ? { hostVersion: record.hostVersion } : {}),
       ...(record.startedAt === undefined ? {} : { startedAt: record.startedAt }),
+      ...(record.product === undefined ? {} : { product: record.product }),
     });
   }
   return scan;
@@ -430,6 +465,29 @@ export interface KimiReadOnlyHttpOptions {
    * request, this one bounds the caller's interest in all of them.
    */
   signal?: AbortSignal;
+  /**
+   * The wire this client SPEAKS when it is not the 0.x one. See
+   * {@link KimiGetTranslator} and {@link KimiReadOnlyHttp.speaking}.
+   */
+  translator?: KimiGetTranslator;
+}
+
+export type KimiGetQuery = Readonly<Record<string, string | number | undefined>>;
+
+/** The native read underneath a translator: the same GET-only door, untranslated. */
+export type KimiNativeGet = <T>(path: string, query?: KimiGetQuery) => Promise<KimiGetResult<T>>;
+
+/**
+ * A read-side wire translator: answers a 0.x read (`/api/v2/sessions`,
+ * `.../messages`, `.../approvals`, …) from another wire's routes.
+ *
+ * It holds no transport of its own. Everything it sends goes through the
+ * `native` reader it is handed, which is this file's GET-only door, so a
+ * translated client is exactly as read-only as an untranslated one. The Kimi
+ * Agent Protocol translator lives in `kap.ts`.
+ */
+export interface KimiGetTranslator {
+  get<T>(path: string, query: KimiGetQuery | undefined, native: KimiNativeGet): Promise<KimiGetResult<T>>;
 }
 
 /**
@@ -505,8 +563,12 @@ export class KimiReadOnlyHttp {
   private readonly maxBytes: number;
   private readonly fetchImpl: KimiFetch;
   private readonly cancel?: AbortSignal;
+  private readonly options: KimiReadOnlyHttpOptions;
+  private readonly translator?: KimiGetTranslator;
 
   constructor(options: KimiReadOnlyHttpOptions) {
+    this.options = options;
+    if (options.translator) this.translator = options.translator;
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
     if (options.token) this.token = options.token;
     this.timeoutMs = options.timeoutMs && options.timeoutMs > 0 ? options.timeoutMs : KIMI_HTTP_TIMEOUT_MS;
@@ -521,10 +583,29 @@ export class KimiReadOnlyHttp {
   }
 
   /**
+   * The same client — origin, token, timeouts, cancellation — answering the
+   * 0.x read surface from another wire through `translator`. The identity gate
+   * hands every caller a client for the wire the server it verified speaks, so
+   * the rest of the package keeps asking 0.x questions.
+   */
+  speaking(translator: KimiGetTranslator): KimiReadOnlyHttp {
+    return new KimiReadOnlyHttp({ ...this.options, translator });
+  }
+
+  /**
    * Read one envelope-wrapped resource. The only network operation this package
    * performs over HTTP.
    */
-  async getJson<T>(path: string, query?: Readonly<Record<string, string | number | undefined>>): Promise<KimiGetResult<T>> {
+  async getJson<T>(path: string, query?: KimiGetQuery): Promise<KimiGetResult<T>> {
+    if (this.translator) {
+      const native: KimiNativeGet = <U>(nativePath: string, nativeQuery?: KimiGetQuery) =>
+        this.nativeGet<U>(nativePath, nativeQuery);
+      return this.translator.get<T>(path, query, native);
+    }
+    return this.nativeGet<T>(path, query);
+  }
+
+  private async nativeGet<T>(path: string, query?: KimiGetQuery): Promise<KimiGetResult<T>> {
     let url: string;
     try {
       const resolved = new URL(path.startsWith('/') ? path : `/${path}`, `${this.baseUrl}/`);
@@ -619,66 +700,111 @@ export function isKimiReadOnlyWsFrame(type: string): type is KimiReadOnlyWsFrame
   return (KIMI_READ_ONLY_WS_FRAMES as readonly string[]).includes(type);
 }
 
-// ── Supported range ─────────────────────────────────────────────────────────
+// ── Supported range and wire selection ──────────────────────────────────────
 
 /**
- * The first Kimi Code version this adapter does not speak. The supported range
- * is closed at the top, and this bound is exclusive.
+ * The first Kimi Code version that does not speak the 0.x local server
+ * protocol this adapter was first written against.
  *
  * Kimi Code went from 0.43.1 straight to 2.0.0, and the 2.x line replaced the
- * local server protocol this adapter is written against: by 2.7.0 it is the
- * versioned Kimi Agent Protocol (KAP 1.0.0), with the session list, history,
- * live subscription, cancel, and the approval and question routes all
- * changed. A 2.x server still answers `/api/v1/meta` with every field
- * {@link bindKimiServerIdentity} reads, so without this bound it passes the
- * gate and then fails on every operation after it. Supporting it is a port,
- * not a version bump; until one lands, a version at or past this is refused.
+ * local server protocol step by step until, at 2.7.0, it became the versioned
+ * Kimi Agent Protocol (KAP 1.0.0): the session list, history, live
+ * subscription, cancel, and the approval and question routes all changed.
  */
 export const KIMI_UNSUPPORTED_FROM_VERSION = '2.0.0';
 
 /**
- * Where a Kimi Code version sits against {@link KIMI_UNSUPPORTED_FROM_VERSION}.
+ * The first Kimi Code version that serves KAP 1.x, which this adapter speaks
+ * beside the 0.x wire; the wire a server speaks is selected from its
+ * `/api/v1/meta`.
  *
- * `unreadable` is not "probably fine": a version that cannot be ordered cannot
- * be shown to be below the bound, and every caller refuses it.
+ * Proven from the published bundles: 2.6.3 has no `KIMI_AGENT_PROTOCOL_VERSION`
+ * and still emits `event.session.work_changed`; 2.7.0, 2.7.1, 2.7.2 and 2.7.3
+ * all carry `KIMI_AGENT_PROTOCOL_VERSION = "1.0.0"` and the meta field. The
+ * served `kap.md` says the same: "Kimi Code CLI >= v2.7.0". Everything from
+ * {@link KIMI_UNSUPPORTED_FROM_VERSION} up to this is a half-migrated protocol
+ * neither wire describes, and stays refused.
  */
-export type KimiVersionStanding = 'below-ceiling' | 'unsupported' | 'unreadable';
+export const KIMI_KAP_FROM_VERSION = '2.7.0';
 
 /**
- * Compared with `2.0.0-0`, the LOWEST version of the 2.0.0 line, rather than
- * with `2.0.0` itself. SemVer orders a prerelease below its release, so a plain
- * comparison would admit `2.0.0-canary.…` as "older than 2.0.0" although it is
- * already the new protocol. Comparing with the line's floor refuses every
- * prerelease of the bound and of everything after it, including the published
- * canaries `2.7.0-canary.20261120021741-0947717` and
- * `3.0.0-canary.20261109125038-713a200`.
+ * Which wire a Kimi Code version can speak, or why none.
+ *
+ * `unreadable` is not "probably fine": a version that cannot be ordered cannot
+ * be placed in either range, and every caller refuses it.
+ */
+export type KimiVersionStanding = 'legacy' | 'kap' | 'unsupported' | 'unreadable';
+
+/**
+ * Compared with the `-0` floor of each bound rather than with the bound itself.
+ * SemVer orders a prerelease below its release, so a plain comparison would
+ * read `2.0.0-canary.…` as 0.x. Against `2.0.0-0` every prerelease of 2.0.0 and
+ * later leaves the 0.x range; against `2.7.0-0` the 2.7.0 canaries enter the
+ * KAP range, where the server's own protocol announcement then decides.
  */
 export function kimiVersionStanding(version: string): KimiVersionStanding {
-  const order = compareSemanticVersions(version, `${KIMI_UNSUPPORTED_FROM_VERSION}-0`);
-  if (order === undefined) return 'unreadable';
-  return order < 0 ? 'below-ceiling' : 'unsupported';
+  const legacy = compareSemanticVersions(version, `${KIMI_UNSUPPORTED_FROM_VERSION}-0`);
+  if (legacy === undefined) return 'unreadable';
+  if (legacy < 0) return 'legacy';
+  const kap = compareSemanticVersions(version, `${KIMI_KAP_FROM_VERSION}-0`);
+  if (kap === undefined) return 'unreadable';
+  return kap < 0 ? 'unsupported' : 'kap';
+}
+
+/** Is this version inside one of the two supported ranges? */
+export function kimiVersionSupported(version: string): boolean {
+  const standing = kimiVersionStanding(version);
+  return standing === 'legacy' || standing === 'kap';
 }
 
 /**
  * The `/api/v1/meta` field a Kimi Agent Protocol server announces its protocol
- * version in (`"1.0.0"` from Kimi Code 2.7.0). No 0.x server sends it: the
- * 0.43.0 meta schema has no such key.
+ * version in (`"1.0.0"` on Kimi Code 2.7.0 through 2.7.3, captured live on
+ * 2.7.2). No 0.x server sends it: the 0.43.0 meta schema has no such key.
  */
 export const KIMI_AGENT_PROTOCOL_META_FIELD = 'kimi_agent_protocol_version';
 
+/** The KAP major version this adapter speaks. */
+export const KIMI_KAP_PROTOCOL_MAJOR = 1;
+
+/** The two wires this adapter speaks. */
+export type KimiWire = 'legacy' | 'kap';
+
 /**
- * Does this `/api/v1/meta` `data` come from a Kimi Agent Protocol server?
+ * Does this `/api/v1/meta` `data` carry the KAP announcement at all?
  *
- * PRESENCE decides, not the value: only the protocol this adapter does not speak
- * carries the key, so an empty or malformed value is still that protocol.
- *
- * It is the second line behind the version bound, for a server whose version
- * number says nothing about its protocol: Kimi Code Desktop registers in the
- * same instance directory under its own 1.x numbering and serves KAP.
+ * PRESENCE decides, not the value: only KAP servers carry the key.
  */
 export function kimiMetaSpeaksAgentProtocol(meta: unknown): boolean {
   return !!meta && typeof meta === 'object' && !Array.isArray(meta)
     && Object.prototype.hasOwnProperty.call(meta, KIMI_AGENT_PROTOCOL_META_FIELD);
+}
+
+/**
+ * The wire a server's `/api/v1/meta` says it speaks.
+ *
+ * No announcement is the 0.x wire. An announcement of KAP
+ * {@link KIMI_KAP_PROTOCOL_MAJOR}.x is KAP. Any other announcement — another
+ * major, an empty or malformed value — is `unknown`, and refused: a future KAP
+ * 2 is a new protocol, not a newer version of this one.
+ */
+export function kimiMetaWire(meta: unknown): KimiWire | 'unknown' {
+  if (!kimiMetaSpeaksAgentProtocol(meta)) return 'legacy';
+  const announced = (meta as Record<string, unknown>)[KIMI_AGENT_PROTOCOL_META_FIELD];
+  if (typeof announced !== 'string') return 'unknown';
+  const major = /^(\d+)\.\d+\.\d+(?:[-+].*)?$/.exec(announced.trim());
+  return major && Number(major[1]) === KIMI_KAP_PROTOCOL_MAJOR ? 'kap' : 'unknown';
+}
+
+/**
+ * The read-side KAP translator and live-state holder the gate hands a KAP
+ * client. Implemented in `kap.ts`; declared here so the gate does not depend on
+ * the translation itself.
+ */
+export interface KimiKapBinding {
+  translator(): KimiGetTranslator;
+  /** Record which wire, and which server generation, answers at this origin. */
+  noteVerified(baseUrl: string, wire: KimiWire, apiServerId: string): void;
 }
 
 // ── Identity gate ───────────────────────────────────────────────────────────
@@ -694,9 +820,13 @@ export type KimiInstanceRefusal =
   | 'startup-mismatch'
   | 'version-mismatch'
   | 'incomplete'
-  /** The registry record names a version outside the supported range (or one that cannot be read). */
+  /** The registry record names a version outside both supported ranges (or one that cannot be read). */
   | 'unsupported-version'
-  /** `/api/v1/meta` announces the Kimi Agent Protocol. */
+  /**
+   * `/api/v1/meta` announces a protocol this adapter does not speak, or one its
+   * recorded version does not: a 0.x version announcing KAP, a 2.7+ version
+   * announcing nothing, or a KAP major other than {@link KIMI_KAP_PROTOCOL_MAJOR}.
+   */
   | 'unsupported-protocol';
 
 /**
@@ -896,7 +1026,14 @@ export function bindKimiServerIdentity(
 }
 
 export type KimiVerifiedInstance =
-  | { ok: true; instance: KimiDiscoveredInstance; http: KimiReadOnlyHttp; identity: KimiServerIdentity }
+  | {
+    ok: true;
+    instance: KimiDiscoveredInstance;
+    /** A client for {@link wire}: on KAP it answers the 0.x read surface through the KAP translator. */
+    http: KimiReadOnlyHttp;
+    identity: KimiServerIdentity;
+    wire: KimiWire;
+  }
   | { ok: false; reason: KimiInstanceRefusal };
 
 /**
@@ -913,16 +1050,20 @@ export type KimiVerifiedInstance =
  *    interchangeable (each owns whichever sessions it loaded), so choosing is a
  *    guess; and resolving per call let a discovery and the attach it led to land
  *    on different servers.
- *  - a registry record whose `host_version` is at or past
- *    {@link KIMI_UNSUPPORTED_FROM_VERSION}, or cannot be read as a version.
- *    Decided from the record alone, BEFORE the client is built: nothing at all
- *    is sent to a server this adapter does not speak, not even the token. A
- *    record with no `host_version` is left to the binding, which refuses it as
- *    `unbindable`.
+ *  - a registry record whose `host_version` is in neither supported range —
+ *    from {@link KIMI_UNSUPPORTED_FROM_VERSION} up to {@link KIMI_KAP_FROM_VERSION}
+ *    — or cannot be read as a version. Decided from the record alone, BEFORE
+ *    the client is built: nothing at all is sent to a server this adapter does
+ *    not speak, not even the token. A record with no `host_version` is left to
+ *    the binding, which refuses it as `unbindable`.
  *  - `/api/v1/meta` unreachable, unauthorized, or malformed.
- *  - `/api/v1/meta` announcing the Kimi Agent Protocol, checked before the
- *    binding and before any other request. See
- *    {@link kimiMetaSpeaksAgentProtocol}.
+ *  - `/api/v1/meta` announcing a wire the recorded version does not speak, or
+ *    a KAP major other than {@link KIMI_KAP_PROTOCOL_MAJOR}, checked before the
+ *    binding and before any other request. See {@link kimiMetaWire}.
+ *
+ * A KAP server is handed back with a client that SPEAKS KAP behind the 0.x read
+ * surface ({@link KimiReadOnlyHttp.speaking}), so every caller keeps its 0.x
+ * questions and gets KAP answers.
  *  - metadata that cannot bind the answering server to the registry record it
  *    was reached through. See {@link bindKimiServerIdentity} for every binding
  *    case, for why this is NOT an id comparison, and for why there is no
@@ -955,6 +1096,7 @@ export type KimiVerifiedInstance =
 export async function resolveVerifiedInstance(
   scan: KimiInstanceScan,
   createClient: (instance: KimiDiscoveredInstance) => KimiReadOnlyHttp,
+  kap?: KimiKapBinding,
 ): Promise<KimiVerifiedInstance> {
   // A truncated scan is refused BEFORE counting: an unexamined record may
   // describe another live server, so a partial registry view can prove
@@ -965,14 +1107,40 @@ export async function resolveVerifiedInstance(
   if (live.length === 0) return { ok: false, reason: 'none' };
   if (live.length > 1) return { ok: false, reason: 'ambiguous' };
   const instance = live[0]!;
-  if (instance.hostVersion !== undefined && kimiVersionStanding(instance.hostVersion) !== 'below-ceiling') {
+  const standing = instance.hostVersion === undefined ? undefined : kimiVersionStanding(instance.hostVersion);
+  if (standing === 'unsupported' || standing === 'unreadable') {
     return { ok: false, reason: 'unsupported-version' };
   }
   const http = createClient(instance);
   const meta = await http.getJson<unknown>('/api/v1/meta');
   if (!meta.ok) return { ok: false, reason: 'unreachable' };
-  if (kimiMetaSpeaksAgentProtocol(meta.data)) return { ok: false, reason: 'unsupported-protocol' };
+  // The wire is the SERVER's own statement, and the recorded version must agree
+  // with it: a 0.x record answering with KAP, or a 2.7+ record answering
+  // without it, is a server this adapter cannot predict, so it is refused
+  // before the binding and before any other request. A record with no version
+  // is left to the binding, which refuses it as `unbindable`.
+  const wire = kimiMetaWire(meta.data);
+  if (wire === 'unknown') return { ok: false, reason: 'unsupported-protocol' };
+  if (standing !== undefined && standing !== wire) return { ok: false, reason: 'unsupported-protocol' };
   const bound = bindKimiServerIdentity(instance, meta.data);
   if (!bound.ok) return { ok: false, reason: bound.reason };
-  return { ok: true, instance, http, identity: bound.identity };
+  if (wire === 'legacy') {
+    kap?.noteVerified(instance.baseUrl, wire, bound.identity.apiServerId);
+    return { ok: true, instance, http, identity: bound.identity, wire };
+  }
+  const binding = kap ?? defaultKapBinding?.();
+  if (!binding) return { ok: false, reason: 'unsupported-protocol' };
+  binding.noteVerified(instance.baseUrl, wire, bound.identity.apiServerId);
+  return { ok: true, instance, http: http.speaking(binding.translator()), identity: bound.identity, wire };
+}
+
+/**
+ * The KAP binding a caller that passed none is given — registered by `kap.ts`
+ * when it loads, so this file stays free of the translation itself. A process
+ * that never loaded the KAP module has none, and refuses KAP servers.
+ */
+let defaultKapBinding: (() => KimiKapBinding) | undefined;
+
+export function registerDefaultKimiKapBinding(factory: () => KimiKapBinding): void {
+  defaultKapBinding = factory;
 }

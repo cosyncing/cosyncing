@@ -25,9 +25,15 @@ import {
  * here would cost the operator Create and Resume on any ordinary update — this
  * repository has already lost a full lane to exactly that, when a self-update
  * from 3.0.60 to 3.0.61 removed a CLI flag mid-run.
+ *
+ * 3.0.75 (Hub core 0.2.1) was captured on 2026-11-24 in an isolated home: the
+ * CLI's own store writes, the managed Hub's discovery record, `/health`, and
+ * Create, prompts, an approval, Stop, a failed run and a subagent through the
+ * Hub v1 frames this adapter sends and reads. ACP was not re-captured; no
+ * product path uses it since the ACP writer was removed.
  */
 export const CLINE_MEASURED_VERSIONS: readonly string[] = Object.freeze([
-  '3.0.60', '3.0.61',
+  '3.0.60', '3.0.61', '3.0.75',
 ]);
 
 /**
@@ -58,6 +64,7 @@ export const CLINE_MEASURED_VERSIONS: readonly string[] = Object.freeze([
 export const CLINE_MEASURED_HUB_CORE: Readonly<Record<string, string>> = Object.freeze({
   '3.0.60': '0.0.81',
   '3.0.61': '0.0.82',
+  '3.0.75': '0.2.1',
 });
 
 /** The Hub core floor. Lives here, beside the CLI versions it is derived
@@ -97,17 +104,22 @@ export const CLINE_MINIMUM_SUPPORTED_VERSION = lowestSemanticVersion(
   CLINE_DRIVABLE_MEASURED_VERSIONS,
 );
 
-/** Retained under its original name for operator-facing copy. */
-export const CLINE_VERIFIED_VERSION = '3.0.61';
+/** The newest physically verified build, retained under its original name. */
+export const CLINE_VERIFIED_VERSION = '3.0.75';
 
 /** Snapshot schemas physically captured and accepted for read-only Observe.
  *
  *  Deliberately an ENUMERATION, unlike the version floor above. These name
  *  on-disk snapshot formats, and a newer CLI writing an unfamiliar format is
  *  not something a `>=` comparison can vouch for. 3.0.60 stays listed: sessions
- *  written by it are still on disk, and Observe is read-only. */
+ *  written by it are still on disk, and Observe is read-only.
+ *
+ *  3.0.75 writes the same document as 3.0.61 (`version: 1`, `agent`, `taskType`,
+ *  `origin {source, mode, sessionId[, parentThreadId, subagent], version}`), with
+ *  `origin.version` stamped `3.0.75`; only its subagent ids changed, see
+ *  `SUBAGENT_FILE`. Captured from the CLI's own parent and child writes. */
 export const CLINE_OBSERVE_VERSIONS: readonly string[] = Object.freeze([
-  '3.0.56', '3.0.60', CLINE_VERIFIED_VERSION,
+  '3.0.56', '3.0.60', '3.0.61', '3.0.75',
 ]);
 const CLINE_MEASURED_VERSION_SET = new Set(CLINE_MEASURED_VERSIONS);
 
@@ -150,7 +162,10 @@ const MAX_MODEL_CHARS = 512;
 // 3.0.60 ACP appends `_cli` and may use mixed-case base62; the earlier CLI
 // form remains readable for existing durable sessions.
 const SESSION_ID = /^\d{13}_[A-Za-z0-9]{5}(?:_cli)?$/u;
-const SUBAGENT_FILE = /^(agent_\d{13}_[a-z0-9]{5,8})\.messages\.json$/u;
+// Agent ids were `agent_<Date.now()>_<base36>` through 3.0.61 (core 0.0.82) and
+// are `agent_<randomUUID()>` from 3.0.75 (core 0.2.1), measured on both the CLI
+// and the Hub. Without the second form every 3.0.75 subagent row vanished.
+const SUBAGENT_FILE = /^(agent_(?:\d{13}_[a-z0-9]{5,8}|[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}))\.messages\.json$/u;
 const CLINE_OBSERVE_VERSION_SET = new Set(CLINE_OBSERVE_VERSIONS);
 
 export interface ClineStoreTrace {

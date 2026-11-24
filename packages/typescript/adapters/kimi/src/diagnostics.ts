@@ -27,11 +27,14 @@ import {
   resolveKimiHome,
   bindKimiServerIdentity,
   decodeKimiServerMeta,
-  kimiMetaSpeaksAgentProtocol,
+  kimiMetaWire,
   kimiVersionStanding,
+  kimiVersionSupported,
   KIMI_AGENT_PROTOCOL_META_FIELD,
   KIMI_DEFAULT_PORT,
   KIMI_INSTANCE_SCAN_MAX_FILES,
+  KIMI_KAP_FROM_VERSION,
+  KIMI_KAP_PROTOCOL_MAJOR,
   KIMI_UNSUPPORTED_FROM_VERSION,
   type KimiIdentityBinding,
   type KimiInstanceScan,
@@ -112,27 +115,27 @@ function restartRemediation(
 
 export const KIMI_MINIMUM_VERSION: AgentMinimumVersion = Object.freeze({
   version: '0.35.0',
-  requiredFeature: 'the `kimi web` local server REST `/api/v2/sessions` list and the `{seq, epoch}` WebSocket cursor protocol used for observe, plus the `/api/v1` session-create, prompt, approval, and question endpoints Drive writes through for sessions cosyncing created',
+  requiredFeature: 'the `kimi web` local server: on 0.x, the REST `/api/v2/sessions` list and the `{seq, epoch}` WebSocket cursor protocol used for observe, plus the `/api/v1` session-create, prompt, approval, and question endpoints Drive writes through; from 2.7.0, the same reads and writes over the Kimi Agent Protocol (KAP 1.x)',
   evidenceUrl: 'https://moonshotai.github.io/kimi-code/en/guides/server.html',
-  evidenceNote: 'Conservative floor: this repository captured its Kimi fixtures from a real 0.35.0 server (meta, session list, paged messages, snapshot, WS handshake). The server API is marked experimental upstream, so the floor is the exact tested version rather than an inferred earlier one. The range is closed at 2.0.0: Kimi Code 2.x replaced the local server protocol, and is refused until a port lands.',
+  evidenceNote: 'Conservative floor: this repository captured its Kimi fixtures from a real 0.35.0 server (meta, session list, paged messages, snapshot, WS handshake). The server API is marked experimental upstream, so the floor is the exact tested version rather than an inferred earlier one. Two ranges are supported: 0.x up to 2.0.0, and 2.7.0 onward, where the server speaks KAP 1.x (captured live from 2.7.2). 2.0.0 to 2.6.x predate KAP 1.0 and differ from the 0.x protocol, and are refused.',
 });
 
 /** The whole supported range, as doctor and the adapter's refusals name it. */
-export const KIMI_SUPPORTED_RANGE = `>= ${KIMI_MINIMUM_VERSION.version} and < ${KIMI_UNSUPPORTED_FROM_VERSION}`;
+export const KIMI_SUPPORTED_RANGE = `>= ${KIMI_MINIMUM_VERSION.version} and < ${KIMI_UNSUPPORTED_FROM_VERSION}, or >= ${KIMI_KAP_FROM_VERSION} (Kimi Agent Protocol ${KIMI_KAP_PROTOCOL_MAJOR}.x)`;
 
 /**
  * What to do about a Kimi Code outside the range, from either end.
  *
  * Deliberately carries NO command, and that is a change rather than an
- * omission. The floor's remediation used to be `kimi update`, which on 0.x
- * installs the newest release — 2.x, which is past the top of the range. The
- * same text reaches setup's preflight, which repeats a version check's command
- * as its fix, so a runnable `kimi update` there would walk an operator from one
- * unsupported version to another.
+ * omission. The floor's remediation used to be `kimi update`, which installs
+ * the newest release whatever it is — a 2.x before 2.7.0, or a later release
+ * no capture has verified. The same text reaches setup's preflight, which
+ * repeats a version check's command as its fix, so a runnable `kimi update`
+ * there could walk an operator from one unsupported version to another.
  */
-const KIMI_VERSION_RANGE_REMEDIATION = `cosyncing supports Kimi Code ${KIMI_SUPPORTED_RANGE}. Kimi Code 2.x replaced `
-  + 'its local server protocol and is not supported yet, so keep or reinstall a 0.x release in that range; '
-  + '`kimi update` installs 2.x.';
+const KIMI_VERSION_RANGE_REMEDIATION = `cosyncing supports Kimi Code ${KIMI_SUPPORTED_RANGE}. Kimi Code `
+  + `${KIMI_UNSUPPORTED_FROM_VERSION} up to ${KIMI_KAP_FROM_VERSION} predates Kimi Agent Protocol 1.0 and differs from the `
+  + '0.x protocol, so it is not supported; install a release in one of those ranges.';
 
 /**
  * The version checks, with the top of the range applied.
@@ -350,7 +353,7 @@ export async function diagnoseKimiSetup(
   // registry record alone, before the health probe, so doctor sends nothing to a
   // server cosyncing does not speak. No start or restart instruction in either
   // posture — what fixes this is the installed version, not the process.
-  if (instance.hostVersion !== undefined && kimiVersionStanding(instance.hostVersion) !== 'below-ceiling') {
+  if (instance.hostVersion !== undefined && !kimiVersionSupported(instance.hostVersion)) {
     checks.push({
       id: 'kimi.server',
       status: 'fail',
@@ -397,14 +400,21 @@ export async function diagnoseKimiSetup(
     });
     return { agent: 'kimi', displayName: 'Kimi Code', minimumVersion: KIMI_MINIMUM_VERSION, checks };
   }
-  // The protocol announcement, checked where the adapter's gate checks it:
-  // after the metadata is read and before the binding.
-  if (kimiMetaSpeaksAgentProtocol(payload)) {
+  // The protocol announcement, checked where the adapter's gate checks it and
+  // by the same rule: after the metadata is read and before the binding, the
+  // announced wire must be one this adapter speaks AND the one the recorded
+  // version speaks.
+  const wire = kimiMetaWire(payload);
+  const standing = instance.hostVersion === undefined ? undefined : kimiVersionStanding(instance.hostVersion);
+  if (wire === 'unknown' || (standing !== undefined && standing !== wire)) {
+    const announced = (payload as Record<string, unknown> | undefined)?.[KIMI_AGENT_PROTOCOL_META_FIELD];
     checks.push({
       id: 'kimi.server',
       status: 'fail',
       detailCode: 'server-protocol-unsupported',
-      summary: `The running Kimi server announces the Kimi Agent Protocol (\`${KIMI_AGENT_PROTOCOL_META_FIELD}\`), which cosyncing does not support yet.`,
+      summary: typeof announced === 'string'
+        ? `The running Kimi server announces Kimi Agent Protocol ${announced} (\`${KIMI_AGENT_PROTOCOL_META_FIELD}\`), which cosyncing does not speak for its version.`
+        : 'The running Kimi server does not announce the protocol its version speaks.',
       evidence: { url: instance.baseUrl, supportedRange: KIMI_SUPPORTED_RANGE },
       remediation: { kind: 'manual', message: KIMI_VERSION_RANGE_REMEDIATION },
     });
@@ -448,8 +458,10 @@ export async function diagnoseKimiSetup(
     id: 'kimi.server',
     status: 'pass',
     detailCode: 'server-reachable',
-    summary: 'The Kimi local server is reachable and advertises the WebSocket surface.',
-    evidence: { url: instance.baseUrl, serverVersion: bound.identity.serverVersion },
+    summary: wire === 'kap'
+      ? 'The Kimi local server is reachable and speaks the Kimi Agent Protocol over its WebSocket surface.'
+      : 'The Kimi local server is reachable and advertises the WebSocket surface.',
+    evidence: { url: instance.baseUrl, serverVersion: bound.identity.serverVersion, wire },
   });
   return { agent: 'kimi', displayName: 'Kimi Code', minimumVersion: KIMI_MINIMUM_VERSION, checks };
 }

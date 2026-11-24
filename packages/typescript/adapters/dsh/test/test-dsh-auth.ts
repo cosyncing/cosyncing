@@ -499,6 +499,44 @@ for (const origin of ['stored', 'owned-exchange'] as const) {
     `${session.state} saves=${String(saves)}`);
 }
 
+{
+  // A restart usually reaches the session as "release, then adopt": the
+  // broker ends every launch before it spawns the next one. The new token must
+  // count as a new launch exactly as a token that replaces a held one does,
+  // or what the old launch was blocked for outlives it. Here the old launch's
+  // requests were refused by the Host/Origin fence, a block that otherwise
+  // stands for the life of the session.
+  type Order = 'refuse-then-replace' | 'refuse-release-adopt' | 'release-refuse-adopt';
+  const run = async (order: Order): Promise<{ state: string; reason: string }> => {
+    const store = memoryStore();
+    store.records.set('scope-test', {
+      name: COOKIE_NAME, value: 'v1.enrolled.sig', expiresAt: 1_700_000_000_000 + 10 * 86_400_000,
+    });
+    const { session } = harness(() => okResponse(), { store });
+    session.adoptLaunchToken('token-first-launch');
+    await session.ensure();
+    if (order === 'release-refuse-adopt') session.releaseLaunchToken(true);
+    session.reportCredentialRefused('host-or-origin-refused');
+    if (order === 'refuse-release-adopt') session.releaseLaunchToken(true);
+    session.adoptLaunchToken('token-next-launch');
+    const outcome = await session.ensure();
+    return { state: outcome.state, reason: outcome.reason };
+  };
+  const replaced = await run('refuse-then-replace');
+  const afterRelease = await run('refuse-release-adopt');
+  check('a launch token adopted after a release is a new launch, as one that replaces a held token is',
+    replaced.state === 'authenticated'
+      && afterRelease.state === replaced.state && afterRelease.reason === replaced.reason,
+    JSON.stringify({ replaced, afterRelease }));
+  // The other order: the launch is released first, and the refusal comes from
+  // the host now at the address, before its URL is read. It is about the
+  // launch whose token comes next, so that token does not lift it.
+  const refusedAfterRelease = await run('release-refuse-adopt');
+  check('a refusal seen after a release still stands when the next launch token is adopted',
+    refusedAfterRelease.state === 'blocked' && refusedAfterRelease.reason === 'host-or-origin-refused',
+    JSON.stringify(refusedAfterRelease));
+}
+
 // ── A store that will not answer is not an empty store (review R10) ──────────
 
 {

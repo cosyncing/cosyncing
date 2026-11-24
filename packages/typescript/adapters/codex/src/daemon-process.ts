@@ -10,6 +10,8 @@ export interface CodexDaemonProcess extends HostProcessIdentity {
   home: string;
   cli: string;
   unknownFlags?: string[];
+  /** Saved feature overrides the daemon was launched with (`features.<name>=<bool>`), in argv order. */
+  featureOverrides?: string[];
   receiptLayouts?: CodexDaemonReceiptLayout[];
 }
 
@@ -131,10 +133,15 @@ export function createCodexNewThreadFolderScan(dependencies: {
 }
 
 export type CodexDaemonArguments =
-  | { valid: true; unknownFlags: string[] }
+  | { valid: true; unknownFlags: string[]; featureOverrides?: string[] }
   | { valid: false; detail: string };
 
+/** The only configuration override a managed daemon carries: a saved feature toggle, as Codex writes it. */
+const CODEX_DAEMON_FEATURE_OVERRIDE = /^features\.([a-z0-9_]+)=(?:true|false)$/;
+
 /** Structural native daemon form; new bare flags do not change the control endpoint.
+ * Codex 0.169+ also relaunches the daemon with each saved feature override as a `-c
+ * features.<name>=<bool>` pair; any other `-c` key could change behaviour this check cannot judge.
  * This is only one ownership check; a matching argument list never grants ownership alone. */
 export function parseManagedCodexDaemonArguments(args: readonly string[]): CodexDaemonArguments {
   // Name recognizable tokens without echoing private values or paths into restart errors.
@@ -150,22 +157,31 @@ export function parseManagedCodexDaemonArguments(args: readonly string[]): Codex
   if (args[0] !== 'app-server') return refused(args[0], 'must start with app-server');
   let listens = 0;
   const unknownFlags: string[] = [];
+  const featureOverrides: string[] = [];
+  const features = new Set<string>();
   for (let i = 1; i < args.length; i++) {
     const token = args[i]!;
     if (token === '--listen' || token.startsWith('--listen=')) {
       if (++listens !== 1) return refused(token, 'appears more than once');
       const address = token === '--listen' ? args[++i] : token.slice('--listen='.length);
       if (address !== 'unix://') return refused(token, 'must use the default unix:// control socket');
+    } else if (token === '-c') {
+      const pair = args[++i];
+      const feature = pair?.match(CODEX_DAEMON_FEATURE_OVERRIDE)?.[1];
+      if (!feature) return refused(token, 'must be followed by a boolean feature override (features.<name>=true|false)');
+      if (features.has(feature)) return refused(token, `sets feature ${feature} more than once`);
+      features.add(feature);
+      featureOverrides.push(pair!);
     } else if (!/^--[a-z0-9][a-z0-9-]*$/.test(token)) {
       return refused(token, 'is not a recognized bare long flag');
     } else {
       const next = args[i + 1];
-      if (next !== undefined && !next.startsWith('--')) return refused(token, 'carries a value');
+      if (next !== undefined && !next.startsWith('-')) return refused(token, 'carries a value');
       if (token !== '--remote-control' && token !== '--managed-daemon') unknownFlags.push(token);
     }
   }
   if (listens !== 1) return refused('--listen', 'is required exactly once');
-  return { valid: true, unknownFlags };
+  return { valid: true, unknownFlags, ...(featureOverrides.length ? { featureOverrides } : {}) };
 }
 
 export function managedCodexDaemonArguments(args: readonly string[]): boolean {
@@ -276,7 +292,10 @@ function inspectProcess(
     if (after.state !== 'running' || after.identity.start !== live.identity.start || after.identity.boot !== live.identity.boot) {
       return unknown('Codex daemon identity changed during inspection.');
     }
-    return { state: 'running', process: { ...live.identity, executable, argv, home, cli: resolvedCli, unknownFlags: argumentsRead.unknownFlags } };
+    return { state: 'running', process: {
+      ...live.identity, executable, argv, home, cli: resolvedCli, unknownFlags: argumentsRead.unknownFlags,
+      ...(argumentsRead.featureOverrides ? { featureOverrides: argumentsRead.featureOverrides } : {}),
+    } };
   } catch {
     return exited() ? { state: 'absent' } : unknown('Codex daemon executable or launch identity could not be read.');
   }

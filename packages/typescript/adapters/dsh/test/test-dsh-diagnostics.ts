@@ -190,30 +190,32 @@ function checkOf(
   );
 
   // Above the floor is not the same as supported. These are published builds
-  // (npm `latest`/`next`, `alpha`, and a 0.2.1 rc) that the running adapter
-  // refuses, so doctor must fail them too rather than call them supported — and
+  // (the rc before the qualified 0.2.2-rc.5, `alpha`, and a 0.2.1 rc) that the
+  // running adapter refuses, so doctor must fail them too rather than call them supported — and
   // its fix must be the pinned qualified build, never `@latest`, which is what
   // installs the refused version.
-  for (const version of ['0.2.2-rc.5', '0.2.3-alpha.2', '0.2.1-rc.5']) {
+  for (const version of ['0.2.2-rc.4', '0.2.3-alpha.2', '0.2.1-rc.5']) {
     const unqualified = await diagnoseDshSetup(context({ executable: '/usr/local/bin/dsh', version }).context);
     const verdict = checkOf(unqualified, 'dsh.version');
     check(
       `doctor fails ${version} as unqualified and names the qualified versions and the pinned install`,
       verdict?.status === 'fail' && verdict.detailCode === 'version-unqualified'
         && verdict.evidence?.installedVersion === version
-        && verdict.evidence?.qualifiedVersions === '0.1.0-rc.6, 0.2.0-rc.2'
+        && verdict.evidence?.qualifiedVersions === '0.1.0-rc.6, 0.2.0-rc.2, 0.2.2-rc.5'
         && verdict.remediation?.command === 'npm i -g @deepseek-ai/dsh@0.2.0-rc.2'
         && (verdict.remediation?.message ?? '').includes(version),
       JSON.stringify(verdict),
     );
   }
-  const qualified = await diagnoseDshSetup(context({ executable: '/usr/local/bin/dsh', version: '0.2.0-rc.2' }).context);
-  check(
-    'the qualified 0.2.0-rc.2 build still passes the version check',
-    checkOf(qualified, 'dsh.version')?.status === 'pass'
-      && checkOf(qualified, 'dsh.version')?.detailCode === 'version-supported',
-    JSON.stringify(checkOf(qualified, 'dsh.version')),
-  );
+  for (const version of ['0.2.0-rc.2', '0.2.2-rc.5']) {
+    const qualified = await diagnoseDshSetup(context({ executable: '/usr/local/bin/dsh', version }).context);
+    check(
+      `the qualified ${version} build passes the version check`,
+      checkOf(qualified, 'dsh.version')?.status === 'pass'
+        && checkOf(qualified, 'dsh.version')?.detailCode === 'version-supported',
+      JSON.stringify(checkOf(qualified, 'dsh.version')),
+    );
+  }
   const missing = await diagnoseDshSetup(context({}).context);
   check(
     'the install advice for a missing dsh is pinned to the qualified build',

@@ -203,19 +203,20 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
   {
     file: 'packages/typescript/adapters/omp/test/test-omp-discovery.ts',
     title: 'omp JSONL discovery and dialect-delta mapping suite',
-    nativeVersion: '17.4.2',
+    nativeVersion: '17.4.2 / 19.1.0 (runtime stamp, activeLeafId and form rules)',
     coverage: [
       { fn: 'F01', level: 'L2', agents: ['omp'], note: 'leading title slot, session header discovery, and stable session identity' },
-      { fn: 'F04', level: 'L2', agents: ['omp'], note: 'shared JSONL mapper consumes omp session history' },
+      { fn: 'F04', level: 'L2', agents: ['omp'], note: 'shared JSONL mapper consumes omp session history; omp 19.1.0 activeLeafId replays the branch it records (source-modelled rows)' },
+      { fn: 'F07', level: 'L1', agents: ['omp'], note: 'omp 19.1.0 form HTML parser, answer shapes, and the field rules omp enforces before an answer is sent (a pattern only where a work bound says the check is cheap)' },
       { fn: 'F08', level: 'L2', agents: ['omp'], note: 'combined provider/modelId model_change maps to canonical model identity' },
-      { fn: 'F14', level: 'L1', agents: ['omp'], note: 'last-write-wins title and title_change lifecycle metadata' },
+      { fn: 'F14', level: 'L1', agents: ['omp'], note: 'last-write-wins title and title_change lifecycle metadata; Resume, fork and native rename refused for a file a newer omp wrote (top-level stamps, incomparable ones refused)' },
       { fn: 'F15', level: 'L1', agents: ['omp'], note: 'model/status metadata survives discovery' },
     ],
   },
   {
     file: 'e2e/adapters/conformance/omp.test.ts',
     title: 'omp conformance kit: fake-stdio RPC create, resume and lifecycle',
-    nativeVersion: '17.4.2',
+    nativeVersion: '17.4.2 / 19.1.0 (fork extra)',
     coverage: [
       { fn: 'F01', level: 'L2', agents: ['omp'], note: 'fake native --mode rpc create and resume path' },
       { fn: 'F03', level: 'L2', agents: ['omp'], note: 'resume connection uses the native stdio RPC transport' },
@@ -223,7 +224,8 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
       { fn: 'F08', level: 'L2', agents: ['omp'], note: 'get_state model identity maps through the shared engine' },
       { fn: 'F09', level: 'L2', agents: ['omp'], note: 'fake native RPC requires get_available_commands and refuses pi-only get_commands' },
       { fn: 'F12', level: 'L2', agents: ['omp'], note: 'file input writes byte-exact inbox content and sends its absolute path in the same turn' },
-      { fn: 'F14', level: 'L2', agents: ['omp'], note: 'native create/name path and explicit no-fork/no-clone surface' },
+      { fn: 'F07', level: 'L2', agents: ['omp'], note: 'form frames captured from omp 19.1.0, replayed by the fake: question cards, answers in the shape omp validates, and a withdrawn form closes its card' },
+      { fn: 'F14', level: 'L2', agents: ['omp'], note: 'native create/name path; fake 17.4.2 refuses fork; fake 19.1.0 bare and entry fork; no clone' },
     ],
   },
   {
@@ -238,7 +240,7 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
   {
     file: 'packages/typescript/adapters/omp/test/test-omp-runtime-readiness.ts',
     title: 'omp Bun and package readiness qualification suite',
-    nativeVersion: '17.4.2',
+    nativeVersion: '17.4.2 / 19.1.0',
     coverage: [
       { fn: 'F15', level: 'L1', agents: ['omp'], note: 'runtime and native package versions are qualified before create/resume' },
       { fn: 'F16', level: 'L1', agents: ['omp'], note: 'unverifiable and below-floor launchers fail closed' },
@@ -246,13 +248,13 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
   },
   {
     file: 'packages/typescript/adapters/omp/test/test-omp-protocol-parity.ts',
-    title: 'omp 17.4.2 fixture/adapter protocol lock with optional native source audit',
-    nativeVersion: '17.4.2',
+    title: 'omp 17.4.2 and 19.1.0 fixture/adapter protocol lock with optional native source audit',
+    nativeVersion: '17.4.2 / 19.1.0',
     coverage: [
       { fn: 'F04', level: 'L2', agents: ['omp'], note: 'reviewed fixture matches the shared engine consumed-event set; installed native source audit is optional' },
       { fn: 'F08', level: 'L2', agents: ['omp'], note: 'reviewed fixture requires the RPC model commands used by the adapter' },
       { fn: 'F09', level: 'L2', agents: ['omp'], note: 'reviewed fixture carries get_available_commands and omits get_commands' },
-      { fn: 'F14', level: 'L2', agents: ['omp'], note: 'reviewed fixture carries set_session_name/export and omits fork/clone' },
+      { fn: 'F14', level: 'L2', agents: ['omp'], note: 'reviewed fixtures carry set_session_name/export, omit clone, and carry fork only from 19.1.0' },
     ],
   },
   {

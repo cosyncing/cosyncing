@@ -409,8 +409,23 @@ export interface ManagedHostPlan {
    * that can start a host it cannot authenticate to.
    */
   observeOutput?(text: string): void;
-  /** This launch is over and its process is gone or disowned: drop anything derived from its output. */
+  /**
+   * A launch is over and its process is gone or disowned: drop anything derived
+   * from its output. Said when a start fails, when another host takes the
+   * address from the child, when a child proven to be the server exits, and
+   * before every spawn (for whatever launch came before).
+   */
   launchEnded?(reason: string): void;
+  /**
+   * Whether the adapter is still waiting for something in this launch's
+   * output. Asked only for a start about to be reported, after readiness and
+   * the ownership decision: while it says yes, the output is forwarded again
+   * for at most {@link MANAGED_LAUNCH_OUTPUT_EXTRA_POLLS} more polls, never
+   * past the deadline, and then the start is reported as it would have been.
+   * Readiness is not asked again, so the wait never fails a host that is still
+   * running; a child that is the host and dies meanwhile is a failed start.
+   */
+  awaitingOutput?(): boolean;
   /** How long a freshly spawned host has to become ready before it is a failure. */
   readyTimeoutMs: number;
   /** Poll interval while waiting for readiness. */
@@ -622,6 +637,17 @@ export async function startManagedHost(
   // started, not a side fact alongside some other outcome.
   if (stranded !== undefined) return { action: 'preserved-predecessor', verdict: stranded };
 
+  // Whatever an earlier launch handed the adapter ended with that launch, which
+  // is over by now: stopped as a predecessor above, gone, or never ours. Said
+  // here, before the new child exists, so nothing derived from the old output
+  // (a launch token, for one host) is still held when the new output arrives,
+  // or worse, when it never does. Only an adapter that implements the hook
+  // hears this.
+  try {
+    plan.launchEnded?.('superseded-by-new-launch');
+  } catch {
+    /* an adapter's reaction is never a reason not to start */
+  }
   // A missing or non-executable command throws synchronously rather than
   // producing a child, and that must read as a reported start failure like any
   // other — it is the ordinary case of "the tool is not installed", and letting
@@ -691,6 +717,20 @@ export async function startManagedHost(
     } catch {
       /* same: the broker's own bookkeeping wins over an adapter's reaction */
     }
+  };
+  // A started host's launch also ends when its process does. Only for a child
+  // proven to BE the server: a launcher that exits while its server keeps
+  // serving has not ended anything. And only while the ownership record still
+  // names this process, so an exit noticed late cannot end a newer launch
+  // (whose record names a new process) or repeat a stop that already said so
+  // (which clears the record).
+  const endLaunchOnExit = (): void => {
+    if (!plan.launchEnded) return;
+    const launched = spawned.state === 'running' ? spawned.identity : undefined;
+    void child.exited.then(() => {
+      const current = store.read(plan.agent);
+      if (launched && current?.pid === launched.pid && current.start === launched.start) endLaunch('host-exited');
+    }, () => {});
   };
   // Written BEFORE readiness, deliberately. The record's claim is "this broker
   // spawned this process", which is proven right now; it is not a claim about
@@ -836,6 +876,54 @@ export async function startManagedHost(
   // startup budget before authentication has even received that URL.
   if (plan.observeOutput) await effects.sleep(0);
   const pollMs = plan.readyPollMs ?? 150;
+  // Readiness can pass before the output has given the adapter what it needs
+  // from this launch: a host that authenticates with a stored credential can
+  // answer before the URL carrying its new token has been forwarded, and no
+  // output is forwarded once the start returns. An adapter that says it is
+  // still waiting gets the output again at once, then once per poll for at
+  // most MANAGED_LAUNCH_OUTPUT_EXTRA_POLLS polls, never past the deadline.
+  // Readiness is not asked again. An adapter without the hook is not delayed.
+  // Answers whether the adapter was waiting at all.
+  const awaitingOutput = (): boolean => {
+    try {
+      return plan.awaitingOutput?.() === true;
+    } catch {
+      return false;
+    }
+  };
+  const awaitLaunchOutput = async (): Promise<boolean> => {
+    let waited = false;
+    for (let extra = 0; awaitingOutput(); extra += 1) {
+      waited = true;
+      forwardOutput();
+      if (!awaitingOutput() || extra >= MANAGED_LAUNCH_OUTPUT_EXTRA_POLLS || childGone()
+        || deadline - effects.now() < pollMs) break;
+      await effects.sleep(pollMs);
+    }
+    return waited;
+  };
+  // Every start is reported through here, and only after ownership is
+  // decided: the proof is taken while a launcher is still alive to give it,
+  // and the path where another host won the address never waits, so our
+  // losing child's output is not read after readiness. `childIsHost` is true
+  // when the record names the child as the host. A child that dies during the
+  // wait is then a host that died during its start, and is reported as one
+  // that dies before readiness is. A launcher whose proven server serves on
+  // may exit by design, so its exit ends nothing.
+  const reportStarted = async (
+    pid: number,
+    servingProven: boolean,
+    childIsHost: boolean,
+  ): Promise<ManagedHostStartOutcome> => {
+    if (await awaitLaunchOutput() && childIsHost && childGone()) {
+      store.clear(plan.agent);
+      endLaunch('host-exited-during-start');
+      return { action: 'start-failed', detailCode: 'host-exited-during-start', capturedOutput: child.readOutput() };
+    }
+    await recordObserved();
+    if (childIsHost && servingProven) endLaunchOnExit();
+    return { action: 'started', pid, servingProven };
+  };
   let polls = 0;
   for (;;) {
     // Forwarded on EVERY poll, which is what "each poll" in the contract means.
@@ -867,33 +955,34 @@ export async function startManagedHost(
           // Proven ours, but its identity could not be read, so the record keeps
           // naming the child. The start succeeded; what is unproven is which
           // process serves, and that is exactly what `servingProven: false` says.
-          await recordObserved();
-          return { action: 'started', pid: child.pid, servingProven: false };
+          return await reportStarted(child.pid, false, false);
         }
-        await recordObserved();
-        return { action: 'started', pid: serving.pid, servingProven: true };
+        return await reportStarted(serving.pid, true, serving.pid === child.pid);
       }
       if (serving.state === 'identified') {
         const adopted = provenListenerDescendant(record, serving.pid, effects);
         if (adopted) {
           record = adopted;
           store.write(record);
-          await recordObserved();
-          return { action: 'started', pid: serving.pid, servingProven: true };
+          return await reportStarted(serving.pid, true, false);
         }
         // Another host won the address while ours was starting. Ours is proven
         // ours and is demonstrably not the one serving, so it is stopped rather
         // than leaked — and the winner is classified and left strictly alone.
         const stopped = await terminate(child.pid, plan.stopGraceMs, effects, childGone);
         if (stopped.gone) store.clear(plan.agent);
+        // Our launch is over even if the child is slow to go: it does not serve
+        // this address, so nothing it printed is about the host that does.
+        endLaunch('address-taken');
         const live = effects.liveProcess(serving.pid);
         return {
           action: 'already-serving',
           verdict: classifyManagedHost(store.read(plan.agent), live, plan.identityKey),
         };
       }
-      await recordObserved();
-      return { action: 'started', pid: child.pid, servingProven: false };
+      // Unless a serving descendant was adopted while readiness was awaited,
+      // the record still names the child, so the child is the host.
+      return await reportStarted(child.pid, false, record.pid === child.pid);
     }
     if (childGone()) {
       // Exited — but a LAUNCHER exiting is not the same event as a host dying.
@@ -930,6 +1019,18 @@ export async function startManagedHost(
     await effects.sleep(pollMs);
   }
 }
+
+/**
+ * How many more polls of output a started host's adapter can get after
+ * readiness has passed, while it says it is still waiting for something in
+ * that output ({@link ManagedHostPlan.awaitingOutput}).
+ *
+ * The output is forwarded once more straight away, which is usually enough:
+ * in a managed-launch capture on dsh 0.2.2-rc.5 the probe that passed began
+ * 11-19 ms before the launch URL reached the pipe and returned about 120 ms
+ * later. The extra polls are margin for a busy broker.
+ */
+export const MANAGED_LAUNCH_OUTPUT_EXTRA_POLLS = 3;
 
 /**
  * Two independent walks, because one proves nothing durable. This branch RE-KEYS
@@ -1426,6 +1527,7 @@ export async function ensureManagedHost(
     isAvailable(options?: { signal?: AbortSignal }): Promise<boolean>;
     observeManagedOutput?(chunk: string): void;
     managedLaunchEnded?(reason: string): void;
+    awaitingManagedOutput?(): boolean;
   },
   effects: ManagedHostEffects,
   store: ManagedHostStore,
@@ -1492,6 +1594,7 @@ export async function ensureManagedHost(
       // line. An adapter with no use for them simply does not implement the hook.
       observeOutput: (text) => backend.observeManagedOutput?.(text),
       launchEnded: (reason) => backend.managedLaunchEnded?.(reason),
+      awaitingOutput: () => backend.awaitingManagedOutput?.() === true,
       launch: descriptor.launch,
       ...(descriptor.launchKeepsServerForeground ? { launchKeepsServerForeground: true } : {}),
       readyTimeoutMs: descriptor.readyTimeoutMs,
@@ -1531,6 +1634,13 @@ export async function releaseManagedHost(
   // otherwise flipping a variable strands a process nothing will ever reap.
   // Ownership is still what authorizes the signal.
   const descriptor = await backend.describeManagedHost();
+  // A host this broker stopped, or found already gone, has ended its launch, so
+  // the adapter drops whatever it derived from that launch's output. A host
+  // left running (preserved) has not, and keeps it.
+  const ended = (outcome: ManagedHostStopOutcome): ManagedHostStopOutcome => {
+    if (outcome.action === 'stopped' || outcome.action === 'already-gone') noteLaunchEnded(backend, 'stopped');
+    return outcome;
+  };
   if (!descriptor) {
     // THE RECORD IS THE PRIMARY INPUT, not the description.
     //
@@ -1543,14 +1653,28 @@ export async function releaseManagedHost(
     // everything a stop needs; the description was only ever a convenience.
     const record = store.read(backend.id);
     if (!record) return { action: 'undescribed' };
-    return await stopRecordedManagedHost(record, effects, store);
+    return ended(await stopRecordedManagedHost(record, effects, store));
   }
-  return await stopManagedHost(
+  return ended(await stopManagedHost(
     { agent: backend.id, identityKey: descriptor.identityKey, stopGraceMs: descriptor.stopGraceMs },
     effects,
     store,
     () => locatorLocation(descriptor, effects),
-  );
+  ));
+}
+
+/**
+ * Tell the adapter a launch is over, from outside a start: release and
+ * recovery, which stop a host or find it gone. A start says it through the
+ * plan. Only an adapter that implements the hook hears it, and its reaction
+ * never changes what the broker did.
+ */
+function noteLaunchEnded(backend: { managedLaunchEnded?(reason: string): void }, reason: string): void {
+  try {
+    backend.managedLaunchEnded?.(reason);
+  } catch {
+    /* an adapter's reaction never changes what the stop did */
+  }
 }
 
 
@@ -1845,10 +1969,17 @@ export async function recoverManagedHost(
       effects, store, () => locatorLocation(descriptor, effects),
     );
     if (stopped.action === 'preserved') return { action: 'declined', reason: 'unproven' };
+    // Said here and not left to the next spawn: the restart below may spawn
+    // nothing (budget spent, address taken, nothing to launch), and a launch
+    // whose exit was never watched (a launcher-shaped start, or one whose
+    // server was never proven) has said it nowhere else.
+    noteLaunchEnded(backend, 'stopped');
   } else {
     // 'absent': the recorded process is gone and nothing is serving. The record
-    // describes nothing, so it goes before a replacement is started.
+    // describes nothing, so it goes before a replacement is started, and so
+    // does anything the adapter took from that launch's output.
     store.clear(backend.id);
+    noteLaunchEnded(backend, 'host-exited');
   }
   return await restart(backend, effects, store, ledger, env, budget);
 }

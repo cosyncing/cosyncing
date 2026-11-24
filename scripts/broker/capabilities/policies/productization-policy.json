@@ -29,19 +29,6 @@
     },
     {
       "schemaVersion": 1,
-      "id": "pi.rpc.import",
-      "agent": "pi",
-      "nativeId": "pi:rpc:import",
-      "decision": "unsafe",
-      "risk": "critical",
-      "riskClass": "R3",
-      "reviewRequired": true,
-      "reason": "arbitrary-path session import crosses filesystem/content trust boundaries until validation and redaction policy exists",
-      "reviewedAt": "2026-07-02",
-      "reviewer": "maintainer"
-    },
-    {
-      "schemaVersion": 1,
       "id": "pi.rpc.switch_session",
       "agent": "pi",
       "nativeId": "pi:rpc:switch_session",

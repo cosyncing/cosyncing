@@ -7,7 +7,7 @@
  * Fixture JSONL only, no real omp.
  */
 export {};
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -166,16 +166,368 @@ process.exit(73);
   let futureRenameRefusal = '';
   try { await futureAdapter.attach(idOf(sessionA), 'resume'); } catch (error) { futureResumeRefusal = String(error); }
   try { await futureAdapter.renameSession(idOf(sessionA), 'must not persist'); } catch (error) { futureRenameRefusal = String(error); }
-  check('future omp refuses Resume and native rename before spawning the unverified runtime',
-    /verified only for 17\.4\.2/.test(futureResumeRefusal)
-      && /verified only for 17\.4\.2/.test(futureRenameRefusal)
+  let futureForkRefusal = '';
+  try { await futureAdapter.forkSession(idOf(sessionA)); } catch (error) { futureForkRefusal = String(error); }
+  check('future omp refuses Resume, native rename and fork before spawning the unverified runtime',
+    /verified only for omp 17\.4\.2 and 19\.1\.0/.test(futureResumeRefusal)
+      && /verified only for omp 17\.4\.2 and 19\.1\.0/.test(futureRenameRefusal)
+      && /verified only for omp 17\.4\.2 and 19\.1\.0/.test(futureForkRefusal)
+      && futureAdapter.canForkSession() === false
       && !existsSync(futureSpawnMarker),
-    JSON.stringify({ futureResumeRefusal, futureRenameRefusal }));
+    JSON.stringify({ futureResumeRefusal, futureRenameRefusal, futureForkRefusal }));
   check('future omp discovery does not auto-install its bridge',
     !existsSync(join(root, '.omp', 'agent', 'extensions', 'cosyncing-bridge', 'index.ts')));
   delete process.env.COSYNCING_OMP_BIN;
   process.env.COSYNCING_OMP_BRIDGE_AUTOINSTALL = '0';
   resetOmpRuntimeReadinessCache();
+
+  // ── A file a newer omp wrote is not continued by an older configured omp ──
+  // omp 19.1.0 stamps `runtime:{version}` on every entry it appends (captured; the shape below is
+  // the captured one). omp 17.4.2 writes none and ignores 19.1.0's `activeLeafId`, so it could
+  // continue such a file on the wrong branch: Resume and native rename refuse before any spawn.
+  const { readOmpWriterStamps, ompNativeWriteRefusal } = await import('../src/index.ts');
+  const sessionD = join(sessionsRoot, '2026-11-24_dddd.jsonl');
+  writeFileSync(sessionD, [
+    JSON.stringify({ type: 'title', v: 1, title: '', updatedAt: '2026-11-24T08:25:35.080Z', pad: '' }),
+    JSON.stringify({ type: 'session', version: 3, id: 'sess-d', timestamp: '2026-11-24T08:25:35.080Z', cwd: cwdA }),
+    JSON.stringify({ type: 'model_change', id: 'd1', parentId: null, timestamp: '2026-11-24T08:25:35.173Z', runtime: { version: '19.0.3' }, model: 'fixture-provider/fixture-model' }),
+    JSON.stringify({ type: 'message', id: 'd2', parentId: 'd1', timestamp: '2026-11-24T08:25:35.367Z', runtime: { version: '19.1.0' }, message: { role: 'user', content: [{ type: 'text', text: 'written by omp 19.1.0' }] } }),
+  ].join('\n') + '\n');
+  const stampsD = await readOmpWriterStamps(sessionD);
+  const stampsA = await readOmpWriterStamps(sessionA);
+  check('the newest writer stamp is read from the file',
+    stampsD.newest === '19.1.0' && !stampsD.incomparable && stampsA.newest === undefined && !stampsA.incomparable,
+    JSON.stringify({ stampsD, stampsA }));
+  check('only an omp older than the file\'s newest writer is refused',
+    /written by omp 19\.1\.0, which is newer than the omp 17\.4\.2/.test(await ompNativeWriteRefusal(sessionD, '17.4.2') ?? '')
+      && await ompNativeWriteRefusal(sessionD, '19.1.0') === undefined
+      && await ompNativeWriteRefusal(sessionA, '17.4.2') === undefined
+      && await ompNativeWriteRefusal(sessionD, undefined) === undefined);
+  // The stamp rows below keep the captured entry shape and vary only the version, and a nested
+  // `runtime` (as in a tool's `details`): no omp other than 17.4.2 and 19.1.0 was captured.
+  const stampRow = (id: string, version: unknown, details?: unknown) => JSON.stringify({
+    type: 'message', id, parentId: null, timestamp: '2026-11-24T08:25:35.367Z',
+    ...(version === undefined ? {} : { runtime: { version } }),
+    message: { role: 'toolResult', content: [{ type: 'text', text: 'ok' }], ...(details === undefined ? {} : { details }) },
+  });
+  const stampFile = (name: string, rows: string[]) => {
+    const path = join(root, `${name}.jsonl`);
+    writeFileSync(path, rows.join('\n') + '\n');
+    return path;
+  };
+  const unknownFirst = stampFile('stamps-unknown-first', [stampRow('s1', 'dev-build'), stampRow('s2', '19.1.0')]);
+  const unknownLast = stampFile('stamps-unknown-last', [stampRow('s1', '19.1.0'), stampRow('s2', 'dev-build')]);
+  const unknownRefusals = [await ompNativeWriteRefusal(unknownFirst, '19.1.0'), await ompNativeWriteRefusal(unknownLast, '19.1.0')];
+  check('a stamp that does not compare refuses whatever its place in the file',
+    unknownRefusals.every((refusal) => /cannot compare with the omp 19\.1\.0/.test(refusal ?? '')),
+    JSON.stringify(unknownRefusals));
+  const nested = stampFile('stamps-nested', [
+    stampRow('s1', '19.1.0', { runtime: { version: '22.11.0' } }),
+    stampRow('s2', undefined, { runtime: { version: '22.11.0' } }),
+  ]);
+  const nestedStamps = await readOmpWriterStamps(nested);
+  check('only an entry\'s own runtime stamp counts, not one nested in its details',
+    nestedStamps.newest === '19.1.0' && !nestedStamps.incomparable && await ompNativeWriteRefusal(nested, '19.1.0') === undefined,
+    JSON.stringify(nestedStamps));
+  const growing = stampFile('stamps-growing', [stampRow('s1', '19.1.0')]);
+  const before = await ompNativeWriteRefusal(growing, '19.1.0');
+  appendFileSync(growing, stampRow('s2', '19.2.0') + '\n');
+  const after = await ompNativeWriteRefusal(growing, '19.1.0');
+  check('the cached reading follows the file when it changes',
+    before === undefined && /written by omp 19\.2\.0/.test(after ?? ''), JSON.stringify({ before, after }));
+  // A later omp may order the runtime keys differently, or write the stamp after a large payload:
+  // the top-level stamp is still found, past a nested one, without parsing the entry whole.
+  const reordered = stampFile('stamps-reordered', [JSON.stringify({
+    type: 'message', id: 's1', parentId: null, timestamp: '2026-11-24T08:25:35.367Z',
+    runtime: { build: 'later', version: '19.2.0' },
+    message: { role: 'user', content: [{ type: 'text', text: 'ok' }] },
+  })]);
+  const payloadFirst = stampFile('stamps-payload-first', [JSON.stringify({
+    type: 'message', id: 's1', parentId: null, timestamp: '2026-11-24T08:25:35.367Z',
+    message: { role: 'toolResult', content: [{ type: 'text', text: 'x'.repeat(4 * 1024 * 1024) }], details: { runtime: { version: '22.11.0' } } },
+    runtime: { version: '19.2.0' },
+  })]);
+  const walkStarted = performance.now();
+  const reorderedStamps = await readOmpWriterStamps(reordered);
+  const payloadFirstStamps = await readOmpWriterStamps(payloadFirst);
+  const walkMs = performance.now() - walkStarted;
+  check('the top-level stamp is found whatever its key order and after a 4 MiB payload',
+    reorderedStamps.newest === '19.2.0' && payloadFirstStamps.newest === '19.2.0' && walkMs < 2_000,
+    `${Math.round(walkMs)} ms ${JSON.stringify({ reorderedStamps, payloadFirstStamps })}`);
+  const olderBin = join(root, 'omp-older');
+  const olderSpawnMarker = join(root, 'older-runtime-spawned');
+  writeFileSync(olderBin, `#!/usr/bin/env bun
+import { writeFileSync } from 'node:fs';
+if (process.argv.includes('--version')) { console.log('17.4.2'); process.exit(0); }
+writeFileSync(${JSON.stringify(olderSpawnMarker)}, 'spawned');
+process.exit(73);
+`);
+  chmodSync(olderBin, 0o755);
+  process.env.COSYNCING_OMP_BIN = olderBin;
+  resetOmpRuntimeReadinessCache();
+  const olderAdapter = new OmpAdapter({ brokerUrl: 'http://127.0.0.1:7734' });
+  const refusalOf = async (action: () => Promise<unknown>): Promise<{ name: string; message: string }> => {
+    try {
+      await action();
+      return { name: 'none', message: '' };
+    } catch (error) {
+      return { name: (error as Error).name, message: String((error as Error).message) };
+    }
+  };
+  const newerResume = await refusalOf(() => olderAdapter.attach(idOf(sessionD), 'resume'));
+  const newerRename = await refusalOf(() => olderAdapter.renameSession(idOf(sessionD), 'must not persist'));
+  check('omp 17.4.2 refuses Resume (unresumable) and native rename (alias fallback) of a file omp 19.1.0 wrote, before spawning',
+    newerResume.name === 'NativeSessionUnresumableError'
+      && /newer than the omp 17\.4\.2/.test(newerResume.message)
+      && newerRename.name === 'NativeSessionRenameUnsupportedError'
+      && !existsSync(olderSpawnMarker),
+    JSON.stringify({ newerResume, newerRename }));
+  const newerObserve = await olderAdapter.attach(idOf(sessionD), 'observe');
+  const newerHistory = await newerObserve.getHistory();
+  check('the refused file stays readable through Observe',
+    newerHistory.some((message) => message.type === 'user-message' && message.text === 'written by omp 19.1.0'));
+  await newerObserve.close();
+  // Fork runs the configured omp as well. omp 17.4.2 has no RPC fork, so the refusal shows with omp
+  // 19.1.0 configured and a later omp's entry (the captured shape, a version past the captured ones).
+  const olderCanFork = olderAdapter.canForkSession();
+  const nineteenBin = join(root, 'omp-nineteen');
+  const nineteenSpawnMarker = join(root, 'nineteen-runtime-spawned');
+  writeFileSync(nineteenBin, `#!/usr/bin/env bun
+import { writeFileSync } from 'node:fs';
+if (process.argv.includes('--version')) { console.log('omp/19.1.0'); process.exit(0); }
+writeFileSync(${JSON.stringify(nineteenSpawnMarker)}, 'spawned');
+process.exit(73);
+`);
+  chmodSync(nineteenBin, 0o755);
+  process.env.COSYNCING_OMP_BIN = nineteenBin;
+  resetOmpRuntimeReadinessCache();
+  appendFileSync(sessionD, JSON.stringify({ type: 'message', id: 'd3', parentId: 'd2', timestamp: '2026-11-24T08:26:01.120Z', runtime: { version: '19.2.0' }, message: { role: 'user', content: [{ type: 'text', text: 'written by a later omp' }] } }) + '\n');
+  const nineteenAdapter = new OmpAdapter({ brokerUrl: 'http://127.0.0.1:7734' });
+  const newerFork = await refusalOf(() => nineteenAdapter.forkSession(idOf(sessionD)));
+  check('omp 17.4.2 offers no fork, and omp 19.1.0 refuses to fork a file a later omp wrote (unresumable: the broker answers 409), before spawning',
+    olderCanFork === false
+      && nineteenAdapter.canForkSession() === true
+      && newerFork.name === 'NativeSessionUnresumableError'
+      && /written by omp 19\.2\.0, which is newer than the omp 19\.1\.0/.test(newerFork.message)
+      && !existsSync(nineteenSpawnMarker),
+    JSON.stringify(newerFork));
+  rmSync(sessionD, { force: true });
+  delete process.env.COSYNCING_OMP_BIN;
+  resetOmpRuntimeReadinessCache();
+
+  // ── omp 19.1.0's replay leaf (`resolveSessionLeafId`, session-entries.ts) ──
+  // Source-modelled rows: no capture produced an `activeLeafId` row. An entry written off the
+  // active branch records the leaf it interrupted, and a reload replays that leaf's branch.
+  const { mapPiJsonlText } = await import('@cosyncing/pi-engine');
+  const { OMP_DIALECT: ompDialect } = await import('../src/dialect.ts');
+  const entry = (id: string, parentId: string | null, role: 'user' | 'assistant', text: string, extra: Record<string, unknown> = {}) =>
+    JSON.stringify({
+      type: 'message', id, parentId, timestamp: '2026-11-24T08:00:00.000Z', ...extra,
+      message: role === 'user'
+        ? { role, content: [{ type: 'text', text }] }
+        : { role, content: [{ type: 'text', text }], stopReason: 'stop' },
+    });
+  const branched = (last: string) => [
+    JSON.stringify({ type: 'session', version: 3, id: 'sess-leaf', timestamp: '2026-11-24T08:00:00.000Z', cwd: cwdA }),
+    entry('u1', null, 'user', 'root prompt'),
+    entry('a1', 'u1', 'assistant', 'root answer'),
+    entry('u2', 'a1', 'user', 'branch A prompt'),
+    entry('a2', 'u2', 'assistant', 'branch A answer'),
+    entry('u3', 'a1', 'user', 'branch B prompt'),
+    entry('a3', 'u3', 'assistant', 'branch B answer'),
+    last,
+  ].join('\n') + '\n';
+  const userTexts = (raw: string) => mapPiJsonlText(raw, 0, ompDialect)
+    .filter((message) => message.type === 'user-message').map((message) => (message as { text?: string }).text);
+  const offBranch = userTexts(branched(entry('late', 'a2', 'assistant', 'late branch A result', { activeLeafId: 'a3' })));
+  check('an off-branch entry with activeLeafId replays the branch it interrupted',
+    JSON.stringify(offBranch) === JSON.stringify(['root prompt', 'branch B prompt']), JSON.stringify(offBranch));
+  const lastIsLeaf = userTexts(branched(entry('late', 'a2', 'assistant', 'late branch A result')));
+  check('without activeLeafId the last entry is the leaf, as for Pi',
+    JSON.stringify(lastIsLeaf) === JSON.stringify(['root prompt', 'branch A prompt']), JSON.stringify(lastIsLeaf));
+  const cleared = userTexts(branched(entry('late', 'a2', 'assistant', 'late branch A result', { activeLeafId: null })));
+  check('a null activeLeafId replays a cleared leaf', cleared.length === 0, JSON.stringify(cleared));
+  const missing = userTexts(branched(entry('late', 'a2', 'assistant', 'late branch A result', { activeLeafId: 'gone' })));
+  check('a recorded leaf that no longer exists falls back to the newest self-selected entry',
+    JSON.stringify(missing) === JSON.stringify(['root prompt', 'branch B prompt']), JSON.stringify(missing));
+
+  // ── omp 19.1.0 form dialogs, read and validated the way omp reads and validates them ──
+  const { parsePiFormDialog, piFormAnswer, piFormQuestions } = await import('../../../pi-engine/src/form-dialog.ts');
+  const controls = parsePiFormDialog(`<form>
+  <label>Region <select name="region"><option value="eu">Europe</option><option value="us" disabled>US</option><option value="ap">Asia</option></select></label>
+  <label>Tags <select name="tags" multiple><option value="a" selected>Alpha</option><option value="b">Beta</option></select></label>
+  <label>Replicas <input type="number" name="replicas" min="1" max="5" step="1" value="2"></label>
+  <label>Load <input type="range" name="load" min="0" max="100"></label>
+  <label>Notes <textarea name="notes" maxlength="10">
+default</textarea></label>
+</form>`);
+  check('select, multi-select, number, range and textarea become card questions',
+    JSON.stringify(controls && piFormQuestions(controls)) === JSON.stringify([
+      { question: 'Region', options: [{ label: 'Europe' }, { label: 'Asia' }], freeText: false },
+      { question: 'Tags', options: [{ label: 'Alpha' }, { label: 'Beta' }], multiple: true, freeText: false },
+      { question: 'Replicas', options: [], kind: 'number', min: 1, max: 5, step: 1 },
+      { question: 'Load', options: [], kind: 'number', min: 0, max: 100 },
+      { question: 'Notes', options: [], kind: 'text' },
+    ]),
+    JSON.stringify(controls && piFormQuestions(controls)));
+  const controlDefaults = controls && piFormAnswer(controls, undefined);
+  check('defaults: a single select takes its first enabled option, a textarea its content',
+    JSON.stringify(controlDefaults) === JSON.stringify({ ok: true, data: { region: 'eu', tags: ['a'], replicas: 2, notes: 'default' } }),
+    JSON.stringify(controlDefaults));
+  const controlAnswer = controls && piFormAnswer(controls, [['Asia'], ['Beta'], ['4'], ['50'], ['hi']]);
+  check('answers become option values, an array for the multi-select, numbers for number and range',
+    JSON.stringify(controlAnswer) === JSON.stringify({ ok: true, data: { region: 'ap', tags: ['b'], replicas: 4, load: 50, notes: 'hi' } }),
+    JSON.stringify(controlAnswer));
+  const outOfRange = controls && piFormAnswer(controls, [['Asia'], ['Beta'], ['9'], ['50'], ['hi']]);
+  const tooLong = controls && piFormAnswer(controls, [['Asia'], ['Beta'], ['4'], ['50'], ['far too long here']]);
+  check('a number past max and a textarea past maxlength are refused before sending',
+    outOfRange?.ok === false && /Replicas: Must be at most 5/.test(outOfRange.problem)
+      && tooLong?.ok === false && /Notes: At most 10 characters/.test(tooLong.problem),
+    JSON.stringify({ outOfRange, tooLong }));
+
+  // omp decides array or string over the options in the HTML, disabled and repeated ones counted.
+  const groups = parsePiFormDialog(`<form>
+  <fieldset><legend>Extras</legend>
+    <label><input type="checkbox" name="extras" value="cheese"> Cheese</label>
+    <label><input type="checkbox" name="extras" value="ham" disabled> Ham</label>
+  </fieldset>
+  <label><input type="checkbox" name="agree" value="yes"> I agree</label>
+  <fieldset><legend>Size</legend>
+    <label><input type="checkbox" name="size" value="m"> Medium</label>
+    <label><input type="checkbox" name="size" value="m" checked> Medium again</label>
+  </fieldset>
+</form>`);
+  const groupAnswer = groups && piFormAnswer(groups, [['Cheese'], ['I agree'], ['Medium']]);
+  check('a two-option checkbox group with one disabled option still answers an array; a lone checkbox a string',
+    JSON.stringify(groups?.fields.map((field) => [field.name, field.options.length, field.arrayAnswer])) === JSON.stringify([['extras', 1, true], ['agree', 1, false], ['size', 1, true]])
+      && JSON.stringify(groupAnswer) === JSON.stringify({ ok: true, data: { extras: ['cheese'], agree: 'yes', size: ['m'] } }),
+    JSON.stringify({ fields: groups?.fields, groupAnswer }));
+  const groupDefaults = groups && piFormAnswer(groups, undefined);
+  check('a repeated value that is checked is checked by default',
+    groupDefaults?.ok === true && JSON.stringify(groupDefaults.data.size) === JSON.stringify(['m']),
+    JSON.stringify(groupDefaults));
+
+  // omp's field rules (`fieldError`): an answer it would refuse never leaves the card.
+  const rules = parsePiFormDialog(`<form>
+  <label>Name <input name="name" required minlength="2"></label>
+  <label>Code <input name="code" pattern="[A-Z]{3}-\\d{2}"></label>
+  <label>Mail <input type="email" name="mail"></label>
+  <label>Site <input type="url" name="site"></label>
+  <label>Size <select name="size" required><option value="" disabled selected>Pick one</option><option value="s">Small</option></select></label>
+</form>`);
+  const rulesProblem = (answers: string[][] | undefined) => {
+    const answer = rules && piFormAnswer(rules, answers);
+    return answer && !answer.ok ? answer.problem : answer ? 'ok' : 'unparsed';
+  };
+  const valid = rules && piFormAnswer(rules, [['Al'], ['ABC-12'], ['a@b'], ['https://x.test'], ['Small']]);
+  check('a valid answer passes every rule',
+    JSON.stringify(valid) === JSON.stringify({ ok: true, data: { name: 'Al', code: 'ABC-12', mail: 'a@b', site: 'https://x.test', size: 's' } }),
+    JSON.stringify(valid));
+  const refusals = [
+    rulesProblem(undefined),
+    rulesProblem([['A'], ['ABC-12'], ['a@b'], ['https://x.test'], ['Small']]),
+    rulesProblem([['Al'], ['abc'], ['a@b'], ['https://x.test'], ['Small']]),
+    rulesProblem([['Al'], ['ABC-12'], ['nope'], ['https://x.test'], ['Small']]),
+    rulesProblem([['Al'], ['ABC-12'], ['a@b'], ['x'], ['Small']]),
+    rulesProblem([['Al'], ['ABC-12'], ['a@b'], ['https://x.test'], ['Huge']]),
+  ];
+  check('required, minlength, pattern, email, url and an unknown option are each refused',
+    /^Name: Required$/.test(refusals[0]!)
+      && /^Name: Needs at least 2 characters$/.test(refusals[1]!)
+      && /^Code: Must match /.test(refusals[2]!)
+      && /^Mail: Enter an email address$/.test(refusals[3]!)
+      && /^Site: Enter a full URL$/.test(refusals[4]!)
+      && /^Size: Choose one of its options$/.test(refusals[5]!)
+      && !refusals.some((problem) => problem.includes('Huge')),
+    JSON.stringify(refusals));
+
+  // Forms the card cannot carry exactly are not offered; an invalid pattern is ignored, as omp does.
+  const refused = {
+    file: parsePiFormDialog('<form><label>Doc <input type="file" name="doc"></label></form>'),
+    twoTexts: parsePiFormDialog('<form><input name="a"><input name="a"></form>'),
+    radioAndCheckbox: parsePiFormDialog('<form><input type="radio" name="a" value="1"><input type="checkbox" name="a" value="2"></form>'),
+    requiredNothingToPick: parsePiFormDialog('<form><input type="radio" name="a" value="1" required disabled></form>'),
+    nothing: parsePiFormDialog('<form><p>Just text</p></form>'),
+  };
+  const invalidPattern = parsePiFormDialog('<form><label>A <input name="a" pattern="["></label></form>');
+  check('file inputs, repeated names, unanswerable required groups and empty forms are refused',
+    Object.values(refused).every((form) => form === undefined)
+      && invalidPattern?.fields.length === 1 && invalidPattern.fields[0]!.pattern === undefined,
+    JSON.stringify({ refused, invalidPattern }));
+
+  // A pattern never keeps a form from being offered. It is checked here only where a worst-case
+  // bound on the matcher's work for the answer is small; otherwise omp alone checks it.
+  const patternForm = (pattern: string) => parsePiFormDialog(`<form><label>Value <input name="v" pattern="${pattern}"></label></form>`);
+  const kept = ['[a-z]+(-[a-z]+)*', '\\d+(\\.\\d+)*', '(?:[a-z]|-)*', '(\\w+\\s?)+', '\\w*\\w*\\w*\\w*x', '[\\s\\S]*']
+    .map((pattern) => ({ pattern, form: patternForm(pattern) }));
+  check('forms with linear, polynomial and exponential patterns are all offered with the pattern kept',
+    kept.every(({ pattern, form }) => form?.fields.length === 1 && form.fields[0]!.pattern === pattern),
+    JSON.stringify(kept.map(({ pattern, form }) => [pattern, form?.fields[0]?.pattern])));
+  const alternation = patternForm('(?:[a-z]|-)*');
+  const cheapOk = alternation && piFormAnswer(alternation, [['a-b']]);
+  const cheapRefused = alternation && piFormAnswer(alternation, [['a_b']]);
+  check('a pattern that is cheap to run on a short answer is still checked before sending',
+    cheapOk?.ok === true && cheapRefused?.ok === false && /^Value: Must match /.test(cheapRefused.problem),
+    JSON.stringify({ cheapOk, cheapRefused }));
+  const slug = patternForm('[a-z]+(-[a-z]+)*');
+  // `My_Slug` does not match: only a skipped check lets it through, so this proves omp is left to check it.
+  const slugAnswer = slug && piFormAnswer(slug, [['My_Slug']]);
+  check('a linear pattern the bound counts as costly is left to omp, and the answer is sent',
+    JSON.stringify(slugAnswer) === JSON.stringify({ ok: true, data: { v: 'My_Slug' } }), JSON.stringify(slugAnswer));
+  const patternStarted = performance.now();
+  const polynomial = patternForm('\\w*\\w*\\w*\\w*x');
+  const polynomialAnswer = polynomial && piFormAnswer(polynomial, [['a'.repeat(1024)]]);
+  const anything = patternForm('[\\s\\S]*');
+  const longAnswer = anything && piFormAnswer(anything, [['b'.repeat(5000)]]);
+  const patternMs = performance.now() - patternStarted;
+  check('a polynomial pattern with a 1024-character answer returns at once, and a long answer is no longer refused',
+    patternMs < 1_000 && polynomialAnswer?.ok === true && longAnswer?.ok === true,
+    `${Math.round(patternMs)} ms ${JSON.stringify({ polynomial: polynomialAnswer?.ok, long: longAnswer?.ok })}`);
+  // Compiling runs on the broker too: a pattern past the length budget is neither compiled nor
+  // checked here. These 8,000 set-operation classes would take seconds to compile.
+  const compileStarted = performance.now();
+  const longSetForm = patternForm('[\\p{L}--\\p{Lu}]'.repeat(8000));
+  const longSetAnswer = longSetForm && piFormAnswer(longSetForm, [['NOT LOWER 1']]);
+  const compileMs = performance.now() - compileStarted;
+  check('a pattern past the compile budget keeps its form, is never compiled, and is left to omp',
+    compileMs < 1_000 && longSetForm?.fields.length === 1 && longSetForm.fields[0]!.pattern === undefined
+      && longSetAnswer?.ok === true,
+    `${Math.round(compileMs)} ms ${JSON.stringify(longSetAnswer)}`);
+  const budgetForm = parsePiFormDialog(`<form>${[1, 2, 3].map((n) => `<label>P${n} <input name="p${n}" pattern="${'a'.repeat(900)}"></label>`).join('')}</form>`);
+  check('one form compiles at most its budget of pattern text, and the rest is left to omp',
+    JSON.stringify(budgetForm?.fields.map((field) => field.pattern !== undefined)) === JSON.stringify([true, true, false]),
+    JSON.stringify(budgetForm?.fields.map((field) => field.pattern?.length)));
+  // Groups nested past the bound's depth limit count as unbounded: the check is left to omp rather
+  // than recursing, so even an answer that does not match is sent.
+  const deep = patternForm(`${'('.repeat(300)}a${')'.repeat(300)}`);
+  const deepAnswer = deep && piFormAnswer(deep, [['b']]);
+  check('a pattern nested past the depth limit is kept and left to omp',
+    deep?.fields[0]?.pattern?.length === 601 && deepAnswer?.ok === true, JSON.stringify(deepAnswer));
+  // A refusal quotes at most 80 characters of the pattern.
+  const longQuoted = patternForm('a'.repeat(200));
+  const longQuotedAnswer = longQuoted && piFormAnswer(longQuoted, [['b']]);
+  check('a refusal quotes only the start of a long pattern',
+    longQuotedAnswer?.ok === false && longQuotedAnswer.problem === `Value: Must match ${'a'.repeat(80)}…`,
+    JSON.stringify(longQuotedAnswer));
+
+  // The parser runs on the broker's event loop: crafted HTML up to the size cap stays linear.
+  const megabyte = 1024 * 1024 - 64;
+  const crafted = [
+    '<a '.repeat(Math.floor(megabyte / 3)),
+    '<!--'.repeat(Math.floor(megabyte / 4)),
+    '<a b="'.repeat(Math.floor(megabyte / 6)),
+    '<'.repeat(megabyte),
+    '<textarea name="t">' + '</textare'.repeat(Math.floor(megabyte / 10)),
+    // 19,000 checkboxes (about 1,021,560 characters, under the cap) carrying 5000 distinct values.
+    Array.from({ length: 19_000 }, (_, index) => `<input type="checkbox" name="c" value="v${index % 5000}" checked>`).join(''),
+  ];
+  const parseStarted = performance.now();
+  const craftedResults = crafted.map((html) => parsePiFormDialog(html));
+  const parseMs = performance.now() - parseStarted;
+  check('crafted near-cap HTML parses in bounded time',
+    parseMs < 2_000 && craftedResults.slice(0, 4).every((form) => form === undefined)
+      && craftedResults[5]?.fields[0]?.options.length === 5000,
+    `${Math.round(parseMs)} ms`);
 
   // ── Path rules (pure dialect resolution; no adapter needed) ──
   const { inspectOmpPathCollision, OMP_DIALECT } = await import('../src/dialect.ts');

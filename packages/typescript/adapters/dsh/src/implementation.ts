@@ -591,6 +591,12 @@ export class DshAdapter implements AgentBackend {
   private protocolChoice?: { family: DshContractFamily | null; at: number; detail?: string };
   /** Bytes of child output not yet completed into a line, across announcement chunks. */
   private readonly managedOutput = new DshLaunchScanner();
+  /**
+   * Where the owned launch in progress stands on its launch URL: `awaiting`
+   * from the launch's first forwarded output until its URL is `read`. A launch
+   * ending resets it.
+   */
+  private managedLaunchUrl: 'none' | 'awaiting' | 'read' = 'none';
   /** Workspace titles learned from a live `workspace/follow` baseline, with the moment they were read. */
   private remoteWorkspaceBaseline?: { at: number; titles: Map<string, string>; archived: Set<string> };
   private static readonly DSH_WORKSPACE_TITLES_TTL_MS = 5 * 60_000;
@@ -1170,11 +1176,13 @@ export class DshAdapter implements AgentBackend {
   observeManagedOutput(chunk: string): void {
     const baseUrl = this.baseUrlOrUndefined();
     if (baseUrl === undefined) return;
+    if (this.managedLaunchUrl === 'none') this.managedLaunchUrl = 'awaiting';
     for (const raw of this.managedOutput.feed(chunk)) {
       try {
         const parsed = parseDshLaunchUrl(raw, baseUrl);
         const auth = this.authSession(baseUrl);
         auth.adoptLaunchToken(parsed.token);
+        this.managedLaunchUrl = 'read';
         // Kick the exchange off now. Readiness will call `ensure()` too, but an
         // exchange that waits for the first probe is an exchange that spends the
         // host's startup budget on a queue.
@@ -1201,7 +1209,26 @@ export class DshAdapter implements AgentBackend {
    */
   managedLaunchEnded(_reason: string): void {
     this.managedOutput.reset();
+    this.managedLaunchUrl = 'none';
     this.remoteAuth?.releaseLaunchToken(true);
+  }
+
+  /**
+   * Whether an owned launch is in progress (the broker has started forwarding
+   * its output) and this adapter has not read its launch URL yet.
+   *
+   * A stored cookie lets the host pass readiness before the URL it printed has
+   * been forwarded: in a managed-launch capture on 0.2.2-rc.5, 3 of 14
+   * restarts were ready first, and the start returned with the new token
+   * unread. Renewal then has no current token, and a 30-day cookie expires
+   * with nothing to renew it. While this says yes the broker forwards the
+   * output a few more polls after readiness. Readiness itself stays
+   * {@link isAvailable}. Every owned launch is a 0.2 host, because the legacy
+   * family has no verified `--no-open` and `decideManagedLaunch` refuses to
+   * start it, so an owned launch is always expected to print a URL.
+   */
+  awaitingManagedOutput(): boolean {
+    return this.managedLaunchUrl === 'awaiting';
   }
 
   async isAvailable(options?: AvailabilityOptions): Promise<boolean> {
@@ -1320,7 +1347,14 @@ export class DshAdapter implements AgentBackend {
         generationLoss: 'host-scoped', ...(options?.signal ? { signal: options.signal } : {}),
       });
       if (!outcome.ok || !outcome.value || typeof outcome.value !== 'object') return;
-      const block = outcome.value as { asOfSeq?: unknown; values?: unknown };
+      const block = outcome.value as { kind?: unknown; asOfSeq?: unknown; values?: unknown };
+      // rc.2 answers an untagged `{asOfSeq, values}`; 0.2.2 tags it `sequenced`,
+      // or answers `migration-required` with cache hints and no seq for a stored
+      // session in an older format. Only an exact sequenced read replaces the
+      // list hint; a migration answer leaves the roster's own cached hint alone.
+      // The seq check below already refuses the migration shape the source
+      // defines; this refuses any other tagged answer even if it carries a seq.
+      if (block.kind !== undefined && block.kind !== 'sequenced') return;
       if (!Number.isSafeInteger(block.asOfSeq) || Number(block.asOfSeq) < -1
           || !block.values || typeof block.values !== 'object' || Array.isArray(block.values)) return;
       const held = row.projections as { asOfSeq?: unknown } | undefined;

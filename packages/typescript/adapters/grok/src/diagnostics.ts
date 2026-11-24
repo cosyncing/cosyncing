@@ -17,7 +17,7 @@ export const GROK_MINIMUM_VERSION: AgentMinimumVersion = Object.freeze({
   version: GROK_MINIMUM_SUPPORTED_VERSION,
   requiredFeature: 'bounded local-store Observe plus cached-token authenticated ACP Create/Resume',
   evidenceUrl: 'https://grok.com/',
-  evidenceNote: `Physically measured: ${GROK_MEASURED_VERSIONS.join(', ')}. Local store plus authenticated ACP initialize/create/load/prompt evidence was recorded against 1.0.13 on 2026-08-31; 1.0.24 was compared against it on 2026-09-09 and matched on every contract point the adapter reads. Newer builds are supported without being enumerated here — Grok updates itself, so the protocol, authentication, store-shape and ownership checks each fail closed on their own rather than gating on a version list.`,
+  evidenceNote: `Physically measured: ${GROK_MEASURED_VERSIONS.join(', ')}. Local store plus authenticated ACP initialize/create/load/prompt evidence was recorded against 1.0.13 on 2026-08-31; 1.0.24 was compared against it on 2026-09-09 and matched on every contract point the adapter reads; 1.0.92 was driven live through the adapter on 2026-11-24 (Create, Resume, prompts, permissions and Stop). Newer builds are supported without being enumerated here — Grok updates itself, so the protocol, authentication, store-shape and ownership checks each fail closed on their own rather than gating on a version list.`,
 });
 
 function storeCheck(context: SetupDiagnosisContext, binaryPresent: boolean): SetupCheck {

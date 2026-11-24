@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
   "agent": "pi",
-  "version": "0.78.1",
-  "captured_at": "2026-07-02T00:00:00.000Z",
+  "version": "1.6.0",
+  "captured_at": "2026-11-24T00:00:00.000Z",
   "sources": [
     {
-      "id": "pi-rpc-types-0.78.1",
-      "source_url": "installed dist RpcCommand type union, verified 2026-07-02",
+      "id": "pi-rpc-types-1.6.0",
+      "source_url": "installed dist RpcCommand type union (@earendil-works/pi-coding-agent 1.6.0), verified 2026-11-24",
       "checksum": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
       "trust_level": "source-repo"
     }

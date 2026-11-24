@@ -4,13 +4,14 @@
  * Every extra drives the broker over HTTP and the session socket the way the app does, against the
  * kit's fake runtime, and asserts what a client receives, what the runtime receives (its ledger) and
  * what lands in the session file the product reads back. Pi and omp share the engine, so most extras
- * run for both dialects; the few that differ (fork and clone exist only on Pi, omp persists the
- * app's prompt correlation, omp rejects empty names) branch on the dialect, never on a tool name.
+ * run for both dialects; the few that differ (clone exists only on Pi and omp's fork only on the
+ * builds whose RPC has it, omp persists the app's prompt correlation, omp rejects empty names, omp
+ * 19.1.0 sends forms and yields to background work) branch on the dialect, never on a tool name.
  */
 import { expect } from 'bun:test';
 import { BROKER_CONTRACT_REVISION } from '../../../packages/typescript/protocol/src/index.ts';
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { eventually, type SessionStream } from '../../harness/index.ts';
 import type { ConformanceContext, ConformanceExtra } from './kit.ts';
 import { type PiFake, type PiFamilyDialect, promptText, piFileOf, piRowId, piUuidOf } from './pi-family.ts';
@@ -264,19 +265,73 @@ export function piFamilyExtras(dialect: PiFamilyDialect): ConformanceExtra[] {
   // ------------------------------------------------------------- fork and clone
   if (omp) {
     extras.push({
-      title: 'omp offers neither fork nor clone: both are refused before any runtime starts',
+      title: 'omp forks only on a build whose RPC has fork: 17.4.2 refuses before any runtime starts, 19.1.0 copies the whole session bare and keeps a chosen entry, and clone is never offered',
       async run(context) {
         const fake = asFake(context);
-        const stored = fake.seedSession({ title: 'no fork on omp' });
+        const stored = fake.seedSession({ title: 'fork on omp', turns: 2 });
         await context.client.waitForSession((row) => row.id === stored.id);
+        const agentRow = async (): Promise<any> => {
+          const agents = (await context.client.get(`/api/agents?contractRevision=${BROKER_CONTRACT_REVISION}`)).body;
+          return (Array.isArray(agents) ? agents : agents.agents).find((candidate: any) => candidate.id === agent);
+        };
+        const userTexts = async (rowId: string): Promise<string[]> => {
+          const stream = await context.client.attach(agent, rowId);
+          const messages = (await stream.waitForKind('history')).messages as any[];
+          stream.close();
+          return messages.filter((message) => message.type === 'user-message').map(text);
+        };
         const mark = fake.ledger.mark();
         const fork = await post(context, `/api/sessions/${agent}/${stored.id}/fork`, { messageId: 'any' });
         const clone = await post(context, `/api/sessions/${agent}/${stored.id}/clone`);
         expect([fork.status, clone.status]).toEqual([501, 501]);
         expect(fake.ledger.spawns(mark)).toEqual([]);
-        const agents = (await context.client.get(`/api/agents?contractRevision=${BROKER_CONTRACT_REVISION}`)).body;
-        const row = (Array.isArray(agents) ? agents : agents.agents).find((candidate: any) => candidate.id === agent);
-        expect([row.canFork, row.canClone]).toEqual([false, false]);
+        const old = await agentRow();
+        expect([old.canFork, old.canClone]).toEqual([false, false]);
+
+        // omp 19.1.0 answers `--version` as `omp/19.1.0` (captured), and its RPC has fork again.
+        fake.setVersion('19.1.0', 'omp/19.1.0\n');
+        await context.restart();
+        try {
+          await context.client.waitForSession((row) => row.id === stored.id);
+          const current = await agentRow();
+          expect([current.canFork, current.canClone]).toEqual([true, false]);
+          const sourceFile = piFileOf(stored.id);
+          const before = readFileSync(sourceFile, 'utf8');
+          const userEntries = readEntries(sourceFile).filter((entry) => entry.type === 'message' && entry.message?.role === 'user');
+
+          // No clone on omp: a bare fork is omp's own bare `fork`, a copy of the whole session.
+          const bareMark = fake.ledger.mark();
+          const bare = await post(context, `/api/sessions/${agent}/${stored.id}/fork`);
+          expect(bare.status, bare.text).toBe(200);
+          const bareCommands = fake.ledger.commands('fork', bareMark);
+          expect(bareCommands.length).toBe(1);
+          // A missing frame reads as `{}`, which fails the type check below.
+          const bareFrame: Record<string, any> = bareCommands[0]?.frame ?? {};
+          expect(bareFrame.type).toBe('fork');
+          expect('entryId' in bareFrame).toBe(false);
+          expect(fake.ledger.commands('clone', bareMark)).toEqual([]);
+          expect(fake.ledger.spawns(bareMark).some((entry) => entry.pid === bareCommands[0]!.pid && entry.session === sourceFile)).toBe(true);
+          // The copy is written inside omp's own store, the only place an omp session id may name.
+          expect(piFileOf(bare.body.session.id)).toStartWith(`${fake.sessionsRoot}${sep}`);
+          expect(await userTexts(bare.body.session.id)).toEqual([stored.texts[0]!, stored.texts[2]!]);
+
+          // A fork at a chosen entry: omp keeps that entry in the copy, where Pi forks just before it.
+          const atMark = fake.ledger.mark();
+          const at = await post(context, `/api/sessions/${agent}/${stored.id}/fork`, { messageId: userEntries[1].id });
+          expect(at.status, at.text).toBe(200);
+          expect(fake.ledger.commands('fork', atMark)[0]!.frame).toMatchObject({ type: 'fork', entryId: userEntries[1].id });
+          expect(await userTexts(at.body.session.id)).toEqual([stored.texts[0]!, stored.texts[2]!]);
+          const atEntries = readEntries(piFileOf(at.body.session.id));
+          expect(atEntries.at(-1)?.id).toBe(userEntries[1].id);
+
+          expect((await post(context, `/api/sessions/${agent}/${stored.id}/clone`)).status).toBe(501);
+          expect(new Set([stored.id, bare.body.session.id, at.body.session.id]).size).toBe(3);
+          expect(readFileSync(sourceFile, 'utf8')).toBe(before);
+          expect(fake.ledger.faults(mark)).toEqual([]);
+        } finally {
+          fake.setVersion(dialect.version.current);
+          await context.restart();
+        }
       },
     });
   } else {
@@ -547,6 +602,124 @@ export function piFamilyExtras(dialect: PiFamilyDialect): ConformanceExtra[] {
       const skipped = stream.messages().find((message) => message.type === 'event' && message.name === 'dialog-skipped');
       expect(skipped?.payload?.method).toBe('custom-widget');
       stream.close();
+    },
+  });
+
+  // ------------------------------------------------- omp 19.1.0 forms and background work
+  if (omp) extras.push({
+    title: 'an omp form is one question card per control, answered in the shape omp validates, and a form omp withdraws closes its card unanswered',
+    async run(context) {
+      const fake = asFake(context);
+      const session = await context.drivableSession('omp form');
+      const owner = await context.openDrive(session);
+      const replies = (from: number) => fake.ledger.commands('extension_ui_response', from).map((entry) => entry.frame);
+      const mark = fake.ledger.mark();
+
+      // The HTML a real omp 19.1.0 `ask` sent: a radio group, a checkbox group and a text field.
+      const asked = context.prompt(owner, '[[form]] fill the form');
+      const card = await owner.waitForMessage((message) => message.type === 'question-request' && String(message.requestId).startsWith('form-')
+        && !String(message.requestId).endsWith('-expiring'));
+      // Worded as omp's own answer summary words them (captured): legend, legend, label.
+      expect(card.questions).toMatchObject([
+        { question: 'Color', options: [{ label: 'Red' }, { label: 'Blue' }], freeText: false },
+        { question: 'Extras', options: [{ label: 'Cheese' }, { label: 'Ham' }, { label: 'Olives' }], multiple: true, freeText: false },
+        { question: 'Note', options: [], kind: 'text' },
+      ]);
+      expect(card.questions[0].multiple ?? false).toBe(false);
+      expect((await owner.sendAndAwait({ kind: 'answer', requestId: card.requestId, answers: [['Blue'], ['Cheese', 'Olives'], ['ship it']] })).kind).toBe('ack');
+      await owner.waitForMessage((message) => message.type === 'question-resolved' && message.requestId === card.requestId);
+      expect((await asked).kind).toBe('ack');
+      // Option values, an array for the checkbox group, text as typed: what omp's validator takes.
+      const answered = { color: 'blue', extras: ['cheese', 'olives'], note: 'ship it' };
+      await owner.waitForMessage((message) => message.type === 'model-output' && text(message).includes(`form ${JSON.stringify(answered)}`));
+      expect(replies(mark)).toEqual([{ type: 'extension_ui_response', id: card.requestId, data: answered }]);
+
+      // omp withdraws a form at its timeout with cancel{targetId} and goes on with the defaults: the
+      // card closes, nothing is sent back, and a late answer is refused.
+      const expiringMark = fake.ledger.mark();
+      const expiring = context.prompt(owner, '[[expiringform:omp-form-expiry]] deploy?');
+      const lapsed = await owner.waitForMessage((message) => message.type === 'question-request' && String(message.requestId).endsWith('-expiring'));
+      expect(lapsed.questions).toMatchObject([
+        { question: 'Proceed with the deploy?', options: [{ label: 'Yes' }, { label: 'No' }], freeText: false },
+      ]);
+      fake.release('omp-form-expiry');
+      await owner.waitForMessage((message) => message.type === 'question-resolved' && message.requestId === lapsed.requestId);
+      expect((await expiring).kind).toBe('ack');
+      await owner.waitForMessage((message) => message.type === 'model-output' && text(message).includes('form timed out: proceed=yes'));
+      expect((await owner.sendAndAwait({ kind: 'answer', requestId: lapsed.requestId, answers: [['No']] })).kind).toBe('nack');
+      expect(replies(expiringMark)).toEqual([]);
+      expect(fake.ledger.faults(mark)).toEqual([]);
+      owner.close();
+    },
+  });
+
+  if (omp) extras.push({
+    title: 'an omp run that yields to background work stays running until it wakes and ends, one whose work ends without waking settles idle, and Stop ends the wait before omp closes the run',
+    async run(context) {
+      const fake = asFake(context);
+      const session = await context.drivableSession('omp background');
+      const owner = await context.openDrive(session);
+      const isStatus = (frame: any, status: string) => frame.kind === 'message' && frame.message?.type === 'status' && frame.message.status === status;
+      const waiting = (frame: any) => isStatus(frame, 'running') && frame.message.detail === 'Waiting for background work…';
+      const mark = fake.ledger.mark();
+
+      const from = owner.frames.length;
+      expect((await context.prompt(owner, '[[background:omp-bg-wake]] start the job')).kind).toBe('ack');
+      await owner.waitForFrame(waiting, { after: from, what: 'the yield to background work' });
+      await owner.waitForMessage((message) => message.type === 'model-output' && text(message) === 'answer: start the job');
+      // Yielded is not settled: omp will write the job's result and its own answer to the file.
+      expect(owner.frames.slice(from).some((frame) => isStatus(frame, 'idle'))).toBe(false);
+      fake.release('omp-bg-wake');
+      await owner.waitForMessage((message) => message.type === 'model-output' && text(message) === 'background done');
+      await owner.waitForFrame((frame) => isStatus(frame, 'idle'), { after: from, what: 'the woken run ending' });
+      const wokeAt = owner.frames.findIndex((frame, index) => index >= from && frame.kind === 'message'
+        && frame.message?.type === 'model-output' && text(frame.message) === 'background done');
+      const idleAt = owner.frames.findIndex((frame, index) => index >= from && isStatus(frame, 'idle'));
+      expect(wokeAt).toBeGreaterThan(-1);
+      expect(idleAt).toBeGreaterThan(wokeAt);
+
+      // The work ends and omp does not wake: only session_settled says so, and the session goes idle.
+      const goneFrom = owner.frames.length;
+      expect((await context.prompt(owner, '[[backgroundgone:omp-bg-gone]] start another')).kind).toBe('ack');
+      await owner.waitForFrame(waiting, { after: goneFrom, what: 'the second yield' });
+      expect(owner.frames.slice(goneFrom).some((frame) => isStatus(frame, 'idle'))).toBe(false);
+      fake.release('omp-bg-gone');
+      await owner.waitForFrame((frame) => isStatus(frame, 'idle'), { after: goneFrom, what: 'session_settled ending the yield' });
+
+      // Stop while yielded. omp 19.1.0's source (source-modelled, not captured): the abort ends the
+      // wait with no wake-up run, and only once it has unwound does omp close the run with its
+      // stored agent_end (terminal) and session_settled; a prompt sent meanwhile runs after that.
+      // The fake holds the close until `release-omp-bg-stop`, so the idle seen first is Stop's own.
+      const stopFrom = owner.frames.length;
+      expect((await context.prompt(owner, '[[backgroundgone:omp-bg-stop]] start a third')).kind).toBe('ack');
+      await owner.waitForFrame(waiting, { after: stopFrom, what: 'the third yield' });
+      const stopMark = fake.ledger.mark();
+      expect((await owner.sendAndAwait({ kind: 'command', name: 'stop' })).kind).toBe('ack');
+      await owner.waitForFrame((frame) => isStatus(frame, 'idle'), { after: stopFrom, what: 'Stop ending the yield' });
+      expect(fake.ledger.since(stopMark).some((entry) => entry.kind === 'abort')).toBe(true);
+      expect(fake.ledger.since(stopMark).some((entry) => entry.kind === 'yield-closed')).toBe(false);
+      // A prompt sent before omp's close: its echo is queued now and must survive that close.
+      const between = context.prompt(owner, 'after the stop', { clientMessageId: 'omp-bg-between' });
+      const queuedEcho = await owner.waitForMessage((message) => message.type === 'user-message'
+        && message.clientKey === 'omp-bg-between' && message.queued === true);
+      const closeFrom = owner.frames.length;
+      fake.release('omp-bg-stop');
+      expect((await between).kind).toBe('ack');
+      const startedEcho = await owner.waitForMessage((message) => message.type === 'user-message'
+        && message.clientKey === 'omp-bg-between' && message.queued === false);
+      expect(startedEcho.key).toBe(queuedEcho.key);
+      await owner.waitForMessage((message) => message.type === 'model-output' && text(message) === 'answer: after the stop');
+      await owner.waitForFrame((frame) => isStatus(frame, 'idle'), { after: closeFrom, what: 'the prompt sent after Stop ending' });
+      expect(fake.ledger.since(stopMark).some((entry) => entry.kind === 'yield-closed')).toBe(true);
+      // omp's late close changed nothing: no idle or running before the new run's own start, and
+      // that run's end is the only idle.
+      const statuses = owner.frames.slice(closeFrom)
+        .filter((frame) => frame.kind === 'message' && frame.message?.type === 'status')
+        .map((frame) => frame.message.status);
+      expect(statuses[0]).toBe('running');
+      expect(statuses.filter((status) => status === 'idle')).toHaveLength(1);
+      expect(fake.ledger.faults(mark)).toEqual([]);
+      owner.close();
     },
   });
 

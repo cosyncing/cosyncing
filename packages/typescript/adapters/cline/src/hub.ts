@@ -355,7 +355,12 @@ export async function probeClineHub(options: {
       || health.coreVersion !== discovery.coreVersion
       || health.host !== discovery.host
       || health.port !== discovery.port
-      || health.url !== discovery.url) return undefined;
+      || health.url !== discovery.url
+      // Core 0.2.1 (CLI 3.0.75) reports its own `hubId` here; 0.0.82 does not.
+      // Without it, a record left behind by an EARLIER Hub on the same port and
+      // core version agreed with every field above, and the Hub epoch derived
+      // from that record (`hubId:startedAt`) named a Hub that was gone.
+      || (health.hubId !== undefined && health.hubId !== discovery.hubId)) return undefined;
     return discovery;
   } catch {
     return undefined;

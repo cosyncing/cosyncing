@@ -11,7 +11,6 @@ export type RpcCommand =
   | { id: string; type: 'extension_ui_request' }
   | { id: string; type: 'set_session_name'; name: string }
   | { id: string; type: 'get_session_stats' }
-  | { id: string; type: 'import'; path: string }
   | { id: string; type: 'export_html' }
   | { id: string; type: 'fork' }
   | { id: string; type: 'clone' }

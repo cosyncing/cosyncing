@@ -13,7 +13,8 @@ export interface CodexRestartDependencies {
   processState(process: CodexDaemonProcess): 'running' | 'exited' | 'unknown';
   gracefulStop(process: CodexDaemonProcess): void;
   forceStop(process: CodexDaemonProcess): void;
-  run(command: 'start', timeoutMs: number): Promise<CodexDaemonCommandResult>;
+  /** `args` follow the subcommand: the `-c features.<name>=<bool>` pairs to relaunch with. */
+  run(command: 'start', timeoutMs: number, args?: readonly string[]): Promise<CodexDaemonCommandResult>;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   gracefulMs?: number;
@@ -79,9 +80,20 @@ export async function restartCodexDaemonVerified(deps: CodexRestartDependencies,
     if (await replacement()) return;
     throw new Error('Codex control endpoint still reports a running daemon; no replacement was started.');
   }
-  log(`start requested; confirmed=${options.confirmed === true}`);
-  const started = await deps.run('start', 15_000);
+  // A fresh `daemon start` replaces the saved feature overrides with the ones it is given (Codex
+  // 0.169+), so a plain start would drop them. Relaunch with exactly the pairs the verified daemon ran
+  // with; Codex validates and saves them again.
+  const overrides = old?.featureOverrides ?? [];
+  log(`start requested; confirmed=${options.confirmed === true}; featureOverrides=${overrides.length}`);
+  let started = await deps.run('start', 15_000, overrides.flatMap((pair) => ['-c', pair]));
   log(`start finished; exit=${started.code}; timedOut=${started.timedOut === true}`);
+  if (started.code !== 0 && !started.timedOut && overrides.length) {
+    // The installed CLI may no longer accept a saved feature. The old daemon is already gone, so
+    // keep Codex available without the overrides rather than leave it stopped.
+    log(`start with saved feature overrides failed; starting without them: ${started.stderr.trim() || started.stdout.trim()}`);
+    started = await deps.run('start', 15_000);
+    log(`start finished; exit=${started.code}; timedOut=${started.timedOut === true}`);
+  }
   if (started.code !== 0) throw new Error(started.stderr.trim() || started.stdout.trim() || 'Codex daemon start failed.');
   if (!await wait(replacement, 5_000)) {
     throw new Error('Codex restart failed verification: the previous process must exit and the installed daemon must answer.');

@@ -1060,6 +1060,35 @@ try {
       (await probeClineHub({ env, homeDir: fake.root, fetcher: healthAt(newer) }))?.hubId === 'fixture-hub');
   }
 
+  // The discovery record and /health a real Cline 3.0.75 managed Hub (core 0.2.1) wrote and
+  // served, captured in an isolated home. Both now carry `buildId` and a client protocol range,
+  // and /health names its own `hubId`; 0.0.82's /health did not, which the fixtures above keep.
+  {
+    const captured = JSON.parse(readFileSync(new URL('./fixtures/cline-3.0.75-redacted.json', import.meta.url), 'utf8'));
+    const recorded = captured.hub;
+    const capturedEnv = { ...env, COSYNCING_CLINE_HUB_PORT: String(recorded.discovery.port) };
+    writeFileSync(discoveryPath, `${JSON.stringify({ ...recorded.discovery, authToken: 'fixture-owner-token' })}\n`, { mode: 0o600 });
+    const serving = (health: Record<string, unknown>): typeof globalThis.fetch =>
+      (async () => new Response(JSON.stringify(health), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      })) as unknown as typeof globalThis.fetch;
+    const admitted = await probeClineHub({ env: capturedEnv, homeDir: fake.root, fetcher: serving(recorded.health) });
+    check('the captured 3.0.75 Hub (core 0.2.1) record and /health are admitted for Drive',
+      admitted !== undefined
+        && admitted.hubId === recorded.discovery.hubId
+        && admitted.coreVersion === '0.2.1'
+        && recorded.health.hubId === recorded.discovery.hubId,
+      JSON.stringify(admitted && { hubId: admitted.hubId, coreVersion: admitted.coreVersion }));
+    check('a /health that names another Hub than the record is refused',
+      await probeClineHub({
+        env: capturedEnv, homeDir: fake.root, fetcher: serving({ ...recorded.health, hubId: 'hub_replacement' }),
+      }) === undefined);
+    const { hubId: _hubId, ...withoutHubId } = recorded.health;
+    check('a /health without hubId (core 0.0.82) is still judged by the remaining fields',
+      (await probeClineHub({ env: capturedEnv, homeDir: fake.root, fetcher: serving(withoutHubId) }))?.hubId
+        === recorded.discovery.hubId);
+  }
+
   writeHubVersion('0.0.81');
   check('a Hub core below the floor is refused by discovery',
     await readClineHubDiscovery({ env, homeDir: fake.root }) === undefined);

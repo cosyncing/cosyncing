@@ -151,6 +151,43 @@ try {
     }
   }
 
+  // Create's child and a Drive child read the same way. Grok 1.0.92 sends a dozen
+  // `_x.ai/session/setup` notices per create and, during a turn, one
+  // `_x.ai/session_notification` per streamed tool-argument chunk (a captured Drive session
+  // traced 275). None is read, and none may become a broker log line. An
+  // `_x.ai/session/update` is read, so one whose params cannot be read is still traced.
+  {
+    const noticeFake = writeFakeGrokBinary(join(root, 'notice-bin'), join(root, 'notice-home'));
+    const noticeAdapter = new GrokAdapter({ command: noticeFake.path, env: noticeFake.env, requestTimeoutMs: 2_000 });
+    const logged: string[] = [];
+    const consoleError = console.error;
+    console.error = (...args: unknown[]) => { logged.push(args.map(String).join(' ')); };
+    let noticeDrive: GrokDriveConnection | undefined;
+    try {
+      noticeFake.env.FAKE_GROK_VENDOR_NOTICES = '1';
+      const noticeCreated = await noticeAdapter.createSession({ directory: cwd });
+      noticeDrive = await noticeAdapter.attach(noticeCreated.id, 'resume') as GrokDriveConnection;
+      const noticeLive: AgentMessage[] = [];
+      noticeDrive.subscribe((message) => noticeLive.push(message));
+      await noticeDrive.sendPrompt({ text: 'turn with vendor notices' });
+      const sentAt = noticeFake.events().filter((event) => event.kind === 'vendor-notices').map((event) => event.at);
+      check('Create and Drive children log no line for Grok\'s _x.ai notices and still trace other unknown ones',
+        sentAt.includes('session/new')
+          && sentAt.includes('session/prompt')
+          && noticeLive.some((message) => message.type === 'run-summary' && message.status === 'done')
+          && !logged.some((line) => line.includes('op=_x.ai/') && !line.includes('op=_x.ai/session/update:'))
+          && logged.some((line) => line.includes('unhandled-extension op=_vendor.test/notice')),
+        JSON.stringify({ sentAt, logged }));
+      check('a Drive child still traces an _x.ai/session/update whose params it cannot read',
+        logged.some((line) => line.includes('unhandled-extension op=_x.ai/session/update:')),
+        JSON.stringify(logged));
+    } finally {
+      delete noticeFake.env.FAKE_GROK_VENDOR_NOTICES;
+      await noticeDrive?.close();
+      console.error = consoleError;
+    }
+  }
+
   const fake = writeFakeGrokBinary(bin, store);
   const adapter = new GrokAdapter({ command: fake.path, env: fake.env, homeDir: root, requestTimeoutMs: 2_000, testOnlyEnableUnverifiedDrive: true });
   check('the exact fake binary is available, authenticated, and create-enabled',
@@ -339,6 +376,80 @@ try {
       unguarded: starts.filter((event) => event.autoUpdateDisabled !== '1')
         .map((event) => ({ kind: event.kind, argv: event.argv })),
     }));
+
+  // Grok 1.0.92 renames a fresh summary.json over the old one several times around
+  // session/load, some after the answer (a 2026-11-24 capture). The relaunch's durable read
+  // lands in that window; a single read there found no session and revoked Drive for good.
+  fake.env.FAKE_GROK_LOAD_SUMMARY_REWRITE_MS = '150';
+  const spawnsBeforeRewrites = fake.spawnCount();
+  let rewriteRelaunchError: unknown;
+  try {
+    await drive.sendPrompt({
+      text: 'relaunch while Grok rewrites its summary',
+      model: { providerID: 'xai', modelID: 'grok-4.6', reasoningEffort: 'low' },
+      permissionMode: 'default',
+    });
+  } catch (error) { rewriteRelaunchError = error; }
+  delete fake.env.FAKE_GROK_LOAD_SUMMARY_REWRITE_MS;
+  const drivingAfterRewrites = drive.driving;
+  const rewritesDone = await waitFor(
+    () => fake.events().some((event) => event.kind === 'summary-rewrites-done'), 3_000);
+  const rewrites = fake.events().filter((event) => event.kind === 'summary-rewrites-done');
+  check('a relaunch whose session/load is followed by Grok\'s summary.json rewrites keeps Drive',
+    rewriteRelaunchError === undefined
+      && drivingAfterRewrites
+      && fake.spawnCount() === spawnsBeforeRewrites + 1
+      && drive.info.currentModel?.reasoningEffort === 'low'
+      && rewritesDone
+      && rewrites.some((event) => typeof event.count === 'number' && event.count > 0)
+      && (await adapter.discoverSessions()).find((row) => row.id === created.id)?.control?.drive.state === 'driving',
+    JSON.stringify({ error: String(rewriteRelaunchError ?? ''), rewrites, driving: drive.driving }));
+
+  // The same saves can leave the summary from before the relaunch in place for a moment, still
+  // naming the previous model. A durable read that lands there must keep reading until the
+  // switched model is saved; refusing it revoked Drive for good. Own store, so the session
+  // above keeps its model for the checks that follow.
+  {
+    const staleStore = join(root, 'stale-home');
+    const staleFake = writeFakeGrokBinary(join(root, 'stale-bin'), staleStore);
+    const staleAdapter = new GrokAdapter({ command: staleFake.path, env: staleFake.env, requestTimeoutMs: 2_000 });
+    let staleDrive: GrokDriveConnection | undefined;
+    try {
+      const staleCreated = await staleAdapter.createSession({
+        directory: cwd,
+        model: { providerID: 'xai', modelID: 'grok-4.6', reasoningEffort: 'high' },
+        permissionMode: 'default',
+      });
+      staleDrive = await staleAdapter.attach(staleCreated.id, 'resume') as GrokDriveConnection;
+      staleFake.env.FAKE_GROK_LOAD_SUMMARY_REWRITE_MS = '300';
+      staleFake.env.FAKE_GROK_LOAD_SUMMARY_STALE_MS = '200';
+      let staleError: unknown;
+      try {
+        await staleDrive.sendPrompt({
+          text: 'switch while Grok still shows the previous model',
+          model: { providerID: 'xai', modelID: 'grok-4.5' },
+          permissionMode: 'default',
+        });
+      } catch (error) { staleError = error; }
+      delete staleFake.env.FAKE_GROK_LOAD_SUMMARY_REWRITE_MS;
+      delete staleFake.env.FAKE_GROK_LOAD_SUMMARY_STALE_MS;
+      const staleDone = await waitFor(
+        () => staleFake.events().some((event) => event.kind === 'summary-rewrites-done'), 3_000);
+      const staleRewrites = staleFake.events().filter((event) => event.kind === 'summary-rewrites-done');
+      const staleDurable = (await discoverGrokStore({ root: staleStore })).find((row) => row.id === staleCreated.id);
+      check('a session/load followed by the previous summary keeps Drive once the switched model is saved',
+        staleError === undefined
+          && staleDrive.driving
+          && staleDrive.info.currentModel?.modelID === 'grok-4.5'
+          && staleDone
+          && staleRewrites.some((event) => typeof event.stale === 'number' && event.stale > 0)
+          && staleDurable?.model === 'grok-4.5'
+          && (await staleAdapter.discoverSessions()).find((row) => row.id === staleCreated.id)?.control?.drive.state === 'driving',
+        JSON.stringify({ error: String(staleError ?? ''), staleRewrites, info: staleDrive.info }));
+    } finally {
+      await staleDrive?.close();
+    }
+  }
 
   const spawnsBeforeSwitch = fake.spawnCount();
   fake.env.FAKE_GROK_DONE_METHOD = 'x.ai/session/update';

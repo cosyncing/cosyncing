@@ -1,10 +1,10 @@
 # Cline (experimental)
 
-The shipped adapter is measured against Cline CLI 3.0.60 and 3.0.61 and Hub
-core 0.0.82. These are supported FLOORS rather than pins: a newer CLI or Hub
-is admitted, because the wire contracts that matter -- Hub protocol `v1`, the
-ACP agent identity, and the on-disk snapshot schema -- are each checked
-structurally at use.
+The shipped adapter is measured against Cline CLI 3.0.60, 3.0.61 and 3.0.75,
+and Hub cores 0.0.82 and 0.2.1 (the Hub that 3.0.75 ships). The floors are
+3.0.61 and core 0.0.82, not pins: a newer CLI or Hub is admitted, because the
+wire contracts that matter -- Hub protocol `v1`, the ACP agent identity, and
+the on-disk snapshot schema -- are each checked structurally at use.
 
 **Drive requires CLI 3.0.61 or newer**, even though 3.0.60 was measured. Drive
 runs through the managed Hub, and 3.0.60 ships `@cline/core 0.0.81`, below the

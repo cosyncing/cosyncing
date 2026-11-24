@@ -2843,10 +2843,11 @@ export async function runCodexDaemonCommand(
   command: 'version' | 'restart' | 'stop' | 'start',
   timeoutMs: number,
   binOverride?: string,
+  args: readonly string[] = [],
 ): Promise<CodexDaemonCommandResult> {
   const bin = binOverride?.trim() || resolveBin('codex');
   if (!bin) throw new Error('Codex CLI is not available on PATH.');
-  const proc = spawnCodex(bin, ['app-server', 'daemon', command], {
+  const proc = spawnCodex(bin, ['app-server', 'daemon', command, ...args], {
     stdin: 'ignore',
     stdout: 'pipe',
     stderr: 'pipe',
@@ -2972,7 +2973,7 @@ async function restartCodexDaemonOnce(options: CodexRestartOptions): Promise<voi
     processState: codexDaemonProcessState,
     gracefulStop: gracefullyStopCodexDaemonProcess,
     forceStop: forceStopCodexDaemonProcess,
-    run: (command, timeoutMs) => runCodexDaemonCommand(command, timeoutMs, bin),
+    run: (command, timeoutMs, args) => runCodexDaemonCommand(command, timeoutMs, bin, args),
     verifyMs: codexRestartVerifyMs(),
     log: (message) => console.log(`[${PRODUCT_IDENTITY.productName}] Codex daemon restart: ${message}`),
   }, options);

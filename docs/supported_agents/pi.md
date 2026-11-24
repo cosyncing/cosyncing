@@ -1,6 +1,7 @@
 # Pi
 
-cosyncing requires Pi 0.78.1 or newer. The official installer is recommended:
+cosyncing requires Pi 0.78.1 or newer; the RPC surface was last verified
+against Pi 1.6.0. The official installer is recommended:
 
 ```bash
 curl -fsSL https://pi.dev/install.sh | sh

@@ -1,7 +1,9 @@
 # Codex
 
-cosyncing requires Codex 0.144.5 or newer. For the managed app-server and
-terminal sync, install Codex with OpenAI's official standalone installer.
+cosyncing requires Codex 0.144.5 or newer. The managed daemon, session
+creation, a turn through the daemon and history replay were last checked with
+Codex 0.171.0. For the managed app-server and terminal sync, install Codex with
+OpenAI's official standalone installer.
 
 On macOS or Linux:
 
@@ -348,6 +350,15 @@ and start time that Codex 0.156 and later record, so a host suspend or clock
 change does not block a restart. Older receipts record only a start time; when it
 no longer matches, cosyncing refuses to restart until you restart Codex yourself
 while nothing is running.
+
+Codex 0.169 and newer save feature overrides given to
+`codex app-server daemon start` or `restart` (`--enable <feature>`,
+`--disable <feature>` or `-c features.<name>=true|false`) and run the daemon
+with them. cosyncing restarts such a daemon with the same overrides. Any other
+`-c` setting on the daemon's command line prevents cosyncing from restarting
+it. Codex itself clears saved overrides when a stopped daemon is started without
+them; that includes the plain start cosyncing uses when it finds the daemon
+stopped, for example after a reboot.
 
 Direct agent-to-user file delivery is not currently available in Codex. The
 installed skill leaves generated files in the workspace because Codex has no

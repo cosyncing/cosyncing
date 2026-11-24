@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 export {};
-import { appendFileSync, mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   discoverGrokStore,
@@ -130,6 +131,30 @@ try {
   renameSync(movedSession, tree.sessionDir);
   rmSync(external, { recursive: true, force: true });
 
+  // The one-id lookup behind findGrokStoredSession's re-reads: the row full discovery returns,
+  // without reading or tracing the other sessions planted above, and still refused when the
+  // id appears under two cwd groups.
+  const fullTraces: string[] = [];
+  const fullRow = (await discoverGrokStore({ root: tree.root, trace: (event) => fullTraces.push(event.detail) }))
+    .find((row) => row.id === tree.id);
+  const onlyTraces: string[] = [];
+  const onlyRows = await discoverGrokStore({ root: tree.root, onlyId: tree.id, trace: (event) => onlyTraces.push(event.detail) });
+  check('a one-id lookup returns the full-discovery row and reads no other session',
+    fullRow !== undefined
+      && onlyRows.length === 1
+      && JSON.stringify(onlyRows[0]) === JSON.stringify(fullRow)
+      && fullTraces.length > 0
+      && onlyTraces.length === 0
+      && (await discoverGrokStore({ root: tree.root, onlyId: '019f9d70-e38e-7591-9a24-74a06ad89477' })).length === 0,
+    JSON.stringify({ fullTraces, onlyTraces, onlyRows }));
+  const duplicateGroup = join(tree.root, 'sessions', encodeURIComponent('/other/cwd'));
+  mkdirSync(join(duplicateGroup, tree.id), { recursive: true });
+  writeFileSync(join(duplicateGroup, tree.id, 'summary.json'), `${JSON.stringify({ info: { id: tree.id, cwd: '/other/cwd' } })}\n`);
+  check('a one-id lookup still refuses an id that appears under two cwd groups',
+    (await discoverGrokStore({ root: tree.root, onlyId: tree.id })).length === 0
+      && (await discoverGrokStore({ root: tree.root })).every((row) => row.id !== tree.id));
+  rmSync(duplicateGroup, { recursive: true, force: true });
+
   const boundedTraces: string[] = [];
   const bounded = await discoverGrokStore({ root: tree.root, maxScanEntries: 1, trace: (event) => boundedTraces.push(event.detail) });
   check('discovery work exhaustion refuses a partial roster', bounded.length === 0 && boundedTraces.some((detail) => detail.includes('refusing partial discovery')), boundedTraces.join(' | '));
@@ -193,6 +218,11 @@ try {
       && linkedChild.currentModel?.modelID === 'grok-4.6'
       && linkedChild.currentModel.reasoningEffort === 'xhigh',
     JSON.stringify(linked.map((session) => ({ id: session.id, origin: session.origin, parent: session.parentThreadId }))));
+  const childOnly = (await discoverGrokStore({ root: lineageTree.root, onlyId: childId }))
+    .find((session) => session.id === childId);
+  check('a one-id lookup of a child also reads its claiming parent and keeps the lineage',
+    childOnly?.parentThreadId === lineageTree.id && JSON.stringify(childOnly) === JSON.stringify(linkedChild),
+    JSON.stringify(childOnly));
 
   rmSync(parentMetaPath, { force: true });
 
@@ -215,7 +245,8 @@ try {
   });
   check('two exact parent claims make the child ambiguous and withhold it',
     ambiguous.every((session) => session.id !== childId)
-      && ambiguousTraces.some((detail) => detail.includes('ambiguous')),
+      && ambiguousTraces.some((detail) => detail.includes('ambiguous'))
+      && (await discoverGrokStore({ root: lineageTree.root, onlyId: childId })).every((session) => session.id !== childId),
     ambiguousTraces.join(' | '));
   rmSync(secondParentDir, { recursive: true, force: true });
 
@@ -243,6 +274,44 @@ try {
     lineageBounds.join(' | '));
 } finally {
   lineageTree.cleanup();
+}
+
+// The store files of a real Grok 1.0.92 session (a 2026-11-24 capture, scrubbed of paths,
+// host, agent ids and the custom model's name), in the layout Grok wrote them. 1.0.92 also writes
+// chat_history.jsonl, events.jsonl, usage.json and other files beside these; discovery reads
+// only these three.
+const capturedRoot = mkdtempSync(join(tmpdir(), 'cosyncing-grok-1092-'));
+try {
+  const capturedId = '01a20cf4-7344-7f02-ace8-e17183132705';
+  const capturedDir = join(capturedRoot, 'sessions', encodeURIComponent('/workspace/capture'), capturedId);
+  mkdirSync(capturedDir, { recursive: true });
+  for (const file of ['summary.json', 'updates.jsonl', 'signals.json']) {
+    copyFileSync(join(import.meta.dir, 'fixtures', 'grok-1.0.92', file), join(capturedDir, file));
+  }
+  const capturedTraces: string[] = [];
+  const captured = await discoverGrokStore({ root: capturedRoot, trace: (event) => capturedTraces.push(`${event.op}:${event.detail}`) });
+  const capturedSession = captured[0];
+  check('a captured Grok 1.0.92 session is discovered with its id, cwd, model, title and message count',
+    captured.length === 1
+      && capturedTraces.length === 0
+      && capturedSession?.id === capturedId
+      && capturedSession.cwd === '/workspace/capture'
+      && capturedSession.model === 'byok-model'
+      && capturedSession.title === 'Reply with exactly the single word PONG and nothing else.'
+      && capturedSession.messageCount === 32
+      && capturedSession.createdAt === Date.parse('2026-11-24T09:47:56.617Z'),
+    JSON.stringify({ captured, capturedTraces }));
+  const capturedSignals = await readGrokSignals(capturedSession!);
+  const capturedHistory = await readGrokUpdates(capturedSession!);
+  check('its signals and its updates log read whole, with numeric epoch-second timestamps',
+    capturedSignals?.contextTokensUsed === 11_661
+      && capturedSignals.contextWindowTokens === 256_000
+      && capturedHistory.entries.length === 32
+      && capturedHistory.issues.length === 0
+      && capturedHistory.entries.every((entry) => typeof entry.record.timestamp === 'number'),
+    JSON.stringify({ capturedSignals, entries: capturedHistory.entries.length, issues: capturedHistory.issues }));
+} finally {
+  rmSync(capturedRoot, { recursive: true, force: true });
 }
 
 const failed = results.filter((result) => !result.ok).length;

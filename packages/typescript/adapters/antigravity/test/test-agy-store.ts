@@ -1720,10 +1720,10 @@ const IDS = FIXTURE.conversationIds;
 
     // SP-1: every child above ran with agy's self-update off, whatever the broker's env says.
     check('SP-1: every `agy models` the adapter ran had agy\'s self-update disabled',
-      probe.runs().length === 4 && probe.runs().every((value) => value === '1'), probe.runs().join(','));
+      probe.runs().length === 4 && probe.runs().every((value) => value === 'true'), probe.runs().join(','));
     const overridden = agyProbeEnv({ PATH: '/fixture/bin', AGY_CLI_DISABLE_AUTO_UPDATE: '0' });
     check('SP-1: the probe env keeps the broker\'s own and overrides an inherited opt-in to updates',
-      overridden.AGY_CLI_DISABLE_AUTO_UPDATE === '1' && overridden.PATH === '/fixture/bin');
+      overridden.AGY_CLI_DISABLE_AUTO_UPDATE === 'true' && overridden.PATH === '/fixture/bin');
 
     // The measured shape: a child that never answers is killed at the limit and backs off the same way.
     resetAgyCliCatalogForTests();
@@ -1809,7 +1809,7 @@ const IDS = FIXTURE.conversationIds;
       && expired.signIn.remediation?.message.includes('does not inherit proxy settings') === true,
     String(expired.signIn?.remediation?.message));
   check('SP-1: doctor\'s `agy --version` probe runs with agy\'s self-update disabled',
-    expired.probeEnv?.AGY_CLI_DISABLE_AUTO_UPDATE === '1', JSON.stringify(expired.probeEnv));
+    expired.probeEnv?.AGY_CLI_DISABLE_AUTO_UPDATE === 'true', JSON.stringify(expired.probeEnv));
 
   const network = await doctor({ lines: CLI_LOG.signInNetworkError });
   check('without a proxy, a refresh agy reported as a network error says so',

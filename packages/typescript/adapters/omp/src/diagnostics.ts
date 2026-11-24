@@ -1,5 +1,4 @@
 import {
-  compareSemanticVersions,
   diagnoseBinaryVersion,
   type AgentMinimumVersion,
   type AgentSetupDiagnosis,
@@ -14,9 +13,13 @@ import {
   type PiDialectDiagnosticLabels,
 } from '@cosyncing/pi-engine';
 import {
+  detectOmpBunVersion,
   diagnoseOmpBunRuntime,
   OMP_MINIMUM_SUPPORTED_VERSION,
   OMP_VERIFIED_VERSION,
+  ompInstallAdvice,
+  ompVerifiedVersionsText,
+  ompVersionVerdict,
 } from './runtime-readiness.ts';
 import { inspectOmpPathCollision, OMP_DIALECT } from './dialect.ts';
 import { resolvePiDialectPaths } from '@cosyncing/pi-engine';
@@ -45,27 +48,37 @@ export async function diagnoseOmpSetup(
     installMessage: 'Install the supported omp (oh-my-pi) package, then rerun doctor.',
     upgradeCommand: `bun install -g @oh-my-pi/pi-coding-agent@${OMP_MINIMUM_SUPPORTED_VERSION}`,
   });
-  // `OMP_MINIMUM_VERSION` is read as a floor, but readiness drives exactly the verified build: a
-  // newer omp is not "supported" in doctor while the roster refuses to drive it.
-  const aboveVerified = binary.installedVersion
-    ? compareSemanticVersions(binary.installedVersion, OMP_VERIFIED_VERSION)
-    : undefined;
-  if (aboveVerified !== undefined && aboveVerified > 0) {
-    const index = binary.checks.findIndex((check) => check.id === 'omp.version');
-    if (index >= 0) {
-      binary.checks[index] = {
+  // `OMP_MINIMUM_VERSION` is read as a floor, but readiness drives exactly the captured builds: an
+  // omp above the floor that is not one of them (newer than the newest, or between two captured
+  // releases) is not "supported" in doctor while the roster refuses to drive it.
+  const verdict = binary.installedVersion ? ompVersionVerdict(binary.installedVersion) : undefined;
+  const index = binary.checks.findIndex((check) => check.id === 'omp.version');
+  const versionCheck = index >= 0 ? binary.checks[index] : undefined;
+  if (versionCheck && (verdict === 'unverified' || versionCheck.remediation?.kind === 'command')) {
+    // Which captured omp to install depends on the Bun that would run it: omp 19.1.0 does not start
+    // on a Bun below its floor, so advising it there leads straight to a Bun failure.
+    const advice = ompInstallAdvice(binary.executable ? await detectOmpBunVersion(context, binary.executable) : undefined);
+    binary.checks[index] = verdict === 'unverified'
+      ? {
         id: 'omp.version',
         status: 'fail',
         detailCode: 'version-unverified',
-        summary: `omp ${binary.installedVersion} is newer than ${OMP_VERIFIED_VERSION}, the build Drive and Create were measured against.`,
+        summary: `omp ${binary.installedVersion} is not one of the builds Drive and Create were measured against (omp ${ompVerifiedVersionsText()}).`,
         evidence: { installedVersion: binary.installedVersion!, verifiedVersion: OMP_VERIFIED_VERSION },
         remediation: {
           kind: 'command',
-          message: `Install omp ${OMP_VERIFIED_VERSION} to drive sessions from the app, or keep using Observe.`,
-          command: `bun install -g @oh-my-pi/pi-coding-agent@${OMP_VERIFIED_VERSION}`,
+          message: `${advice.message} to drive sessions from the app, or keep using Observe.`,
+          command: advice.command,
+        },
+      }
+      : {
+        ...versionCheck,
+        remediation: {
+          kind: 'command',
+          message: versionCheck.detailCode === 'version-below-minimum' ? `${advice.message}.` : versionCheck.remediation!.message,
+          command: advice.command,
         },
       };
-    }
   }
   const env = { ...context.env, HOME: context.homeDir };
   const paths = resolvePiDialectPaths(OMP_DIALECT, env);
