@@ -132,11 +132,12 @@ that address, and the exchange runs on its own.
 
 The cookie lasts 30 days. In its last day, cosyncing renews it with the launch
 URL of a host it started, so a host cosyncing manages does not need you to sign
-in again. When cosyncing restarts that host, it does not treat the new host as
-ready until it has read the new launch URL, and it never uses the URL of a host
-that has stopped. cosyncing can renew only with a launch URL it read itself. A
-host you started yourself, or a host that was already running when the broker
-started, gives cosyncing no URL to read, so when its cookie expires, run
+in again. When cosyncing starts or restarts that host, it waits briefly for the
+new launch URL before it reports the host as started. When cosyncing stops or
+restarts a host it started, or sees that host exit, it drops that host's launch
+URL. cosyncing renews only with a launch URL it read itself. A host you started
+yourself, or one that was already running when the broker started, gives
+cosyncing no URL to read. When that host's cookie expires, run
 `cosyncing dsh connect` again.
 
 `cosyncing doctor` reads the same enrollment the running broker uses, so it never
