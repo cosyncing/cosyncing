@@ -89,4 +89,4 @@ export function opencodeAllowsV1(generation: OpencodeGeneration): boolean {
   return generation.kind !== 'v2' && generation.kind !== 'future';
 }
 
-export const OPENCODE_V1_READ_ONLY_REASON = 'cosyncing supports OpenCode 1; the installed OpenCode generation is detected but not yet supported. These V1 sessions remain read-only.';
+export const OPENCODE_V1_READ_ONLY_REASON = 'The installed OpenCode is no longer OpenCode 1, so this stored OpenCode 1 session is read-only. A running OpenCode 2 service lists it again once it has imported it.';

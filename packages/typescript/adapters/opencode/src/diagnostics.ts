@@ -184,9 +184,9 @@ export async function diagnoseOpenCodeSetup(
     // `diagnoseBinaryVersion` runs it on every doctor and every setup.
     versionProbeEnv: { OPENCODE_DISABLE_AUTOUPDATE: '1' },
     minimum: OPENCODE_MINIMUM_VERSION,
-    // opencode.ai and Homebrew now install OpenCode 2. Name the installs that stay on OpenCode 1
-    // (the install script refuses 2.x; the `opencode-ai` npm package only carries 1.x).
-    installMessage: 'Install OpenCode 1 with `curl -fsSL https://opencode.ai/install | bash` or `npm install --global opencode-ai`, then rerun doctor. OpenCode 2 is not yet supported.',
+    // opencode.ai and Homebrew now install OpenCode 2 (`@opencode/cli` on npm). Also name the installs
+    // that stay on OpenCode 1 (the install script refuses 2.x; `opencode-ai` only carries 1.x).
+    installMessage: 'Install OpenCode 2 with `npm install --global @opencode/cli`, or stay on OpenCode 1 with `curl -fsSL https://opencode.ai/install | bash` or `npm install --global opencode-ai`, then rerun doctor.',
     upgradeCommand: 'opencode upgrade',
   });
   const major = Number(binary.installedVersion?.split('.')[0]);
