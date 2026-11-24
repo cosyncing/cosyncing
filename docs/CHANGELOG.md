@@ -17,6 +17,13 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   including one already waiting when you open the session. Answering or
   dismissing from the app continues the Kilo turn. Before, the turn waited with no
   card and the session stayed Working.
+- omp 19.1.0 is supported alongside omp 17.4.2. omp 19.1.0 needs Bun 1.4.4 or
+  newer; doctor names the Bun it needs.
+- omp 19.1.0 forms appear as question cards: choices, multiple choices, and typed
+  answers. A form omp withdraws, for example at its timeout, closes its card.
+- Sessions can be forked on omp 19.1.0. Forking a whole session copies all of it;
+  forking at a message keeps that message in the copy. Clone stays unavailable
+  for omp.
 
 ### Changed
 
@@ -25,23 +32,35 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   2.x. Reasonix 2.x and 1.x releases after 1.25.2 keep opening sessions in Observe
   mode only until support for 2.61.0 lands. `cosy doctor`, the read-only session
   reason and the setup guide say so and give the pinned install command.
-- DeepSeek Harness: cosyncing refuses any `dsh` version other than the two it
-  supports, 0.2.0-rc.2 and 0.1.0-rc.6, instead of accepting every 0.2 or 0.1
-  build. Newer 0.2 builds such as 0.2.2-rc.5 changed messages that live updates
-  and image previews depend on, and were accepted with those features silently
-  missing. With an unsupported version installed, cosyncing does not start or use
-  a `dsh web` host on this machine, opening or creating a session reports the
-  supported versions, and `cosy doctor` gives the install command for 0.2.0-rc.2.
-- Kimi Code 2.x replaced the local server protocol cosyncing uses, so cosyncing
-  supports Kimi Code 0.35.0 and newer, below 2.0.0. A running Kimi Code 2.x server,
-  or one that announces the Kimi Agent Protocol, shows Kimi Code as unavailable
-  instead of failing on every step. cosyncing sends a registered 2.x server no
-  requests, stops after the metadata read for a server announcing that protocol,
-  and refuses new sessions with a reason. `cosy doctor` names the version it found and the
-  supported range, and no longer suggests `kimi update`, which installs 2.x.
+- DeepSeek Harness: cosyncing supports `dsh` 0.2.0-rc.2, 0.2.2-rc.5 and
+  0.1.0-rc.6, and refuses every other version instead of accepting every 0.2 or
+  0.1 build. Later 0.2 builds changed messages that live updates and image
+  previews depend on. 0.2.2-rc.5 is supported because cosyncing now reads both
+  forms; other builds were accepted with those features silently missing. With an
+  unsupported version installed, cosyncing does not start or use a `dsh web` host
+  on this machine, opening or creating a session reports the supported versions,
+  and `cosy doctor` gives the install command for 0.2.0-rc.2.
+- Kimi Code 2.7.0 and newer are supported over the Kimi Agent Protocol,
+  alongside 0.35.0 to below 2.0.0. cosyncing picks the protocol from the running
+  server's metadata. Kimi Code 2.0.0 to 2.6.x stay unsupported: a running server
+  of those versions shows Kimi Code as unavailable, new sessions are refused with
+  a reason, and `cosy doctor` names the version it found and the supported
+  ranges. When the installed Kimi Code is unsupported, the service starts
+  `kimi web` from it once and not again until the installed `kimi` changes. On
+  2.7, cosyncing uses the `kimi web` server and ignores Kimi Desktop's, and a
+  driven session that another Kimi program holds switches to observe.
+- While omp 19.1.0 waits for background work it started, the session shows
+  Working with "Waiting for background work…" instead of going idle early.
+- Pi is verified against Pi 1.6.0. The minimum version stays 0.78.1.
+- Cline: Cline 3.0.75 and the managed Cline Hub it ships are now measured, so New
+  Session, prompts, approvals and Stop are supported on it. The minimum versions
+  are unchanged.
 
 ### Fixed
 
+- Cline: sessions written by Cline 3.0.75, and their subagents, appear in the
+  session list again with their transcripts. Before, Cline 3.0.75 sessions were
+  missing from the list.
 - OpenCode 2 is recognized from its `opencode v2.x.y` version banner. Before, the
   broker read it as an unknown version and kept its OpenCode 1 behavior, so it
   could start its managed OpenCode server with the OpenCode 2 binary. Now OpenCode

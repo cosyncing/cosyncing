@@ -248,7 +248,7 @@ export const SUPPORT_MATRIX_CLAIMS: SupportClaim[] = [
     reviewedNativeVersions: { grok: '1.0.13' },
   }),
   claim('cline', 'F14', 'partial', 'managed create/resume/stop, Observe rewrite reset, native rename, and exact-id terminal handoff ship; replacement-Hub resume, fork, clone, and export are unsupported', undefined, {
-    reviewedNativeVersions: { cline: '3.0.61' },
+    reviewedNativeVersions: { cline: '3.0.75' },
   }),
   claim('kilo', 'F14', 'partial', 'create, live attach, cancel, native rename, and retained-history reset ship; terminal handoff, fork, clone, and export are unsupported', undefined, {
     reviewedNativeVersions: { kilo: '7.4.23' },
