@@ -3230,7 +3230,8 @@ function kimiFrameText(raw: unknown): string {
   return Buffer.from(view.buffer, view.byteOffset, view.byteLength).toString('utf8');
 }
 
-function defaultSocketFactory(url: string, token: string | undefined): KimiSocketLike {
+/** The production socket: a WebSocket carrying the bearer header. Exported so the KAP shim (`kap.ts`) can wrap it. */
+export function defaultSocketFactory(url: string, token: string | undefined): KimiSocketLike {
   const options = token ? { headers: { authorization: `Bearer ${token}` } } : undefined;
   return new WebSocket(url, options as never) as unknown as KimiSocketLike;
 }
