@@ -15,7 +15,7 @@ export {};
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CLAUDE_SUBMITTED_TEXTS_LIMIT, ClaudeResumeConnection, claudeModelLabel } from '../src/index.ts';
+import { CLAUDE_SUBMITTED_TEXTS_LIMIT, ClaudeResumeConnection, claudeModelLabel, resumeArgs } from '../src/index.ts';
 import type { ClaudeStore } from '../src/index.ts';
 import type { AgentMessage, SessionInfo } from '../../../adapter-api/src/index.ts';
 
@@ -539,7 +539,39 @@ async function main(): Promise<void> {
     check('P2: the fable picker preselects medium and names it as Claude\'s default',
       fable?.defaultReasoningEffort === 'medium' && JSON.stringify(noted) === JSON.stringify(['medium']),
       JSON.stringify(fable));
+    // The 2.1.330 registry: `opus`, `sonnet` and `haiku` resolve to the 5.5 models, which declare effort,
+    // max and xhigh (so ultracode, which needs xhigh) and default to medium.
+    const ladder = ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'];
+    const offered = await h.conn.listModels();
+    const wrongAliases = ['opus', 'sonnet', 'haiku', 'fable'].filter((alias) => {
+      const option = offered.find((m) => m.modelID === alias);
+      return option?.defaultReasoningEffort !== 'medium'
+        || JSON.stringify((option.reasoningEfforts ?? []).map((e) => e.effort)) !== JSON.stringify(ladder);
+    });
+    check('P2: every alias offers the 2.1.330 ladder with ultracode and preselects medium',
+      wrongAliases.length === 0, JSON.stringify(offered.map((m) => ({ id: m.modelID, d: m.defaultReasoningEffort, e: m.reasoningEfforts?.map((x) => x.effort) }))));
     await h.conn.close();
+  }
+
+  // ── a concrete id narrower than its alias still clamps the launch's effort ──────────────────────
+  {
+    const effortArgs = (model: string, effort: string): string[] => {
+      const args = resumeArgs('00000000-0000-4000-8000-000000000000', { model, effort, isDefault: true });
+      const at = args.indexOf('--effort');
+      return [at >= 0 ? args[at + 1]! : '', args.includes('--settings') ? 'settings' : ''].filter(Boolean);
+    };
+    const cases: [string, string, string[]][] = [
+      ['sonnet', 'xhigh', ['xhigh']],
+      ['haiku', 'ultracode', ['xhigh', 'settings']],
+      ['claude-sonnet-4-6', 'xhigh', []], // registry: effort and max, no xhigh
+      ['claude-sonnet-4-6', 'max', ['max']],
+      ['claude-haiku-4-5-20251001', 'high', []], // registry: no effort control
+      ['claude-opus-4-6', 'ultracode', []],
+      ['claude-opus-5-5', 'xhigh', ['xhigh']],
+    ];
+    const wrong = cases.filter(([model, effort, want]) => JSON.stringify(effortArgs(model, effort)) !== JSON.stringify(want));
+    check('launch clamps effort by the concrete model\'s registry ladder, the alias by today\'s',
+      wrong.length === 0, JSON.stringify(wrong.map(([model, effort, want]) => ({ model, effort, want, got: effortArgs(model, effort) }))));
   }
 
   // ── Drive context usage comes from init model + authoritative result usage ─────────────────────
@@ -824,7 +856,8 @@ async function main(): Promise<void> {
     Object.assign(h.conn as any, { launchModel: 'opus', launchEffort: 'ultracode' });
     (h.conn as any).handleEvent({ type: 'result', subtype: 'success', is_error: false, terminal_reason: 'completed' });
     h.answerControl = () => ({ subtype: 'success' });
-    await h.conn.sendPrompt({ text: 'on haiku', model: { providerID: 'anthropic', modelID: 'haiku' } } as any);
+    // Haiku 4.5 has no effort control at all (on 2.1.330 the `haiku` alias names Haiku 5.5, which has xhigh).
+    await h.conn.sendPrompt({ text: 'on haiku', model: { providerID: 'anthropic', modelID: 'claude-haiku-4-5' } } as any);
     const settings = h.stdin.filter((line: any) => line.request?.subtype === 'apply_flag_settings').map((line: any) => line.request.settings);
     check('live switch: moving to a model without ultracode turns ultracode off',
       JSON.stringify(settings) === JSON.stringify([{ ultracode: false }]), JSON.stringify(settings));

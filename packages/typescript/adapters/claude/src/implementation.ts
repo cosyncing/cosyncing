@@ -974,8 +974,8 @@ export function resumeArgs(uuid: string, opts: { model?: string; mode?: string; 
   // an unknown wrapper model clamps to "supported" (modelSupportsEffort → true) so the endpoint decides.
   // ULTRACODE is special: it is NOT a valid `--effort` value (the launch flag warns + ignores it — confirmed
   // on minimax) — it's xhigh + a session orchestration flag enabled via the `--settings {ultracode:true}`
-  // launch flag (belt-and-suspenders with `--effort xhigh`, which ultracode implies). Sonnet/Haiku reject
-  // ultracode → clamped out (neither flag emitted). Cost-safety is unaffected (it lives in resumeEnv).
+  // launch flag (belt-and-suspenders with `--effort xhigh`, which ultracode implies). A model without xhigh
+  // (Sonnet 4.6, Haiku 4.5) rejects ultracode → clamped out (neither flag emitted). Cost-safety is unaffected (it lives in resumeEnv).
   if (opts.effort) {
     if (opts.effort === 'ultracode') {
       if (modelSupportsEffort(opts.model ?? 'opus', 'ultracode')) args.push('--settings', JSON.stringify({ ultracode: true }), '--effort', 'xhigh');
@@ -2974,8 +2974,8 @@ export class ClaudeLiveConnection implements SessionConnection {
       // (and so we never re-inject e.g. `/effort ultracode` onto a Sonnet/Haiku that rejects it).
       if (this.syncEffort && !modelSupportsEffort(model, this.syncEffort)) this.syncEffort = undefined;
     }
-    // Effort: inject only on a real change AND only if the (now-current) model supports it — Sonnet has no
-    // xhigh, Haiku no effort, and only Opus/Fable accept `ultracode`, so a stale pick never injects an invalid
+    // Effort: inject only on a real change AND only if the (now-current) model supports it — Sonnet 4.6 has no
+    // xhigh, Haiku 4.5 no effort, and only xhigh-capable models accept `ultracode`, so a stale pick never injects an invalid
     // `/effort`. ultracode is a valid mid-session slash command the live terminal parses natively.
     const effort = input.model?.reasoningEffort;
     if (effort && effort !== this.syncEffort && modelSupportsEffort(this.syncModel ?? model, effort)) {
@@ -3086,14 +3086,14 @@ const E_MEDIUM: Effort = { effort: 'medium', label: 'Medium' };
 const E_HIGH: Effort = { effort: 'high', label: 'High' };
 const E_XHIGH: Effort = { effort: 'xhigh', label: 'Extra high' };
 const E_MAX: Effort = { effort: 'max', label: 'Max', description: 'Most thinking, slowest' };
-const EFFORTS_FULL: Effort[] = [E_LOW, E_MEDIUM, E_HIGH, E_XHIGH, E_MAX]; // Opus 4.8/4.7, Fable 5
-const EFFORTS_NO_XHIGH: Effort[] = [E_LOW, E_MEDIUM, E_HIGH, E_MAX]; //        Sonnet 4.6 (no xhigh)
+const EFFORTS_FULL: Effort[] = [E_LOW, E_MEDIUM, E_HIGH, E_XHIGH, E_MAX]; // every 5.x model, Opus 4.7/4.8
+const EFFORTS_NO_XHIGH: Effort[] = [E_LOW, E_MEDIUM, E_HIGH, E_MAX]; //        Sonnet 4.6, Opus 4.6 (no xhigh)
 const EFFORTS_NONE: Effort[] = []; //                                         Haiku 4.5 (no effort control)
 
 /** Ultracode (binary 2.1.181: "Enable ultracode for the session: xhigh effort plus standing dynamic-workflow
  *  orchestration") = xhigh + an orchestration flag, NOT a real effort rung. It's SESSION-ONLY (never persisted)
- *  and gated to xhigh-capable models, so it rides ONLY on EFFORTS_FULL_ULTRA (Opus/Fable) — never on
- *  Sonnet/Haiku. The launch flag `--effort` does NOT accept it (it'd be ignored); Drive enables it via the
+ *  and gated to xhigh-capable models (2.1.330: the model declares `xhigh_effort`), so it rides ONLY on
+ *  EFFORTS_FULL_ULTRA, which every current alias carries, never on a concrete id without xhigh. The launch flag `--effort` does NOT accept it (it'd be ignored); Drive enables it via the
  *  `--settings {ultracode:true}` launch flag (+ `--effort xhigh`), Sync via the `/effort ultracode` slash
  *  command. Surfaced as one extra pseudo-effort token appended after `max` so the existing effort picker shows
  *  it with zero app-side change. */
@@ -3111,15 +3111,40 @@ function effortsWithDefaultNote(efforts: Effort[], defaultEffort: string | undef
 /** Curated, user-selectable Claude alias catalog. There is no complete zero-turn list command. Concrete ids
  *  below are matching keys for account gating only; they are not presented as verified alias resolutions.
  *  A model this list lacks still renders as the exact live current value from transcript/init.
- *  Fable: Claude Code 2.1.321+ resolves `fable` to `claude-fable-5-2`, whose registry `default_effort` is
- *  `medium` (read from the 2.1.330 build; an account-level server override can still change it). */
+ *
+ *  Each entry follows the CURRENT Claude Code's model registry (read from the 2.1.330 build; 2.1.331 is
+ *  the same): `opus`, `sonnet`, `haiku` and `fable` resolve to Opus 5.5, Sonnet 5.5, Haiku 5.5 and Fable
+ *  5.2, every one declares `effort`, `max_effort` and `xhigh_effort` (so ultracode too, which needs
+ *  xhigh), and every one's registry `default_effort` is `medium`. An account-level server override can
+ *  still change a default. The picker has no cheap CLI version to key on, so an older Claude, where an
+ *  alias still named a 4.x model (Opus 4.8 defaulting to high, Sonnet 4.6 with no xhigh, Haiku 4.5 with
+ *  no effort control), is shown today's ladder and default; {@link modelSupportsEffort} still clamps a
+ *  session whose model is one of those concrete ids. */
 type CatalogEntry = { alias: string; fullId: string; label: string; efforts: Effort[]; defaultEffort?: string };
 const CURATED_CLAUDE_CATALOG: CatalogEntry[] = [
-  { alias: 'opus', fullId: 'claude-opus-4-8', label: 'Opus', efforts: EFFORTS_FULL_ULTRA, defaultEffort: 'high' },
-  { alias: 'sonnet', fullId: 'claude-sonnet-4-6', label: 'Sonnet', efforts: EFFORTS_NO_XHIGH, defaultEffort: 'high' },
-  { alias: 'haiku', fullId: 'claude-haiku-4-5', label: 'Haiku', efforts: EFFORTS_NONE },
+  { alias: 'opus', fullId: 'claude-opus-5-5', label: 'Opus', efforts: EFFORTS_FULL_ULTRA, defaultEffort: 'medium' },
+  { alias: 'sonnet', fullId: 'claude-sonnet-5-5', label: 'Sonnet', efforts: EFFORTS_FULL_ULTRA, defaultEffort: 'medium' },
+  { alias: 'haiku', fullId: 'claude-haiku-5-5', label: 'Haiku', efforts: EFFORTS_FULL_ULTRA, defaultEffort: 'medium' },
   { alias: 'fable', fullId: 'claude-fable-5-2', label: 'Fable', efforts: EFFORTS_FULL_ULTRA, defaultEffort: 'medium' },
 ];
+
+/** Concrete ids whose effort ladder is narrower than the one their alias resolves to today, from the
+ *  registry's capabilities (2.1.330): Sonnet 4.6 and Opus 4.6 have `effort` and `max_effort` but no
+ *  `xhigh_effort`; Haiku 4.5, the older 4.x ids and every 3.x id declare no effort at all. A dated
+ *  spelling (`claude-haiku-4-5-20251001`) has its base id's ladder. */
+const CLAUDE_NARROW_EFFORT_MODELS: ReadonlyMap<string, Effort[]> = new Map([
+  ['claude-sonnet-4-6', EFFORTS_NO_XHIGH], ['claude-opus-4-6', EFFORTS_NO_XHIGH],
+  ['claude-haiku-4-5', EFFORTS_NONE], ['claude-sonnet-4-5', EFFORTS_NONE], ['claude-sonnet-4-0', EFFORTS_NONE],
+  ['claude-opus-4-5', EFFORTS_NONE], ['claude-opus-4-1', EFFORTS_NONE], ['claude-opus-4-0', EFFORTS_NONE],
+]);
+
+/** The ladder a concrete id is narrower than its alias's, or undefined when the alias's ladder holds. */
+function narrowEffortsOf(model: string | undefined): Effort[] | undefined {
+  if (!model) return undefined;
+  const base = model.toLowerCase().replace(/\[1m\]$/, '').replace(/-\d{8}$/, '');
+  if (/^claude-3-/.test(base)) return EFFORTS_NONE;
+  return CLAUDE_NARROW_EFFORT_MODELS.get(base);
+}
 /** Roster display label for a resolved model id, authored HERE because the adapter is the only party
  *  that knows Claude's tiers: the client's family table has no `fable` entry, so `claude-fable-5` showed
  *  no model at all while Opus/Sonnet/Haiku rendered. Family = a curated alias as a whole `-` segment (or
@@ -3150,11 +3175,13 @@ export const CLAUDE_MAX_GATING_ENTRIES = 256;
 
 /** Whether `model` (alias or full id) accepts `effort`. Unknown models (not in the curated catalog, e.g. a
  *  wrapper or a future tier) return true — we don't second-guess a model we don't know; the CLI validates.
- *  Known models clamp to their set (Sonnet drops `xhigh`; Haiku drops everything). The pseudo-effort
- *  `ultracode` lives only on the xhigh-capable entries (Opus/Fable), so it validates true for them and false
- *  for Sonnet/Haiku here. Used so neither a Drive relaunch nor a sync `/effort` injection carries a level the
- *  chosen model can't run. */
+ *  A concrete id with a narrower ladder than its alias clamps to that ladder ({@link narrowEffortsOf}:
+ *  Sonnet 4.6 drops `xhigh`, Haiku 4.5 drops everything); otherwise the alias's entry decides. The
+ *  pseudo-effort `ultracode` needs xhigh, so it is never in a narrow ladder. Used so neither a Drive
+ *  relaunch nor a sync `/effort` injection carries a level the chosen model can't run. */
 function modelSupportsEffort(model: string | undefined, effort: string): boolean {
+  const narrow = narrowEffortsOf(model);
+  if (narrow) return narrow.some((x) => x.effort === effort);
   const a = modelAlias(model);
   const e = CURATED_CLAUDE_CATALOG.find((c) => c.alias === a || c.fullId === model);
   return e ? e.efforts.some((x) => x.effort === effort) : true;
@@ -3225,7 +3252,7 @@ function readModelGating(store: ClaudeStore): Set<string> {
  *  store exposes a bounded curated alias list ({@link CURATED_CLAUDE_CATALOG}). GrowthBook data can remove a
  *  blocked alias, but never adds entries or turns an alias into a purported concrete model id. Each alias
  *  carries only the reasoning-effort levels supported by runtime information already used by the adapter
- *  (Opus full ladder; Sonnet no `xhigh`; Haiku none), so the app can infer the effort picker per model.
+ *  (every current alias: the full ladder plus ultracode), so the app can infer the effort picker per model.
  *  A wrapper store is pinned to the concrete backend models declared by that wrapper.
  *  `defaultReasoningEffort` preselects the model's default. (Issues B + D; dynamic-discovery refinement.) */
 export function claudeModelOptions(store: ClaudeStore): ModelOption[] {
