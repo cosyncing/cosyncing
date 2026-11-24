@@ -650,7 +650,7 @@ export function piFamilyExtras(dialect: PiFamilyDialect): ConformanceExtra[] {
   });
 
   if (omp) extras.push({
-    title: 'an omp run that yields to background work stays running until it wakes and ends, one whose work ends without waking settles idle, and Stop ends the wait',
+    title: 'an omp run that yields to background work stays running until it wakes and ends, one whose work ends without waking settles idle, and Stop ends the wait before omp closes the run',
     async run(context) {
       const fake = asFake(context);
       const session = await context.drivableSession('omp background');
@@ -682,9 +682,10 @@ export function piFamilyExtras(dialect: PiFamilyDialect): ConformanceExtra[] {
       fake.release('omp-bg-gone');
       await owner.waitForFrame((frame) => isStatus(frame, 'idle'), { after: goneFrom, what: 'session_settled ending the yield' });
 
-      // Stop while yielded. What omp emits after aborting a yield is not captured (its source says
-      // the abort ends the wait), so the engine ends the wait itself: the session is idle at once,
-      // with no terminal agent_end or session_settled from the runtime, and the abort reached it.
+      // Stop while yielded. omp 19.1.0's source (source-modelled, not captured): the abort ends the
+      // wait with no wake-up run, and only once it has unwound does omp close the run with its
+      // stored agent_end (terminal) and session_settled; a prompt sent meanwhile runs after that.
+      // The fake holds the close until `release-omp-bg-stop`, so the idle seen first is Stop's own.
       const stopFrom = owner.frames.length;
       expect((await context.prompt(owner, '[[backgroundgone:omp-bg-stop]] start a third')).kind).toBe('ack');
       await owner.waitForFrame(waiting, { after: stopFrom, what: 'the third yield' });
@@ -692,7 +693,27 @@ export function piFamilyExtras(dialect: PiFamilyDialect): ConformanceExtra[] {
       expect((await owner.sendAndAwait({ kind: 'command', name: 'stop' })).kind).toBe('ack');
       await owner.waitForFrame((frame) => isStatus(frame, 'idle'), { after: stopFrom, what: 'Stop ending the yield' });
       expect(fake.ledger.since(stopMark).some((entry) => entry.kind === 'abort')).toBe(true);
+      expect(fake.ledger.since(stopMark).some((entry) => entry.kind === 'yield-closed')).toBe(false);
+      // A prompt sent before omp's close: its echo is queued now and must survive that close.
+      const between = context.prompt(owner, 'after the stop', { clientMessageId: 'omp-bg-between' });
+      const queuedEcho = await owner.waitForMessage((message) => message.type === 'user-message'
+        && message.clientKey === 'omp-bg-between' && message.queued === true);
+      const closeFrom = owner.frames.length;
       fake.release('omp-bg-stop');
+      expect((await between).kind).toBe('ack');
+      const startedEcho = await owner.waitForMessage((message) => message.type === 'user-message'
+        && message.clientKey === 'omp-bg-between' && message.queued === false);
+      expect(startedEcho.key).toBe(queuedEcho.key);
+      await owner.waitForMessage((message) => message.type === 'model-output' && text(message) === 'answer: after the stop');
+      await owner.waitForFrame((frame) => isStatus(frame, 'idle'), { after: closeFrom, what: 'the prompt sent after Stop ending' });
+      expect(fake.ledger.since(stopMark).some((entry) => entry.kind === 'yield-closed')).toBe(true);
+      // omp's late close changed nothing: no idle or running before the new run's own start, and
+      // that run's end is the only idle.
+      const statuses = owner.frames.slice(closeFrom)
+        .filter((frame) => frame.kind === 'message' && frame.message?.type === 'status')
+        .map((frame) => frame.message.status);
+      expect(statuses[0]).toBe('running');
+      expect(statuses.filter((status) => status === 'idle')).toHaveLength(1);
       expect(fake.ledger.faults(mark)).toEqual([]);
       owner.close();
     },

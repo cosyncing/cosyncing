@@ -38,6 +38,10 @@
  *                    itself (async-result message, answer, terminal agent_end) and settles
  *   [[backgroundgone:TAG]] the same yield, but the work ends without a wake-up run: only
  *                    `session_settled` follows `release-TAG` (source-modelled; no capture had it)
+ *                    An `abort` during either yield ends it without a wake-up run; the runtime then
+ *                    closes the run (terminal `agent_end`, `session_settled`) once `release-TAG`
+ *                    appears, and a prompt that arrives before that close runs after it
+ *                    (source-modelled from omp 19.1.0, see the `abort` command)
  *   [[hold:TAG]]     keep the run open until the control file `release-TAG` appears, or `abort`
  *   [[retry]]        one failed attempt (`auto_retry_start`/`auto_retry_end`) before the answer
  *   [[tool]]         a bash tool call and its result before the answer
@@ -311,6 +315,10 @@ function runFakePi(): void {
   let running = false;
   let aborted = false;
   let stopHold: (() => void) | undefined;
+  /** The tag of the background wait the open yield is in, while it is in one. */
+  let yieldTag: string | undefined;
+  /** Set from an abort during a yield until the runtime has closed that run. */
+  let abortClosing: Promise<void> | undefined;
   let turnNumber = 0;
   const steers: Input[] = [];
   const awaiting = new Map<string, (response: Json) => void>();
@@ -383,6 +391,15 @@ function runFakePi(): void {
     stopHold = resolve;
     const tickRelease = (): void => {
       if (aborted || existsSync(join(config.controlDir, `release-${tag}`))) return resolve();
+      setTimeout(tickRelease, 20);
+    };
+    tickRelease();
+  });
+
+  /** `release-TAG` appearing, whatever else happens meanwhile. */
+  const untilReleased = (tag: string): Promise<void> => new Promise((resolve) => {
+    const tickRelease = (): void => {
+      if (existsSync(join(config.controlDir, `release-${tag}`))) return resolve();
       setTimeout(tickRelease, 20);
     };
     tickRelease();
@@ -496,7 +513,11 @@ function runFakePi(): void {
       // accepts prompts meanwhile, and is settled only once that work is done.
       emit({ type: 'agent_end', messages: [], isTerminal: false, yielded: true, awaitingAsyncWork: true });
       running = false;
+      yieldTag = background[2]!;
       await released(background[2]!);
+      // An abort ended the wait: the `abort` command closes the run, and nothing wakes it.
+      if (aborted) return;
+      yieldTag = undefined;
       // `[[backgroundgone]]` is source-modelled, not captured: omp's async-job manager settles the
       // session without a wake-up run when no result is left to deliver (a killed job, or a result
       // another turn already took). Every capture woke up.
@@ -548,6 +569,11 @@ function runFakePi(): void {
   };
 
   const handle = (command: Json): void => {
+    // Read only after an aborted yield's close (see `abort`): recorded when it is handled.
+    if (abortClosing && command.type === 'prompt') {
+      void abortClosing.then(() => handle(command));
+      return;
+    }
     record({ kind: 'recv', session: file, model: model.id, frame: command });
     switch (command.type) {
       case 'get_state':
@@ -621,6 +647,23 @@ function runFakePi(): void {
         record({ kind: 'abort', session: file, midTurn: running });
         aborted = true;
         stopHold?.();
+        if (yieldTag && !running) {
+          // omp 19.1.0 source (source-modelled, not captured): `abort` awaits `session.abort`
+          // (rpc-mode.ts). A paused run counts as stoppable, so the abort sets
+          // `autoResumeSuppressed` and the awaited work wakes nothing; once the abort has unwound,
+          // `#checkRun` closes the run and emits its stored agent_end, which the wire encodes
+          // terminal (`#closeRun`, loop-end-wire.ts), and the session settles. Prompts start through
+          // the serial command queue behind the abort, so one sent meanwhile runs after the close.
+          // The fake holds that close until `release-TAG`.
+          const tag = yieldTag;
+          yieldTag = undefined;
+          abortClosing = untilReleased(tag).then(() => {
+            abortClosing = undefined;
+            record({ kind: 'yield-closed', session: file });
+            emit({ type: 'agent_end', messages: [], isTerminal: true, yielded: true });
+            emit({ type: 'session_settled' });
+          });
+        }
         return ok(command);
       }
       case 'compact': {

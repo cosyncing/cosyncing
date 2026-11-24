@@ -1491,6 +1491,11 @@ class PiConnection implements SessionConnection {
    *  lands. The session is not settled, so it stays running; `session_settled` is the end when no
    *  wake-up run comes. */
   private awaitingAsyncWork = false;
+  /** Stop ended a yielded run here, and omp's own close of it has not arrived yet: once the abort
+   *  unwinds, omp ends the run with the `agent_end` it stored, encoded terminal, then settles
+   *  (omp 19.1.0 source: `abort`, `#checkRun`, `#closeRun`, `loop-end-wire.ts`). Cleared by that
+   *  close, or by the next `agent_start` when a run begins first. */
+  private stoppedYieldCloses = false;
   /** What this Drive has proved its session file holds. Made once the runtime has answered (so it
    *  has loaded the file, and its own load-time migration is not taken for a rewrite), or at the
    *  first prompt when it never answered at start. */
@@ -2015,6 +2020,7 @@ class PiConnection implements SessionConnection {
       case 'agent_start':
         this.streaming = true;
         this.awaitingAsyncWork = false;
+        this.stoppedYieldCloses = false;
         // The run's start clock — consumed only by the FALLBACK turn anchor below; the
         // authoritative anchor is the opening user message itself (message_start).
         this.runStartedAt = nativeTimeMs(ev.timestamp) ?? Date.now();
@@ -2136,6 +2142,12 @@ class PiConnection implements SessionConnection {
         return;
       }
       case 'agent_end':
+        if (this.stoppedYieldCloses && !this.streaming && ev.isTerminal !== false) {
+          // omp's close of a yield Stop already ended. Ending the run again would repeat its idle
+          // and stats, and drop the correlation of a prompt sent since Stop.
+          this.stoppedYieldCloses = false;
+          return;
+        }
         this.streaming = false;
         this.toolArgs.clear(); // turn boundary — drop args of any tool-call whose result never arrived (abort/block)
         if (ev.isTerminal === false || this.retryActive) {
@@ -2158,6 +2170,10 @@ class PiConnection implements SessionConnection {
         // omp's "nothing is live, queued or scheduled" (measured after every terminal agent_end).
         // It only ends something here when a yielded run's background work finished without the
         // wake-up run that would have ended it (a job killed, or its result taken by another turn).
+        if (this.stoppedYieldCloses && !this.streaming) {
+          this.stoppedYieldCloses = false;
+          return;
+        }
         if (this.awaitingAsyncWork) this.finishRun(ev);
         return;
       case 'message_update': {
@@ -2841,11 +2857,14 @@ class PiConnection implements SessionConnection {
       // The run's dialogs end with it: one Pi tied to the run is already settled, and one it was
       // not would hold the stopped run open until someone answered it.
       this.withdrawPendingUi((ui) => ui.duringRun);
-      // A run yielded to background work has no live turn left to end with a terminal agent_end,
-      // and what omp emits after aborting that wait is not captured (its source says the abort
-      // ends the wait). So Stop ends it here: the session goes idle now, and a wake-up run omp
-      // still starts shows as running again.
-      if (yielded) this.finishRun({});
+      // A run yielded to background work ends here, at once. omp 19.1.0's source shows the rest:
+      // the abort sets `autoResumeSuppressed`, so no wake-up run follows, and only once the abort
+      // has unwound does omp close the run with its stored agent_end (terminal) and
+      // session_settled. That close ends nothing here any more (see `stoppedYieldCloses`).
+      if (yielded) {
+        this.finishRun({});
+        this.stoppedYieldCloses = true;
+      }
       return { notice: 'Stopped the turn.' };
     }
     if (this.closed) throw new Error(`${this.rt.dialect.displayName} Drive connection is closed.`);
