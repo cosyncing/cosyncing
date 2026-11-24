@@ -408,10 +408,12 @@ try {
   const piDriftReport = existsSync(join(piDriftOut, 'discovery-drift.json'))
     ? JSON.parse(readFileSync(join(piDriftOut, 'discovery-drift.json'), 'utf8'))
     : undefined;
+  // The synthetic fixture is the 1.6.0 seed's commands plus one invented command, so that command is
+  // the only drift (no `import`: Pi's RPC has none).
+  const piAdded = (piDriftReport?.sourceDrift ?? []).filter((d: any) => d.change === 'added').map((d: any) => d.nativeId);
   check(
     'Pi discovery drift detects synthetic RpcCommand and exits report-only',
-    piDrift.status === 0 &&
-      !!piDriftReport?.sourceDrift?.some((d: any) => d.nativeId === 'pi:rpc:synthetic_new_command' && d.change === 'added'),
+    piDrift.status === 0 && piAdded.length === 1 && piAdded[0] === 'pi:rpc:synthetic_new_command',
     piDrift.stderr || piDrift.stdout || JSON.stringify(piDriftReport),
   );
 
