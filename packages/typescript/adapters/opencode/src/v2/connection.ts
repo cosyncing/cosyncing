@@ -374,7 +374,7 @@ class BoundV2Connection implements SessionConnection {
   }
 
   async listModels() { return this.backend.listModels(this.info.currentModel); }
-  async listAgents() { return this.backend.listAgents(); }
+  async listAgents() { return this.backend.listAgents(this.info.cwd); }
   async setAgent(agent: string): Promise<void> {
     this.assertMutable();
     if (!(await this.listAgents()).some((item) => item.name === agent)) throw new Error('Choose an available OpenCode agent.');

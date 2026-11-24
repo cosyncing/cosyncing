@@ -41,6 +41,8 @@ export class FakeOpenCodeV2Serve {
   authenticationRequired = true;
   migration: 'required' | 'running' | 'completed' | 'error' = 'completed';
   formFields?: Json[];
+  /** The next agent list is read from a location still loading its plugins (see {@link route}). */
+  agentsLoading = false;
   malformedPendingFor?: string;
   beforeRosterReply?: () => Promise<void>;
   beforePendingReply?: (id: string) => Promise<void>;
@@ -168,11 +170,12 @@ export class FakeOpenCodeV2Serve {
   noise(id: string): void { this.emit('fixture.unknown', { sessionID: id }); }
   setBusy(id: string, busy: boolean): void { this.session(id).busy = busy; this.emit(busy ? 'session.execution.started' : 'session.execution.succeeded', { sessionID: id }, true); }
 
-  emit(type: string, data: Json, durable = false): void {
+  emit(type: string, data: Json, durable = false, location?: Json): void {
     const sessionID = data.sessionID ?? data.form?.sessionID;
     const seq = (this.sequences.get(sessionID) ?? 0) + 1;
     if (durable) this.sequences.set(sessionID, seq);
-    const event = { id: this.id('evt'), created: this.now(), type, data, ...(sessionID && this.sessions.has(sessionID) ? { location: this.session(sessionID).info.location } : {}), ...(durable ? { durable: { aggregateID: sessionID, seq, version: 1 } } : {}) };
+    const scope = location ?? (sessionID && this.sessions.has(sessionID) ? this.session(sessionID).info.location : undefined);
+    const event = { id: this.id('evt'), created: this.now(), type, data, ...(scope ? { location: scope } : {}), ...(durable ? { durable: { aggregateID: sessionID, seq, version: 1 } } : {}) };
     const bytes = new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`);
     for (const stream of this.streams) try { stream.enqueue(bytes); } catch { this.streams.delete(stream); }
   }
@@ -216,7 +219,17 @@ export class FakeOpenCodeV2Serve {
     if (path === '/api/session/active') return Response.json({ data: Object.fromEntries([...this.sessions].filter(([, session]) => session.busy).map(([id]) => [id, { type: 'running' }])) });
     if (path === '/api/provider') return Response.json({ location: { directory: '/work/project' }, data: [{ id: 'test-provider', name: 'Test Provider', activation: 'enabled' }] });
     if (path === '/api/model') return Response.json({ location: { directory: '/work/project' }, data: ['model-a', 'model-b'].map((id) => ({ id, modelID: id, providerID: 'test-provider', name: id === 'model-a' ? 'Model A' : 'Model B', enabled: true, variants: [{ id: 'low' }, { id: 'high' }] })) });
-    if (path === '/api/agent') return Response.json({ location: { directory: '/work/project' }, data: [{ id: 'build', name: 'Build', mode: 'primary', hidden: false }, { id: 'plan', name: 'Plan', mode: 'primary', hidden: false }] });
+    if (path === '/api/agent') {
+      const location = { directory: url.searchParams.get('location[directory]') ?? '/work/project' };
+      if (this.agentsLoading) {
+        // As captured on 2.3.2: a location still loading answers with the agents loaded so far (here
+        // none, as right after a location first loaded), then announces the rest with agent.updated.
+        this.agentsLoading = false;
+        setTimeout(() => this.emit('agent.updated', {}, false, location), 20);
+        return Response.json({ location, data: [] });
+      }
+      return Response.json({ location, data: [{ id: 'build', name: 'Build', mode: 'primary', hidden: false }, { id: 'plan', name: 'Plan', mode: 'primary', hidden: false }] });
+    }
     if (path === '/api/command') return Response.json({ location: { directory: url.searchParams.get('location[directory]') ?? '/work/project' }, data: [{ name: 'review', description: 'Review changes' }] });
     const exported = /^\/api\/experimental\/session\/([^/]+)\/export$/.exec(path);
     if (exported) {
