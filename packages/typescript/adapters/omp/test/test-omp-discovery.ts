@@ -238,6 +238,42 @@ process.exit(73);
   delete process.env.COSYNCING_OMP_BIN;
   resetOmpRuntimeReadinessCache();
 
+  // ── omp 19.1.0's replay leaf (`resolveSessionLeafId`, session-entries.ts) ──
+  // Source-modelled rows: no capture produced an `activeLeafId` row. An entry written off the
+  // active branch records the leaf it interrupted, and a reload replays that leaf's branch.
+  const { mapPiJsonlText } = await import('@cosyncing/pi-engine');
+  const { OMP_DIALECT: ompDialect } = await import('../src/dialect.ts');
+  const entry = (id: string, parentId: string | null, role: 'user' | 'assistant', text: string, extra: Record<string, unknown> = {}) =>
+    JSON.stringify({
+      type: 'message', id, parentId, timestamp: '2026-11-24T08:00:00.000Z', ...extra,
+      message: role === 'user'
+        ? { role, content: [{ type: 'text', text }] }
+        : { role, content: [{ type: 'text', text }], stopReason: 'stop' },
+    });
+  const branched = (last: string) => [
+    JSON.stringify({ type: 'session', version: 3, id: 'sess-leaf', timestamp: '2026-11-24T08:00:00.000Z', cwd: cwdA }),
+    entry('u1', null, 'user', 'root prompt'),
+    entry('a1', 'u1', 'assistant', 'root answer'),
+    entry('u2', 'a1', 'user', 'branch A prompt'),
+    entry('a2', 'u2', 'assistant', 'branch A answer'),
+    entry('u3', 'a1', 'user', 'branch B prompt'),
+    entry('a3', 'u3', 'assistant', 'branch B answer'),
+    last,
+  ].join('\n') + '\n';
+  const userTexts = (raw: string) => mapPiJsonlText(raw, 0, ompDialect)
+    .filter((message) => message.type === 'user-message').map((message) => (message as { text?: string }).text);
+  const offBranch = userTexts(branched(entry('late', 'a2', 'assistant', 'late branch A result', { activeLeafId: 'a3' })));
+  check('an off-branch entry with activeLeafId replays the branch it interrupted',
+    JSON.stringify(offBranch) === JSON.stringify(['root prompt', 'branch B prompt']), JSON.stringify(offBranch));
+  const lastIsLeaf = userTexts(branched(entry('late', 'a2', 'assistant', 'late branch A result')));
+  check('without activeLeafId the last entry is the leaf, as for Pi',
+    JSON.stringify(lastIsLeaf) === JSON.stringify(['root prompt', 'branch A prompt']), JSON.stringify(lastIsLeaf));
+  const cleared = userTexts(branched(entry('late', 'a2', 'assistant', 'late branch A result', { activeLeafId: null })));
+  check('a null activeLeafId replays a cleared leaf', cleared.length === 0, JSON.stringify(cleared));
+  const missing = userTexts(branched(entry('late', 'a2', 'assistant', 'late branch A result', { activeLeafId: 'gone' })));
+  check('a recorded leaf that no longer exists falls back to the newest self-selected entry',
+    JSON.stringify(missing) === JSON.stringify(['root prompt', 'branch B prompt']), JSON.stringify(missing));
+
   // ── omp 19.1.0 form dialogs, read and validated the way omp reads and validates them ──
   const { parsePiFormDialog, piFormAnswer, piFormQuestions } = await import('../../../pi-engine/src/form-dialog.ts');
   const controls = parsePiFormDialog(`<form>
