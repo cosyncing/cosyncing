@@ -874,7 +874,7 @@ try {
       plainChecks.length === 0, JSON.stringify(plainChecks));
   }
 
-  for (const [version, code, status] of [['2.1.3', 'version-below-minimum', 'warn'], ['2.1.4', 'version-supported', 'pass'], ['3.0.0', 'generation-unknown', 'warn']] as const) {
+  for (const [version, code, status] of [['2.1.4', 'version-below-minimum', 'warn'], ['2.2.0', 'version-supported', 'pass'], ['3.0.0', 'generation-unknown', 'warn']] as const) {
     const diagnosis = await diagnoseOpenCodeSetup(makeFixtureContext(testRoot, 'opencode', version));
     const detected = checkById(diagnosis, 'opencode.version');
     check(`OpenCode ${version} has its generation-aware version verdict`, detected.status === status && detected.detailCode === code);

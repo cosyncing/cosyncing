@@ -411,7 +411,7 @@ export const opencodeV2Kit: ConformanceKit = {
     ...opencodeProfile,
     displayName: 'OpenCode',
     version: {
-      ...opencodeProfile.version, current: '2.1.4', below: '2.1.3', newer: '2.2.0',
+      ...opencodeProfile.version, current: '2.3.2', below: '2.1.4', newer: '2.4.0',
       doctor: {
         current: { check: 'version', status: 'pass', detailCode: 'version-supported' },
         below: { check: 'version', status: 'warn', detailCode: 'version-below-minimum' },
@@ -454,7 +454,11 @@ export const opencodeV2Kit: ConformanceKit = {
       },
     });
     serve.start(0); leases.set(paths.root, serve.port);
-    const cli = installFakeExecutable(paths.bin, 'opencode', 'opencode-cli.ts', { ledger: ledger.path, controlDir, version: '2.1.4' } satisfies FakeOpencodeCliConfig);
+    const cli = installFakeExecutable(paths.bin, 'opencode', 'opencode-cli.ts', {
+      ledger: ledger.path, controlDir, version: '2.3.2',
+      // Captured from the installed 2.3.2 binary (as from 2.1.4 and 2.2.0): the banner carries a v prefix.
+      versionOutput: 'opencode v2.3.2\n',
+    } satisfies FakeOpencodeCliConfig);
     let workspaces = 0, seeded = 0;
     const controller: OpencodeV2Fake = {
       ledger, serve, cli, paths, registrationPath, legacyStore, storeRoot: join(paths.root, 'opencode-data'),
@@ -476,7 +480,7 @@ export const opencodeV2Kit: ConformanceKit = {
       rewriteHistory: (session) => serve.rewriteFirstUserText(session.id, 'rewritten first prompt'),
       replaceLog: (session) => serve.rewriteFirstUserText(session.id, 'rewritten first prompt'),
       watcherNoise: (session) => serve.noise(session.id),
-      setVersion(version, output) { cli.writeConfig({ ...cli.readConfig<FakeOpencodeCliConfig>(), version, versionOutput: output }); serve.setVersion(version); },
+      setVersion(version, output) { cli.writeConfig({ ...cli.readConfig<FakeOpencodeCliConfig>(), version, versionOutput: output ?? (version.startsWith('2.') ? `opencode v${version}\n` : undefined) }); serve.setVersion(version); },
       setInstalled(installed) { cli.setInstalled(installed); },
       release: (tag) => serve.release(tag),
       configure: () => ({}),
@@ -586,12 +590,12 @@ export const opencodeV2Kit: ConformanceKit = {
         try {
           expect((await context.client.post('/api/sessions/opencode', { directory: fake.workspace('no-cli') })).status).toBe(200);
         } finally { fake.cli.setInstalled(true); }
-        for (const [version, expected] of [['2.1.3', 503], ['2.2.0', 200]] as const) {
+        for (const [version, expected] of [['2.1.4', 503], ['2.2.0', 200]] as const) {
           fake.serve.setVersion(version);
           const response = await context.client.post('/api/sessions/opencode', { directory: fake.workspace('version') });
           expect(response.status, response.text).toBe(expected);
         }
-        fake.serve.setVersion('2.1.4');
+        fake.serve.setVersion('2.3.2');
       },
     },
   ],
@@ -682,21 +686,21 @@ opencodeV2Kit.extras!.push(
       const fake = context.fake as OpencodeV2Fake;
       const credential = fake.serve.registration().password;
       try {
-        for (const [version, expected, status] of [['2.1.4', 'version-supported', 'pass'], ['2.1.3', 'version-below-minimum', 'warn'], ['2.2.0', 'version-supported', 'pass']] as const) {
+        for (const [version, expected, status] of [['2.3.2', 'version-supported', 'pass'], ['2.1.4', 'version-below-minimum', 'warn'], ['2.2.0', 'version-supported', 'pass']] as const) {
           fake.serve.setVersion(version);
           const report = await v2Doctor(context);
           expect(report.checks.find((check) => check.id === 'opencode.version')).toMatchObject({ detailCode: expected, status });
           expect(report.checks.find((check) => check.id === 'opencode.managed-serve-eligibility')).toMatchObject({ status: 'skip', detailCode: 'external-v2-service' });
           expect(report.raw).not.toContain(credential);
         }
-        fake.serve.setVersion('2.1.4');
+        fake.serve.setVersion('2.3.2');
         fake.serve.failNext('GET', '/api/info', 401, 100);
         const mark = fake.ledger.mark();
         const rejected = await v2Doctor(context);
         expect(rejected.checks.find((check) => check.id === 'opencode.server')?.detailCode).toBe('credential-rejected');
         expect(fake.ledger.paths(mark).some((path) => path.includes('/global/health') || path === 'GET /session')).toBe(false);
         expect(rejected.checks.find((check) => check.id === 'opencode.server')?.remediation).toBeUndefined();
-      } finally { fake.serve.failNext('GET', '/api/info', 401, 0); fake.serve.setVersion('2.1.4'); await context.restart(); }
+      } finally { fake.serve.failNext('GET', '/api/info', 401, 0); fake.serve.setVersion('2.3.2'); await context.restart(); }
     },
   },
   {
@@ -741,7 +745,7 @@ opencodeV2Kit.extras!.push(
         const from = legacy.frames.length;
         fake.serve.beforeRosterReply = () => rosterGate;
         fake.serve.seed({ id, directory: cwd, title: 'imported', turns: 1, model: { providerID: OPENCODE_PROVIDER, modelID: 'model-b' } });
-        fake.serve.emit('session.created', { sessionID: id, location: { directory: cwd }, projectID: 'project-fixture', slug: 'imported', version: '2.1.4', title: 'imported' }, true);
+        fake.serve.emit('session.created', { sessionID: id, location: { directory: cwd }, projectID: 'project-fixture', slug: 'imported', version: '2.3.2', title: 'imported' }, true);
         const importedFrame = await legacy.waitForFrame((frame) => frame.kind === 'session' && frame.authority?.canMutate === true, { after: from });
         expect(importedFrame.info.currentModel).toMatchObject({ providerID: OPENCODE_PROVIDER, modelID: 'model-b' });
         const history = await legacy.waitForFrame((frame) => frame.kind === 'history' && frame.reset === true, { after: from });

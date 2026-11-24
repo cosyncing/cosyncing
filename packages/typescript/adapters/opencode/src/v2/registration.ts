@@ -3,8 +3,11 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { openRegularFileSync } from '@cosyncing/adapter-api';
 
-export const OPENCODE_V2_MINIMUM_VERSION = '2.1.4';
-export const OPENCODE_V2_MEASURED_VERSIONS: readonly string[] = Object.freeze(['2.1.4']);
+/** 2.2.0 replaced the attachment check that refused 8-15 MiB images and removed the cross-session
+ *  stalls measured on 2.1.4 (#58811, #58437). Captured against 2.1.4 (2026-10), 2.2.0 and 2.3.2
+ *  (2026-11); newer 2.x answers are checked structurally per operation. */
+export const OPENCODE_V2_MINIMUM_VERSION = '2.2.0';
+export const OPENCODE_V2_MEASURED_VERSIONS: readonly string[] = Object.freeze(['2.1.4', '2.2.0', '2.3.2']);
 
 export interface V2Registration {
   readonly url: string;

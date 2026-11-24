@@ -1,7 +1,7 @@
 # OpenCode
 
 cosyncing supports OpenCode **1.17.19 or newer in the 1.x line** and
-**2.1.4 or newer in the 2.x line**. Both use the `opencode` command.
+**2.2.0 or newer in the 2.x line**. Both use the `opencode` command.
 
 For OpenCode 1, the official install script and the stable npm package are
 supported:

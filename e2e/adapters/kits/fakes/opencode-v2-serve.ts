@@ -37,7 +37,7 @@ export class FakeOpenCodeV2Serve {
   private expectedCreate?: string;
   private compactions = new Map<string, string>();
   exportMessageCount = 0;
-  version = '2.1.4';
+  version = '2.3.2';
   authenticationRequired = true;
   migration: 'required' | 'running' | 'completed' | 'error' = 'completed';
   formFields?: Json[];

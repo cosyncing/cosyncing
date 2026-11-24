@@ -15,8 +15,8 @@ import { isSession, object } from './v2/mapping.ts';
 const V2_MINIMUM: AgentMinimumVersion = Object.freeze({
   version: OPENCODE_V2_MINIMUM_VERSION,
   requiredFeature: 'the shared OpenCode service HTTP and event contracts',
-  evidenceUrl: 'https://github.com/anomalyco/opencode/releases/tag/v2.1.4',
-  evidenceNote: 'Measured service identity, migration, history, live events and input contracts; newer 2.x responses are validated structurally.',
+  evidenceUrl: 'https://github.com/anomalyco/opencode/releases/tag/v2.2.0',
+  evidenceNote: 'Measured service identity, migration, history, live events and input contracts on 2.1.4, 2.2.0 and 2.3.2; 2.2.0 admits large image attachments; newer 2.x responses are validated structurally.',
 });
 
 async function diagnoseV2(
