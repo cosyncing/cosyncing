@@ -27,6 +27,7 @@ import {
   OMP_MINIMUM_SUPPORTED_VERSION,
   OMP_VERIFIED_VERSION_BUN_FLOOR,
   ompIdentityVersion,
+  ompInstallAdvice,
   ompSupportsRpcFork,
   type OmpRuntimeHost,
 } from '../src/index.ts';
@@ -254,29 +255,41 @@ try {
   assert.deepEqual(['17.4.2', '19.1.0', '18.2.0', undefined].map(ompSupportsRpcFork), [false, true, false, false],
     'only a captured build whose RPC has fork offers it');
 
-  // Doctor reads a version list too: 19.1.0 passes, a release between the captured ones does not,
-  // and the remediation names the newest captured build with the Bun it needs.
-  for (const [answer, status, detailCode] of [
-    ['omp/19.1.0\n', 'pass', 'bun-runtime-supported'],
-    ['18.2.0\n', 'fail', 'bun-runtime-launcher-above-verified'],
+  // Doctor reads a version list too: 19.1.0 passes, a release between the captured ones does not.
+  // Its fix is the captured omp the detected Bun can run: omp 19.1.0 does not start below Bun
+  // 1.4.4, so on Bun 1.4.0 the runnable command is omp 17.4.2, with Bun's upgrade named first.
+  for (const [answer, bunAnswer, status, detailCode, command, message] of [
+    ['omp/19.1.0\n', '1.4.0\n', 'pass', 'bun-runtime-supported', undefined, undefined],
+    ['18.2.0\n', '1.4.0\n', 'fail', 'bun-runtime-launcher-above-verified',
+      'bun install -g @oh-my-pi/pi-coding-agent@17.4.2',
+      /Install omp 17\.4\.2, which runs on Bun 1\.4\.0 \(omp 19\.1\.0 needs Bun 1\.4\.4 or newer, so upgrade Bun first to use it\)/],
+    ['18.2.0\n', '1.4.4\n', 'fail', 'bun-runtime-launcher-above-verified',
+      'bun install -g @oh-my-pi/pi-coding-agent@19.1.0',
+      /Install omp 19\.1\.0, which Bun 1\.4\.4 runs/],
   ] as const) {
     const doctor = await diagnoseOmpBunRuntime({
       ...doctorContext,
       env: { PATH: '/usr/bin:/bin', COSYNCING_OMP_BIN: override },
-      resolveExecutable: (command) => command === newerBun ? newerBun : undefined,
+      resolveExecutable: (candidate) => candidate === newerBun ? newerBun : undefined,
       readTextPrefix: (path, maxBytes) => ({ ok: true, text: readFileSync(path).subarray(0, maxBytes).toString('utf8') }),
       runReadOnly: async (executable) => ({
-        status: 'ok', exitCode: 0, stdout: executable === override ? answer : '1.4.0\n', stderr: '',
+        status: 'ok', exitCode: 0, stdout: executable === override ? answer : bunAnswer, stderr: '',
       }),
     }, override);
     assert.deepEqual({ status: doctor.status, detailCode: doctor.detailCode }, { status, detailCode },
-      `doctor for a launcher answering ${JSON.stringify(answer)}`);
+      `doctor for a launcher answering ${JSON.stringify(answer)} on Bun ${bunAnswer.trim()}`);
     if (status === 'fail') {
       assert.match(doctor.summary, /verified only for omp 17\.4\.2 and 19\.1\.0/);
       assert.equal(doctor.remediation?.kind, 'command');
-      assert.match(doctor.remediation?.message ?? '', /Install omp 19\.1\.0 \(it needs Bun 1\.4\.4 or newer\)/);
+      assert.equal(doctor.remediation?.command, command, `install command on Bun ${bunAnswer.trim()}`);
+      assert.match(doctor.remediation?.message ?? '', message!);
     }
   }
+  // The same choice where doctor reads only omp's own version check (no Bun answer).
+  assert.deepEqual(ompInstallAdvice('1.4.4').command, 'bun install -g @oh-my-pi/pi-coding-agent@19.1.0');
+  assert.deepEqual(ompInstallAdvice('1.3.14').command, 'bun install -g @oh-my-pi/pi-coding-agent@17.4.2');
+  assert.deepEqual(ompInstallAdvice(undefined).command, 'bun install -g @oh-my-pi/pi-coding-agent@17.4.2',
+    'an unknown Bun gets the omp that runs on the default floor');
 
   const missing = inspectOmpRuntimeReadiness({ PATH: join(root, 'empty') });
   assert.equal(missing.ready, false);

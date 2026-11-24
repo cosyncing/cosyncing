@@ -143,13 +143,36 @@ function unsupportedOmpVersionMessage(subject: string, verdict: 'below-minimum' 
     : `${subject}, but ${OMP_MINIMUM_SUPPORTED_VERSION} is required. ${ompVerifiedInstallHint()}, then restart cosyncing.`;
 }
 
+/**
+ * The omp to install on the Bun that would run it, as a runnable command: the newest captured build
+ * when that Bun meets its floor, otherwise the older captured build (and say Bun must be upgraded
+ * first for the newer one). An unknown Bun gets the build that runs on the default floor.
+ */
+export function ompInstallAdvice(bunVersion: string | undefined): { command: string; message: string } {
+  const install = (version: string) => `bun install -g @oh-my-pi/pi-coding-agent@${version}`;
+  const comparison = bunVersion ? compareSemanticVersions(bunVersion, OMP_VERIFIED_VERSION_BUN_FLOOR) : undefined;
+  if (comparison !== undefined && comparison >= 0) {
+    return { command: install(OMP_VERIFIED_VERSION), message: `Install omp ${OMP_VERIFIED_VERSION}, which Bun ${bunVersion} runs` };
+  }
+  const older = OMP_VERIFIED_VERSIONS.filter((version) => version !== OMP_VERIFIED_VERSION).at(-1) ?? OMP_MINIMUM_SUPPORTED_VERSION;
+  const upgrade = `omp ${OMP_VERIFIED_VERSION} needs Bun ${OMP_VERIFIED_VERSION_BUN_FLOOR} or newer, so upgrade Bun first to use it`;
+  return {
+    command: install(older),
+    message: bunVersion && comparison !== undefined
+      ? `Install omp ${older}, which runs on Bun ${bunVersion} (${upgrade})`
+      : `Install omp ${older} (${upgrade})`,
+  };
+}
+
 /** The doctor check for an omp version that is not one of the captured ones. */
 function unsupportedOmpVersionDiagnosis(
   detailCode: string,
   subject: string,
   version: string,
   verdict: 'below-minimum' | 'unverified',
+  bunVersion: string | undefined,
 ): SetupCheck {
+  const advice = ompInstallAdvice(bunVersion);
   return {
     id: 'omp.bun-runtime',
     status: 'fail',
@@ -161,9 +184,9 @@ function unsupportedOmpVersionDiagnosis(
     remediation: {
       kind: 'command',
       message: verdict === 'unverified'
-        ? `${ompVerifiedInstallHint()}, or wait for a new protocol capture, then rerun doctor.`
-        : `${ompVerifiedInstallHint()}, then rerun doctor.`,
-      command: `bun install -g @oh-my-pi/pi-coding-agent@${OMP_VERIFIED_VERSION}`,
+        ? `${advice.message}, or wait for a new protocol capture, then rerun doctor.`
+        : `${advice.message}, then rerun doctor.`,
+      command: advice.command,
     },
   };
 }
@@ -744,6 +767,35 @@ async function boundedDoctorProbe(
   return context.runReadOnly(executable, ['--version'], 3_000);
 }
 
+/** The version of the first of `candidates` that resolves and answers, or undefined. */
+async function doctorBunVersion(context: SetupDiagnosisContext, candidates: readonly string[]): Promise<string | undefined> {
+  for (const candidate of candidates) {
+    const bun = context.resolveExecutable(candidate);
+    if (!bun) continue;
+    const probe = await boundedDoctorProbe(context, bun);
+    return probe.status === 'ok' ? semanticVersionFromText(`${probe.stdout}\n${probe.stderr}`) : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * The Bun version an omp launcher would run on, for advice on which omp to install: the Bun beside
+ * a Windows shim, or the one a POSIX launcher's shebang names. Undefined for a native executable,
+ * an unreadable launcher, or a Bun that does not answer.
+ */
+export async function detectOmpBunVersion(context: SetupDiagnosisContext, executable: string): Promise<string | undefined> {
+  if (resolvedInvocationKind(executable, context.platform) === 'batch') {
+    return doctorBunVersion(context, batchBunCandidates(executable));
+  }
+  const launcherPath = canonical(executable);
+  const launcher = context.readTextPrefix
+    ? context.readTextPrefix(launcherPath, LAUNCHER_PREFIX_MAX_BYTES)
+    : context.readText(launcherPath, LAUNCHER_PREFIX_MAX_BYTES);
+  if (!launcher.ok) return undefined;
+  const bunCommand = bunCommandFromShebang(launcher.text);
+  return bunCommand ? doctorBunVersion(context, [bunCommand]) : undefined;
+}
+
 /** The only diagnosis a timed-out probe supports: nothing is known, and the fix is to try again. */
 function ompProbeTimedOutDiagnosis(what: 'launcher' | 'interpreter', executable: string): SetupCheck {
   return {
@@ -850,6 +902,7 @@ export async function diagnoseOmpBunRuntime(
         'The resolved omp launcher',
         reportedVersion,
         verdict,
+        await doctorBunVersion(context, batchBunCandidates(executable)),
       );
     }
     contract = identity.contract;
@@ -954,6 +1007,7 @@ export async function diagnoseOmpBunRuntime(
           'The omp Bun launcher',
           launcherVersion,
           verdict,
+          await doctorBunVersion(context, [bunCommand]),
         );
       }
       contract = { ...contract, version: launcherVersion };
@@ -966,6 +1020,7 @@ export async function diagnoseOmpBunRuntime(
         'The installed omp package',
         packageVersion,
         packageVerdict,
+        await doctorBunVersion(context, [bunCommand]),
       );
     }
     if (!packageVersion || packageVerdict === undefined) {

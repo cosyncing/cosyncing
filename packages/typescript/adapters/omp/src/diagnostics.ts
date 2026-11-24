@@ -13,10 +13,11 @@ import {
   type PiDialectDiagnosticLabels,
 } from '@cosyncing/pi-engine';
 import {
+  detectOmpBunVersion,
   diagnoseOmpBunRuntime,
   OMP_MINIMUM_SUPPORTED_VERSION,
   OMP_VERIFIED_VERSION,
-  ompVerifiedInstallHint,
+  ompInstallAdvice,
   ompVerifiedVersionsText,
   ompVersionVerdict,
 } from './runtime-readiness.ts';
@@ -51,10 +52,14 @@ export async function diagnoseOmpSetup(
   // omp above the floor that is not one of them (newer than the newest, or between two captured
   // releases) is not "supported" in doctor while the roster refuses to drive it.
   const verdict = binary.installedVersion ? ompVersionVerdict(binary.installedVersion) : undefined;
-  if (verdict === 'unverified') {
-    const index = binary.checks.findIndex((check) => check.id === 'omp.version');
-    if (index >= 0) {
-      binary.checks[index] = {
+  const index = binary.checks.findIndex((check) => check.id === 'omp.version');
+  const versionCheck = index >= 0 ? binary.checks[index] : undefined;
+  if (versionCheck && (verdict === 'unverified' || versionCheck.remediation?.kind === 'command')) {
+    // Which captured omp to install depends on the Bun that would run it: omp 19.1.0 does not start
+    // on a Bun below its floor, so advising it there leads straight to a Bun failure.
+    const advice = ompInstallAdvice(binary.executable ? await detectOmpBunVersion(context, binary.executable) : undefined);
+    binary.checks[index] = verdict === 'unverified'
+      ? {
         id: 'omp.version',
         status: 'fail',
         detailCode: 'version-unverified',
@@ -62,11 +67,18 @@ export async function diagnoseOmpSetup(
         evidence: { installedVersion: binary.installedVersion!, verifiedVersion: OMP_VERIFIED_VERSION },
         remediation: {
           kind: 'command',
-          message: `${ompVerifiedInstallHint()} to drive sessions from the app, or keep using Observe.`,
-          command: `bun install -g @oh-my-pi/pi-coding-agent@${OMP_VERIFIED_VERSION}`,
+          message: `${advice.message} to drive sessions from the app, or keep using Observe.`,
+          command: advice.command,
+        },
+      }
+      : {
+        ...versionCheck,
+        remediation: {
+          kind: 'command',
+          message: versionCheck.detailCode === 'version-below-minimum' ? `${advice.message}.` : versionCheck.remediation!.message,
+          command: advice.command,
         },
       };
-    }
   }
   const env = { ...context.env, HOME: context.homeDir };
   const paths = resolvePiDialectPaths(OMP_DIALECT, env);
