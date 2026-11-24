@@ -175,7 +175,7 @@ class ThrowingCancelTransport extends FakeTransport {
   override sessionCancel(): void { throw new Error('fixture EPIPE'); }
 }
 
-/** Scrubbed Reasonix 2.61.0 capture (RX-4, 2026-11-24). */
+/** Scrubbed 2026-11-24 capture of Reasonix 2.61.0. */
 const capturedV261 = JSON.parse(readFileSync(
   join(import.meta.dir, 'fixtures', 'reasonix-v2.61.0-capture.json'),
   'utf8',
@@ -1062,6 +1062,57 @@ try {
   await turnFailed.close();
   writeDurableRows(initial, 8);
 
+  // A prompt admitted before 2.61.0's settlement of the previous turn has landed took its byte fence
+  // on the longer, unsettled file. The settlement shortens that earlier user row, so the new prompt's
+  // echo sits below the fence; the accepted settlement pulls the fence back and the echo stays its own.
+  const unsettledUser = {
+    role: 'user',
+    content: '<workspace>\n/srv/ws\n</workspace>\n\nfailed before the queued prompt',
+    raw_content: 'failed before the queued prompt',
+    createdAt: 18,
+  };
+  writeDurableRows([...initial, unsettledUser, capturedInterruptedRow!], 9);
+  const settlementTransport: ReasonixAcpTransport = {
+    alive: true,
+    async sessionPrompt() {
+      writeDurableRows([
+        ...initial,
+        { ...unsettledUser, content: unsettledUser.raw_content },
+        capturedInterruptedRow!,
+        { role: 'user', content: 'queued behind the failure', raw_content: 'queued behind the failure', createdAt: 19 },
+        { role: 'assistant', content: 'answered after the settlement', workDurationMs: 1 },
+      ], 10);
+      return { stopReason: 'end_turn' };
+    },
+    sessionCancel() {},
+    async close() {},
+  };
+  const settlementRace = ReasonixDriveConnection.fromTransport(session, info, settlementTransport);
+  const settlementSeen: AgentMessage[] = [];
+  settlementRace.subscribe((message) => settlementSeen.push(message));
+  await settlementRace.getHistory();
+  let settlementRejected: unknown;
+  try {
+    await settlementRace.sendPrompt({ text: 'queued behind the failure', clientMessageId: 'queued-behind-client' });
+  } catch (error) { settlementRejected = error; }
+  const settlementHistory = await settlementRace.getHistory();
+  check('2.61.0: a prompt whose byte fence predates a shrinking settlement still owns its echo and keeps Drive',
+    settlementRejected === undefined
+      && settlementRace.driving
+      && !settlementSeen.some((message) => message.type === 'history-reset')
+      && settlementHistory.filter((message) => message.type === 'user-message'
+        && message.text === 'queued behind the failure').length === 1
+      && settlementHistory.some((message) => message.type === 'user-message'
+        && message.text === 'queued behind the failure'
+        && message.clientKey === 'queued-behind-client'),
+    JSON.stringify({
+      error: String(settlementRejected),
+      notices: settlementSeen.filter((message) => message.type === 'notice'),
+      users: settlementHistory.filter((message) => message.type === 'user-message'),
+    }));
+  await settlementRace.close();
+  writeDurableRows(initial, 8);
+
   let otherRpcAlive = true;
   const otherRpcTransport: ReasonixAcpTransport = {
     get alive() { return otherRpcAlive; },
@@ -1181,6 +1232,8 @@ try {
   usageConnection.pushUpdate(asThisSession(capturedV261.wire.usageUpdate.params));
   const unpricedContext = usageSeen.filter((message) => message.type === 'metadata-update' && message.key === 'contextUsage');
   usageConnection.pushStatus(asThisSession(capturedV261.wire.pricedStatusCompletion.params));
+  const statusOnlyUsage = usageSeen.filter((message): message is Extract<AgentMessage, { type: 'metadata-update' }> =>
+    message.type === 'metadata-update' && message.key === 'sessionUsage').at(-1);
   usageConnection.pushUpdate(asThisSession(capturedV261.wire.pricedUsageUpdate.params));
   const contextRows = usageSeen.filter((message): message is Extract<AgentMessage, { type: 'metadata-update' }> =>
     message.type === 'metadata-update' && message.key === 'contextUsage');
@@ -1195,6 +1248,10 @@ try {
       && JSON.stringify(contextRows.at(-1)?.value) === JSON.stringify({ used: pricedUpdate.used, max: pricedUpdate.size })
       && !usageSeen.some((message) => message.type === 'event'),
     JSON.stringify(contextRows));
+  check('2.61.0: the status envelope alone carries the complete USD cost, before any priced usage_update',
+    (statusOnlyUsage?.value as { cost?: number } | undefined)?.cost === pricedTotals.estimatedCost
+      && (statusOnlyUsage?.value as { input?: number } | undefined)?.input === pricedTotals.promptTokens,
+    JSON.stringify(statusOnlyUsage));
   check('2.61.0: status_update totals at status.usage.cumulative carry tokens and the complete USD cost',
     sessionUsageRows.length >= 1
       && (sessionUsageRows.at(-1)?.value as { input?: number }).input === pricedTotals.promptTokens
@@ -1206,6 +1263,15 @@ try {
     usageHistory.some((message) => message.type === 'metadata-update' && message.key === 'contextUsage'
       && JSON.stringify(message.value) === JSON.stringify({ used: pricedUpdate.used, max: pricedUpdate.size })),
     JSON.stringify(usageHistory.filter((message) => message.type === 'metadata-update')));
+  // The broker's cached history pages come from a captured snapshot, not from getHistory.
+  const usageCaptured: AgentMessage[] = [];
+  await usageConnection.captureHistorySnapshot({
+    accept(message) { usageCaptured.push(message); return true; },
+  });
+  check('2.61.0: a captured history snapshot carries the latest context reading too',
+    usageCaptured.some((message) => message.type === 'metadata-update' && message.key === 'contextUsage'
+      && JSON.stringify(message.value) === JSON.stringify({ used: pricedUpdate.used, max: pricedUpdate.size })),
+    JSON.stringify(usageCaptured.filter((message) => message.type === 'metadata-update')));
   await usageConnection.close();
 
   // A Reasonix tool turn persists one assistant row per model step, and v1.25.2

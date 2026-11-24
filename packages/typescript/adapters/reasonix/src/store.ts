@@ -1234,11 +1234,21 @@ function isSettledUserRow(before: Record<string, unknown>, after: Record<string,
       && JSON.stringify(before[key]) === JSON.stringify(after[key]));
 }
 
+/** Every display field except where the row sits: a settlement moves offsets and lengths, nothing else. */
+function displayShape(entry: ReasonixDisplayEntry): string {
+  const fields = entry as unknown as Record<string, unknown>;
+  return JSON.stringify(Object.keys(fields)
+    .filter((key) => key !== 'offset' && key !== 'length' && fields[key] !== undefined)
+    .sort()
+    .map((key) => [key, fields[key]]));
+}
+
 /**
  * Whether `read` still extends an accepted prefix of `acceptedCount` records whose bytes it no longer
- * repeats, because the only rows that differ are user rows Reasonix settled (see
- * {@link isSettledUserRow}) and their display entries keep index and role. Any other difference,
- * a missing row, or a prefix that does not parse is a rewrite.
+ * repeats, because the one row that differs is the accepted prefix's last human user row and
+ * Reasonix settled it (see {@link isSettledUserRow}). Every accepted display entry must keep every
+ * field but its offset and length. Any other difference, an earlier row, a missing row, or a prefix
+ * that does not parse is a rewrite.
  */
 export function reasonixSettlementExtendsPrefix(
   acceptedPrefix: Buffer,
@@ -1253,23 +1263,36 @@ export function reasonixSettlementExtendsPrefix(
   for (const entry of acceptedDisplay) {
     if (entry.index >= acceptedCount) continue;
     const next = nextDisplay.get(entry.index);
-    if (!next || next.role !== entry.role) return false;
+    if (!next || displayShape(next) !== displayShape(entry)) return false;
   }
-  let settled = 0;
-  for (let index = 0; index < acceptedCount; index += 1) {
-    let before: unknown;
+  const before: Array<Record<string, unknown>> = [];
+  for (const line of lines) {
+    let row: unknown;
     try {
-      before = JSON.parse(lines[index]!);
+      row = JSON.parse(line);
     } catch {
       return false;
     }
-    const after = read.records[index];
-    if (!isRecord(before) || !isRecord(after)) return false;
-    if (JSON.stringify(before) === JSON.stringify(after)) continue;
-    if (!isSettledUserRow(before, after)) return false;
-    settled += 1;
+    if (!isRecord(row)) return false;
+    before.push(row);
   }
-  return settled > 0;
+  // Only the turn being settled: measured, each settlement rewrote the then-last human user row.
+  let lastHumanUser = -1;
+  for (let index = before.length - 1; index >= 0; index -= 1) {
+    if (isReasonixHumanUserRecord(before[index] as ReasonixTranscriptRecord)) {
+      lastHumanUser = index;
+      break;
+    }
+  }
+  let settled = false;
+  for (let index = 0; index < acceptedCount; index += 1) {
+    const after = read.records[index];
+    if (!isRecord(after)) return false;
+    if (JSON.stringify(before[index]) === JSON.stringify(after)) continue;
+    if (index !== lastHumanUser || !isSettledUserRow(before[index]!, after)) return false;
+    settled = true;
+  }
+  return settled;
 }
 
 export async function reasonixHistorySourceIdentity(

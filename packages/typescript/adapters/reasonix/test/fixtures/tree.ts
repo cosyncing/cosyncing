@@ -253,7 +253,7 @@ const materialize = (text) => {
     { role: 'assistant', content: 'created answer', reasoning_content: '', workDurationMs: 1 },
   ];
   if (process.env.FAKE_REASONIX_RUNNING_FIRST_WRITE === '1') {
-    // Reasonix 2.61.0's order (Phase B, 2026-11-24): the created session's transcript and meta land
+    // Reasonix 2.61.0's order (2026-11-24 capture): the created session's transcript and meta land
     // with the user row when the first turn STARTS; \`.acp.json\` follows after the turn. With
     // FAKE_REASONIX_ACP_METADATA_DELAY_MS it is written mid-turn in state \`running\`, as an
     // upstream mode or approval drift save does.

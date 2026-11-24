@@ -261,6 +261,7 @@ export class ReasonixObserveConnection implements SessionConnection {
     if (interrupted) messages.push(interrupted);
     const usage = reasonixSessionUsageValue(this.session.usage);
     if (usage) messages.push({ type: 'metadata-update', key: 'sessionUsage', value: usage });
+    messages.push(...this.snapshotLiveState());
     this.onHistorySnapshot(read.records, read.displayEntries, messages, read.byteLength, snapshot);
     this.applySnapshotCorrelations(read, identity, messages);
     this.markCorrelationReplaySynchronized();
@@ -360,6 +361,7 @@ export class ReasonixObserveConnection implements SessionConnection {
       }
       const usage = reasonixSessionUsageValue(this.session.usage);
       if (usage) messages.push({ type: 'metadata-update', key: 'sessionUsage', value: usage });
+      messages.push(...this.snapshotLiveState());
       this.onHistorySnapshot(read.records, read.displayEntries, messages, read.byteLength, {
         read,
         identity: identityBefore,
@@ -846,15 +848,31 @@ export class ReasonixObserveConnection implements SessionConnection {
     // Reasonix 2.61.0 settles a cancelled or failed turn by rewriting that turn's user row in place
     // (store.ts `reasonixSettlementExtendsPrefix`). The rows a reader showed are unchanged, so the
     // settled transcript continues this cursor; anything else that moves the prefix is a rewrite.
-    if (!bytesExtend && !reasonixSettlementExtendsPrefix(
-      this.durablePrefixValue,
-      this.recordCount,
-      this.displayPrefixEntries,
-      read,
-    )) return true;
+    if (!bytesExtend) {
+      if (!reasonixSettlementExtendsPrefix(
+        this.durablePrefixValue,
+        this.recordCount,
+        this.displayPrefixEntries,
+        read,
+      )) return true;
+      this.onSettledHistory(read, this.recordCount);
+      return false;
+    }
     return read.records.length === this.recordCount
       && this.revision !== undefined
       && identity?.revision !== this.revision;
+  }
+
+  /**
+   * A settled read was accepted as continuing the cursor's first `acceptedCount` records, which now
+   * end earlier in the file. It can be reported more than once before the cursor advances, so an
+   * override must be idempotent.
+   */
+  protected onSettledHistory(_read: ReasonixTranscriptRead, _acceptedCount: number): void {}
+
+  /** Live state a history snapshot carries beside the durable rows; Observe has none. */
+  protected snapshotLiveState(): AgentMessage[] {
+    return [];
   }
 
   private setTailCursor(

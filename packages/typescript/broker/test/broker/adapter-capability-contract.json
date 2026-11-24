@@ -147,7 +147,7 @@
         "createSessionPresent": true,
         "dynamicHook": true,
         "hookReads": "local-installation",
-        "reason": "canCreateSession() resolves the local Reasonix executable and runs a bounded --version probe; Create is offered only for exact v1.25.2 or v2.61.0 (the final release): the R1 probe on 1.25.2 and the RX-4 capture on 2.61.0 proved session/new returns the same durable store id. The version answer is cached per executable identity for an hour. The resolved boolean remains host-dependent."
+        "reason": "canCreateSession() resolves the local Reasonix executable and runs a bounded --version probe; Create is offered only for exact v1.25.2 or v2.61.0 (the final release): the R1 probe on 1.25.2 and a 2026-11-24 capture of 2.61.0 proved session/new returns the same durable store id. The version answer is cached per executable identity for an hour. The resolved boolean remains host-dependent."
       },
       "terminalSyncHint": {
         "status": "unsupported",

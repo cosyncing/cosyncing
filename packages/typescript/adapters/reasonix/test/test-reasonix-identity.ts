@@ -325,7 +325,7 @@ try {
     }
   }
 
-  // The version cache (Cline's CN-2 rule): one probe per executable identity for an hour, and a
+  // The version cache, the same rule as the Cline adapter's: one probe per executable identity for an hour, and a
   // binary replaced in place (same path, size and mtime; new inode) is probed on the next refresh.
   const cacheTree = buildReasonixFixtureTree();
   try {
@@ -533,9 +533,9 @@ try {
 
     // Reasonix 2.61.0 writes a created session's transcript and meta when its first turn STARTS and
     // `.acp.json` only after the turn (upstream persistAfterTurn), unless a mode or approval drift
-    // saves it mid-turn in state `running`. Phase B measured the first order on the real binary:
-    // Create demoted within 300 ms because the half-written session had no cwd. Both orders are the
-    // created owner's own turn and must keep Drive.
+    // saves it mid-turn in state `running`. A 2026-11-24 run of the adapter against the real binary
+    // measured the first order: Create demoted within 300 ms because the half-written session had no
+    // cwd. In both orders the session is busy with its own first turn and must keep Drive.
     for (const variant of [
       { name: 'ACP metadata after the turn (measured)', acpDelayMs: undefined },
       { name: 'ACP metadata mid-turn in state running', acpDelayMs: '120' },

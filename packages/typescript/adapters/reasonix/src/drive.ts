@@ -799,7 +799,7 @@ export function reasonixUsageUpdate(update: Record<string, unknown>): ReasonixUs
  * bounded for display; `undefined` for any other failure.
  *
  * Measured 2026-11-24 with the provider answering 503: after its own retries (about 90 s) 2.61.0
- * answered `session/prompt` with `{"code":-32603,"message":"vllm-hpc: status 503: ...",
+ * answered `session/prompt` with `{"code":-32603,"message":"fixtprov: status 503: ...",
  * "data":{"code":"turn_failed"}}`, stored the user row and a `local_only` interrupted-turn row, and
  * the next prompt on the same child succeeded. 1.25.2 answers the same failure with stopReason
  * `error`. Both are one failed turn of a healthy session, not a lost writer.
@@ -1133,11 +1133,32 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
     if (this.pendingCreate) return [...this.pendingPrompts.map((entry) => entry.row)];
     return [
       ...await super.getHistory(query),
-      ...(this.contextUsage
-        ? [{ type: 'metadata-update' as const, key: 'contextUsage', value: { ...this.contextUsage } }]
-        : []),
       ...this.pendingPrompts.map((entry) => entry.row),
     ];
+  }
+
+  /** The latest context reading, so a replay or a cached history page carries it for a late joiner. */
+  protected override snapshotLiveState(): AgentMessage[] {
+    return this.contextUsage
+      ? [{ type: 'metadata-update', key: 'contextUsage', value: { ...this.contextUsage } }]
+      : [];
+  }
+
+  /**
+   * A settlement rewrote an earlier user row shorter, so every byte position taken before it now
+   * lies past the rows it named. Pull each such fence back to the end of the accepted rows in the
+   * settled file: a prompt admitted before the settlement landed then still owns its echo, and a
+   * fence taken after it is already at or past that end, so taking the minimum is idempotent.
+   * The echo must still match the reserved display index and the prompt text.
+   */
+  protected override onSettledHistory(read: ReasonixTranscriptRead, acceptedCount: number): void {
+    const last = read.displayEntries.find((entry) => entry.index === acceptedCount - 1);
+    if (!last) return;
+    const settledEnd = last.offset + last.length;
+    for (const entry of this.pendingPrompts) {
+      if (entry.byteFence > settledEnd) entry.byteFence = settledEnd;
+    }
+    if (this.ownershipFence !== undefined && this.ownershipFence > settledEnd) this.ownershipFence = settledEnd;
   }
 
   getPending(): AgentMessage[] {
@@ -1665,7 +1686,7 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
         return false;
       }
       // 2.61.0 writes the transcript and meta when the first turn starts and `.acp.json` (cwd, mode,
-      // state) only after it (Phase B, 2026-11-24). While that turn is ours and in flight, a session
+      // state) only after it (2026-11-24 capture of Reasonix 2.61.0). While that turn is ours and in flight, a session
       // without ACP metadata is not materialized yet: wait for a later wake-up or for the turn's
       // own materialization instead of judging a half-written identity.
       if (this.pendingCreate && this.inFlightNativeTurns > 0
@@ -2129,7 +2150,7 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
   ): Promise<void> {
     let durable: ReasonixStoredSession | undefined;
     // 1.25.2 first writes a created session when its first turn ends, idle. 2.61.0 writes the
-    // transcript and meta when that turn starts and `.acp.json` after it (Phase B, 2026-11-24),
+    // transcript and meta when that turn starts and `.acp.json` after it (2026-11-24 capture),
     // but a mode or approval drift during the turn saves `.acp.json` early in state `running`
     // (upstream acp_service.go saveMetaIfPresent). That busy posture is THIS connection's own first
     // turn, not another writer; any other busy posture still fails closed.
@@ -2137,11 +2158,13 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
       && (candidate.status === 'working' || candidate.status === 'needs-input')
       && this.ownsLiveWriter();
     for (let attempt = 0; attempt < 40; attempt += 1) {
+      // A closed connection has nothing left to materialize; stop waiting for its files.
+      if (this.closedDrive) return;
       const candidate = await pending.discover();
       if (candidate) {
         durable = candidate;
         // 2.61.0 writes the transcript and meta before `.acp.json` (cwd, mode, state), which follows
-        // the turn (Phase B, 2026-11-24). Until it lands the candidate has no cwd: keep waiting
+        // the turn (2026-11-24 capture). Until it lands the candidate has no cwd: keep waiting
         // inside this bound rather than reading the half-written session as a mismatch. Still
         // missing after the bound, the cwd check below fails closed.
         if (candidate.cwd === undefined) {

@@ -22,12 +22,14 @@ import {
   reasonixHistorySourceIdentity,
   reasonixPathContained,
   reasonixSessionUsage,
+  reasonixSettlementExtendsPrefix,
   reasonixSessionUsageValue,
   reasonixStoreRoot,
   ReasonixStoreEnumerationError,
 } from '../src/store.ts';
+import type { ReasonixDisplayEntry, ReasonixTranscriptRecord } from '../src/mapping.ts';
 
-/** Scrubbed Reasonix 2.61.0 capture (RX-4, 2026-11-24); byte offsets are as Reasonix wrote them. */
+/** Scrubbed 2026-11-24 capture of Reasonix 2.61.0; byte offsets are as Reasonix wrote them. */
 interface CapturedSessionFiles {
   transcript: string;
   meta: string;
@@ -39,6 +41,7 @@ interface CapturedSessionFiles {
 const v261 = JSON.parse(readFileSync(join(import.meta.dir, 'fixtures', 'reasonix-v2.61.0-capture.json'), 'utf8')) as {
   created: { sessionId: string; final: CapturedSessionFiles; beforeCancel: Pick<CapturedSessionFiles, 'transcript' | 'displayIndex'> };
   migrated: { sessionId: string; continued: CapturedSessionFiles };
+  transcriptVersions: Array<{ seq: number; renamed: boolean; text: string }>;
   wire: Record<string, { params?: { status?: { usage?: { cumulative?: unknown } } } }>;
 };
 function writeCapturedSession(dir: string, id: string, files: CapturedSessionFiles): void {
@@ -582,6 +585,62 @@ try {
     } finally {
       rmSync(migratedRoot, { recursive: true, force: true });
     }
+  }
+  // Settlement: measured, each save that settled an interrupted turn rewrote only the then-last
+  // human user row's `content` to its `raw_content` and moved the offsets after it. Only that shape
+  // continues an accepted prefix; an earlier row or any other display field is still a rewrite.
+  {
+    const lines = (text: string): string[] => text.split('\n').filter((line) => line.trim());
+    const display = (rows: readonly string[], authoredTurns?: readonly number[]): ReasonixDisplayEntry[] => {
+      let offset = 0;
+      return rows.map((line, index) => {
+        const length = Buffer.byteLength(line) + 1;
+        const role = (JSON.parse(line) as { role?: string }).role;
+        const entry: ReasonixDisplayEntry = {
+          index,
+          offset,
+          length,
+          ...(role ? { role } : {}),
+          authoredTurn: authoredTurns?.[index] ?? Math.floor(index / 2),
+          ...(role === 'user' ? { startsTurn: true } : {}),
+        };
+        offset += length;
+        return entry;
+      });
+    };
+    const settledAt = v261.transcriptVersions.findIndex((version, index) => index > 0
+      && lines(version.text).length > lines(v261.transcriptVersions[index - 1]!.text).length
+      && Buffer.byteLength(version.text) < Buffer.byteLength(v261.transcriptVersions[index - 1]!.text));
+    const beforeLines = lines(v261.transcriptVersions[settledAt - 1]!.text);
+    const afterLines = lines(v261.transcriptVersions[settledAt]!.text);
+    const after = {
+      records: afterLines.map((line) => JSON.parse(line) as ReasonixTranscriptRecord),
+      displayEntries: display(afterLines),
+    };
+    const accepted = (prefix: readonly string[], entries = display(prefix), next = after): boolean =>
+      reasonixSettlementExtendsPrefix(Buffer.from(`${prefix.join('\n')}\n`), prefix.length, entries, next);
+    check('2.61.0: the captured failure settlement continues the accepted prefix',
+      settledAt > 0 && accepted(beforeLines),
+      JSON.stringify({ settledAt, before: beforeLines.length, after: afterLines.length }));
+    // The same settlement, but an EARLIER user row also loses its workspace wrapper.
+    const userIndexes = beforeLines.flatMap((line, index) =>
+      (JSON.parse(line) as { role?: string }).role === 'user' ? [index] : []);
+    const earlier = userIndexes.at(-2)!;
+    const earlierWrapped = beforeLines.map((line, index) => {
+      if (index !== earlier) return line;
+      const row = JSON.parse(line) as { raw_content: string };
+      return JSON.stringify({ ...row, content: `<workspace>/srv/ws</workspace>\n\n${row.raw_content}` });
+    });
+    check('2.61.0: a settlement-shaped change to an earlier user row is still a rewrite',
+      userIndexes.length >= 2 && !accepted(earlierWrapped),
+      JSON.stringify({ userIndexes }));
+    // The same settlement with one accepted display entry's turn changed.
+    const turnChanged = {
+      ...after,
+      displayEntries: display(afterLines, afterLines.map((_line, index) => (index === 1 ? 9 : Math.floor(index / 2)))),
+    };
+    check('2.61.0: a settlement that changes another display field than offset and length is still a rewrite',
+      !accepted(beforeLines, display(beforeLines), turnChanged));
   }
   // Session cost: 2.61.0 states the currency. Only a complete USD estimate is a reportable cost.
   {

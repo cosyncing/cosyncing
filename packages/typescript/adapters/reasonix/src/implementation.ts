@@ -120,8 +120,8 @@ interface PendingCreatedOwner {
 
 const DEFAULT_PENDING_CREATE_TIMEOUT_MS = 60_000;
 /**
- * How long a SUCCESSFUL version probe is trusted for one executable identity: an hour, as Cline
- * (CN-2). It can be that long because the key changes whenever the resolved file is rewritten or
+ * How long a SUCCESSFUL version probe is trusted for one executable identity: an hour, the same rule
+ * as the Cline adapter's version check. It can be that long because the key changes whenever the resolved file is rewritten or
  * replaced, which is what an install, update or downgrade does; the TTL only bounds what the key
  * cannot see (the npm launcher's platform binary changing while the launcher stays untouched).
  */
