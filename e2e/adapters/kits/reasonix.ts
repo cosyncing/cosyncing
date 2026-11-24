@@ -1,7 +1,8 @@
 /**
  * Reasonix conformance kit: an ACP stdio agent that drives any stored session
- * its own metadata reports idle, pinned to exactly Reasonix 1.25.2 (newer
- * builds stay Observe-only), with the version gate cached by the broker.
+ * its own metadata reports idle, pinned to the exact Reasonix versions 1.25.2
+ * and 2.61.0, the final release (every other build stays Observe-only), with
+ * the version gate cached by the broker per executable identity.
  */
 import { expect } from 'bun:test';
 import { appendFileSync, mkdirSync, readFileSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';

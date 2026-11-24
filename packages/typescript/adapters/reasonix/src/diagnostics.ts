@@ -9,35 +9,56 @@ import {
 import { reasonixStoreRoot } from './store.ts';
 
 /**
- * The one version Drive is measured against, and the only value the runtime
- * gate compares with `===`.
+ * The 1.x release Drive was first measured against, and the doctor's `>=` floor.
  *
- * Separate from {@link REASONIX_MINIMUM_VERSION} because those are different
- * claims wearing one number: `AgentMinimumVersion` is consumed as a `>=` FLOOR
- * by `diagnoseBinaryVersion`, while the Drive gate is an EXACT pin. Reading the
- * floor as the pin (and writing the pin a third time as a bare literal in the
- * adapter) meant a future bump could move one and silently leave the others.
+ * Separate from {@link REASONIX_DRIVE_VERSIONS} because those are different claims: `AgentMinimumVersion`
+ * is consumed as a `>=` FLOOR by `diagnoseBinaryVersion`, while the Drive gate is an EXACT set. Reading
+ * the floor as the gate would hand Drive to every unmeasured 1.x and 2.x release above it.
  */
 export const REASONIX_VERIFIED_VERSION = '1.25.2';
 
 /**
- * The final upstream release. Reasonix development has ended and its repository is archived, so this is
- * the one newer version support can move to; until it does, every other version stays Observe-only.
+ * The final upstream release. Reasonix development has ended and its repository is archived, so no
+ * later version exists to measure; this is the version a fresh `npm install -g reasonix` gets.
  */
 export const REASONIX_FINAL_UPSTREAM_VERSION = '2.61.0';
 
 /**
- * What a newer install gets, in the one wording doctor, the Drive reason and the Create/Resume refusals
- * share. Names no date: none is promised.
+ * The exact versions that get Drive, Create and Resume; the runtime gate compares with `===`.
+ *
+ * 2.61.0 was measured on 2026-11-24 in an isolated home: ACP sessions stay in the global
+ * `sessions/<id>.jsonl` store at meta schema 2, event index schema 1 and display index schema 1, and
+ * a 1.25.2 session continues on 2.61.0 under the same id and files. 1.x releases after 1.25.2 are
+ * different programs for this adapter: 1.39.11 (the last 1.x) writes new sessions to `sessions-v4/`
+ * and rewrites a continued 1.25.2 transcript, so they stay Observe-only.
  */
-export const REASONIX_NEWER_VERSIONS_NOTE = `Reasonix 2.x and 1.x releases after ${REASONIX_VERIFIED_VERSION} `
-  + `stay Observe-only until support for the final ${REASONIX_FINAL_UPSTREAM_VERSION} release lands.`;
+export const REASONIX_DRIVE_VERSIONS: readonly string[] = Object.freeze([
+  REASONIX_VERIFIED_VERSION,
+  REASONIX_FINAL_UPSTREAM_VERSION,
+]);
+
+export function reasonixVersionAllowsDrive(version: string | undefined): boolean {
+  return version !== undefined && REASONIX_DRIVE_VERSIONS.includes(version);
+}
+
+/** The install a doctor or a refusal recommends: the final release. */
+export const REASONIX_INSTALL_COMMAND = `npm install -g reasonix@${REASONIX_FINAL_UPSTREAM_VERSION}`;
+
+/**
+ * The version rule, in the one wording doctor, the Drive reason and the Create/Resume refusals share.
+ */
+export const REASONIX_VERSION_RULE = `Drive, Create and Resume need Reasonix ${REASONIX_FINAL_UPSTREAM_VERSION} `
+  + `(the final release) or ${REASONIX_VERIFIED_VERSION}. Other versions are Observe-only: 1.x releases after `
+  + `${REASONIX_VERIFIED_VERSION} were not measured, and from 1.38.8 they keep new sessions in a sessions-v4 store `
+  + `this adapter does not list; 2.x releases before ${REASONIX_FINAL_UPSTREAM_VERSION} were not measured.`;
 
 export const REASONIX_MINIMUM_VERSION: AgentMinimumVersion = Object.freeze({
   version: REASONIX_VERIFIED_VERSION,
   requiredFeature: 'the ACP stdio create/load/prompt surface and schema-v2 session store used by this adapter',
   evidenceUrl: 'https://reasonix.io/changelog/v1.25.2/',
-  evidenceNote: `Exact measured version: native-contract fixtures and isolated probes were recorded against Reasonix ${REASONIX_VERIFIED_VERSION} on 2026-08-27. Upstream development has ended. ${REASONIX_NEWER_VERSIONS_NOTE}`,
+  evidenceNote: `Exact measured versions: native-contract fixtures and isolated probes were recorded against `
+    + `Reasonix ${REASONIX_VERIFIED_VERSION} on 2026-08-27 and ${REASONIX_FINAL_UPSTREAM_VERSION} on 2026-11-24. `
+    + `Upstream development has ended. ${REASONIX_VERSION_RULE}`,
 });
 
 function storeCheck(context: SetupDiagnosisContext, binaryPresent: boolean): SetupCheck {
@@ -92,27 +113,28 @@ export async function diagnoseReasonixSetup(
     productNames: ['reasonix'],
     preferVersionProbe: true,
     minimum: REASONIX_MINIMUM_VERSION,
-    installMessage: `Install Reasonix ${REASONIX_VERIFIED_VERSION}, the only supported version `
-      + `(npm install -g reasonix@${REASONIX_VERIFIED_VERSION}), then rerun doctor.`,
-    upgradeCommand: `npm install -g reasonix@${REASONIX_VERIFIED_VERSION}`,
+    installMessage: `Install Reasonix ${REASONIX_FINAL_UPSTREAM_VERSION}, the final release `
+      + `(${REASONIX_INSTALL_COMMAND}), then rerun doctor.`,
+    upgradeCommand: REASONIX_INSTALL_COMMAND,
   });
-  if (binary.installedVersion && binary.installedVersion !== REASONIX_VERIFIED_VERSION) {
+  if (binary.installedVersion && !reasonixVersionAllowsDrive(binary.installedVersion)) {
     const index = binary.checks.findIndex((check) => check.id === 'reasonix.version');
     if (index >= 0) {
       binary.checks[index] = {
         id: 'reasonix.version',
         status: 'fail',
         detailCode: 'version-unverified',
-        summary: `Reasonix ${binary.installedVersion} is Observe-only here: ${REASONIX_VERIFIED_VERSION} is the only `
-          + `supported version. Upstream development has ended. ${REASONIX_NEWER_VERSIONS_NOTE}`,
+        summary: `Reasonix ${binary.installedVersion} is Observe-only here. Upstream development has ended. `
+          + REASONIX_VERSION_RULE,
         evidence: {
           installedVersion: binary.installedVersion,
-          verifiedVersion: REASONIX_VERIFIED_VERSION,
+          verifiedVersion: REASONIX_FINAL_UPSTREAM_VERSION,
+          supportedVersions: REASONIX_DRIVE_VERSIONS.join(', '),
         },
         remediation: {
           kind: 'command',
-          message: `Install Reasonix ${REASONIX_VERIFIED_VERSION} for Create and Resume, or keep using Observe.`,
-          command: `npm install -g reasonix@${REASONIX_VERIFIED_VERSION}`,
+          message: `Install Reasonix ${REASONIX_FINAL_UPSTREAM_VERSION} for Create and Resume, or keep using Observe.`,
+          command: REASONIX_INSTALL_COMMAND,
         },
       };
     }

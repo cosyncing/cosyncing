@@ -15,13 +15,41 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   discoverReasonixStore,
+  isReasonixTranscriptName,
   parseReasonixTimestamp,
   readReasonixTranscript,
+  REASONIX_JSONL_SIDECAR_SUFFIXES,
   reasonixHistorySourceIdentity,
   reasonixPathContained,
+  reasonixSessionUsage,
+  reasonixSessionUsageValue,
   reasonixStoreRoot,
   ReasonixStoreEnumerationError,
 } from '../src/store.ts';
+
+/** Scrubbed Reasonix 2.61.0 capture (RX-4, 2026-11-24); byte offsets are as Reasonix wrote them. */
+interface CapturedSessionFiles {
+  transcript: string;
+  meta: string;
+  acp: string;
+  eventIndex: string;
+  events: string;
+  displayIndex: string;
+}
+const v261 = JSON.parse(readFileSync(join(import.meta.dir, 'fixtures', 'reasonix-v2.61.0-capture.json'), 'utf8')) as {
+  created: { sessionId: string; final: CapturedSessionFiles; beforeCancel: Pick<CapturedSessionFiles, 'transcript' | 'displayIndex'> };
+  migrated: { sessionId: string; continued: CapturedSessionFiles };
+  wire: Record<string, { params?: { status?: { usage?: { cumulative?: unknown } } } }>;
+};
+function writeCapturedSession(dir: string, id: string, files: CapturedSessionFiles): void {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${id}.jsonl`), files.transcript);
+  writeFileSync(join(dir, `${id}.jsonl.meta`), files.meta);
+  writeFileSync(join(dir, `${id}.acp.json`), files.acp);
+  writeFileSync(join(dir, `${id}.event-index.json`), files.eventIndex);
+  writeFileSync(join(dir, `${id}.events.jsonl`), files.events);
+  writeFileSync(join(dir, `${id}.display-index.json`), files.displayIndex);
+}
 
 const results: Array<{ name: string; ok: boolean; detail: string }> = [];
 function check(name: string, ok: boolean, detail = ''): void {
@@ -451,6 +479,127 @@ try {
     } finally {
       rmSync(capRoot, { recursive: true, force: true });
     }
+  }
+  // Reasonix 2.61.0, captured. Its ACP sessions stay in the global `sessions/` store at the same
+  // schemas, beside new `.jsonl` sidecars (upstream `jsonlSidecarSuffixes`) that are not
+  // conversations, and `v4-<id>.jsonl` imports this adapter cannot Resume.
+  {
+    const v2Root = mkdtempSync(join(tmpdir(), 'reasonix-v261-store-'));
+    try {
+      const sessions = join(v2Root, 'sessions');
+      const id = v261.created.sessionId;
+      writeCapturedSession(sessions, id, v261.created.final);
+      // The non-conversation files 2.61.0 left beside the captured session, by name.
+      for (const suffix of ['.jsonl.lease.json', '.jsonl.lease.lock', '.jsonl.lock', '.jsonl.telemetry.json', '.goal-state.json']) {
+        writeFileSync(join(sessions, `${id}${suffix}`), '');
+      }
+      // Upstream's `.jsonl` sidecars, each holding the session's own records so a scan that
+      // mistook one for a conversation would list it.
+      for (const suffix of REASONIX_JSONL_SIDECAR_SUFFIXES.filter((name) => name !== '.events.jsonl')) {
+        writeFileSync(join(sessions, `${id}${suffix}`), v261.created.final.transcript);
+      }
+      // A `v4-<id>.jsonl` import with a matching meta: listable by every other measure.
+      const imported = `v4-${id}`;
+      writeFileSync(join(sessions, `${imported}.jsonl`), v261.created.final.transcript);
+      writeFileSync(join(sessions, `${imported}.jsonl.meta`), v261.created.final.meta.replace(`"${id}"`, `"${imported}"`));
+      const found = await discoverReasonixStore({ root: v2Root });
+      check('2.61.0: discovery lists the captured session and none of its .jsonl sidecars or a v4- import',
+        found.length === 1 && found[0]?.id === id && found[0]?.layout === 'global',
+        JSON.stringify(found.map((session) => session.id)));
+      let strictError: unknown;
+      try {
+        await discoverReasonixStore({ root: v2Root, maxSessions: 1, requireCompleteEnumeration: true });
+      } catch (error) {
+        strictError = error;
+      }
+      check('2.61.0: the sidecars do not spend the strict candidate budget of a one-session store',
+        strictError === undefined,
+        String(strictError));
+      check('2.61.0: transcript names exclude every upstream sidecar suffix, v4- imports and dot files',
+        isReasonixTranscriptName(`${id}.jsonl`)
+          && REASONIX_JSONL_SIDECAR_SUFFIXES.every((suffix) => !isReasonixTranscriptName(`${id}${suffix}`))
+          && !isReasonixTranscriptName(`v4-${id}.jsonl`)
+          && !isReasonixTranscriptName(`.${id}.jsonl`)
+          && !isReasonixTranscriptName(`${id}.jsonl.meta`));
+      const session = found[0]!;
+      const settled = await readReasonixTranscript(session);
+      check('2.61.0: the captured transcript reads at its exact display boundaries, a cancelled and a failed turn included',
+        settled.issues.length === 0
+          && settled.records.length === 17
+          && settled.displayEntries.length === 17
+          && settled.records.filter((record) => record.local_only === true).length === 2,
+        JSON.stringify({ issues: settled.issues, records: settled.records.length }));
+
+      // The event journal ahead of the flat transcript, across the two mid-chain `replace` events
+      // (reason `rewrite`) 2.61.0 wrote when it settled the cancelled and the failed turn: the
+      // captured flat transcript and display index from before the cancel, with the captured final
+      // journal, index and meta.
+      writeFileSync(join(sessions, `${id}.jsonl`), v261.created.beforeCancel.transcript);
+      writeFileSync(join(sessions, `${id}.display-index.json`), v261.created.beforeCancel.displayIndex);
+      const lagging = await readReasonixTranscript(session);
+      const finalRecords = v261.created.final.transcript.split('\n').filter(Boolean).map((line) => JSON.parse(line));
+      check('2.61.0: a journal with mid-chain rewrite replaces reconstructs the settled tail over the older flat prefix',
+        lagging.issues.length === 0
+          && lagging.eventJournalReconciled === true
+          && lagging.records.length === 17
+          && JSON.stringify(lagging.records) === JSON.stringify(finalRecords)
+          && lagging.displayEntries.length === 17
+          && lagging.displayEntries.filter((entry) => entry.startsTurn === true).length === 6,
+        JSON.stringify({ issues: lagging.issues, records: lagging.records.length, reconciled: lagging.eventJournalReconciled }));
+      const events = v261.created.final.events.split('\n').filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+      const broken = events.map((event) => event.reason === 'rewrite' && event.revision === 8
+        ? { ...event, base_revision: 6 }
+        : event);
+      writeFileSync(join(sessions, `${id}.events.jsonl`), `${broken.map((event) => JSON.stringify(event)).join('\n')}\n`);
+      const brokenIndex = JSON.parse(v261.created.final.eventIndex) as Record<string, unknown>;
+      writeFileSync(join(sessions, `${id}.event-index.json`), JSON.stringify({
+        ...brokenIndex,
+        log_size: Buffer.byteLength(`${broken.map((event) => JSON.stringify(event)).join('\n')}\n`),
+      }));
+      const discontinuous = await readReasonixTranscript(session);
+      check('2.61.0: a mid-chain replace that does not name the revision it replaces is refused',
+        discontinuous.eventJournalReconciled !== true
+          && discontinuous.issues.includes('event journal replace chain is not contiguous'),
+        JSON.stringify(discontinuous.issues));
+    } finally {
+      rmSync(v2Root, { recursive: true, force: true });
+    }
+  }
+  // The continued 1.25.2 session keeps its id and files on 2.61.0 over ACP.
+  {
+    const migratedRoot = mkdtempSync(join(tmpdir(), 'reasonix-v261-migrated-'));
+    try {
+      const id = v261.migrated.sessionId;
+      writeCapturedSession(join(migratedRoot, 'sessions'), id, v261.migrated.continued);
+      const found = await discoverReasonixStore({ root: migratedRoot });
+      const read = found[0] ? await readReasonixTranscript(found[0]) : undefined;
+      check('2.61.0: a 1.25.2 session continued over ACP is listed under its original id with every row',
+        found.length === 1 && found[0]?.id === id
+          && read?.issues.length === 0
+          && read.records.length === 7
+          && read.records[5]?.host_authored === true,
+        JSON.stringify({ ids: found.map((session) => session.id), issues: read?.issues }));
+    } finally {
+      rmSync(migratedRoot, { recursive: true, force: true });
+    }
+  }
+  // Session cost: 2.61.0 states the currency. Only a complete USD estimate is a reportable cost.
+  {
+    const priced = reasonixSessionUsage(v261.wire.pricedStatusCompletion?.params?.status?.usage?.cumulative);
+    const unpriced = reasonixSessionUsage(v261.wire.v125StatusCompletion?.params?.status?.usage?.cumulative);
+    const pricedValue = reasonixSessionUsageValue(priced);
+    const otherCurrency = reasonixSessionUsageValue(priced ? { ...priced, currency: 'EUR' } : undefined);
+    check('2.61.0: a complete USD cumulative reports its cost and source, and the same amount in another currency does not',
+      priced?.currency === 'USD'
+        && pricedValue?.cost === priced.estimatedCost
+        && pricedValue?.source === 'executor'
+        && otherCurrency !== undefined && !('cost' in otherCurrency),
+      JSON.stringify({ priced, pricedValue, otherCurrency }));
+    check('1.25.2: a cumulative with null cost and currency carries tokens and no cost',
+      unpriced?.promptTokens !== undefined
+        && unpriced.currency === undefined
+        && !('cost' in (reasonixSessionUsageValue(unpriced) ?? {})),
+      JSON.stringify(unpriced));
   }
 } catch (error) {
   check('test harness completed', false, error instanceof Error ? error.message : String(error));

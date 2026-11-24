@@ -14,6 +14,7 @@ import {
 import { ReasonixCorrelationRegistry } from '../src/correlation.ts';
 import { ReasonixObserveConnection } from '../src/observe.ts';
 import type { AcpRequestPermissionParams, AcpSessionUpdateParams } from '@cosyncing/acp-client';
+import { AcpRpcError } from '@cosyncing/acp-client';
 import type { ReasonixDisplayEntry, ReasonixTranscriptRecord } from '../src/mapping.ts';
 import type {
   ReasonixApprovalMode,
@@ -173,6 +174,18 @@ class FakeTransport implements ReasonixAcpTransport {
 class ThrowingCancelTransport extends FakeTransport {
   override sessionCancel(): void { throw new Error('fixture EPIPE'); }
 }
+
+/** Scrubbed Reasonix 2.61.0 capture (RX-4, 2026-11-24). */
+const capturedV261 = JSON.parse(readFileSync(
+  join(import.meta.dir, 'fixtures', 'reasonix-v2.61.0-capture.json'),
+  'utf8',
+)) as {
+  created: { final: { transcript: string } };
+  migrated: { continued: { transcript: string } };
+  wire: Record<string, any>;
+};
+const capturedRows = (text: string): ReasonixTranscriptRecord[] =>
+  text.split('\n').filter(Boolean).map((line) => JSON.parse(line) as ReasonixTranscriptRecord);
 
 const root = mkdtempSync(join(tmpdir(), 'cosyncing-reasonix-drive-'));
 const dir = join(root, 'sessions');
@@ -1010,6 +1023,191 @@ try {
   await terminalError.close();
   writeDurableRows(initial, 8);
 
+  // Reasonix 2.61.0 ends a provider failure with a JSON-RPC error, `data.code` `turn_failed`, after
+  // storing the user row and a `local_only` interrupted row; the same child answered the next prompt.
+  // It is one failed turn, settled like 1.25.2's stopReason `error`, and keeps Drive.
+  const capturedFailure = capturedV261.wire.turnFailed.error as { code: number; message: string; data: unknown };
+  const capturedInterruptedRow = capturedRows(capturedV261.created.final.transcript)
+    .find((row) => row.local_only === true && row.content === undefined);
+  let turnFailedAlive = true;
+  const turnFailedTransport: ReasonixAcpTransport = {
+    get alive() { return turnFailedAlive; },
+    async sessionPrompt() {
+      writeDurableRows([
+        ...initial,
+        { role: 'user', content: 'provider outage turn', raw_content: 'provider outage turn', createdAt: 14 },
+        capturedInterruptedRow!,
+      ], 9);
+      throw new AcpRpcError(capturedFailure.code, capturedFailure.message, capturedFailure.data);
+    },
+    sessionCancel() {},
+    async close() { turnFailedAlive = false; },
+  };
+  const turnFailed = ReasonixDriveConnection.fromTransport(session, info, turnFailedTransport);
+  const turnFailedSeen: AgentMessage[] = [];
+  turnFailed.subscribe((message) => turnFailedSeen.push(message));
+  await turnFailed.getHistory();
+  let turnFailedRejected: unknown;
+  try {
+    await turnFailed.sendPrompt({ text: 'provider outage turn' });
+  } catch (error) { turnFailedRejected = error; }
+  check('2.61.0: a captured turn_failed provider error ends the turn as an error and keeps Drive',
+    capturedInterruptedRow !== undefined
+      && turnFailedRejected === undefined
+      && turnFailed.driving
+      && turnFailedSeen.some((message) => message.type === 'error'
+        && message.message.startsWith('Reasonix ended the turn with an error: ')
+        && message.message.includes('status 503')),
+    JSON.stringify({ error: String(turnFailedRejected), seen: turnFailedSeen.filter((message) => message.type === 'error') }));
+  await turnFailed.close();
+  writeDurableRows(initial, 8);
+
+  let otherRpcAlive = true;
+  const otherRpcTransport: ReasonixAcpTransport = {
+    get alive() { return otherRpcAlive; },
+    async sessionPrompt() {
+      throw new AcpRpcError(capturedFailure.code, capturedFailure.message, { code: 'internal_error' });
+    },
+    sessionCancel() {},
+    async close() { otherRpcAlive = false; },
+  };
+  const otherRpc = ReasonixDriveConnection.fromTransport(session, info, otherRpcTransport);
+  await otherRpc.getHistory();
+  let otherRpcRejected = false;
+  try { await otherRpc.sendPrompt({ text: 'any other ACP failure' }); } catch { otherRpcRejected = true; }
+  check('any other JSON-RPC prompt error still fails closed and ends Drive',
+    otherRpcRejected && !otherRpc.driving);
+  await otherRpc.close();
+  writeDurableRows(initial, 8);
+
+  // A turn answered from another transcript (upstream rule S2 moves a continued 1.x session to a new
+  // one) is no longer this connection's: the captured 2.61.0 answer names its own session's file.
+  const capturedAnswer = capturedV261.wire.promptResult.result as Record<string, unknown>;
+  const movedTransport: ReasonixAcpTransport = {
+    alive: true,
+    async sessionPrompt() {
+      writeDurableRows([
+        ...initial,
+        { role: 'user', content: 'moved turn', raw_content: 'moved turn', createdAt: 15 },
+        { role: 'assistant', content: 'elsewhere', workDurationMs: 1 },
+      ], 9);
+      return capturedAnswer;
+    },
+    sessionCancel() {},
+    async close() {},
+  };
+  const moved = ReasonixDriveConnection.fromTransport(session, info, movedTransport);
+  await moved.getHistory();
+  let movedRejected = false;
+  try { await moved.sendPrompt({ text: 'moved turn' }); } catch { movedRejected = true; }
+  check('2.61.0: an answer naming another session transcript ends Drive',
+    movedRejected && !moved.driving);
+  await moved.close();
+  writeDurableRows(initial, 8);
+  const ownAnswer = JSON.parse(JSON.stringify(capturedAnswer).replace(/[0-9a-f-]{36}\.jsonl/, `${id}.jsonl`)) as Record<string, unknown>;
+  const ownTransport: ReasonixAcpTransport = {
+    alive: true,
+    async sessionPrompt() {
+      writeDurableRows([
+        ...initial,
+        { role: 'user', content: 'own turn', raw_content: 'own turn', createdAt: 16 },
+        { role: 'assistant', content: 'here', workDurationMs: 1 },
+      ], 9);
+      return ownAnswer;
+    },
+    sessionCancel() {},
+    async close() {},
+  };
+  const own = ReasonixDriveConnection.fromTransport(session, info, ownTransport);
+  await own.getHistory();
+  let ownRejected: unknown;
+  try { await own.sendPrompt({ text: 'own turn' }); } catch (error) { ownRejected = error; }
+  check('2.61.0: an answer naming this session transcript under _meta keeps Drive',
+    ownRejected === undefined && own.driving,
+    String(ownRejected));
+  await own.close();
+  writeDurableRows(initial, 8);
+
+  // A 1.25.2 session continued on 2.61.0 (captured): a reasoning-only step, then a `host_authored`
+  // user row Reasonix wrote itself, then the answer. The host row is context, not a foreign write,
+  // and the turn closes on the answer, not on the empty step before it.
+  const migratedRows = capturedRows(capturedV261.migrated.continued.transcript);
+  const hostTransport: ReasonixAcpTransport = {
+    alive: true,
+    async sessionPrompt() {
+      writeDurableRows([
+        ...initial,
+        { ...migratedRows[3]!, raw_content: 'continued on 2.61.0' },
+        migratedRows[4]!,
+        migratedRows[5]!,
+        migratedRows[6]!,
+      ], 9);
+      return { stopReason: 'end_turn' };
+    },
+    sessionCancel() {},
+    async close() {},
+  };
+  const hostTurn = ReasonixDriveConnection.fromTransport(session, info, hostTransport);
+  const hostSeen: AgentMessage[] = [];
+  hostTurn.subscribe((message) => hostSeen.push(message));
+  await hostTurn.getHistory();
+  let hostRejected: unknown;
+  try { await hostTurn.sendPrompt({ text: 'continued on 2.61.0' }); } catch (error) { hostRejected = error; }
+  const hostHistory = await hostTurn.getHistory();
+  await waitFor(() => runNotifications(hostSeen).length > 0);
+  check('2.61.0: a host-authored continuation row keeps Drive and replays as context, not a user bubble',
+    migratedRows[5]?.host_authored === true
+      && hostRejected === undefined
+      && hostTurn.driving
+      && hostHistory.filter((message) => message.type === 'user-message').map((message) => message.text).join('|')
+        === 'same text|continued on 2.61.0'
+      && hostHistory.some((message) => message.type === 'event'
+        && (message.payload as { source?: string }).source === 'Reasonix host continuation'),
+    JSON.stringify({ error: String(hostRejected), users: hostHistory.filter((message) => message.type === 'user-message') }));
+  check('2.61.0: the continued turn notifies once, on the answer after the host row',
+    JSON.stringify(runNotifications(hostSeen)) === JSON.stringify([`done:reasonix:${id}:message:5:summary`]),
+    JSON.stringify(runSummaries(hostSeen)));
+  await hostTurn.close();
+  writeDurableRows(initial, 8);
+
+  // Captured 2.61.0 telemetry: `usage_update` is the context reading (and the session cost when
+  // every priced event has one); the status update carries the session totals at
+  // `status.usage.cumulative`, as 1.25.2's does.
+  const usageTransport = new FakeTransport();
+  const usageConnection = new TestDriveConnection(session, info, usageTransport);
+  const usageSeen: AgentMessage[] = [];
+  usageConnection.subscribe((message) => usageSeen.push(message));
+  const asThisSession = <T extends { sessionId?: unknown }>(params: T): T => ({ ...params, sessionId: id });
+  usageConnection.pushUpdate(asThisSession(capturedV261.wire.usageUpdate.params));
+  const unpricedContext = usageSeen.filter((message) => message.type === 'metadata-update' && message.key === 'contextUsage');
+  usageConnection.pushStatus(asThisSession(capturedV261.wire.pricedStatusCompletion.params));
+  usageConnection.pushUpdate(asThisSession(capturedV261.wire.pricedUsageUpdate.params));
+  const contextRows = usageSeen.filter((message): message is Extract<AgentMessage, { type: 'metadata-update' }> =>
+    message.type === 'metadata-update' && message.key === 'contextUsage');
+  const sessionUsageRows = usageSeen.filter((message): message is Extract<AgentMessage, { type: 'metadata-update' }> =>
+    message.type === 'metadata-update' && message.key === 'sessionUsage');
+  const pricedUpdate = capturedV261.wire.pricedUsageUpdate.params.update as { used: number; size: number; cost: { amount: number } };
+  const pricedTotals = capturedV261.wire.pricedStatusCompletion.params.status.usage.cumulative as {
+    promptTokens: number; estimatedCost: number;
+  };
+  check('2.61.0: usage_update maps to the context reading, never to an unmapped event',
+    unpricedContext.length === 1
+      && JSON.stringify(contextRows.at(-1)?.value) === JSON.stringify({ used: pricedUpdate.used, max: pricedUpdate.size })
+      && !usageSeen.some((message) => message.type === 'event'),
+    JSON.stringify(contextRows));
+  check('2.61.0: status_update totals at status.usage.cumulative carry tokens and the complete USD cost',
+    sessionUsageRows.length >= 1
+      && (sessionUsageRows.at(-1)?.value as { input?: number }).input === pricedTotals.promptTokens
+      && (sessionUsageRows.at(-1)?.value as { cost?: number }).cost === pricedTotals.estimatedCost
+      && pricedTotals.estimatedCost === pricedUpdate.cost.amount,
+    JSON.stringify(sessionUsageRows));
+  const usageHistory = await usageConnection.getHistory();
+  check('2.61.0: a late joiner replays the latest context reading',
+    usageHistory.some((message) => message.type === 'metadata-update' && message.key === 'contextUsage'
+      && JSON.stringify(message.value) === JSON.stringify({ used: pricedUpdate.used, max: pricedUpdate.size })),
+    JSON.stringify(usageHistory.filter((message) => message.type === 'metadata-update')));
+  await usageConnection.close();
+
   // A Reasonix tool turn persists one assistant row per model step, and v1.25.2
   // stamps `workDurationMs` on every one (upstream internal/agent/run_loop.go),
   // so the mapper writes a `done` footer per step. Only the last closes the
@@ -1260,7 +1458,7 @@ try {
   permissionConnection.pushStatus({
     sessionId: id,
     sequence: 1,
-    status: { state: 'idle', cumulative: {
+    status: { state: 'idle', usage: { cumulative: {
       promptTokens: 9,
       completionTokens: 3,
       reasoningTokens: 2,
@@ -1270,17 +1468,17 @@ try {
       estimatedCost: 0.01,
       source: 'executor',
       costComplete: false,
-    } },
+    } } },
   });
   permissionConnection.pushStatus({
     sessionId: id,
     sequence: 1,
-    status: { state: 'idle', cumulative: { promptTokens: 99, completionTokens: 1 } },
+    status: { state: 'idle', usage: { cumulative: { promptTokens: 99, completionTokens: 1 } } },
   });
   permissionConnection.pushStatus({
     sessionId: id,
     sequence: 2,
-    status: { state: 'idle', cumulative: {
+    status: { state: 'idle', usage: { cumulative: {
       promptTokens: 12,
       completionTokens: 4,
       cacheHitTokens: 6,
@@ -1289,7 +1487,7 @@ try {
       estimatedCost: 0.02,
       source: 'executor',
       costComplete: true,
-    } },
+    } } },
   });
   permissionConnection.pushStatus({ sessionId: id, sequence: Number.MAX_SAFE_INTEGER, status: null });
   permissionConnection.pushStatus({ sessionId: id, sequence: 3, status: { state: 'running' } });

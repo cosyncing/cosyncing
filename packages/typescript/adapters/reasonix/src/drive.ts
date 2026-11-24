@@ -1,7 +1,9 @@
 import { stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
+import { basename } from 'node:path';
 import {
   AcpClient,
+  AcpRpcError,
   type AcpChildExit,
   type AcpClientHooks,
   type AcpPermissionOption,
@@ -25,6 +27,7 @@ import type {
 import { CONTEXT_INJECTION_EVENT, ControlRefusedError, boundContextBody } from '@cosyncing/adapter-api';
 import {
   boundedReasonixToolPayload,
+  isReasonixHumanUserRecord,
   mapReasonixInterruptedTail,
   mapReasonixRecord,
   reasonixMessageKey,
@@ -453,12 +456,16 @@ class LazyReasonixAcpTransport implements ReasonixAcpTransport {
           env: this.options.env,
           requestTimeoutMs: this.options.requestTimeoutMs,
           signal: startupAbort.signal,
+          clientCapabilitiesMeta: reasonixClientCapabilitiesMeta(),
           hooks: {
             // session/load replays history through the same notification; the
             // file store is the durable replay source, so only prompt-time
-            // updates enter the live mapper.
+            // updates enter the live mapper. `usage_update` is a reading, not
+            // history: 2.61.0 sends one right after session/load, too.
             onSessionUpdate: (params) => {
-              if (this.prompting || params.update?.sessionUpdate === 'available_commands_update') {
+              if (this.prompting
+                || params.update?.sessionUpdate === 'available_commands_update'
+                || params.update?.sessionUpdate === 'usage_update') {
                 this.hooks.onSessionUpdate(params);
               }
             },
@@ -634,7 +641,7 @@ function drivenTurnClosing(sessionId: string, read: ReasonixTranscriptRead, user
     const record = read.records[lineIndex];
     if (!record) continue;
     const display = displayByIndex.get(lineIndex);
-    if (record.role === 'user' && display?.startsTurn !== false) return found ?? { state: 'sealed' };
+    if (isReasonixHumanUserRecord(record) && display?.startsTurn !== false) return found ?? { state: 'sealed' };
     if (record.role !== 'assistant') continue;
     const summary = mapReasonixRecord(record, { sessionId, lineIndex, display })
       .find((message): message is RunSummary => message.type === 'run-summary' && message.status === 'done');
@@ -746,6 +753,80 @@ function boundedToolField(value: unknown, fallback: string): string {
   return typeof value === 'string' && value.length <= MAX_TOOL_FIELD_CHARS
     ? value
     : fallback;
+}
+
+/**
+ * The initialize opt-in Reasonix 2.61.0 reads to send `_reasonix.io/session/status_update`
+ * (`clientCapabilities._meta`). Measured 2026-11-24: without it 2.61.0 sends no status update at
+ * all; 1.25.2 accepts it and sends them either way.
+ */
+export function reasonixClientCapabilitiesMeta(): Record<string, unknown> {
+  return { 'reasonix.io': { statusUpdates: { supported: true } } };
+}
+
+export interface ReasonixUsageUpdate {
+  /** Tokens the next request carries. */
+  used: number;
+  /** The model's context window. */
+  size: number;
+  /** The session's cost so far; Reasonix sends it only when every priced event produced one. */
+  cost?: { amount: number; currency: string };
+}
+
+/**
+ * ACP `usage_update`, which 2.61.0 sends before each prompt answer and after `session/load`
+ * (measured: `{"used":6647,"size":262144,"cost":{"amount":0.0010722,"currency":"USD"}}`). 1.25.2
+ * sends none. `undefined` is another update; `null` a malformed one, dropped rather than shown.
+ */
+export function reasonixUsageUpdate(update: Record<string, unknown>): ReasonixUsageUpdate | null | undefined {
+  if (update.sessionUpdate !== 'usage_update') return undefined;
+  const used = update.used;
+  const size = update.size;
+  if (!Number.isSafeInteger(used) || !Number.isSafeInteger(size)
+    || (used as number) < 0 || (size as number) <= 0) return null;
+  const raw = update.cost;
+  let cost: ReasonixUsageUpdate['cost'];
+  if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) {
+    const { amount, currency } = raw as { amount?: unknown; currency?: unknown };
+    if (typeof amount === 'number' && Number.isFinite(amount) && amount >= 0
+      && typeof currency === 'string' && /^[A-Z]{3}$/.test(currency)) cost = { amount, currency };
+  }
+  return { used: used as number, size: size as number, ...(cost ? { cost } : {}) };
+}
+
+/**
+ * The cause of a turn Reasonix 2.61.0 ended with a JSON-RPC error carrying `data.code` `turn_failed`,
+ * bounded for display; `undefined` for any other failure.
+ *
+ * Measured 2026-11-24 with the provider answering 503: after its own retries (about 90 s) 2.61.0
+ * answered `session/prompt` with `{"code":-32603,"message":"vllm-hpc: status 503: ...",
+ * "data":{"code":"turn_failed"}}`, stored the user row and a `local_only` interrupted-turn row, and
+ * the next prompt on the same child succeeded. 1.25.2 answers the same failure with stopReason
+ * `error`. Both are one failed turn of a healthy session, not a lost writer.
+ */
+export function reasonixTurnFailure(error: unknown): string | undefined {
+  if (!(error instanceof AcpRpcError)) return undefined;
+  const data = error.data;
+  if (typeof data !== 'object' || data === null || (data as { code?: unknown }).code !== 'turn_failed') return undefined;
+  const message = error.message.replace(/\s+/g, ' ').trim();
+  return message.length > 512 ? `${message.slice(0, 509)}...` : message;
+}
+
+/**
+ * The transcript a prompt answer names: 2.61.0 under `_meta["reasonix.io"].transcriptPath`, 1.25.2
+ * at the top level (both measured). Absent on 1.25.2's first prompt of a new session.
+ */
+export function reasonixPromptTranscriptPath(result: AcpSessionPromptResult | undefined): string | undefined {
+  if (!result) return undefined;
+  const meta = result._meta;
+  const vendor = typeof meta === 'object' && meta !== null && !Array.isArray(meta)
+    ? (meta as Record<string, unknown>)['reasonix.io']
+    : undefined;
+  const nested = typeof vendor === 'object' && vendor !== null && !Array.isArray(vendor)
+    ? (vendor as { transcriptPath?: unknown }).transcriptPath
+    : undefined;
+  const value = nested ?? result.transcriptPath;
+  return typeof value === 'string' && value.length > 0 && value.length <= 32_768 ? value : undefined;
 }
 
 /** Normalize one ACP live update without inventing file semantics the wire did not report. */
@@ -879,6 +960,8 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
   private demoted = false;
   private correlationInvalidated = false;
   private lastStatusSequence = -1;
+  /** The latest ACP `usage_update` context reading (2.61.0), replayed to late joiners. */
+  private contextUsage?: { used: number; max: number };
   private pendingCreate?: NonNullable<ReasonixDriveOpenOptions['pendingCreate']>;
   /**
    * The first durable snapshot of an ACP-created session must be fanned out
@@ -943,6 +1026,7 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
       cwd,
       env: options.env,
       requestTimeoutMs: options.requestTimeoutMs,
+      clientCapabilitiesMeta: reasonixClientCapabilitiesMeta(),
       hooks,
     });
     try {
@@ -1047,7 +1131,13 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
 
   override async getHistory(query?: HistoryQuery): Promise<AgentMessage[]> {
     if (this.pendingCreate) return [...this.pendingPrompts.map((entry) => entry.row)];
-    return [...await super.getHistory(query), ...this.pendingPrompts.map((entry) => entry.row)];
+    return [
+      ...await super.getHistory(query),
+      ...(this.contextUsage
+        ? [{ type: 'metadata-update' as const, key: 'contextUsage', value: { ...this.contextUsage } }]
+        : []),
+      ...this.pendingPrompts.map((entry) => entry.row),
+    ];
   }
 
   getPending(): AgentMessage[] {
@@ -1183,10 +1273,28 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
         nativeStarted = true;
         this.trackDrivenTurn(key);
         if (admitted.materializesCreate) this.startPendingCreateProbe();
-        const result = await this.transport.sessionPrompt({
-          sessionId: this.session.id,
-          prompt: [{ type: 'text', text: input.text }],
-        });
+        let turnFailure: string | undefined;
+        let result: AcpSessionPromptResult;
+        try {
+          result = await this.transport.sessionPrompt({
+            sessionId: this.session.id,
+            prompt: [{ type: 'text', text: input.text }],
+          });
+        } catch (error) {
+          // 2.61.0's provider failure: one failed turn, settled like 1.25.2's stopReason `error`.
+          turnFailure = reasonixTurnFailure(error);
+          if (turnFailure === undefined) throw error;
+          result = { stopReason: 'error' };
+        }
+        const transcriptPath = reasonixPromptTranscriptPath(result);
+        if (transcriptPath !== undefined && basename(transcriptPath) !== `${this.session.id}.jsonl`) {
+          // Upstream's rule S2 moves a continued 1.x session to a new 2.x session. Measured over ACP
+          // 2.61.0 kept the id; if a turn ever lands elsewhere this connection no longer owns it.
+          throw new Error(
+            `Reasonix answered the turn from transcript ${basename(transcriptPath)}, not ${this.session.id}.jsonl; `
+              + 'the conversation moved to another session',
+          );
+        }
         if (!['end_turn', 'max_tokens', 'max_turn_requests', 'refusal', 'cancelled', 'error'].includes(result.stopReason ?? '')) {
           throw new Error(`Reasonix returned unsupported ACP stopReason ${JSON.stringify(result.stopReason)}.`);
         }
@@ -1232,7 +1340,14 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
         }
         this.resolveDrivenTurn(key, result.stopReason, snapshot);
         if (result.stopReason === 'refusal') this.emitLive({ type: 'error', message: 'Reasonix refused the turn.' });
-        if (result.stopReason === 'error') this.emitLive({ type: 'error', message: 'Reasonix ended the turn with an error.' });
+        if (result.stopReason === 'error') {
+          this.emitLive({
+            type: 'error',
+            message: turnFailure === undefined
+              ? 'Reasonix ended the turn with an error.'
+              : `Reasonix ended the turn with an error: ${turnFailure}`,
+          });
+        }
         if (result.stopReason === 'max_tokens') this.emitLive({ type: 'notice', message: 'Reasonix reached the turn token limit.' });
       } catch (error) {
         if (error instanceof ReasonixPromptCancelledBeforeDelivery) {
@@ -1498,7 +1613,7 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
     );
     for (let lineIndex = 0; lineIndex < records.length; lineIndex += 1) {
       const record = records[lineIndex];
-      if (!record || record.role !== 'user') continue;
+      if (!record || !isReasonixHumanUserRecord(record)) continue;
       const display = displayByIndex.get(lineIndex);
       const key = reasonixMessageKey(this.session.id, display?.index ?? lineIndex);
       const native = userByKey.get(key);
@@ -1535,7 +1650,7 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
     if (!this.publishCreatedInitialSnapshot && !this.pendingCreate && !this.materializingCreate) return false;
     const pendingFirstPrompt = this.pendingPrompts.find((entry) => entry.materializesCreate);
     if (pendingFirstPrompt) {
-      const durableUsers = read.records.filter((record) => record.role === 'user');
+      const durableUsers = read.records.filter((record) => isReasonixHumanUserRecord(record));
       // Reasonix may persist a stable system-only snapshot before its first
       // prompt finishes. Do not release the bounded probe or advance Observe's
       // initial cursor until this SAME stable prefix contains the owned echo.
@@ -1549,6 +1664,12 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
         this.demote('Reasonix created-session transcript materialized with a foreign first user write.');
         return false;
       }
+      // 2.61.0 writes the transcript and meta when the first turn starts and `.acp.json` (cwd, mode,
+      // state) only after it (Phase B, 2026-11-24). While that turn is ours and in flight, a session
+      // without ACP metadata is not materialized yet: wait for a later wake-up or for the turn's
+      // own materialization instead of judging a half-written identity.
+      if (this.pendingCreate && this.inFlightNativeTurns > 0
+        && !await readReasonixAcpPosture(this.session)) return undefined;
     }
     try {
       await this.materializeCreatedSession();
@@ -1665,7 +1786,8 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
     foreignIfUnclaimed: boolean,
     snapshot?: StableReasonixSnapshot,
   ): void {
-    if (record.role !== 'user') return;
+    // A host-authored row is Reasonix's own continuation: never an echo, never a foreign write.
+    if (!isReasonixHumanUserRecord(record)) return;
     const text = typeof record.raw_content === 'string' ? record.raw_content
       : typeof record.content === 'string' ? record.content
         : undefined;
@@ -1823,6 +1945,11 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
       this.availableCommands = commands;
       return;
     }
+    const usage = reasonixUsageUpdate(params.update);
+    if (usage !== undefined) {
+      if (usage) this.acceptUsageUpdate(usage);
+      return;
+    }
     const assistantIndex = this.activeAssistantIndex;
     const messages = mapReasonixSessionUpdate(
       params.update,
@@ -1851,6 +1978,23 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
     if (params.update.sessionUpdate === 'tool_call') {
       this.activeIdentityAmbiguous = true;
       if (assistantIndex !== undefined) this.durableRebaseAfterIndex = assistantIndex;
+    }
+  }
+
+  /**
+   * `used`/`size` is the context reading the client shows; the cost joins the session usage the
+   * status updates already carry. Never a cost-only usage frame: the client reads a missing token
+   * bucket as cleared, so a cost waits until token totals exist.
+   */
+  private acceptUsageUpdate(usage: ReasonixUsageUpdate): void {
+    const reading = { used: usage.used, max: usage.size };
+    if (this.contextUsage?.used !== reading.used || this.contextUsage.max !== reading.max) {
+      this.contextUsage = reading;
+      this.emitLive({ type: 'metadata-update', key: 'contextUsage', value: { ...reading } });
+    }
+    const tokens = this.session.usage;
+    if (usage.cost && tokens && (tokens.promptTokens !== undefined || tokens.completionTokens !== undefined)) {
+      this.recordSessionUsage({ estimatedCost: usage.cost.amount, currency: usage.cost.currency, costComplete: true });
     }
   }
 
@@ -1984,16 +2128,32 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
     pending: NonNullable<ReasonixDriveOpenOptions['pendingCreate']>,
   ): Promise<void> {
     let durable: ReasonixStoredSession | undefined;
+    // 1.25.2 first writes a created session when its first turn ends, idle. 2.61.0 writes the
+    // transcript and meta when that turn starts and `.acp.json` after it (Phase B, 2026-11-24),
+    // but a mode or approval drift during the turn saves `.acp.json` early in state `running`
+    // (upstream acp_service.go saveMetaIfPresent). That busy posture is THIS connection's own first
+    // turn, not another writer; any other busy posture still fails closed.
+    const ownFirstTurn = (candidate: ReasonixStoredSession): boolean => !candidate.driveEligible
+      && (candidate.status === 'working' || candidate.status === 'needs-input')
+      && this.ownsLiveWriter();
     for (let attempt = 0; attempt < 40; attempt += 1) {
       const candidate = await pending.discover();
       if (candidate) {
         durable = candidate;
+        // 2.61.0 writes the transcript and meta before `.acp.json` (cwd, mode, state), which follows
+        // the turn (Phase B, 2026-11-24). Until it lands the candidate has no cwd: keep waiting
+        // inside this bound rather than reading the half-written session as a mismatch. Still
+        // missing after the bound, the cwd check below fails closed.
+        if (candidate.cwd === undefined) {
+          if (attempt + 1 < 40) await new Promise((resolve) => setTimeout(resolve, 25));
+          continue;
+        }
         const identityMismatch = candidate.id !== this.session.id
           || candidate.cwd !== pending.cwd
           || (pending.model !== undefined && candidate.model !== pending.model)
           || (pending.permissionMode !== undefined && candidate.currentMode !== pending.permissionMode)
           || candidate.transcriptPath !== this.session.transcriptPath;
-        if (identityMismatch || candidate.driveEligible) break;
+        if (identityMismatch || candidate.driveEligible || ownFirstTurn(candidate)) break;
       }
       if (attempt + 1 < 40) await new Promise((resolve) => setTimeout(resolve, 25));
     }
@@ -2005,7 +2165,7 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
       || (pending.model !== undefined && durable.model !== pending.model)
       || (pending.permissionMode !== undefined && durable.currentMode !== pending.permissionMode)
       || durable.transcriptPath !== this.session.transcriptPath
-      || !durable.driveEligible;
+      || (!durable.driveEligible && !ownFirstTurn(durable));
     if (mismatch) {
       throw new Error(
         `Reasonix durable identity mismatch after create: expected id=${this.session.id} cwd=${pending.cwd}`
@@ -2153,11 +2313,16 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
     if (!Number.isSafeInteger(sequence) || (sequence as number) < 0 || (sequence as number) <= this.lastStatusSequence) return;
     const status = params.status;
     if (typeof status !== 'object' || status === null) return;
-    const nativeStatus = status as { state?: unknown; cumulative?: unknown };
+    // On the wire the session totals sit at `status.usage.cumulative` (measured on 1.25.2 and
+    // 2.61.0); `.acp.json` stores the same snapshot as `status.cumulative`.
+    const nativeStatus = status as { state?: unknown; usage?: unknown };
     const state = nativeStatus.state;
     if (state !== 'running' && state !== 'idle') return;
     this.lastStatusSequence = sequence as number;
-    const usage = reasonixSessionUsage(nativeStatus.cumulative);
+    const usageBlock = nativeStatus.usage;
+    const usage = typeof usageBlock === 'object' && usageBlock !== null && !Array.isArray(usageBlock)
+      ? reasonixSessionUsage((usageBlock as { cumulative?: unknown }).cumulative)
+      : undefined;
     if (usage) this.recordSessionUsage(usage);
     if (state === 'running') this.emitLive({ type: 'status', status: 'running' });
     if (state === 'idle') {

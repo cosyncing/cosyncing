@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentMessage, HistorySnapshotSink, SessionInfo } from '@cosyncing/adapter-api';
 import { ReasonixObserveConnection } from '../src/observe.ts';
-import { discoverReasonixStore } from '../src/store.ts';
+import { discoverReasonixStore, reasonixHistorySourceIdentity } from '../src/store.ts';
 
 class TrackingReasonixObserveConnection extends ReasonixObserveConnection {
   rewrites = 0;
@@ -564,6 +564,101 @@ try {
     replacementReset && replacedLive.filter((message) => message.type === 'history-reset').length === 1,
     JSON.stringify(replacedLive.map((message) => message.type)));
   await replaced.close();
+
+  // Reasonix 2.61.0, captured: a 20 ms poller recorded every version of one session's flat
+  // transcript through a prompt, a cancel, a provider failure and a recovery. Half of the saves
+  // renamed a new file over the old, and settling the cancelled and the failed turn rewrote that
+  // turn's user row to its raw prompt (the failed one shrank the file). None of it changes a row a
+  // reader shows, so none of it is a history reset; editing any other accepted row still is.
+  {
+    const versions = (JSON.parse(readFileSync(
+      join(import.meta.dir, 'fixtures', 'reasonix-v2.61.0-capture.json'),
+      'utf8',
+    )) as { transcriptVersions: Array<{ seq: number; renamed: boolean; text: string }> }).transcriptVersions;
+    const probeRoot = mkdtempSync(join(tmpdir(), 'cosyncing-reasonix-v261-observe-'));
+    const probeDir = join(probeRoot, 'sessions');
+    const probeId = 'captured-v261-session';
+    const probeTranscript = join(probeDir, `${probeId}.jsonl`);
+    mkdirSync(probeDir, { recursive: true });
+    const writeVersion = (text: string, revision: number, renamed: boolean): void => {
+      if (renamed) {
+        writeFileSync(`${probeTranscript}.tmp`, text);
+        renameSync(`${probeTranscript}.tmp`, probeTranscript);
+      } else {
+        writeFileSync(probeTranscript, text);
+      }
+      let offset = 0;
+      const entries = text.split('\n').filter(Boolean).map((line, index) => {
+        const entry = { index, offset, length: Buffer.byteLength(line) + 1, role: (JSON.parse(line) as { role: string }).role };
+        offset += entry.length;
+        return entry;
+      });
+      json(join(probeDir, `${probeId}.event-index.json`), {
+        schema_version: 1, log_size: 1, message_count: entries.length, revision,
+        content_digest: `${String(revision).padStart(64, '0')}`, writer_id: 'captured-writer',
+      });
+      json(join(probeDir, `${probeId}.display-index.json`), {
+        schema_version: 1, revision, revision_known: true, transcript_size: Buffer.byteLength(text),
+        message_count: entries.length, entries,
+      });
+      json(`${probeTranscript}.meta`, {
+        id: probeId, schema_version: 2, revision, model: 'fixtprov/fixture-model-0001',
+        created_at: '2026-11-24T13:34:15.000000000Z', updated_at: '2026-11-24T13:36:08.000000000Z',
+        writer_id: 'captured-writer', content_digest: `${String(revision).padStart(64, '0')}`,
+      });
+    };
+    try {
+      json(join(probeDir, `${probeId}.acp.json`), { sessionId: probeId, status: { state: 'idle' } });
+      writeVersion(versions[0]!.text, versions[0]!.seq, false);
+      const probeStored = (await discoverReasonixStore({ root: probeRoot }))[0];
+      if (!probeStored) throw new Error('captured 2.61.0 transcript was not discovered');
+      const sourceBefore = await reasonixHistorySourceIdentity(probeStored);
+      const probe = new TrackingReasonixObserveConnection({
+        session: probeStored,
+        info: { ...info, id: probeId, nativeId: probeId },
+      });
+      await probe.getHistory();
+      const probeLive: AgentMessage[] = [];
+      probe.subscribe((message) => probeLive.push(message));
+      const tailed = () => (probe as unknown as { recordCount: number }).recordCount;
+      let settledAll = true;
+      for (const version of versions.slice(1)) {
+        writeVersion(version.text, version.seq, version.renamed);
+        const rows = version.text.split('\n').filter(Boolean).length;
+        settledAll = await waitFor(() => tailed() === rows) && settledAll;
+      }
+      const lastRows = versions.at(-1)!.text.split('\n').filter(Boolean).map((line) => JSON.parse(line) as {
+        role: string; raw_content?: string;
+      });
+      const prompts = lastRows.slice(3).filter((row) => row.role === 'user').map((row) => row.raw_content);
+      const tailedUsers = probeLive.filter((message) => message.type === 'user-message').map((message) => message.text);
+      check('2.61.0: renamed saves and settled interrupted turns tail as appends, with no history reset',
+        settledAll
+          && probe.rewrites === 0
+          && !probeLive.some((message) => message.type === 'history-reset')
+          && JSON.stringify(tailedUsers) === JSON.stringify(prompts)
+          && versions.some((version) => version.renamed),
+        JSON.stringify({ settledAll, rewrites: probe.rewrites, tailedUsers, prompts }));
+      const sourceAfter = await reasonixHistorySourceIdentity(probeStored);
+      check('2.61.0: the history source keeps one identity across the renames while its revision advances',
+        sourceBefore?.sourceId === sourceAfter?.sourceId && sourceBefore?.revision !== sourceAfter?.revision,
+        JSON.stringify({ sourceBefore, sourceAfter }));
+      // The same capture with one earlier assistant answer edited: a real rewrite.
+      const edited = versions.at(-1)!.text.split('\n').map((line, index) => {
+        if (index !== 2 || !line) return line;
+        const row = JSON.parse(line) as Record<string, unknown>;
+        return JSON.stringify({ ...row, content: `${String(row.content)} (edited)` });
+      }).join('\n');
+      writeVersion(edited, versions.at(-1)!.seq + 1, true);
+      const editReset = await waitFor(() => probeLive.some((message) => message.type === 'history-reset'));
+      check('2.61.0: editing any other accepted row is still one history reset',
+        editReset && probe.rewrites === 1,
+        JSON.stringify({ rewrites: probe.rewrites }));
+      await probe.close();
+    } finally {
+      rmSync(probeRoot, { recursive: true, force: true });
+    }
+  }
 
 } catch (error) {
   check('test harness completed', false, error instanceof Error ? error.message : String(error));

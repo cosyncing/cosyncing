@@ -1,7 +1,8 @@
 /**
- * Total mapping for Reasonix v1.25.2's flat JSONL transcript.
+ * Total mapping for the flat JSONL transcript Reasonix 1.25.2 and 2.61.0 share.
  *
- * Only a native `user` role becomes a human bubble. System rows become context,
+ * Only a native `user` role the human wrote becomes a human bubble; a `user` row Reasonix wrote
+ * itself (`host_authored`, 2.61.0) is context. System rows become context,
  * measured tool rows become bounded tool results, and unknown shapes use the
  * named context-injection category so a future Reasonix schema cannot turn
  * machine-authored material into user speech or take out replay. An assistant row's
@@ -24,7 +25,19 @@ export interface ReasonixTranscriptRecord {
   tool_calls?: unknown;
   tool_call_id?: unknown;
   tool_execution?: unknown;
+  host_authored?: unknown;
   [key: string]: unknown;
+}
+
+/**
+ * Whether a `user` row is the human's. Reasonix 2.61.0 writes its own `user` rows too: when an
+ * assistant step ends without visible text it appends `"host_authored": true` with a continuation
+ * instruction and no `raw_content` (measured 2026-11-24 continuing a 1.25.2 session; its display
+ * entry is `synthetic` and starts no turn). Such a row is never a prompt, never an echo to claim,
+ * and never a foreign write.
+ */
+export function isReasonixHumanUserRecord(record: ReasonixTranscriptRecord | undefined): boolean {
+  return record?.role === 'user' && record.host_authored !== true;
 }
 
 const MAX_TOOL_FIELD_CHARS = 512;
@@ -167,6 +180,10 @@ export function mapReasonixRecord(
       return [contextEvent('Reasonix system context', textOf(record.content) ?? unknownRecordBody(record))];
     }
 
+    if (record.role === 'user' && record.host_authored === true) {
+      return [contextEvent('Reasonix host continuation', textOf(record.content) ?? unknownRecordBody(record))];
+    }
+
     if (record.role === 'user') {
       const text = textOf(record.raw_content) ?? textOf(record.content);
       if (text !== undefined) {
@@ -264,7 +281,7 @@ export function mapReasonixInterruptedTail(
 ): AgentMessage | undefined {
   let lineIndex = -1;
   for (let index = records.length - 1; index >= 0; index -= 1) {
-    if (records[index]?.role === 'user') {
+    if (isReasonixHumanUserRecord(records[index])) {
       lineIndex = index;
       break;
     }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 export {};
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentMessage, SessionInfo } from '@cosyncing/adapter-api';
@@ -8,8 +8,9 @@ import {
   mapReasonixSessionUpdate,
   mapReasonixTranscript,
   REASONIX_FINAL_UPSTREAM_VERSION,
-  REASONIX_NEWER_VERSIONS_NOTE,
   REASONIX_VERIFIED_VERSION,
+  REASONIX_VERSION_RULE,
+  REASONIX_VERSION_SUCCESS_TTL_MS,
   ReasonixAdapter,
   ReasonixObserveConnection,
 } from '../src/index.ts';
@@ -266,45 +267,105 @@ try {
     modeTree.cleanup();
   }
 
-  // The exact pin, and what a current install meets: `npm i -g reasonix` now installs 2.61.0, the final
-  // upstream release. It stays Observe-only, and the row and the Resume refusal say why in the freeze
-  // wording rather than as an unexplained version mismatch.
-  const frozenTree = buildReasonixFixtureTree();
-  try {
-    const frozenFake = writeFakeReasonixBinary(
-      join(frozenTree.root, 'bin'),
-      frozenTree.id,
-      REASONIX_FINAL_UPSTREAM_VERSION,
-    );
-    const frozen = new ReasonixAdapter({
-      command: frozenFake.path,
-      env: { ...frozenFake.env, REASONIX_HOME: frozenTree.root },
-    });
-    const frozenRow = (await frozen.discoverSessions()).find((candidate) => candidate.id === frozenTree.id);
-    const frozenReason = frozenRow?.control?.drive.reason ?? '';
-    check('a 2.61.0 binary lists its sessions Observe-only and says 1.25.2 is the only supported version',
-      frozenRow?.control?.drive.state === 'observing'
-        && frozenRow?.control?.drive.supported === false
-        && frozenRow?.control?.drive.takeoverAvailable === undefined
-        && frozenReason.includes(`Reasonix ${REASONIX_VERIFIED_VERSION}, the only supported version`)
-        && frozenReason.includes(REASONIX_NEWER_VERSIONS_NOTE),
-      JSON.stringify(frozenRow?.control?.drive));
-    let frozenResumeRefusal = '';
+  // The version rule. 1.25.2 and the final 2.61.0 (what `npm i -g reasonix` installs) drive; 1.x after
+  // 1.25.2 (1.39.11 is the last, and moves new sessions to sessions-v4) and an unmeasured 2.x do not.
+  for (const [version, drives] of [
+    [REASONIX_FINAL_UPSTREAM_VERSION, true],
+    [REASONIX_VERIFIED_VERSION, true],
+    ['1.39.11', false],
+    ['2.60.0', false],
+  ] as const) {
+    const ruleTree = buildReasonixFixtureTree();
     try {
-      await frozen.attach(frozenTree.id, 'resume');
-    } catch (error) {
-      frozenResumeRefusal = error instanceof Error ? error.message : String(error);
+      const ruleFake = writeFakeReasonixBinary(join(ruleTree.root, 'bin'), ruleTree.id, version);
+      const ruled = new ReasonixAdapter({
+        command: ruleFake.path,
+        env: { ...ruleFake.env, REASONIX_HOME: ruleTree.root },
+      });
+      const row = (await ruled.discoverSessions()).find((candidate) => candidate.id === ruleTree.id);
+      let resumeRefusal = '';
+      let initializeCapabilities: unknown;
+      try {
+        const drive = await ruled.attach(ruleTree.id, 'resume');
+        await drive.listCommands?.();
+        initializeCapabilities = (ruleFake.events().find((event) => event.kind === 'frame'
+          && (event.frame as { method?: unknown }).method === 'initialize')?.frame as { params?: { clientCapabilities?: unknown } })
+          ?.params?.clientCapabilities;
+        await drive.close();
+      } catch (error) {
+        resumeRefusal = error instanceof Error ? error.message : String(error);
+      }
+      if (drives) {
+        check(`Reasonix ${version} lists its sessions with Drive available and offers Create`,
+          row?.control?.drive.supported === true
+            && row.control.drive.takeoverAvailable === true
+            && await ruled.canCreateSession() === true
+            && resumeRefusal === '',
+          JSON.stringify({ drive: row?.control?.drive, resumeRefusal }));
+        check(`Reasonix ${version} Drive opts in to status updates through initialize _meta`,
+          JSON.stringify(initializeCapabilities)
+            === JSON.stringify({ _meta: { 'reasonix.io': { statusUpdates: { supported: true } } } }),
+          JSON.stringify(initializeCapabilities));
+      } else {
+        const observer = await ruled.attach(ruleTree.id, 'observe');
+        await observer.close();
+        check(`Reasonix ${version} stays Observe-only, refuses Create and Resume with the version rule, and starts no ACP child`,
+          row?.control?.drive.state === 'observing'
+            && row.control.drive.supported === false
+            && row.control.drive.takeoverAvailable === undefined
+            && (row.control.drive.reason ?? '').includes(REASONIX_VERSION_RULE)
+            && await ruled.canCreateSession() === false
+            && resumeRefusal.includes('Observe remains available')
+            && resumeRefusal.includes(REASONIX_VERSION_RULE)
+            && ruleFake.spawnCount() === 0,
+          JSON.stringify({ drive: row?.control?.drive, resumeRefusal, spawns: ruleFake.spawnCount() }));
+      }
+    } finally {
+      ruleTree.cleanup();
     }
-    const frozenObserver = await frozen.attach(frozenTree.id, 'observe');
-    await frozenObserver.close();
-    check('a 2.61.0 binary refuses Create and Resume with the freeze wording, keeps Observe, and starts no ACP child',
-      await frozen.canCreateSession() === false
-        && frozenResumeRefusal.includes('Observe remains available')
-        && frozenResumeRefusal.includes(REASONIX_NEWER_VERSIONS_NOTE)
-        && frozenFake.spawnCount() === 0,
-      JSON.stringify({ refusal: frozenResumeRefusal, spawns: frozenFake.spawnCount() }));
+  }
+
+  // The version cache (Cline's CN-2 rule): one probe per executable identity for an hour, and a
+  // binary replaced in place (same path, size and mtime; new inode) is probed on the next refresh.
+  const cacheTree = buildReasonixFixtureTree();
+  try {
+    const cacheFake = writeFakeReasonixBinary(join(cacheTree.root, 'bin'), cacheTree.id, REASONIX_FINAL_UPSTREAM_VERSION);
+    const installedAt = new Date('2026-11-24T00:15:41.000Z');
+    utimesSync(cacheFake.path, installedAt, installedAt);
+    let clock = Date.parse('2026-11-24T01:00:00.000Z');
+    const cached = new ReasonixAdapter({
+      command: cacheFake.path,
+      env: { ...cacheFake.env, REASONIX_HOME: cacheTree.root },
+      now: () => clock,
+    });
+    const probes = () => cacheFake.events().filter((event) => event.kind === 'version-probe').length;
+    const refresh = async (): Promise<number> => {
+      await cached.discoverSessions();
+      return probes();
+    };
+    const first = await refresh();
+    clock += 5 * 60_000 + 5_000;
+    const second = await refresh();
+    clock += 30 * 60_000;
+    const third = await refresh();
+    check('an unchanged Reasonix binary is probed once across refreshes past the old five-minute expiry',
+      first === 1 && second === 1 && third === 1,
+      JSON.stringify({ first, second, third }));
+    const before = statSync(cacheFake.path);
+    writeFileSync(`${cacheFake.path}.next`, readFileSync(cacheFake.path));
+    chmodSync(`${cacheFake.path}.next`, 0o755);
+    utimesSync(`${cacheFake.path}.next`, installedAt, installedAt);
+    renameSync(`${cacheFake.path}.next`, cacheFake.path);
+    const after = statSync(cacheFake.path);
+    const replaced = await refresh();
+    check('a Reasonix binary reinstalled in place (same path, size and mtime) is probed again on the next refresh',
+      after.size === before.size && after.mtimeMs === before.mtimeMs && after.ino !== before.ino && replaced === 2,
+      JSON.stringify({ replaced, before: [before.size, before.mtimeMs, before.ino], after: [after.size, after.mtimeMs, after.ino] }));
+    clock += REASONIX_VERSION_SUCCESS_TTL_MS;
+    const expired = await refresh();
+    check('the hour-long success cache still expires', expired === 3, String(expired));
   } finally {
-    frozenTree.cleanup();
+    cacheTree.cleanup();
   }
 
   const createRoot = mkdtempSync(join(tmpdir(), 'cosyncing-reasonix-create-'));
@@ -469,6 +530,58 @@ try {
         && streamedCreatedOutputs[0].key === `reasonix:${streamedCreateId}:message:2:output`,
       JSON.stringify(streamedCreatedOutputs));
     await streamedCreatedDrive.close();
+
+    // Reasonix 2.61.0 writes a created session's transcript and meta when its first turn STARTS and
+    // `.acp.json` only after the turn (upstream persistAfterTurn), unless a mode or approval drift
+    // saves it mid-turn in state `running`. Phase B measured the first order on the real binary:
+    // Create demoted within 300 ms because the half-written session had no cwd. Both orders are the
+    // created owner's own turn and must keep Drive.
+    for (const variant of [
+      { name: 'ACP metadata after the turn (measured)', acpDelayMs: undefined },
+      { name: 'ACP metadata mid-turn in state running', acpDelayMs: '120' },
+    ]) {
+      const runningFirstId = `created-running-first-write-${variant.acpDelayMs ?? 'after-turn'}`;
+      const runningFirstFake = writeFakeReasonixBinary(
+        join(createRoot, `bin-running-first-${variant.acpDelayMs ?? 'after-turn'}`),
+        runningFirstId,
+        REASONIX_FINAL_UPSTREAM_VERSION,
+      );
+      const runningFirstAdapter = new ReasonixAdapter({
+        command: runningFirstFake.path,
+        env: {
+          ...runningFirstFake.env,
+          REASONIX_HOME: createRoot,
+          FAKE_REASONIX_MATERIALIZE_ON_PROMPT: '1',
+          FAKE_REASONIX_SYSTEM_ON_MATERIALIZE: '1',
+          FAKE_REASONIX_RUNNING_FIRST_WRITE: '1',
+          ...(variant.acpDelayMs ? { FAKE_REASONIX_ACP_METADATA_DELAY_MS: variant.acpDelayMs } : {}),
+          FAKE_REASONIX_STAGE_DELAY_MS: '1500',
+          FAKE_REASONIX_PROMPT_RESULT_DELAY_MS: '1800',
+        },
+        pendingCreateTimeoutMs: 5_000,
+      });
+      const runningFirstCreated = await runningFirstAdapter.createSession({
+        directory: createCwd,
+        model: { providerID: 'provider', modelID: 'model' },
+      });
+      const runningFirstDrive = await runningFirstAdapter.attach(runningFirstCreated.id, 'resume');
+      const runningFirstLive: AgentMessage[] = [];
+      runningFirstDrive.subscribe((message) => runningFirstLive.push(message));
+      let runningFirstError: unknown;
+      try {
+        await runningFirstDrive.sendPrompt({ text: 'first turn written while running' });
+      } catch (error) { runningFirstError = error; }
+      const runningFirstAnswered = await waitFor(() => runningFirstLive.some((message) =>
+        message.type === 'model-output' && message.text === 'created answer'));
+      check(`2.61.0: a created session first written by its own running turn keeps Drive (${variant.name})`,
+        runningFirstError === undefined
+          && runningFirstAnswered
+          && runningFirstAdapter.isDriving(runningFirstId)
+          && !runningFirstLive.some((message) => message.type === 'notice'
+            && /materialization failed|identity mismatch/.test(message.message)),
+        JSON.stringify({ error: String(runningFirstError), notices: runningFirstLive.filter((message) => message.type === 'notice') }));
+      await runningFirstDrive.close();
+    }
 
     const inboxOnlyId = 'created-inbox-only';
     const inboxOnlyFake = writeFakeReasonixBinary(join(createRoot, 'bin-inbox-only'), inboxOnlyId);

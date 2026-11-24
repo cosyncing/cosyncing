@@ -1,4 +1,4 @@
-/** Read-only Reasonix v1.25.2 store discovery and bounded transcript reads. */
+/** Read-only Reasonix store discovery (1.25.2 and 2.61.0 share it) and bounded transcript reads. */
 import { sessionPromptPreview } from '@cosyncing/adapter-api';
 
 import {
@@ -18,9 +18,10 @@ import {
   sep,
 } from 'node:path';
 import { NO_FOLLOW_FLAG, STORE_READ_FLAGS, type HistorySourceIdentity } from '@cosyncing/adapter-api';
-import type {
-  ReasonixDisplayEntry,
-  ReasonixTranscriptRecord,
+import {
+  isReasonixHumanUserRecord,
+  type ReasonixDisplayEntry,
+  type ReasonixTranscriptRecord,
 } from './mapping.ts';
 
 export const REASONIX_META_SCHEMA = 2;
@@ -36,6 +37,38 @@ export const REASONIX_DISCOVERY_SCAN_ENTRIES = 20_000;
 export const REASONIX_MAX_TITLE_CHARS = 4_096;
 export const REASONIX_MAX_MODEL_CHARS = 512;
 export const REASONIX_MAX_CWD_CHARS = 32_768;
+
+/**
+ * `.jsonl` files beside a session that are not conversations. `.events.jsonl` is 1.25.2's; 2.61.0 adds
+ * the rest (upstream `jsonlSidecarSuffixes`; its MIGRATING.md rule S5 says 1.x lists the wire,
+ * adjudication and execution logs as extra conversations, which is the mistake this list prevents).
+ * `.turns.jsonl` is written by 1.39.11 beside a 1.25.2 session it continued.
+ */
+export const REASONIX_JSONL_SIDECAR_SUFFIXES: readonly string[] = Object.freeze([
+  '.events.jsonl',
+  '.conflicts.jsonl',
+  '.guardian.jsonl',
+  '.wire.jsonl',
+  '.adjudication.jsonl',
+  '.execution.jsonl',
+  '.turns.jsonl',
+]);
+
+/**
+ * Whether a `sessions/` directory entry name is a conversation transcript this adapter lists.
+ *
+ * Not a sidecar, and not `v4-<id>.jsonl`: 2.x writes that import when a non-ACP frontend opens a
+ * conversation 1.x (1.38.8 or later) keeps in `sessions-v4/` (upstream MIGRATING.md rule S4). 2.61.0's
+ * ACP neither lists nor loads such a conversation (measured 2026-11-24: `session/load` of the
+ * sessions-v4 id answers -32603 "openat <id>.jsonl"), so Resume on the import is unmeasured and a 1.x
+ * continuation can refresh it underneath; it stays out of the roster.
+ */
+export function isReasonixTranscriptName(name: string): boolean {
+  return name.endsWith('.jsonl')
+    && !name.startsWith('v4-')
+    && !name.startsWith('.')
+    && !REASONIX_JSONL_SIDECAR_SUFFIXES.some((suffix) => name.endsWith(suffix));
+}
 
 export interface ReasonixStoreTrace {
   op: 'store-read' | 'schema-refused' | 'path-refused' | 'discovery-bound';
@@ -84,6 +117,8 @@ export interface ReasonixSessionUsage {
   estimatedCost?: number;
   source?: string;
   costComplete?: boolean;
+  /** 2.61.0's cumulative carries an ISO currency; 1.25.2's carries none (USD by its price table). */
+  currency?: string;
 }
 
 interface ReasonixEventIndex {
@@ -329,8 +364,7 @@ async function newestTranscriptMtime(
       if (!spendDiscoveryEntry(budget)) break;
       if (!entry.isFile()
         || entry.isSymbolicLink()
-        || !entry.name.endsWith('.jsonl')
-        || entry.name.endsWith('.events.jsonl')) continue;
+        || !isReasonixTranscriptName(entry.name)) continue;
       const info = await lstat(join(directory, entry.name)).catch(() => undefined);
       if (info?.isFile() && !info.isSymbolicLink()) newest = Math.max(newest, info.mtimeMs);
     }
@@ -425,12 +459,27 @@ export function reasonixSessionUsage(value: unknown): ReasonixSessionUsage | und
     ...(boundedUsageInteger(value.events) === undefined ? {} : { events: boundedUsageInteger(value.events) }),
     ...(boundedUsageInteger(value.pricedEvents) === undefined ? {} : { pricedEvents: boundedUsageInteger(value.pricedEvents) }),
     ...(boundedUsageNumber(value.estimatedCost) === undefined ? {} : { estimatedCost: boundedUsageNumber(value.estimatedCost) }),
-    ...(typeof value.source === 'string' && value.source.length > 0 && value.source.length <= 128
-      ? { source: value.source }
+    // `.acp.json` names it `source`; the live status_update names it `usageSource`.
+    ...(typeof (value.source ?? value.usageSource) === 'string'
+      && ((value.source ?? value.usageSource) as string).length > 0
+      && ((value.source ?? value.usageSource) as string).length <= 128
+      ? { source: (value.source ?? value.usageSource) as string }
       : {}),
     ...(typeof value.costComplete === 'boolean' ? { costComplete: value.costComplete } : {}),
+    ...(typeof value.currency === 'string' && /^[A-Z]{3}$/.test(value.currency) ? { currency: value.currency } : {}),
   };
   return Object.keys(usage).length > 0 ? usage : undefined;
+}
+
+/**
+ * The cost this adapter may report: a complete estimate in US dollars. The client's session cost is a
+ * dollar amount with no currency field, so a cost Reasonix prices in another currency is withheld
+ * rather than shown as dollars. No currency is 1.25.2's shape, which priced in USD.
+ */
+export function reasonixReportableCost(usage: ReasonixSessionUsage | undefined): number | undefined {
+  if (!usage || usage.costComplete !== true || usage.estimatedCost === undefined) return undefined;
+  if (usage.currency !== undefined && usage.currency !== 'USD') return undefined;
+  return usage.estimatedCost;
 }
 
 export function reasonixSessionUsageValue(usage: ReasonixSessionUsage | undefined): Record<string, unknown> | undefined {
@@ -447,7 +496,7 @@ export function reasonixSessionUsageValue(usage: ReasonixSessionUsage | undefine
     ...(usage.pricedEvents === undefined ? {} : { pricedEvents: usage.pricedEvents }),
     ...(usage.source === undefined ? {} : { source: usage.source }),
     ...(usage.costComplete === undefined ? {} : { costComplete: usage.costComplete }),
-    ...(usage.costComplete === true && usage.estimatedCost !== undefined ? { cost: usage.estimatedCost } : {}),
+    ...(reasonixReportableCost(usage) === undefined ? {} : { cost: reasonixReportableCost(usage) }),
   };
 }
 
@@ -560,8 +609,7 @@ async function transcriptNames(
       if (!spendDiscoveryEntry(budget)) break;
       if (!entry.isFile()
         || entry.isSymbolicLink()
-        || !entry.name.endsWith('.jsonl')
-        || entry.name.endsWith('.events.jsonl')) continue;
+        || !isReasonixTranscriptName(entry.name)) continue;
       const info = await lstat(join(directory, entry.name)).catch(() => undefined);
       if (!info?.isFile() || info.isSymbolicLink()) continue;
       candidates.push({ name: entry.name, mtimeMs: info.mtimeMs });
@@ -828,17 +876,19 @@ function completeReconciledDisplayEntries(
   let sawUser = false;
   return entries.map((entry, index) => {
     const role = typeof records[index]?.role === 'string' ? records[index]!.role : entry.role;
+    // A host-authored row stays inside the turn it continues, as its native display entry says.
+    const human = role === 'user' && (records[index] === undefined || isReasonixHumanUserRecord(records[index]));
     if (entry.authoredTurn !== undefined) {
       authoredTurn = entry.authoredTurn;
-      if (role === 'user') sawUser = true;
-    } else if (role === 'user') {
+      if (human) sawUser = true;
+    } else if (human) {
       if (sawUser) authoredTurn += 1;
       sawUser = true;
     }
     return {
       ...entry,
       authoredTurn: entry.authoredTurn ?? authoredTurn,
-      ...(role === 'user' && entry.startsTurn === undefined ? { startsTurn: true } : {}),
+      ...(human && entry.startsTurn === undefined ? { startsTurn: true } : {}),
     };
   });
 }
@@ -913,8 +963,19 @@ async function reconcileReasonixEventJournal(
     }
     const messages = event.messages as ReasonixTranscriptRecord[];
     if (event.type === 'replace') {
-      if (index !== 0 || event.base_revision !== undefined || event.message_index !== undefined) {
-        return { issue: 'event journal replace event is not the unique chain root' };
+      // The root replace starts the chain. 2.61.0 also writes a later `replace` (reason `rewrite`)
+      // when a cancelled or failed turn is settled: it names the revision it replaces and restates
+      // the whole transcript, so it must continue the chain exactly like an append does. Whether the
+      // result still extends the flat prefix is checked below like any other tip.
+      if (index === 0) {
+        if (event.base_revision !== undefined || event.message_index !== undefined) {
+          return { issue: 'event journal replace event is not the unique chain root' };
+        }
+      } else if (revision === undefined
+          || exactRevision(event.base_revision) !== revision
+          || eventRevision !== revision + 1
+          || event.message_index !== undefined) {
+        return { issue: 'event journal replace chain is not contiguous' };
       }
       records = [...messages];
     } else if (event.type === 'append') {
@@ -952,7 +1013,8 @@ async function reconcileReasonixEventJournal(
   for (let index = flatRecords.length; index < records.length; index += 1) {
     const record = records[index]!;
     const role = typeof record.role === 'string' ? record.role : undefined;
-    if (role === 'user') authoredTurn += 1;
+    const human = isReasonixHumanUserRecord(record);
+    if (human) authoredTurn += 1;
     const encoded = Buffer.from(`${JSON.stringify(record)}\n`, 'utf8');
     chunks.push(encoded);
     displayEntries.push({
@@ -961,7 +1023,7 @@ async function reconcileReasonixEventJournal(
       length: encoded.length,
       ...(role ? { role } : {}),
       authoredTurn,
-      ...(role === 'user' ? { startsTurn: true } : {}),
+      ...(human ? { startsTurn: true } : {}),
     });
     offset += encoded.length;
     if (offset > REASONIX_MAX_TRANSCRIPT_BYTES) {
@@ -1098,7 +1160,11 @@ export async function readReasonixTranscript(
       ? String(rawDisplay.revision)
       : `${String(file.size)}:${String(file.mtimeNs)}`;
   const flatIdentity: HistorySourceIdentity = {
-    sourceId: `${session.transcriptPath}:${String(file.dev)}:${String(file.ino)}`,
+    // The path and device, not the inode. Reasonix 2.61.0 republishes the transcript through a
+    // temporary file and a rename on ordinary saves (measured 2026-11-24: four of eight saves in one
+    // session, appends included), so the inode names a save, not the source. A rewrite is still a
+    // rewrite: the revision moves, and readers compare the durable prefix bytes themselves.
+    sourceId: `${session.transcriptPath}:${String(file.dev)}`,
     revision: flatRevision,
     appendPosition: bounded.byteLength,
   };
@@ -1142,6 +1208,68 @@ export async function readReasonixTranscript(
     ...(displayRevision === undefined ? {} : { displayRevision }),
     identity: flatIdentity,
   };
+}
+
+/**
+ * One accepted `user` row that Reasonix 2.61.0 rewrote when it settled an interrupted turn.
+ *
+ * Measured 2026-11-24 (isolated home, a 20 ms poller on the flat transcript): when a turn is
+ * cancelled or fails at the provider, 2.61.0 rewrites the whole transcript through a rename and
+ * replaces that turn's user row `content` (its `<workspace>` and policy blocks around the prompt)
+ * with exactly `raw_content`; every other key and every other accepted row stays byte-identical, and
+ * a `local_only` tool row follows. 1.25.2 never rewrites the row. Nothing a reader shows changes:
+ * the bubble is `raw_content`, and its key is the row's index.
+ */
+function isSettledUserRow(before: Record<string, unknown>, after: Record<string, unknown>): boolean {
+  if (before.role !== 'user' || after.role !== 'user'
+    || before.host_authored === true || after.host_authored === true) return false;
+  const raw = after.raw_content;
+  if (typeof raw !== 'string' || before.raw_content !== raw || after.content !== raw) return false;
+  if (typeof before.content !== 'string' || before.content === raw || !before.content.includes(raw)) return false;
+  const rest = (row: Record<string, unknown>): string[] => Object.keys(row).filter((key) => key !== 'content').sort();
+  const beforeKeys = rest(before);
+  const afterKeys = rest(after);
+  return beforeKeys.length === afterKeys.length
+    && beforeKeys.every((key, index) => key === afterKeys[index]
+      && JSON.stringify(before[key]) === JSON.stringify(after[key]));
+}
+
+/**
+ * Whether `read` still extends an accepted prefix of `acceptedCount` records whose bytes it no longer
+ * repeats, because the only rows that differ are user rows Reasonix settled (see
+ * {@link isSettledUserRow}) and their display entries keep index and role. Any other difference,
+ * a missing row, or a prefix that does not parse is a rewrite.
+ */
+export function reasonixSettlementExtendsPrefix(
+  acceptedPrefix: Buffer,
+  acceptedCount: number,
+  acceptedDisplay: readonly ReasonixDisplayEntry[],
+  read: Pick<ReasonixTranscriptRead, 'records' | 'displayEntries'>,
+): boolean {
+  if (acceptedCount <= 0 || read.records.length < acceptedCount) return false;
+  const lines = acceptedPrefix.toString('utf8').split('\n').filter((line) => line.trim());
+  if (lines.length !== acceptedCount) return false;
+  const nextDisplay = new Map(read.displayEntries.map((entry) => [entry.index, entry]));
+  for (const entry of acceptedDisplay) {
+    if (entry.index >= acceptedCount) continue;
+    const next = nextDisplay.get(entry.index);
+    if (!next || next.role !== entry.role) return false;
+  }
+  let settled = 0;
+  for (let index = 0; index < acceptedCount; index += 1) {
+    let before: unknown;
+    try {
+      before = JSON.parse(lines[index]!);
+    } catch {
+      return false;
+    }
+    const after = read.records[index];
+    if (!isRecord(before) || !isRecord(after)) return false;
+    if (JSON.stringify(before) === JSON.stringify(after)) continue;
+    if (!isSettledUserRow(before, after)) return false;
+    settled += 1;
+  }
+  return settled > 0;
 }
 
 export async function reasonixHistorySourceIdentity(
