@@ -75,9 +75,11 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   notices while a session is created or a turn runs.
 - Grok Build 1.0.92: opening a session no longer adds an unmapped-update context
   entry for Grok's empty background-task list.
-- DeepSeek Harness: when cosyncing restarts a `dsh web` host it manages, it now
-  waits until it has read the new launch URL before it treats the host as ready,
-  and it drops the launch token of a host that has stopped. The session cookie of
+- DeepSeek Harness: when cosyncing starts or restarts a `dsh web` host it
+  manages, it now waits briefly for the host's launch URL before it reports the
+  host as started. Before, a host with a stored session cookie could be reported
+  ready before its URL was read. It also drops a host's launch token when it
+  stops or restarts that host, or sees the host exit. The 30-day session cookie of
   a host cosyncing manages is renewed with the current launch, so it no longer
   expires and asks for `cosyncing dsh connect`. A host you start yourself still
   needs `cosyncing dsh connect` when its cookie expires.
