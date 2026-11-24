@@ -17,13 +17,17 @@
  * - a name the form does not have fails the whole answer, and so does any field that fails.
  *
  * A failed answer rejects the extension's dialog outright, so the same rules run here BEFORE
- * anything is sent ({@link piFormAnswer}); a refused answer leaves the card open.
+ * anything is sent ({@link piFormAnswer}); a refused answer leaves the card open. One rule is
+ * skipped where it is not cheap: a `pattern` runs on the broker's event loop, and a backtracking
+ * matcher can take polynomial or exponential time, so it is checked only when a worst-case bound
+ * on that work for the answer's length is small ({@link patternCheckIsCheap}). Otherwise omp alone
+ * checks it, and an answer that fails it fails the extension's dialog after the card closed.
  *
  * Each named control becomes one question, in document order. A form this reader cannot represent
  * faithfully (a file input, a name shared by two different controls, a required group with nothing
- * left to choose, a `pattern` too expensive to check, no answerable control at all) is not offered:
- * the caller cancels it, as it does any dialog it cannot answer. Hidden inputs keep the form's own
- * values, so they are never sent.
+ * left to choose, no answerable control at all) is not offered: the caller cancels it, as it does
+ * any dialog it cannot answer. A `pattern` never keeps a form from being offered. Hidden inputs
+ * keep the form's own values, so they are never sent.
  *
  * The form is untrusted runtime input read on the broker's event loop: every scan here is linear in
  * the HTML's length.
@@ -80,10 +84,8 @@ export interface PiFormQuestion {
 
 /** Larger forms are not offered. omp itself refuses a frame past its protocol's intact size. */
 export const PI_FORM_HTML_MAX_CHARS = 1024 * 1024;
-/** A `pattern` longer than this is not checked here, so its form is not offered. */
-const PATTERN_MAX_CHARS = 512;
-/** An answer longer than this is not run against a `pattern` (bounds a polynomial backtrack). */
-const PATTERN_ANSWER_MAX_CHARS = 1024;
+/** The most matcher steps a `pattern` check may take, by {@link patternWorkBound}: a few ms. */
+const PATTERN_CHECK_BUDGET = 1_000_000;
 
 const SKIPPED = new Set(['script', 'style', 'template', 'head', 'title', 'noscript', 'iframe', 'button']);
 /** Elements whose content is text, not markup, up to their own end tag (HTML raw text / RCDATA). */
@@ -202,121 +204,172 @@ function endTagAt(html: string, name: string, from: number): number {
   }
 }
 
+/** Properties of strings (`v` flag): each can match many multi-character strings at one place. */
+const STRING_PROPERTIES = new Set([
+  'Basic_Emoji',
+  'Emoji_Keycap_Sequence',
+  'RGI_Emoji_Modifier_Sequence',
+  'RGI_Emoji_Flag_Sequence',
+  'RGI_Emoji_Tag_Sequence',
+  'RGI_Emoji_ZWJ_Sequence',
+  'RGI_Emoji',
+]);
+
+/** `{n}`, `{n,}` or `{n,m}` exactly at `lastIndex`. */
+const BRACE_QUANTIFIER = /\{(\d+)(?:(,)(\d*))?\}/y;
+
 /**
- * Whether a `pattern` can backtrack exponentially: a repeated group whose body itself repeats or
- * alternates (`(\w+\s?)+`, `(a|ab)*`). Such a pattern is not run on the broker, so its form is not
- * offered. Linear in the pattern's length.
+ * An upper bound on the steps a backtracking matcher takes to test `^(?:pattern)$` against a
+ * string of `length` UTF-16 units, or Infinity. `pattern` must already compile with the `v` flag.
+ *
+ * It counts the paths the matcher can explore. An atom (a character, class, escape, assertion or
+ * backreference) is one path; a sequence multiplies its parts, an alternation adds its branches, and
+ * a group or lookaround is its body. A quantifier over a body of `p` paths runs that body at most
+ * `r = min(max, min + length)` times (an iteration past `min` that matches nothing ends the loop),
+ * so it has at most `(r + 1) * p^r` paths. A class is one path plus one per `\q{…}` string, and a
+ * property of strings is Infinity. Each path then costs at most `pattern.length + length + 1`
+ * steps, times `length + 1` when a backreference compares a captured string.
+ *
+ * The bound is loose and errs high: `[a-z]+(-[a-z]+)*` counts as exponential, so a long answer to
+ * it is left to omp. Linear in the pattern's length.
  */
-function backtrackingPattern(pattern: string): boolean {
-  /** Per open group: whether its body holds a quantifier or an alternation. */
-  const bodies: boolean[] = [false];
-  const length = pattern.length;
-  const quantifierAt = (at: number): { length: number; repeats: boolean } | undefined => {
-    const ch = pattern[at];
-    let consumed: number;
-    let repeats: boolean;
-    if (ch === '*' || ch === '+') {
-      consumed = 1;
-      repeats = true;
-    } else if (ch === '?') {
-      consumed = 1;
-      repeats = false;
-    } else if (ch === '{') {
-      const match = /^\{(\d+)(,(\d*))?\}/.exec(pattern.slice(at, at + 24));
-      if (!match) return undefined;
-      consumed = match[0].length;
-      const most = match[2] === undefined ? Number(match[1]) : match[3] ? Number(match[3]) : Number.POSITIVE_INFINITY;
-      repeats = most > 1;
-    } else {
-      return undefined;
-    }
-    if (pattern[at + consumed] === '?') consumed += 1;
-    return { length: consumed, repeats };
-  };
+function patternWorkBound(pattern: string, length: number): number {
+  const size = pattern.length;
   let at = 0;
-  let classDepth = 0;
-  while (at < length) {
+  let backreference = false;
+  const cap = (value: number): number => (value > Number.MAX_SAFE_INTEGER ? Infinity : value);
+
+  /** Steps past the escape at `at`. Returns the choices it adds beside one character: a `\q{…}`
+   *  string each, Infinity for a property of strings, otherwise none. */
+  const skipEscape = (inClass: boolean): number => {
+    const kind = pattern[at + 1];
+    if ((kind === 'p' || kind === 'P' || kind === 'u' || kind === 'q') && pattern[at + 2] === '{') {
+      const close = pattern.indexOf('}', at + 3);
+      const body = pattern.slice(at + 3, close < 0 ? size : close);
+      at = close < 0 ? size : close + 1;
+      if (kind === 'p' && STRING_PROPERTIES.has(body)) return Infinity;
+      return kind === 'q' ? body.split('|').length : 0;
+    }
+    if (!inClass && kind === 'k' && pattern[at + 2] === '<') {
+      const close = pattern.indexOf('>', at + 3);
+      at = close < 0 ? size : close + 1;
+      backreference = true;
+      return 0;
+    }
+    if (!inClass && kind !== undefined && kind >= '1' && kind <= '9') {
+      at += 2;
+      while (at < size && pattern[at]! >= '0' && pattern[at]! <= '9') at++;
+      backreference = true;
+      return 0;
+    }
+    at += 2;
+    return 0;
+  };
+
+  /** Steps past the class at `at`, nested classes included. */
+  const skipClass = (): number => {
+    let depth = 0;
+    let paths = 1;
+    while (at < size) {
+      const ch = pattern[at];
+      if (ch === '\\') {
+        paths += skipEscape(true);
+        continue;
+      }
+      at++;
+      if (ch === '[') depth++;
+      else if (ch === ']' && --depth === 0) break;
+    }
+    return paths;
+  };
+
+  /** Steps past a quantifier at `at`, if one is there (a lazy one has the same paths). */
+  const quantifier = (): { min: number; max: number } | undefined => {
+    const ch = pattern[at];
+    let bounds: { min: number; max: number };
+    if (ch === '*') bounds = { min: 0, max: Infinity };
+    else if (ch === '+') bounds = { min: 1, max: Infinity };
+    else if (ch === '?') bounds = { min: 0, max: 1 };
+    else if (ch === '{') {
+      BRACE_QUANTIFIER.lastIndex = at;
+      const match = BRACE_QUANTIFIER.exec(pattern);
+      if (!match) return undefined;
+      const min = Number(match[1]);
+      bounds = { min, max: match[2] === undefined ? min : match[3] ? Number(match[3]) : Infinity };
+      at += match[0].length - 1;
+    } else return undefined;
+    at++;
+    if (pattern[at] === '?') at++;
+    return bounds;
+  };
+
+  const term = (): number => {
     const ch = pattern[at]!;
-    if (ch === '\\') {
-      const kind = pattern[at + 1];
-      if ((kind === 'p' || kind === 'P' || kind === 'u' || kind === 'q') && pattern[at + 2] === '{') {
-        const close = pattern.indexOf('}', at + 3);
-        at = close < 0 ? length : close + 1;
-      } else if (kind === 'k' && pattern[at + 2] === '<') {
-        const close = pattern.indexOf('>', at + 3);
-        at = close < 0 ? length : close + 1;
-      } else {
-        at += 2;
-      }
-      if (classDepth === 0) {
-        const quantifier = quantifierAt(at);
-        if (quantifier) {
-          bodies[bodies.length - 1] = true;
-          at += quantifier.length;
-        }
-      }
-      continue;
-    }
-    if (classDepth > 0) {
-      if (ch === '[') classDepth++;
-      else if (ch === ']') classDepth--;
-      at++;
-      if (classDepth === 0) {
-        const quantifier = quantifierAt(at);
-        if (quantifier) {
-          bodies[bodies.length - 1] = true;
-          at += quantifier.length;
-        }
-      }
-      continue;
-    }
-    if (ch === '[') {
-      classDepth = 1;
-      at++;
-      continue;
-    }
+    let paths: number;
     if (ch === '(') {
-      bodies.push(false);
       at++;
       if (pattern[at] === '?') {
-        // A group prefix (`?:`, `?=`, `?!`, `?<=`, `?<!`, `?<name>`, `?i:`) is not a quantifier.
         at++;
         if (pattern[at] === '<' && pattern[at + 1] !== '=' && pattern[at + 1] !== '!') {
           const close = pattern.indexOf('>', at);
-          at = close < 0 ? length : close + 1;
+          at = close < 0 ? size : close + 1;
+        } else if (pattern[at] === '<') {
+          at += 2;
+        } else if (pattern[at] === '=' || pattern[at] === '!' || pattern[at] === ':') {
+          at++;
         } else {
-          while (at < length && /[a-zA-Z-]/.test(pattern[at]!)) at++;
-          if (pattern[at] === '<') at++;
+          // Modifiers, `(?i:` or `(?-i:`.
+          while (at < size && pattern[at] !== ':') at++;
           at++;
         }
       }
-      continue;
-    }
-    if (ch === ')') {
-      const body = bodies.length > 1 ? bodies.pop()! : false;
+      paths = alternation();
+      if (pattern[at] === ')') at++;
+    } else if (ch === '[') {
+      paths = skipClass();
+    } else if (ch === '\\') {
+      paths = 1 + skipEscape(false);
+    } else if (ch === '*' || ch === '+' || ch === '?' || ch === '{') {
+      // Not reachable for a pattern that compiled; nothing here is bounded.
+      at = size;
+      return Infinity;
+    } else {
       at++;
-      const quantifier = quantifierAt(at);
-      if (quantifier) {
-        if (quantifier.repeats && body) return true;
-        at += quantifier.length;
-        bodies[bodies.length - 1] = true;
-      }
-      if (body) bodies[bodies.length - 1] = true;
-      continue;
+      paths = 1;
     }
-    if (ch === '|') {
-      bodies[bodies.length - 1] = true;
+    const bounds = quantifier();
+    if (!bounds) return paths;
+    const runs = Math.min(bounds.max, bounds.min + length);
+    if (paths <= 1) return cap(runs + 1);
+    return cap((runs + 1) * paths ** runs);
+  };
+
+  const sequence = (): number => {
+    let product = 1;
+    while (at < size && pattern[at] !== '|' && pattern[at] !== ')') product = cap(product * term());
+    return product;
+  };
+
+  function alternation(): number {
+    let total = sequence();
+    while (pattern[at] === '|') {
       at++;
-      continue;
+      total = cap(total + sequence());
     }
-    at++;
-    const quantifier = quantifierAt(at);
-    if (quantifier) {
-      bodies[bodies.length - 1] = true;
-      at += quantifier.length;
-    }
+    return total;
   }
-  return false;
+
+  const paths = alternation();
+  if (at < size) return Infinity;
+  return cap(paths * (size + length + 1) * (backreference ? length + 1 : 1));
+}
+
+/**
+ * Whether checking `text` against `pattern` here is cheap enough for the broker's event loop. When
+ * it is not, the check is skipped and left to omp.
+ */
+function patternCheckIsCheap(pattern: string, text: string): boolean {
+  return patternWorkBound(pattern, text.length) <= PATTERN_CHECK_BUDGET;
 }
 
 /** `^(?:pattern)$` as omp (and HTML) matches `pattern`, or undefined when it does not compile. */
@@ -542,16 +595,10 @@ export function parsePiFormDialog(html: unknown): PiFormDialog | undefined {
       const maxLength = finiteNumber(attrs.get('maxlength'));
       if (minLength !== undefined) draft.field.minLength = minLength;
       if (maxLength !== undefined) draft.field.maxLength = maxLength;
+      // omp ignores a pattern that does not compile. One that does is kept, whatever it costs to
+      // run: it is checked here only where that is cheap (`textFieldProblem`), otherwise by omp.
       const pattern = attrs.get('pattern');
-      if (pattern !== undefined) {
-        // omp ignores a pattern that does not compile; one that does is checked here first, so
-        // one too long or too expensive to run on the broker keeps its form from being offered.
-        if (pattern.length > PATTERN_MAX_CHARS) unsupported = true;
-        else if (compilePattern(pattern)) {
-          if (backtrackingPattern(pattern)) unsupported = true;
-          else draft.field.pattern = pattern;
-        }
-      }
+      if (pattern !== undefined && compilePattern(pattern)) draft.field.pattern = pattern;
       target(attrs, { draft });
       continue;
     }
@@ -641,8 +688,8 @@ function textFieldProblem(field: PiFormField, value: string | number | undefined
   if (field.maxLength !== undefined && text.length > field.maxLength) return `At most ${field.maxLength} characters`;
   if (field.inputType === 'email' && !/^[^\s@]+@[^\s@]+$/.test(text)) return 'Enter an email address';
   if (field.inputType === 'url' && !canParseUrl(text)) return 'Enter a full URL';
-  if (field.pattern) {
-    if (text.length > PATTERN_ANSWER_MAX_CHARS) return `Too long to check against the form's pattern (at most ${PATTERN_ANSWER_MAX_CHARS} characters)`;
+  // Skipped where it is not cheap: omp checks it then, and an answer that fails it fails the dialog.
+  if (field.pattern && patternCheckIsCheap(field.pattern, text)) {
     if (compilePattern(field.pattern)?.test(text) === false) return `Must match ${field.pattern}`;
   }
   return undefined;

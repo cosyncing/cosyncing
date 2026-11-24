@@ -58,10 +58,12 @@ service reconfiguration instead of leaving omp without its bridge.
   groups and single selects become single-choice questions, checkbox groups
   and multi-selects become multiple-choice questions, and text and number
   inputs become typed answers. An answer the form's own rules would refuse
-  (`required`, `pattern`, a length or number range, an email or URL field) is
-  not sent and the card stays open. A form that omp withdraws (for example
-  when its timeout expires) closes its card; omp then submits the form's
-  defaults.
+  (`required`, a length or number range, an email or URL field) is not sent
+  and the card stays open. A `pattern` is checked the same way only when that
+  check is quick for the answer given; otherwise omp checks it, and an answer
+  that does not match fails the form after the card has closed. A form that
+  omp withdraws (for example when its timeout expires) closes its card; omp
+  then submits the form's defaults.
 - In sessions driven from the app on omp 19.1.0, a turn that hands work to
   the background stays running with "Waiting for background work…" until the
   background result's turn ends or omp reports the session settled. Stop

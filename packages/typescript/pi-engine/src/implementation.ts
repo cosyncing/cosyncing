@@ -2779,11 +2779,12 @@ class PiConnection implements SessionConnection {
   /** Answer a `select` dialog with the user's ACTUAL choice (was: always options[0]), or an omp
    *  `form` with one value per control, in the shape omp validates.
    *
-   *  A form answer omp would refuse (`required`, `pattern`, a length or range, an email or URL
-   *  shape) is never sent: omp rejects the extension's whole dialog on one, after the card would
-   *  already show it answered. It is refused here instead, before anything changes, so the card
-   *  stays open. That refusal is a plain error (a `CLIENT_MESSAGE_FAILED` nack): neither
-   *  ControlRefusedError reason fits, since the request IS pending and answering IS supported. */
+   *  A form answer omp would refuse (`required`, a length or range, an email or URL shape, and a
+   *  `pattern` where that check is cheap; see form-dialog.ts) is never sent: omp rejects the
+   *  extension's whole dialog on one, after the card would already show it answered. It is
+   *  refused here instead, before anything changes, so the card stays open. That refusal is a
+   *  plain error (a `CLIENT_MESSAGE_FAILED` nack): neither ControlRefusedError reason fits, since
+   *  the request IS pending and answering IS supported. */
   async answerQuestion(requestId: string, answers: string[][]): Promise<void> {
     const ui = this.pendingQuestion(requestId);
     if (ui.form) {

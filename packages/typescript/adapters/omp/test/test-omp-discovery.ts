@@ -370,14 +370,41 @@ default</textarea></label>
     twoTexts: parsePiFormDialog('<form><input name="a"><input name="a"></form>'),
     radioAndCheckbox: parsePiFormDialog('<form><input type="radio" name="a" value="1"><input type="checkbox" name="a" value="2"></form>'),
     requiredNothingToPick: parsePiFormDialog('<form><input type="radio" name="a" value="1" required disabled></form>'),
-    backtracking: parsePiFormDialog('<form><input name="a" pattern="(\\w+\\s?)+"></form>'),
     nothing: parsePiFormDialog('<form><p>Just text</p></form>'),
   };
   const invalidPattern = parsePiFormDialog('<form><label>A <input name="a" pattern="["></label></form>');
-  check('file inputs, repeated names, unanswerable required groups, backtracking patterns and empty forms are refused',
+  check('file inputs, repeated names, unanswerable required groups and empty forms are refused',
     Object.values(refused).every((form) => form === undefined)
       && invalidPattern?.fields.length === 1 && invalidPattern.fields[0]!.pattern === undefined,
     JSON.stringify({ refused, invalidPattern }));
+
+  // A pattern never keeps a form from being offered. It is checked here only where a worst-case
+  // bound on the matcher's work for the answer is small; otherwise omp alone checks it.
+  const patternForm = (pattern: string) => parsePiFormDialog(`<form><label>Value <input name="v" pattern="${pattern}"></label></form>`);
+  const kept = ['[a-z]+(-[a-z]+)*', '\\d+(\\.\\d+)*', '(?:[a-z]|-)*', '(\\w+\\s?)+', '\\w*\\w*\\w*\\w*x', '[\\s\\S]*']
+    .map((pattern) => ({ pattern, form: patternForm(pattern) }));
+  check('forms with linear, polynomial and exponential patterns are all offered with the pattern kept',
+    kept.every(({ pattern, form }) => form?.fields.length === 1 && form.fields[0]!.pattern === pattern),
+    JSON.stringify(kept.map(({ pattern, form }) => [pattern, form?.fields[0]?.pattern])));
+  const alternation = patternForm('(?:[a-z]|-)*');
+  const cheapOk = alternation && piFormAnswer(alternation, [['a-b']]);
+  const cheapRefused = alternation && piFormAnswer(alternation, [['a_b']]);
+  check('a pattern that is cheap to run on a short answer is still checked before sending',
+    cheapOk?.ok === true && cheapRefused?.ok === false && /^Value: Must match /.test(cheapRefused.problem),
+    JSON.stringify({ cheapOk, cheapRefused }));
+  const slug = patternForm('[a-z]+(-[a-z]+)*');
+  const slugAnswer = slug && piFormAnswer(slug, [['my-slug']]);
+  check('a linear pattern the bound counts as costly is left to omp, and the answer is sent',
+    JSON.stringify(slugAnswer) === JSON.stringify({ ok: true, data: { v: 'my-slug' } }), JSON.stringify(slugAnswer));
+  const patternStarted = performance.now();
+  const polynomial = patternForm('\\w*\\w*\\w*\\w*x');
+  const polynomialAnswer = polynomial && piFormAnswer(polynomial, [['a'.repeat(1024)]]);
+  const anything = patternForm('[\\s\\S]*');
+  const longAnswer = anything && piFormAnswer(anything, [['b'.repeat(5000)]]);
+  const patternMs = performance.now() - patternStarted;
+  check('a polynomial pattern with a 1024-character answer returns at once, and a long answer is no longer refused',
+    patternMs < 1_000 && polynomialAnswer?.ok === true && longAnswer?.ok === true,
+    `${Math.round(patternMs)} ms ${JSON.stringify({ polynomial: polynomialAnswer?.ok, long: longAnswer?.ok })}`);
 
   // The parser runs on the broker's event loop: crafted HTML up to the size cap stays linear.
   const megabyte = 1024 * 1024 - 64;
