@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { OPENCODE_SHARED_ACTIONS } from '../commands.ts';
 import type { V2Binding } from '../binding.ts';
 import type { OpenCodeV2Backend } from './backend.ts';
-import { arrayData, compactAttachments, contentKey, finite, formAnswer, formCard, historyRows, messageRows, nativeId, newNativeId, object, permissionCard, runSummary, sessionPatch, toolMessages, type Native } from './mapping.ts';
+import { arrayData, compactAttachments, contentKey, finite, formAnswer, formCard, historyRows, isRunInput, messageRows, nativeId, newNativeId, object, permissionCard, runSummary, sessionPatch, toolMessages, type Native } from './mapping.ts';
 import { MAX_MESSAGE_RESPONSE_BYTES, MESSAGE_READ_BUDGET_MS, V2Error, type V2Event } from './transport.ts';
 
 /** A V1 history seat switches source when the shared service imports that same native ID. */
@@ -131,10 +131,10 @@ class BoundV2Connection implements SessionConnection {
   private reloadNeeded = false;
   private reloadNotice?: { notice: string; semantic: HistoryResetSemantic };
   private hasSnapshot = false;
-  private lastEnqueued?: string;
+  private lastEnqueued?: { id: string; user: boolean };
   private published: Partial<SessionInfo> = {};
   private publishedStatus?: string;
-  private run?: { key: string; startedAt?: number };
+  private run?: { key: string; startedAt?: number; user: boolean };
 
   constructor(readonly backend: OpenCodeV2Backend, readonly info: SessionInfo, private readonly binding: V2Binding, private readonly observe: boolean) {
     this.updateInfo();
@@ -198,8 +198,8 @@ class BoundV2Connection implements SessionConnection {
         }
         while (this.ended.size > 4096) this.ended.delete(this.ended.values().next().value!);
         const lastIdle = messages.findLastIndex((message) => message.type === 'idle');
-        const firstUser = messages.slice(lastIdle + 1).find((message) => message.type === 'user');
-        if (firstUser && this.backend.active.has(this.info.id)) this.run = { key: firstUser.id, startedAt: firstUser.time?.created };
+        const input = messages.slice(lastIdle + 1).find(isRunInput);
+        if (input && this.backend.active.has(this.info.id)) this.run = { key: input.id, startedAt: input.time?.created, user: input.type === 'user' };
         this.ready = true;
         this.syncPending();
         if (this.hasSnapshot) this.emit({ type: 'history-reset', ...notice });
@@ -266,8 +266,14 @@ class BoundV2Connection implements SessionConnection {
     if (event.type === 'session.inbox.enqueued' && nativeId(data.inboxID, 'msg_') && data.item?.type === 'user' && typeof data.item.payload?.text === 'string') {
       const user = { ...data.item.payload, id: data.inboxID, type: 'user', time: { created: event.created } };
       this.inbox.set(user.id, user);
-      if (!this.run) this.lastEnqueued = user.id;
+      if (!this.run) this.lastEnqueued = { id: user.id, user: true };
       for (const row of messageRows(user, this.backend.clientKeys)) this.emit({ ...row, ...(row.type === 'user-message' ? { queued: true } : {}) });
+    } else if (event.type === 'session.inbox.enqueued' && nativeId(data.inboxID, 'msg_') && data.item?.type === 'synthetic') {
+      // OpenCode 2.3 reports a background subagent going idle, or a background shell exiting, as
+      // queued synthetic input that starts an execution nobody prompted. It names that run; it is
+      // not a user row, so delivery has nothing to fetch or render.
+      this.inbox.set(data.inboxID, { id: data.inboxID, type: 'synthetic' });
+      if (!this.run) this.lastEnqueued = { id: data.inboxID, user: false };
     } else if (event.type === 'session.inbox.delivered' && nativeId(data.inboxID, 'msg_')) {
       const user = this.inbox.get(data.inboxID);
       this.inbox.delete(data.inboxID);
@@ -277,11 +283,11 @@ class BoundV2Connection implements SessionConnection {
         for (const row of messageRows(compactAttachments(value.data), this.backend.clientKeys)) this.emit(row);
       }).catch(() => {});
     } else if (event.type === 'session.execution.started') {
-      this.run = { key: this.lastEnqueued ?? `execution:${event.durable?.seq ?? event.created}`, startedAt: event.created };
+      this.run = { key: this.lastEnqueued?.id ?? `execution:${event.durable?.seq ?? event.created}`, startedAt: event.created, user: this.lastEnqueued?.user ?? false };
       this.lastEnqueued = undefined;
-      this.emit(runSummary(this.run.key, 'running', this.run.startedAt));
+      this.emit(runSummary(this.run.key, 'running', this.run.startedAt, undefined, undefined, this.run.user));
     } else if (['session.execution.succeeded', 'session.execution.failed', 'session.execution.interrupted'].includes(event.type)) {
-      const run = this.run ?? { key: `execution:${event.durable?.seq ?? event.created}`, startedAt: undefined };
+      const run = this.run ?? { key: `execution:${event.durable?.seq ?? event.created}`, startedAt: undefined, user: false };
       this.lastEnqueued = undefined;
       this.run = undefined;
       if (!this.terminalRuns.has(run.key)) {
@@ -292,8 +298,8 @@ class BoundV2Connection implements SessionConnection {
           const start = messages.findIndex((message) => message.id === run.key);
           const end = messages.findIndex((message, index) => index > start && message.type === 'idle' && (run.startedAt === undefined || message.time?.created >= run.startedAt) && (message.time?.created ?? Infinity) <= (event.created ?? Infinity));
           const assistant = messages.slice(Math.max(0, start), end < 0 ? undefined : end).findLast((message) => message.type === 'assistant' && (run.startedAt === undefined || message.time?.created >= run.startedAt) && (event.created === undefined || message.time?.created <= event.created));
-          this.emit(runSummary(run.key, status, run.startedAt, event.created, assistant));
-        }).catch(() => this.emit(runSummary(run.key, status, run.startedAt, event.created)));
+          this.emit(runSummary(run.key, status, run.startedAt, event.created, assistant, run.user));
+        }).catch(() => this.emit(runSummary(run.key, status, run.startedAt, event.created, undefined, run.user)));
       }
     } else if (/^session\.(text|reasoning)\.(delta|ended)$/.test(event.type)) {
       if (!nativeId(data.assistantMessageID, 'msg_') || !Number.isSafeInteger(data.ordinal) || data.ordinal < 0) return;

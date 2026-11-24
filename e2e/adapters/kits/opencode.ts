@@ -986,8 +986,36 @@ opencodeV2Kit.extras!.push(
         const second = await stream.waitForFrame((frame) => frame.kind === 'message' && frame.message.type === 'run-summary' && frame.message.status === 'done', { after: next });
         expect(second.message.key).not.toBe(first.message.key);
         expect(second.message.turnId).toStartWith('execution:');
+        expect(second.message.userMessageKey).toBeUndefined();
         expect(stream.frames.slice(next).some((frame) => frame.kind === 'message' && frame.message.type === 'run-summary' && frame.message.key === first.message.key)).toBe(false);
         await stream.waitForFrame((frame) => frame.kind === 'session' && frame.info.status === 'idle', { after: next });
+        // 2.3: a background subagent or shell reports back as queued synthetic input, which starts
+        // a turn nobody prompted. That turn is keyed by the report, live and in history alike,
+        // and the report itself is never a user row.
+        const reported = stream.frames.length;
+        const report = fake.serve.backgroundReport(session.id, '<subagent sessionID="ses_fixturechild" state="completed" description="Synthetic child task">\nchild done\n</subagent>');
+        const third = await stream.waitForFrame((frame) => frame.kind === 'message' && frame.message.type === 'run-summary' && frame.message.status === 'done', { after: reported });
+        expect(third.message.turnId).toBe(report);
+        expect(third.message.userMessageKey).toBeUndefined();
+        expect(stream.frames.slice(reported).some((frame) => frame.kind === 'message' && frame.message.type === 'user-message')).toBe(false);
+        const reader = await context.client.attach('opencode', session.id, { readOnly: true });
+        try {
+          const history = await reader.waitForKind('history');
+          const stored = history.messages.filter((message: any) => message.type === 'run-summary' && message.turnId === report);
+          expect(stored.length).toBeGreaterThan(0);
+          expect(stored.every((message: any) => message.userMessageKey === undefined && message.key === third.message.key)).toBe(true);
+          expect(history.messages.some((message: any) => message.type === 'user-message' && String(message.text).includes('<subagent'))).toBe(false);
+          // Every newer summary names a user row only when a prompt started it: the prompted turn
+          // does, the unprompted one and the reported one do not.
+          const prompted = history.messages.findIndex((message: any) => message.type === 'user-message' && message.text === 'a prompted execution');
+          expect(prompted).toBeGreaterThanOrEqual(0);
+          const byKey = new Map<string, any>();
+          for (const message of history.messages.slice(prompted)) if (message.type === 'run-summary') byKey.set(message.key, message);
+          const newer = [...byKey.values()];
+          expect(newer.length).toBeGreaterThanOrEqual(3);
+          expect(newer[0].userMessageKey).toBe(history.messages[prompted].key);
+          expect(newer.slice(1).map((message: any) => message.userMessageKey)).toEqual(newer.slice(1).map(() => undefined));
+        } finally { reader.close(); }
       } finally { stream.close(); }
     },
   },

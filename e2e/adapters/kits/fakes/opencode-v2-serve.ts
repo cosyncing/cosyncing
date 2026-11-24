@@ -126,6 +126,26 @@ export class FakeOpenCodeV2Serve {
     this.emit('session.execution.succeeded', { sessionID: id }, true);
   }
 
+  /** A background subagent going idle, or a background shell exiting, as 2.3.2 reports it (captured):
+   *  synthetic input queued and delivered, a `synthetic` history row, then an unprompted execution. */
+  backgroundReport(id: string, text: string): string {
+    const session = this.session(id);
+    const input = { id: this.id('msg'), time: { created: this.now() }, type: 'synthetic', text, description: 'Synthetic child task' };
+    this.emit('session.inbox.enqueued', { sessionID: id, inboxID: input.id, item: { type: 'synthetic', payload: { text, description: input.description, metadata: {} }, delivery: 'steer' } }, true);
+    session.busy = true;
+    this.emit('session.execution.started', { sessionID: id }, true);
+    session.messages.push(input);
+    this.emit('session.inbox.delivered', { sessionID: id, inboxID: input.id }, true);
+    const assistant = { id: this.id('msg'), type: 'assistant', time: { created: this.now(), completed: this.now() }, content: [{ type: 'text', text: 'reported back' }], tokens: { input: 2, output: 2 }, cost: 0 };
+    session.messages.push(assistant);
+    this.emit('session.text.ended', { sessionID: id, assistantMessageID: assistant.id, ordinal: 0, text: 'reported back' }, true);
+    session.messages.push({ id: this.id('msg'), type: 'idle', time: { created: this.now() }, outcome: 'succeeded' });
+    session.busy = false;
+    session.info.time.updated = this.now();
+    this.emit('session.execution.succeeded', { sessionID: id }, true);
+    return input.id;
+  }
+
   finishCompaction(id: string, failed = false): void {
     const session = this.session(id), inputID = this.compactions.get(id)!;
     this.compactions.delete(id);

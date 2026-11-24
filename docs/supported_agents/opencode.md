@@ -45,6 +45,11 @@ export. OpenCode 2 uses its native command catalog; share and unshare are
 not offered. Forms that require external input, conditions or patterns stay
 visible and ask you to answer in the terminal.
 
+OpenCode 2.3 runs subagents, and shell commands that outlast their timeout,
+in the background. The session shows as idle while they run. When one
+finishes, OpenCode starts a new turn in that session by itself, and the app
+shows that turn's answer and summary like any other turn.
+
 For OpenCode 2, the terminal sync hint opens the same session with:
 
 ```bash

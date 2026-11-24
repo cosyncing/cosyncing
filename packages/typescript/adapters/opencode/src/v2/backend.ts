@@ -396,7 +396,7 @@ export class OpenCodeV2Backend {
       } else { page++; limit = Math.min(100, limit * 2); }
       bytes += Buffer.byteLength(JSON.stringify(data));
       if (bytes > 64 * 1024 * 1024) throw new V2Error('invalid-response');
-      this.unknownMessages += data.filter((message) => !['user', 'assistant', 'idle', 'compaction'].includes(message.type)).length;
+      this.unknownMessages += data.filter((message) => !['user', 'synthetic', 'assistant', 'idle', 'compaction'].includes(message.type)).length;
       pages.push([...data].reverse());
       cursor = value.cursor?.next;
       const reachedRun = until && (until.messageId

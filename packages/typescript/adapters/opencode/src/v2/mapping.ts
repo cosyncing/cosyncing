@@ -156,24 +156,33 @@ export function messageRows(message: Native, clientKeys: ReadonlyMap<string, str
   });
 }
 
-export function runSummary(key: string, status: 'running' | 'done' | 'error' | 'cancelled', startedAt?: number, completedAt?: number, assistant?: Native): Extract<AgentMessage, { type: 'run-summary' }> {
+/** `fromUser` is false for an execution OpenCode started itself (a background subagent or shell
+ *  report, a staged revert): its key names that input, which has no user row to attach to. */
+export function runSummary(key: string, status: 'running' | 'done' | 'error' | 'cancelled', startedAt?: number, completedAt?: number, assistant?: Native, fromUser = key.startsWith('msg_')): Extract<AgentMessage, { type: 'run-summary' }> {
   const tokens = assistant?.tokens;
-  return { type: 'run-summary', key: `opencode-v2:run:${key}`, turnId: key, userMessageKey: key.startsWith('msg_') ? key : undefined, status, startedAt, completedAt,
+  return { type: 'run-summary', key: `opencode-v2:run:${key}`, turnId: key, userMessageKey: fromUser ? key : undefined, status, startedAt, completedAt,
     ...(finite(startedAt) && finite(completedAt) ? { totalRuntimeMs: Math.max(0, completedAt - startedAt) } : {}),
     ...(object(tokens) ? { tokens: { ...(finite(tokens.input) ? { input: tokens.input } : {}), ...(finite(tokens.output) ? { output: tokens.output } : {}), ...(finite(tokens.cache?.read) ? { cacheRead: tokens.cache.read } : {}), ...(finite(tokens.cache?.write) ? { cacheWrite: tokens.cache.write } : {}), ...(finite(assistant?.cost) ? { cost: assistant.cost } : {}) } } : {}), source: 'opencode' };
 }
 
+/** What starts an execution: a user prompt, or (2.3.x) the `synthetic` report OpenCode queues when a
+ *  background subagent goes idle or a background shell exits. The synthetic report is not shown
+ *  as a row; it only names the execution it starts. */
+export function isRunInput(message: Native): boolean {
+  return (message.type === 'user' || message.type === 'synthetic') && nativeId(message.id, 'msg_');
+}
+
 export function historyRows(messages: Native[], clientKeys: ReadonlyMap<string, string>): AgentMessage[] {
   const result: AgentMessage[] = [];
-  let user: Native | undefined;
+  let input: Native | undefined;
   let assistant: Native | undefined;
   for (const message of messages) {
-    if (message.type === 'user' && !user) user = message;
+    if (isRunInput(message) && !input) input = message;
     if (message.type === 'assistant') assistant = message;
     result.push(...messageRows(message, clientKeys));
     if (message.type === 'idle' && ['succeeded', 'failed', 'interrupted'].includes(message.outcome) && nativeId(message.id, 'msg_')) {
-      result.push(runSummary(user?.id ?? message.id, message.outcome === 'succeeded' ? 'done' : message.outcome === 'interrupted' ? 'cancelled' : 'error', user?.time?.created ?? assistant?.time?.created, message.time?.created, assistant));
-      user = undefined; assistant = undefined;
+      result.push(runSummary(input?.id ?? message.id, message.outcome === 'succeeded' ? 'done' : message.outcome === 'interrupted' ? 'cancelled' : 'error', input?.time?.created ?? assistant?.time?.created, message.time?.created, assistant, input?.type === 'user'));
+      input = undefined; assistant = undefined;
     }
   }
   return result;
