@@ -305,8 +305,10 @@ export function piFamilyExtras(dialect: PiFamilyDialect): ConformanceExtra[] {
           expect(bare.status, bare.text).toBe(200);
           const bareCommands = fake.ledger.commands('fork', bareMark);
           expect(bareCommands.length).toBe(1);
-          expect(bareCommands[0]!.frame.type).toBe('fork');
-          expect('entryId' in bareCommands[0]!.frame).toBe(false);
+          // A missing frame reads as `{}`, which fails the type check below.
+          const bareFrame: Record<string, any> = bareCommands[0]?.frame ?? {};
+          expect(bareFrame.type).toBe('fork');
+          expect('entryId' in bareFrame).toBe(false);
           expect(fake.ledger.commands('clone', bareMark)).toEqual([]);
           expect(fake.ledger.spawns(bareMark).some((entry) => entry.pid === bareCommands[0]!.pid && entry.session === sourceFile)).toBe(true);
           expect(await userTexts(bare.body.session.id)).toEqual([stored.texts[0]!, stored.texts[2]!]);
