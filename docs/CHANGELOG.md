@@ -18,10 +18,13 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   dismissing from the app continues the Kilo turn. Before, the turn waited with no
   card and the session stayed Working.
 - omp 19.1.0 is supported alongside omp 17.4.2. omp 19.1.0 needs Bun 1.4.4 or
-  newer; doctor names the Bun it needs.
+  newer; `cosy doctor` suggests the omp version the installed Bun can run. A
+  session written by a newer omp than the one cosyncing runs stays readable but
+  is not resumed, forked or renamed through omp.
 - Forms from omp 19.1.0 extensions appear as question cards: choices, multiple
-  choices, and typed answers. A form omp withdraws, for example at its timeout,
-  closes its card.
+  choices, and typed answers. An answer the form would refuse is not sent, and
+  the card stays open. A form omp withdraws, for example at its timeout, closes
+  its card.
 - Sessions can be forked on omp 19.1.0. Forking a whole session copies all of it;
   forking at a message keeps that message in the copy. Clone stays unavailable
   for omp.
@@ -52,8 +55,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   driven session that another Kimi program holds switches to observe.
 - While omp 19.1.0 waits for background work it started, a session driven from
   the app shows Working with "Waiting for background work…" instead of going idle
-  early. In a session running in an omp terminal, background work that ends
-  without a follow-up run leaves the session Working until its next run.
+  early, and Stop ends the wait. In a session running in an omp terminal,
+  background work that ends without a follow-up run leaves the session Working
+  until its next run.
 - Pi is verified against Pi 1.6.0. The minimum version stays 0.78.1.
 - Grok Build 1.0.92 is now a measured version, including Stop and file-write
   permissions.
