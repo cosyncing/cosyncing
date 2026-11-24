@@ -131,7 +131,6 @@ class BoundV2Connection implements SessionConnection {
   private reloadNeeded = false;
   private reloadNotice?: { notice: string; semantic: HistoryResetSemantic };
   private hasSnapshot = false;
-  private lastEnqueued?: { id: string; user: boolean };
   private published: Partial<SessionInfo> = {};
   private publishedStatus?: string;
   private run?: { key: string; startedAt?: number; user: boolean };
@@ -199,7 +198,14 @@ class BoundV2Connection implements SessionConnection {
         while (this.ended.size > 4096) this.ended.delete(this.ended.values().next().value!);
         const lastIdle = messages.findLastIndex((message) => message.type === 'idle');
         const input = messages.slice(lastIdle + 1).find(isRunInput);
-        if (input && this.backend.active.has(this.info.id)) this.run = { key: input.id, startedAt: input.time?.created, user: input.type === 'user' };
+        // A run that ended while events were missed must not name the next one.
+        if (!this.backend.active.has(this.info.id)) this.run = undefined;
+        else if (input) this.run = { key: input.id, startedAt: input.time?.created, user: input.type === 'user' };
+        // Queued inputs the snapshot already holds were delivered while events were missed.
+        if (this.inbox.size) {
+          const delivered = new Set(messages.map((message) => message.id));
+          for (const id of [...this.inbox.keys()]) if (delivered.has(id)) this.inbox.delete(id);
+        }
         this.ready = true;
         this.syncPending();
         if (this.hasSnapshot) this.emit({ type: 'history-reset', ...notice });
@@ -266,14 +272,12 @@ class BoundV2Connection implements SessionConnection {
     if (event.type === 'session.inbox.enqueued' && nativeId(data.inboxID, 'msg_') && data.item?.type === 'user' && typeof data.item.payload?.text === 'string') {
       const user = { ...data.item.payload, id: data.inboxID, type: 'user', time: { created: event.created } };
       this.inbox.set(user.id, user);
-      if (!this.run) this.lastEnqueued = { id: user.id, user: true };
       for (const row of messageRows(user, this.backend.clientKeys)) this.emit({ ...row, ...(row.type === 'user-message' ? { queued: true } : {}) });
     } else if (event.type === 'session.inbox.enqueued' && nativeId(data.inboxID, 'msg_') && data.item?.type === 'synthetic') {
       // OpenCode 2.3 reports a background subagent going idle, or a background shell exiting, as
       // queued synthetic input that starts an execution nobody prompted. It names that run; it is
       // not a user row, so delivery has nothing to fetch or render.
       this.inbox.set(data.inboxID, { id: data.inboxID, type: 'synthetic' });
-      if (!this.run) this.lastEnqueued = { id: data.inboxID, user: false };
     } else if (event.type === 'session.inbox.delivered' && nativeId(data.inboxID, 'msg_')) {
       const user = this.inbox.get(data.inboxID);
       this.inbox.delete(data.inboxID);
@@ -283,12 +287,14 @@ class BoundV2Connection implements SessionConnection {
         for (const row of messageRows(compactAttachments(value.data), this.backend.clientKeys)) this.emit(row);
       }).catch(() => {});
     } else if (event.type === 'session.execution.started') {
-      this.run = { key: this.lastEnqueued?.id ?? `execution:${event.durable?.seq ?? event.created}`, startedAt: event.created, user: this.lastEnqueued?.user ?? false };
-      this.lastEnqueued = undefined;
+      // An execution starts by delivering the oldest queued input (enqueued, started, then delivered,
+      // as captured), which may have been queued behind a run or behind newer input. An input whose
+      // run already ended but was never reported delivered does not name another.
+      const input = [...this.inbox.values()].find((entry) => entry.id !== this.run?.key && !this.terminalRuns.has(entry.id));
+      this.run = { key: input?.id ?? `execution:${event.durable?.seq ?? event.created}`, startedAt: event.created, user: input?.type === 'user' };
       this.emit(runSummary(this.run.key, 'running', this.run.startedAt, undefined, undefined, this.run.user));
     } else if (['session.execution.succeeded', 'session.execution.failed', 'session.execution.interrupted'].includes(event.type)) {
       const run = this.run ?? { key: `execution:${event.durable?.seq ?? event.created}`, startedAt: undefined, user: false };
-      this.lastEnqueued = undefined;
       this.run = undefined;
       if (!this.terminalRuns.has(run.key)) {
         this.terminalRuns.add(run.key);
