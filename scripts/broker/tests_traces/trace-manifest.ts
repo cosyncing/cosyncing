@@ -207,9 +207,9 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
     coverage: [
       { fn: 'F01', level: 'L2', agents: ['omp'], note: 'leading title slot, session header discovery, and stable session identity' },
       { fn: 'F04', level: 'L2', agents: ['omp'], note: 'shared JSONL mapper consumes omp session history; omp 19.1.0 activeLeafId replays the branch it records (source-modelled rows)' },
-      { fn: 'F07', level: 'L1', agents: ['omp'], note: 'omp 19.1.0 form HTML parser, answer shapes, and the field rules omp enforces before an answer is sent' },
+      { fn: 'F07', level: 'L1', agents: ['omp'], note: 'omp 19.1.0 form HTML parser, answer shapes, and the field rules omp enforces before an answer is sent (a pattern only where a work bound says the check is cheap)' },
       { fn: 'F08', level: 'L2', agents: ['omp'], note: 'combined provider/modelId model_change maps to canonical model identity' },
-      { fn: 'F14', level: 'L1', agents: ['omp'], note: 'last-write-wins title and title_change lifecycle metadata; Resume and native rename refused for a file a newer omp wrote' },
+      { fn: 'F14', level: 'L1', agents: ['omp'], note: 'last-write-wins title and title_change lifecycle metadata; Resume, fork and native rename refused for a file a newer omp wrote (top-level stamps, incomparable ones refused)' },
       { fn: 'F15', level: 'L1', agents: ['omp'], note: 'model/status metadata survives discovery' },
     ],
   },
