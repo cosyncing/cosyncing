@@ -17,7 +17,7 @@ check yet: its stored sessions keep offering Take over, which then fails.
 | Agent | Minimum version | Preferred installation for cosyncing | Integration |
 | --- | ---: | --- | --- |
 | [Codex](codex.md) | 0.144.5 | Official standalone installer | Managed app-server, Drive, and terminal sync |
-| [OpenCode](opencode.md) | 1.17.19 | Official install script | Managed shared `serve` |
+| [OpenCode](opencode.md) | 1.17.19 (V1); 2.2.0 (V2) | Official install script or `opencode-ai` (V1); `@opencode/cli` (V2) | V1 managed `serve`; V2 user-run shared service |
 | [Pi](pi.md) | 0.78.1 (verified through 1.6.0) | Official install script | Packaged in-session bridge |
 | [Claude Code](claude-code.md) | 2.1.207 | Official npm or native installer | Observe and Take over; [true sync](claude-true-sync.md) through a Claude Code mod on 2.1.288 or newer |
 
