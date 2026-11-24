@@ -685,7 +685,8 @@ export function piFormAnswer(form: PiFormDialog, answers: readonly (readonly str
       for (const answer of row) {
         const option = field.options.find((candidate) => candidate.label === answer)
           ?? field.options.find((candidate) => candidate.value === answer);
-        if (!option) return { ok: false, problem: `${field.question}: "${answer}" is not one of its options` };
+        // Names the field only: the refusal travels in logs and nacks, the user's text does not.
+        if (!option) return { ok: false, problem: `${field.question}: Choose one of its options` };
         if (!values.includes(option.value)) values.push(option.value);
       }
     } else {

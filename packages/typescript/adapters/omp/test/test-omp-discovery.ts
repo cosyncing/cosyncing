@@ -360,7 +360,8 @@ default</textarea></label>
       && /^Code: Must match /.test(refusals[2]!)
       && /^Mail: Enter an email address$/.test(refusals[3]!)
       && /^Site: Enter a full URL$/.test(refusals[4]!)
-      && /^Size: "Huge" is not one of its options$/.test(refusals[5]!),
+      && /^Size: Choose one of its options$/.test(refusals[5]!)
+      && !refusals.some((problem) => problem.includes('Huge')),
     JSON.stringify(refusals));
 
   // Forms the card cannot carry exactly are not offered; an invalid pattern is ignored, as omp does.
