@@ -197,6 +197,29 @@ try {
     return [ok, `discovered=${discovered?.id === id} decodedRealpath=${decoded === realpathSync(DISCOVERY_SESSION_FILE)}`];
   });
 
+  // The hello gate accepts each captured omp build (17.4.2 and 19.1.0), whichever the broker's own
+  // omp is, and refuses a release between them. The broker's omp here is 17.4.2, whose RPC has no
+  // fork, so fork is not offered.
+  await test('captured omp builds register, an uncaptured one is refused, and 17.4.2 offers no fork', async () => {
+    const nineteenFile = join(DISCOVERY_SESSION_DIR, '2026-11-24T00-00-00-000Z_omp-nineteen.jsonl');
+    writeFileSync(nineteenFile, JSON.stringify({ type: 'session', version: 3, id: 'omp-nineteen', timestamp: new Date().toISOString(), cwd: DISCOVERY_CWD }) + '\n');
+    const helloAs = (nativeVersion: string) => post('/omp/bridge/hello', {
+      sessionFile: realpathSync(nineteenFile), cwd: DISCOVERY_CWD, title: 'omp-bridge-test', nativeVersion,
+    });
+    const accepted = await helloAs('19.1.0');
+    const acceptedBody = await accepted.json().catch(() => ({})) as any;
+    if (typeof acceptedBody?.id === 'string') await bye(acceptedBody.id, 'quit');
+    const refused = await helloAs('18.2.0');
+    const refusedBody = await refused.json().catch(() => ({})) as any;
+    const agents = await (await fetch(`${BROKER}/api/agents?contractRevision=${BROKER_CONTRACT_REVISION}`)).json() as any[];
+    const omp = agents.find((agent) => agent.id === 'omp');
+    const ok = accepted.status === 200 && typeof acceptedBody?.id === 'string'
+      && refused.status === 409 && refusedBody.code === 'OMP_BRIDGE_NATIVE_VERSION_UNVERIFIED'
+      && /17\.4\.2 and 19\.1\.0/.test(String(refusedBody.error))
+      && omp?.canFork === false && omp?.canClone === false;
+    return [ok, `accepted=${accepted.status} refused=${refused.status}/${refusedBody.code} fork=${omp?.canFork} clone=${omp?.canClone}`];
+  });
+
 } finally {
   // Awaiting the exit is the point: signalling and returning left the broker
   // and its children alive past this process, for the lane to reap.
@@ -260,8 +283,9 @@ process.exit(73);
         && otherStatuses.every((status) => status === 409)
         && omp?.supportsCreateSession === true
         && omp?.canCreateSession === false
-        && omp?.canRenameNative === false;
-      return [ok, `hello=${helloResponse.status}/${helloBody.code} others=${otherStatuses.join(',')} create=${omp?.canCreateSession} rename=${omp?.canRenameNative}`];
+        && omp?.canRenameNative === false
+        && omp?.canFork === false;
+      return [ok, `hello=${helloResponse.status}/${helloBody.code} others=${otherStatuses.join(',')} create=${omp?.canCreateSession} rename=${omp?.canRenameNative} fork=${omp?.canFork}`];
     });
 
     // The shipped omp asset, loaded by an omp attesting that same unverified version, meets this

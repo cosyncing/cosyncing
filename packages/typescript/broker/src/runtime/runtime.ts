@@ -62,7 +62,8 @@ import {
   inspectOmpPathCollision,
   OmpAdapter,
   OMP_DIALECT,
-  OMP_VERIFIED_VERSION,
+  isOmpVerifiedVersion,
+  ompVerifiedVersionsText,
 } from '@cosyncing/adapter-omp';
 import { ReasonixAdapter } from '@cosyncing/adapter-reasonix';
 import { GrokAdapter } from '@cosyncing/adapter-grok';
@@ -7853,11 +7854,11 @@ server = Bun.serve<WsData>({
       const b: any = decodedBridgeBody ?? await req.json().catch(() => ({}));
       if (b?.epoch !== undefined && (typeof b.epoch !== 'string' || !/^[A-Za-z0-9-]{1,80}$/.test(b.epoch))) return json({ error: 'invalid bridge generation' }, 400);
       if (ompBridge.isClosed(b?.epoch)) return json({ error: 'closed bridge generation' }, 410);
-      if (b?.nativeVersion !== OMP_VERIFIED_VERSION) {
+      if (!isOmpVerifiedVersion(b?.nativeVersion)) {
         return json({
           ok: false,
           code: 'OMP_BRIDGE_NATIVE_VERSION_UNVERIFIED',
-          error: `OMP bridge registration requires native version ${OMP_VERIFIED_VERSION}.`,
+          error: `OMP bridge registration requires a verified native version (${ompVerifiedVersionsText()}).`,
         }, 409);
       }
       const readiness = currentOmpRuntimeReadiness();

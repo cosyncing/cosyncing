@@ -22,8 +22,11 @@ import type { SetupDiagnosisContext } from '@cosyncing/adapter-api';
 import {
   diagnoseOmpBunRuntime,
   inspectOmpRuntimeReadiness,
+  isOmpVerifiedVersion,
   OMP_DEFAULT_BUN_MINIMUM_VERSION,
   OMP_MINIMUM_SUPPORTED_VERSION,
+  OMP_VERIFIED_VERSION_BUN_FLOOR,
+  ompIdentityVersion,
   type OmpRuntimeHost,
 } from '../src/index.ts';
 
@@ -209,6 +212,67 @@ try {
     }, override);
     assert.deepEqual({ status: doctor.status, detailCode: doctor.detailCode }, { status, detailCode },
       `doctor for a launcher answering ${JSON.stringify(answer)}`);
+  }
+
+  // omp 19.1.0 is the second captured build. Its package declares `engines.bun >=1.4.4` (measured),
+  // so the same Bun that drives 17.4.2 is refused for it, and a release between the two captured
+  // ones stays Observe-only.
+  const bun144 = makeBun('1.4.4', 'bun-1.4.4');
+  const omp19 = makeOmpPackage('omp-19', { version: '19.1.0', bunEngine: `>=${OMP_VERIFIED_VERSION_BUN_FLOOR}` });
+  const omp19OldBun = inspectOmpRuntimeReadiness({ PATH: `${dirname(floorBun)}:${omp19.binDir}` });
+  assert.equal(omp19OldBun.ready, false, 'omp 19.1.0 needs the Bun its package declares');
+  assert.equal(omp19OldBun.detailCode, 'omp-bun-version-below-minimum');
+  assert.equal(omp19OldBun.requiredBunVersion, '1.4.4');
+  const omp19Ready = inspectOmpRuntimeReadiness({ PATH: `${dirname(bun144)}:${omp19.binDir}` });
+  assert.equal(omp19Ready.ready, true, 'omp 19.1.0 on Bun 1.4.4 is a verified runtime');
+  assert.equal(omp19Ready.packageVersion, '19.1.0');
+  const between = makeOmpPackage('omp-between', { version: '18.2.0', bunEngine: `>=${OMP_VERIFIED_VERSION_BUN_FLOOR}` });
+  const betweenResult = inspectOmpRuntimeReadiness({ PATH: `${dirname(bun144)}:${between.binDir}` });
+  assert.equal(betweenResult.ready, false, 'a release between two captured builds is not captured');
+  assert.equal(betweenResult.detailCode, 'omp-package-version-above-verified');
+  assert.match(betweenResult.message, /verified only for omp 17\.4\.2 and 19\.1\.0/);
+  assert.match(betweenResult.message, /Bun 1\.4\.4/, 'the refusal names the Bun omp 19.1.0 needs');
+  const futureNineteen = makeOmpPackage('omp-19-next', { version: '19.2.0', bunEngine: `>=${OMP_VERIFIED_VERSION_BUN_FLOOR}` });
+  assert.equal(
+    inspectOmpRuntimeReadiness({ PATH: `${dirname(bun144)}:${futureNineteen.binDir}` }).detailCode,
+    'omp-package-version-above-verified',
+  );
+
+  // omp 19.1.0 answers `--version` as `omp/19.1.0` (captured stdout); 17.4.2 answers a bare version.
+  assert.equal(ompIdentityVersion('omp/19.1.0\n'), '19.1.0');
+  assert.equal(ompIdentityVersion('17.4.2\n'), '17.4.2');
+  assert.equal(ompIdentityVersion('other/19.1.0\n'), undefined, "a version beside another tool's name is not omp");
+  const native19 = inspectOmpRuntimeReadiness(
+    { COSYNCING_OMP_BIN: makeExecutable(join(root, 'native-19', 'omp'), 'native fixture — no shebang\n'), PATH: '' },
+    { probeVersionOutput: () => ({ output: 'omp/19.1.0\n' }) },
+  );
+  assert.equal(native19.ready, true, 'the captured omp 19.1.0 version answer identifies omp');
+  assert.equal(native19.packageVersion, '19.1.0');
+
+  assert.deepEqual(['17.4.2', '19.1.0', '18.2.0', '19.1.1', '17.4.1'].map(isOmpVerifiedVersion), [true, true, false, false, false]);
+
+  // Doctor reads a version list too: 19.1.0 passes, a release between the captured ones does not,
+  // and the remediation names the newest captured build with the Bun it needs.
+  for (const [answer, status, detailCode] of [
+    ['omp/19.1.0\n', 'pass', 'bun-runtime-supported'],
+    ['18.2.0\n', 'fail', 'bun-runtime-launcher-above-verified'],
+  ] as const) {
+    const doctor = await diagnoseOmpBunRuntime({
+      ...doctorContext,
+      env: { PATH: '/usr/bin:/bin', COSYNCING_OMP_BIN: override },
+      resolveExecutable: (command) => command === newerBun ? newerBun : undefined,
+      readTextPrefix: (path, maxBytes) => ({ ok: true, text: readFileSync(path).subarray(0, maxBytes).toString('utf8') }),
+      runReadOnly: async (executable) => ({
+        status: 'ok', exitCode: 0, stdout: executable === override ? answer : '1.4.0\n', stderr: '',
+      }),
+    }, override);
+    assert.deepEqual({ status: doctor.status, detailCode: doctor.detailCode }, { status, detailCode },
+      `doctor for a launcher answering ${JSON.stringify(answer)}`);
+    if (status === 'fail') {
+      assert.match(doctor.summary, /verified only for omp 17\.4\.2 and 19\.1\.0/);
+      assert.equal(doctor.remediation?.kind, 'command');
+      assert.match(doctor.remediation?.message ?? '', /Install omp 19\.1\.0 \(it needs Bun 1\.4\.4 or newer\)/);
+    }
   }
 
   const missing = inspectOmpRuntimeReadiness({ PATH: join(root, 'empty') });

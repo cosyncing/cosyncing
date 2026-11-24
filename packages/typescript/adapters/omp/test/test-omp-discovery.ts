@@ -167,8 +167,8 @@ process.exit(73);
   try { await futureAdapter.attach(idOf(sessionA), 'resume'); } catch (error) { futureResumeRefusal = String(error); }
   try { await futureAdapter.renameSession(idOf(sessionA), 'must not persist'); } catch (error) { futureRenameRefusal = String(error); }
   check('future omp refuses Resume and native rename before spawning the unverified runtime',
-    /verified only for 17\.4\.2/.test(futureResumeRefusal)
-      && /verified only for 17\.4\.2/.test(futureRenameRefusal)
+    /verified only for omp 17\.4\.2 and 19\.1\.0/.test(futureResumeRefusal)
+      && /verified only for omp 17\.4\.2 and 19\.1\.0/.test(futureRenameRefusal)
       && !existsSync(futureSpawnMarker),
     JSON.stringify({ futureResumeRefusal, futureRenameRefusal }));
   check('future omp discovery does not auto-install its bridge',
