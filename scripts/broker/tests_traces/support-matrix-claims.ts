@@ -141,7 +141,7 @@ export const SUPPORT_MATRIX_CLAIMS: SupportClaim[] = [
   // session/update), so `clientCapabilities: {}` is honest and Grok runs every tool in-process
   // with nothing to ask this client about. The round-trip is real but is exercised only by
   // `writeFakeGrokBinary`, which does send the request; the shipped agent does not.
-  claim('grok', 'F06', 'partial', 'the adapter maps allow-once and reject option ids and settles cards, but shipped Grok issues no permission request through this client: cosyncing delegates no fs/terminal execution, so tools run in-process'),
+  claim('grok', 'F06', 'partial', '1.0.92 asks permission for file writes in the default mode; allow-once and reject settle the card, and a reject ends the turn as cancelled (measured 2026-11-24); 1.0.13 and 1.0.24 issued no permission request'),
   claim('cline', 'F06', 'full', 'managed-Hub per-tool approval cards round-trip approve/reject and are cancelled on stop, close, or ownership loss'),
   claim('kilo', 'F06', 'full', 'authenticated per-tool HTTP/SSE permission requests and replies preserve actionable ownership'),
 

@@ -55,6 +55,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   early. In a session running in an omp terminal, background work that ends
   without a follow-up run leaves the session Working until its next run.
 - Pi is verified against Pi 1.6.0. The minimum version stays 0.78.1.
+- Grok Build 1.0.92 is now a measured version, including Stop and file-write
+  permissions.
 - Cline 3.0.75 and the Cline Hub it ships (core 0.2.1) are now measured versions,
   and `cosy doctor` lists them. With Hub core 0.2.1, cosyncing also checks the
   Hub's own id, so a record left by an earlier Hub on the same port is no longer
@@ -62,6 +64,19 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Grok Build 1.0.92: resuming a session or switching its model or mode no longer
+  makes it read-only at random. Grok rewrites its session summary right after
+  reopening a session, and a check that landed in that moment found no session.
+- Grok Build: the broker log no longer gets a line for each of Grok's own progress
+  notices while a session is created or a turn runs.
+- Grok Build 1.0.92: opening a session no longer adds an unmapped-update context
+  entry for Grok's empty background-task list.
+- DeepSeek Harness: when cosyncing restarts a `dsh web` host it manages, it now
+  waits until it has read the new launch URL before it treats the host as ready,
+  and it drops the launch token of a host that has stopped. The session cookie of
+  a host cosyncing manages is renewed with the current launch, so it no longer
+  expires and asks for `cosyncing dsh connect`. A host you start yourself still
+  needs `cosyncing dsh connect` when its cookie expires.
 - Cline: sessions the Cline 3.0.75 CLI writes, and their subagents, now appear in
   the session list with their transcripts. Before, they were missing.
 - OpenCode 2 is recognized from its `opencode v2.x.y` version banner. Before, the
