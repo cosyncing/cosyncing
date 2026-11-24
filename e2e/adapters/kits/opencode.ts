@@ -594,6 +594,8 @@ export const opencodeV2Kit: ConformanceKit = {
           fake.serve.setVersion(version);
           const response = await context.client.post('/api/sessions/opencode', { directory: fake.workspace('version') });
           expect(response.status, response.text).toBe(expected);
+          // Below the floor the refusal names the floor, not "start OpenCode".
+          if (expected === 503) expect(response.body).toMatchObject({ detailCode: 'v2-below-floor', error: expect.stringContaining('2.2.0 or newer') });
         }
         fake.serve.setVersion('2.3.2');
       },

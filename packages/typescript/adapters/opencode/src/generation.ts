@@ -1,5 +1,6 @@
 import { bunSpawnSyncResolvedInvocation, resolveInvocation } from '@cosyncing/adapter-api';
 import { statSync } from 'node:fs';
+import { OPENCODE_V2_MINIMUM_VERSION } from './v2/registration.ts';
 
 export interface OpencodeGeneration {
   kind: 'v1' | 'v2' | 'future' | 'unparsable' | 'absent';
@@ -89,4 +90,6 @@ export function opencodeAllowsV1(generation: OpencodeGeneration): boolean {
   return generation.kind !== 'v2' && generation.kind !== 'future';
 }
 
-export const OPENCODE_V1_READ_ONLY_REASON = 'The installed OpenCode is no longer OpenCode 1, so this stored OpenCode 1 session is read-only. A running OpenCode 2 service lists it again once it has imported it.';
+/** Also shown while the binding is unusable (below the floor, a future major, credentials), so it
+ *  names what lists the session again rather than promising that any running service does. */
+export const OPENCODE_V1_READ_ONLY_REASON = `The installed OpenCode is no longer OpenCode 1, so this stored OpenCode 1 session is read-only. OpenCode ${OPENCODE_V2_MINIMUM_VERSION} or newer, with its service running, lists it again once it has imported it.`;

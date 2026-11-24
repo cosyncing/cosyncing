@@ -64,7 +64,7 @@ import { BindingResolver, type OpenCodeBinding } from './binding.ts';
 import { hasManagedOpencodeServe } from './managed-server.ts';
 import { OpenCodeV2Backend } from './v2/backend.ts';
 import { followV2Import } from './v2/connection.ts';
-import { readRegistration } from './v2/registration.ts';
+import { OPENCODE_V2_MINIMUM_VERSION, readRegistration } from './v2/registration.ts';
 
 export { opencodeChildEnv } from './generation.ts';
 
@@ -398,7 +398,19 @@ export class OpenCodeAdapter implements AgentBackend {
   }
 
   private unavailable(binding: Extract<OpenCodeBinding, { generation: 'none' }>): never {
-    throw new SessionCreateTemporarilyUnavailableError('The OpenCode service is unavailable. Start OpenCode on its host, then reconnect.', binding.reason);
+    // Only a stopped service is fixed by starting OpenCode; every other reason reuses the doctor's words.
+    const message = binding.reason === 'v2-below-floor'
+      ? `The OpenCode service is below the supported minimum. Update OpenCode to ${OPENCODE_V2_MINIMUM_VERSION} or newer and restart its service, then reconnect.`
+      : binding.reason === 'future-major'
+        ? 'This OpenCode service generation is not supported.'
+        : binding.reason === 'v2-service-starting'
+          ? 'The OpenCode service is starting. Existing sessions are retained.'
+          : binding.reason === 'credential-required' || binding.reason === 'credential-rejected'
+            ? 'OpenCode service credentials are required or were rejected.'
+            : binding.reason === 'registration-invalid'
+              ? binding.detail ?? 'No usable OpenCode service registration was found. Start OpenCode on its host.'
+              : 'The OpenCode service is unavailable. Start OpenCode on its host, then reconnect.';
+    throw new SessionCreateTemporarilyUnavailableError(message, binding.reason);
   }
 
   constructor(opts: OpenCodeAdapterOptions = {}) {

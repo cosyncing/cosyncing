@@ -298,6 +298,7 @@ const ZH_HUMAN_TEXT: Readonly<Record<string, string>> = Object.freeze({
   'cosyncing never starts, stops or pairs the OpenCode service.': 'cosyncing 不会启动、停止或配对 OpenCode 服务。',
   'OpenCode service version is supported.': '支持此 OpenCode 服务版本。',
   'The OpenCode service is below the supported minimum.': 'OpenCode 服务低于支持的最低版本。',
+  'Restart the OpenCode service so it runs the installed OpenCode.': '请重启 OpenCode 服务，使其运行已安装的 OpenCode 版本。',
   'This OpenCode service generation is not supported.': '不支持此 OpenCode 服务版本代系。',
   'No usable OpenCode service registration was found. Start OpenCode on its host.': '未找到可用的 OpenCode 服务注册信息。请在其主机上启动 OpenCode。',
   'OpenCode shared service is reachable.': '可以访问 OpenCode 共享服务。',

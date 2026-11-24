@@ -888,6 +888,32 @@ try {
     check(`OpenCode ${version} has no managed-server repair remediation on an occupied port`, !checkById(occupied, 'opencode.server').remediation);
   }
 
+  {
+    // OpenCode 2 below its own floor: the binary check measured the CLI against the OpenCode 1 floor,
+    // so the V2 verdict must carry the V2 floor and a way out.
+    const below = checkById(await diagnoseOpenCodeSetup(makeFixtureContext(testRoot, 'opencode', '2.1.4')), 'opencode.version');
+    check('OpenCode 2 below 2.2.0 reports the OpenCode 2 floor and the upgrade command',
+      below.remediation?.kind === 'command' && below.remediation.command === 'opencode upgrade'
+        && below.evidence?.installedVersion === '2.1.4' && below.evidence?.minimumVersion === '2.2.0',
+      JSON.stringify(below));
+    // A current CLI whose registered, running service is still older only needs that service restarted.
+    const fixture = makeFixtureContext(join(testRoot, 'opencode-v2-stale-service'), 'opencode', '2.3.2');
+    const state = join(fixture.homeDir, '.local', 'state', 'opencode');
+    mkdirSync(state, { recursive: true });
+    writeFileSync(join(state, 'service.json'), JSON.stringify({ url: 'http://127.0.0.1:47999', pid: 4242, version: '2.1.4', password: 'fixture-password' }), { mode: 0o600 });
+    const stale = checkById(await diagnoseOpenCodeSetup({
+      ...fixture,
+      fetchJson: async (url) => url.endsWith('/api/info')
+        ? { status: 'ok', statusCode: 200, json: { version: '2.1.4', pid: 4242, urls: {}, paths: {}, capabilities: {} } }
+        : { status: 'unreachable' },
+    }), 'opencode.version');
+    check('A current OpenCode 2 CLI with an older running service is told to restart that service',
+      stale.detailCode === 'version-below-minimum' && stale.remediation?.kind === 'command'
+        && stale.remediation.command === 'opencode service restart'
+        && stale.evidence?.installedVersion === '2.1.4' && stale.evidence?.cliVersion === '2.3.2',
+      JSON.stringify(stale));
+  }
+
   const opencodeConflict = await diagnoseOpenCodeSetup(fakeContext({
     executables: { opencode: '/fixture/bin/opencode' },
     runReadOnly: async () => ({ status: 'ok', stdout: '1.17.19', stderr: '' }),

@@ -46,7 +46,21 @@ async function diagnoseV2(
     version.status = effectiveMajor > 2 || below ? 'warn' : 'pass';
     version.detailCode = effectiveMajor > 2 ? 'generation-unknown' : below ? 'version-below-minimum' : 'version-supported';
     version.summary = effectiveMajor > 2 ? 'This OpenCode service generation is not supported.' : below ? 'The OpenCode service is below the supported minimum.' : 'OpenCode service version is supported.';
+    // The binary check measured the CLI against the OpenCode 1 floor; report the OpenCode 2 floor.
+    version.evidence = {
+      installedVersion: effectiveVersion, minimumVersion: OPENCODE_V2_MINIMUM_VERSION,
+      ...(binary.installedVersion && binary.installedVersion !== effectiveVersion ? { cliVersion: binary.installedVersion } : {}),
+    };
     if (version.status === 'pass' || effectiveMajor > 2) delete version.remediation;
+    else if (below) {
+      // A current CLI with an older running service only needs that service restarted; the TUI
+      // also restarts a service whose version differs from its own.
+      const cliCurrent = validInfo && !!binary.installedVersion
+        && (compareSemanticVersions(binary.installedVersion, OPENCODE_V2_MINIMUM_VERSION) ?? -1) >= 0;
+      version.remediation = cliCurrent
+        ? { kind: 'command', message: 'Restart the OpenCode service so it runs the installed OpenCode.', command: 'opencode service restart' }
+        : { kind: 'command', message: `Update OpenCode to ${OPENCODE_V2_MINIMUM_VERSION} or newer.`, command: 'opencode upgrade' };
+    }
   }
   checks.push({ id: 'opencode.storage', status: 'skip', detailCode: 'storage-not-checked', summary: 'V2 session history is read from the service.' });
   let reason = 'v2-service-not-running';
