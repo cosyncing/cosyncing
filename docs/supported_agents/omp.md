@@ -1,10 +1,16 @@
 # omp (oh-my-pi, experimental)
 
-cosyncing enables mutable full sync only for the physically verified omp 17.4.2 protocol. Other versions remain available for read-only Observe when their store is readable. Install the verified package with Bun:
+cosyncing enables mutable full sync only for the measured omp 17.4.2 and
+19.1.0 protocols. Other versions remain available for read-only Observe when
+their store is readable. Install omp 19.1.0 with Bun:
 
 ```bash
-bun install --global @oh-my-pi/pi-coding-agent@17.4.2
+bun install --global @oh-my-pi/pi-coding-agent@19.1.0
 ```
+
+omp 19.1.0 declares `engines.bun >=1.4.4`, so its launcher must run on Bun
+1.4.4 or newer; doctor refuses an older Bun. omp 17.4.2 remains supported on
+older Bun runtimes.
 
 Confirm the launcher and runtime before setup:
 
@@ -48,12 +54,27 @@ service reconfiguration instead of leaving omp without its bridge.
   commands, and byte-exact file input use omp's own RPC names.
 - New sessions and session names are supported.
 - Multiple clients reuse one bridge/Drive owner.
+- On omp 19.1.0, extension HTML form dialogs appear as question cards. Radio
+  groups and single selects become single-choice questions, checkbox groups
+  and multi-selects become multiple-choice questions, and text and number
+  inputs become typed answers. A form that omp withdraws (for example when its
+  timeout expires) closes its card; omp then submits the form's defaults.
+- On omp 19.1.0, a turn that hands work to the background stays running with
+  "Waiting for background work…" until the background result's turn ends or
+  omp reports the session settled.
+- Fork is available on omp 19.1.0: forking a session copies the whole session,
+  and forking at a message keeps that message in the copy.
 
 ## Limits
 
-- Fork and clone are not exposed by omp's RPC surface.
+- omp 17.4.2 exposes no RPC fork, and neither measured version exposes clone
+  through RPC.
+- omp's native `ask` tool exists only in its `--mode rpc-ui`; Drive runs
+  `--mode rpc`, where the tool is unavailable. The bridge's `ask_user` tool and
+  extension form dialogs still reach the app.
 - The v1 adapter deliberately omits native subagent events.
-- The terminal/bridge and installed browser physical passes are complete. The
+- The terminal/bridge and installed browser physical passes are complete for
+  omp 17.4.2; omp 19.1.0 is measured from RPC and bridge captures. The
   integration remains experimental because omp's upstream RPC and store
   contracts are not a stable public compatibility promise.
 
