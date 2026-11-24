@@ -33,9 +33,11 @@ import { DshUnaryTransport, transportFailure, type DshFetch, type DshOutcome, ty
  * controller): `gateway/interactions-forbidden` refuses a forwarded-event answer
  * from a Peer that may not answer, `gateway/peer-disposed` refuses a call whose
  * Peer has already been disposed, and `session/migration-required` refuses a
- * fork of a stored session in an older format. Where each lands is decided in
- * `remote-host.ts` (stream terminality, unary generation loss); a cookie-enrolled
- * owner Peer did not produce the first two in the capture.
+ * fork of a stored session in an older format. They are listed as known codes,
+ * and nothing handles them specially: the capture did not produce
+ * any of them, so each is treated like any other code of its kind (a unary
+ * refusal is returned as-is, a stream failure stays transient) until a capture
+ * shows what it means in practice.
  */
 export const DSH_GATEWAY_ERROR_CODES = Object.freeze([
   'gateway/arguments-invalid',

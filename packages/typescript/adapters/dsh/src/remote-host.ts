@@ -140,10 +140,11 @@ export const DSH_INTERACTION_HANDOFF_MS = 500;
  *    answers the same way forever.
  *
  * `gateway/service-unavailable` and `gateway/uplink-overflow` are deliberately
- * absent: those are "not now", and "not now" is what backoff is for. So is
- * 0.2.2's `gateway/peer-disposed`: it ends with the Peer, and the next carrier
- * is a new Peer. Its `gateway/interactions-forbidden` is terminal: the Peer's
- * permission to answer does not change because it asked again.
+ * absent: those are "not now", and "not now" is what backoff is for. 0.2.2's
+ * `gateway/peer-disposed` and `gateway/interactions-forbidden` are absent too:
+ * both are known only from the 0.2.2-rc.5 package source, no captured stream
+ * has ended with either, and an unrecognised code stays transient (see
+ * {@link dshStreamFailureIsTerminal}) until a capture shows otherwise.
  */
 export const DSH_STREAM_TERMINAL_CODES: readonly string[] = Object.freeze([
   'carrier/closed',
@@ -151,7 +152,6 @@ export const DSH_STREAM_TERMINAL_CODES: readonly string[] = Object.freeze([
   'gateway/arguments-invalid',
   'gateway/definition-unavailable',
   'gateway/input-invalid',
-  'gateway/interactions-forbidden',
   'gateway/method-unavailable',
   'gateway/protocol',
   'gateway/signature-invalid',
@@ -671,11 +671,12 @@ export class DshRemoteHostLink {
   private readonly workspaceRows = new Map<string, Record<string, unknown>>();
   private archivedSessions = new Set<string>();
   /**
-   * The `session/attachment` shape the host last accepted. Starts with rc.2's,
-   * so an rc.2 host is asked exactly what it was asked before 0.2.2 was
-   * qualified; a 0.2.2 host costs one refused read
-   * and is then asked in its own shape. Not reset per carrier: a host upgraded
-   * under a running broker is corrected by the same fallback.
+   * The `session/attachment` shape to try first: the last one the host
+   * accepted, or the other one after the host refused a shape. Starts with
+   * rc.2's, so an rc.2 host is asked exactly what it was asked before 0.2.2 was
+   * qualified; a 0.2.2 host costs one refused read and is then asked in its own
+   * shape. Not reset per carrier: a host upgraded under a running broker is
+   * corrected by the same fallback.
    */
   private attachmentShape: DshAttachmentRequestShape = 'attachment-id';
   /**
@@ -870,16 +871,6 @@ export class DshRemoteHostLink {
       this.auth.reportCredentialRefused(outcome.failure.reason === 'forbidden' ? 'host-or-origin-refused' : 'credential-refused');
       this.note({ code: 'auth-refused', detail: outcome.failure.reason });
     }
-    if (!outcome.ok && outcome.failure.kind === 'rpc' && outcome.failure.code === 'gateway/peer-disposed') {
-      // 0.2.2 checks the calling Peer before it dispatches anything, so this
-      // refusal is proof the call did NOT run: the Peer it spoke for has ended.
-      // That is the existing "generation ended, nothing was sent" outcome, and a
-      // write may be re-issued once the link is ready again.
-      return transportFailure('generation-lost', {
-        retryable: true,
-        detail: 'the DeepSeek Harness host had already closed the connection this call belonged to, so it was not run',
-      });
-    }
     return outcome;
   }
 
@@ -892,6 +883,11 @@ export class DshRemoteHostLink {
    * last worked and, on a shape refusal only, the other one once. Any other
    * failure is the answer: a missing image or a lost generation is not a reason
    * to ask twice.
+   *
+   * The refusal itself is what is learned. The caller's deadline covers both
+   * attempts, so on a slow host the second one can time out; remembering only
+   * a success would then start every later read with the refused shape and pay
+   * for that refusal each time.
    */
   async readAttachment(
     sessionId: string,
@@ -910,6 +906,7 @@ export class DshRemoteHostLink {
         return outcome;
       }
       if (outcome.failure.kind !== 'rpc' || !DSH_REQUEST_SHAPE_REFUSALS.includes(outcome.failure.code)) return outcome;
+      this.attachmentShape = shape === 'attachment-id' ? 'attachment-ref' : 'attachment-id';
     }
     return outcome!;
   }

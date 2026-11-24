@@ -330,10 +330,11 @@ const COOKIE: DshCookie = { name: 'dsh-auth-fixture', value: 'v1.stored-cookie',
   const fixture = await Bun.file(new URL('./fixtures/dsh-0.2.2-rc.5.json', import.meta.url)).json() as {
     unary: {
       sessionListCold: { envelope: { result: { value: { items: Array<Record<string, unknown>> } } } };
-      projectionsCold: { envelope: { result: { value: unknown } } };
+      projectionsCold: { envelope: { result: { value: Record<string, unknown> } } };
+      projectionsMissing: { envelope: { result: { value: unknown } } };
     };
   };
-  const discover = async (list: unknown) => {
+  const discover = async (list: unknown, projections: unknown = fixture.unary.projectionsCold.envelope.result.value) => {
     const host = await startHost();
     const scope = dshCredentialScope(host.baseUrl, '/fixture/dsh-home');
     const sockets = workspaceSocketFactory();
@@ -345,7 +346,7 @@ const COOKIE: DshCookie = { name: 'dsh-auth-fixture', value: 'v1.stored-cookie',
       remoteSocketFactory: sockets.factory,
       fetchImpl: probeAwareFetch(scriptedFetch(host.baseUrl, host, {
         'session/list': () => list,
-        'session/projections': () => fixture.unary.projectionsCold.envelope.result.value,
+        'session/projections': () => projections,
       })),
     });
     const sessions = await adapter.discoverSessions();
@@ -371,6 +372,26 @@ const COOKIE: DshCookie = { name: 'dsh-auth-fixture', value: 'v1.stored-cookie',
   check('0.2.2-rc.5: the tagged sequenced read replaces a stale cached hint',
     refreshed?.title === 'Capture renamed title' && refreshed.currentMode === 'read-only',
     JSON.stringify(refreshed));
+  // The captured answer for a session the host does not have is `null`; it
+  // leaves the roster's own hint in place.
+  const missing = await discover(stale, fixture.unary.projectionsMissing.envelope.result.value);
+  check('0.2.2-rc.5: a captured null projection answer keeps the cached hint',
+    missing.reads === 1 && missing.sessions[0]?.title === 'stale cached title',
+    JSON.stringify(missing.sessions[0]));
+  // Only a `sequenced` answer is an exact cut. `migration-required` was not
+  // captured (it needs a store in an older format); both answers below are test
+  // edits of the captured read. The first carries a seq, so only the `kind`
+  // check keeps it out; the second has the 0.2.2-rc.5 source's shape
+  // (`{kind, values}`, no seq).
+  const tagged = fixture.unary.projectionsCold.envelope.result.value;
+  const migration = { ...tagged, kind: 'migration-required',
+    values: { ...(tagged.values as Record<string, unknown>), title: 'title from a migration answer' } };
+  const withSeq = (await discover(fixture.unary.sessionListCold.envelope.result.value, migration)).sessions[0];
+  const sourceShape = { kind: 'migration-required', values: migration.values };
+  const withoutSeq = (await discover(fixture.unary.sessionListCold.envelope.result.value, sourceShape)).sessions[0];
+  check('0.2.2-rc.5: a migration-required projection answer never replaces the cached hint',
+    withSeq?.title === 'Capture renamed title' && withoutSeq?.title === 'Capture renamed title',
+    JSON.stringify({ withSeq: withSeq?.title, withoutSeq: withoutSeq?.title }));
 }
 
 // ── Managed launch: announcement to authenticated, with no user in the loop ─

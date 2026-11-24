@@ -1325,6 +1325,8 @@ export class DshAdapter implements AgentBackend {
       // or answers `migration-required` with cache hints and no seq for a stored
       // session in an older format. Only an exact sequenced read replaces the
       // list hint; a migration answer leaves the roster's own cached hint alone.
+      // The seq check below already refuses the migration shape the source
+      // defines; this refuses any other tagged answer even if it carries a seq.
       if (block.kind !== undefined && block.kind !== 'sequenced') return;
       if (!Number.isSafeInteger(block.asOfSeq) || Number(block.asOfSeq) < -1
           || !block.values || typeof block.values !== 'object' || Array.isArray(block.values)) return;

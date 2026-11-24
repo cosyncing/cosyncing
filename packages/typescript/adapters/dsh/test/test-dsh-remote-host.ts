@@ -1922,7 +1922,10 @@ const FIXTURE_022 = await Bun.file(new URL('./fixtures/dsh-0.2.2-rc.5.json', imp
   userImageEvent: { seq: number; data: { content: Array<{ type: string; attachment?: Record<string, unknown> }> } };
   readback: { attachment: Record<string, unknown>; data: string };
   unary: { attachmentIdShapeRefused: { envelope: { result: { error: { code: string; message: string } } } } };
-  rc2Comparison: { attachmentRefShapeRefused: { envelope: { result: { error: { code: string; message: string } } } } };
+  rc2Comparison: {
+    attachmentRefShapeRefused: { envelope: { result: { error: { code: string; message: string } } } };
+    controlProjection: Record<string, unknown>;
+  };
 };
 const SESSION_022: SessionInfo = { id: FIXTURE_022.sessionId, tool: 'dsh', title: 'fixture', status: 'idle', attachMode: 'live' };
 
@@ -1955,6 +1958,27 @@ const SESSION_022: SessionInfo = { id: FIXTURE_022.sessionId, tool: 'dsh', title
     JSON.stringify(updates.filter((u) => u.key === 'contextUsage')));
   check('0.2.2-rc.5: no captured control frame is reported as unusable',
     h.diagnostics.every((entry) => entry.code !== 'unusable-stream-item'), JSON.stringify(h.diagnostics));
+  await connection.close();
+  h.link.stop();
+}
+
+{
+  // The rc.2 spelling still reads after the fan-out: the comparison capture's
+  // live rename, one `{key, value}` per frame, replayed as the 0.2.0-rc.2 host
+  // sent it.
+  const frame = FIXTURE_022.rc2Comparison.controlProjection;
+  const h = harness();
+  await h.link.verify();
+  const { connection, messages } = attach(h, { ...info, id: String(frame.sessionId) });
+  await flush();
+  await connection.getHistory();
+  const before = messages.length;
+  h.host.live.item(h.host.stream('session/control').streamId, frame);
+  await flush();
+  check('0.2.0-rc.2: the captured single-key rename still reaches the client',
+    messages.slice(before).some((m) => m.type === 'metadata-update' && m.key === 'sessionInfo'
+      && (m.value as { title?: unknown }).title === 'Capture renamed title'),
+    JSON.stringify(messages.slice(before)));
   await connection.close();
   h.link.stop();
 }
@@ -2013,18 +2037,41 @@ const SESSION_022: SessionInfo = { id: FIXTURE_022.sessionId, tool: 'dsh', title
 }
 
 {
-  // 0.2.2 refuses a call whose Peer is already disposed before dispatching it
-  // (`gateway/peer-disposed`, code and message from the 0.2.2-rc.5 gateway
-  // source; not provoked in the capture). That is the existing "generation
-  // ended, nothing was sent" outcome, retryable, and not a business refusal.
-  const h = harness();
+  // A slow 0.2.2 host. The id shape is refused, and the caller's deadline (one
+  // timer over both attempts) passes while the reference-shaped read is still
+  // out. The refusal is what is learned, so the next read starts with the
+  // reference shape instead of paying for the refused one again.
+  const reads: Array<Record<string, unknown>> = [];
+  const deadline = new AbortController();
+  let slow = true;
+  const h = harness({
+    wrapRemoteFetch: (fetch) => async (url, init) => {
+      if (url.endsWith('/api/session/attachment')) {
+        const body = JSON.parse(init.body) as { payload?: { args?: { request?: Record<string, unknown> } } };
+        const request = body.payload?.args?.request ?? {};
+        reads.push(request);
+        if (slow && 'attachment' in request) {
+          deadline.abort();
+          throw new Error('the caller gave up while the host was still answering');
+        }
+      }
+      return await fetch(url, init);
+    },
+  });
+  h.host.unaryHandlers.set('session/attachment', (args) => ('attachment' in (args.request as Record<string, unknown>)
+    ? { value: FIXTURE_022.readback }
+    : { error: FIXTURE_022.unary.attachmentIdShapeRefused.envelope.result.error }));
   await h.link.verify();
-  h.host.unaryHandlers.set('session/rename', () => ({ error: { code: 'gateway/peer-disposed', message: 'the calling Peer has been disposed' } }));
-  const outcome = await h.link.call('session/rename', { request: { sessionId: SESSION_ID, title: 'x' } }, { generationLoss: 'non-idempotent-write' });
-  check('a disposed-Peer refusal is reported as an unsent, retryable call',
-    !outcome.ok && outcome.failure.kind === 'transport' && outcome.failure.reason === 'generation-lost'
-      && outcome.failure.retryable === true,
-    JSON.stringify(outcome));
+  const logged = FIXTURE_022.userImageEvent.data.content.find((block) => block.type === 'image')!.attachment!;
+  const ref = { ...logged, attachmentId: String(logged.attachmentId) };
+  const timedOut = await h.link.readAttachment(SESSION_022.id, ref, deadline.signal);
+  check('0.2.2-rc.5: a read whose deadline passes during the fallback fails after exactly the two shapes',
+    !timedOut.ok && reads.length === 2 && !('attachment' in reads[0]!) && 'attachment' in reads[1]!,
+    JSON.stringify({ timedOut, reads }));
+  slow = false;
+  const next = await h.link.readAttachment(SESSION_022.id, ref);
+  check('0.2.2-rc.5: the read after it starts with the shape the host did not refuse',
+    next.ok && reads.length === 3 && 'attachment' in reads[2]!, JSON.stringify(reads.slice(2)));
   h.link.stop();
 }
 
