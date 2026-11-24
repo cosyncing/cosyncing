@@ -1,7 +1,9 @@
 # Codex
 
-cosyncing requires Codex 0.144.5 or newer. For the managed app-server and
-terminal sync, install Codex with OpenAI's official standalone installer.
+cosyncing requires Codex 0.144.5 or newer. The managed daemon, session
+creation, a turn through the daemon and history replay were last checked with
+Codex 0.171.0. For the managed app-server and terminal sync, install Codex with
+OpenAI's official standalone installer.
 
 On macOS or Linux:
 
