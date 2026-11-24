@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
 export {};
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { CONTEXT_INJECTION_EVENT, type AgentMessage } from '@cosyncing/adapter-api';
 import {
   grokContextUsage,
@@ -8,6 +10,7 @@ import {
   mapGrokInterruptedTail,
   mapGrokTranscript,
   mapGrokUpdate,
+  type GrokUpdateRecord,
 } from '../src/mapping.ts';
 import { fixtureUpdates } from './fixtures/tree.ts';
 
@@ -367,6 +370,52 @@ check('session aggregate emits only derived context usage, not a token-count rea
     && usage.key === 'contextUsage'
     && (usage.value as { used?: number }).used === 15,
   JSON.stringify(usage));
+
+// A real Grok 1.0.92 updates.jsonl (GK-3 capture, 2026-11-24, scrubbed of paths, host and the
+// custom model's name). Six prompts through the adapter: a plain answer, a write that was
+// approved, a write that was rejected, a long answer stopped mid-turn, one more answer, and
+// one after a fresh adapter resumed the session, as after a broker restart. Grok ended the
+// rejected turn itself (`stop_reason: cancelled`, `cancellationCategory: PermissionRejected`)
+// and the stopped one as `MidTurnAbort`. The store also holds three `background_tasks`
+// snapshots with an empty `tasks` list, one per `session/load` (Create's, then each Drive child's).
+const capturedSessionId = '01a20cf4-7344-7f02-ace8-e17183132705';
+const capturedEntries = readFileSync(join(import.meta.dir, 'fixtures', 'grok-1.0.92', 'updates.jsonl'), 'utf8')
+  .split('\n')
+  .filter((line) => line.trim())
+  .map((line, lineIndex) => ({ record: JSON.parse(line) as GrokUpdateRecord, lineIndex, offset: lineIndex * 1_000, length: line.length + 1 }));
+const capturedTraces: string[] = [];
+const captured = mapGrokTranscript(capturedSessionId, capturedEntries, (event) => capturedTraces.push(`${event.op}:${event.detail}`));
+const emptySnapshots = capturedEntries.filter((entry) =>
+  (entry.record.params as { update?: { sessionUpdate?: unknown } } | undefined)?.update?.sessionUpdate === 'background_tasks');
+check('a captured Grok 1.0.92 transcript maps with no unmapped, malformed or traced rows',
+  capturedEntries.length === 32
+    && capturedTraces.length === 0
+    && captured.every((message) => message.type !== 'event'),
+  JSON.stringify({ capturedTraces, events: captured.filter((message) => message.type === 'event') }));
+check('Grok 1.0.92\'s empty background_tasks snapshots show nothing',
+  emptySnapshots.length === 3
+    && emptySnapshots.every((entry) => mapGrokUpdate(entry.record, { sessionId: capturedSessionId, lineIndex: entry.lineIndex }).length === 0),
+  JSON.stringify(emptySnapshots.map((entry) => entry.record)));
+const capturedUsers = typed(captured, 'user-message');
+const capturedRuns = typed(captured, 'run-summary');
+check('the captured prompts and turn ends replay in order, each run naming its own prompt',
+  capturedUsers.map((row) => row.text.split(' ').slice(0, 3).join(' ')).join('|')
+      === 'Reply with exactly|Create a new|Create a new|Write the numbers|Reply with exactly|Reply with exactly'
+    && capturedRuns.map((row) => row.status).join(',') === 'done,done,cancelled,cancelled,done,done'
+    && capturedRuns.every((row, index) => row.userMessageKey === capturedUsers[index]?.key && row.turnId === capturedUsers[index]?.turnId)
+    && capturedRuns[0]?.tokens?.input === 10_744 && capturedRuns[0]?.tokens?.output === 22,
+  JSON.stringify({ users: capturedUsers.map((row) => row.key), runs: capturedRuns }));
+const capturedResults = typed(captured, 'tool-result');
+check('the captured approved tools complete and the rejected write is an error result',
+  [...new Set(typed(captured, 'tool-call').map((row) => row.callId))].length === 4
+    && capturedResults.length === 4
+    && capturedResults.filter((row) => row.isError).map((row) => row.callId).join() === 'chatcmpl-tool-b80ce483fe189982'
+    && typed(captured, 'tool-call').find((row) => row.callId === 'chatcmpl-tool-bc8150ad1ff620c0')?.toolClass === 'edit',
+  JSON.stringify(capturedResults.map((row) => ({ callId: row.callId, isError: row.isError }))));
+check('the captured stopped turn keeps the answer text Grok stored before Stop',
+  typed(captured, 'model-output').map((row) => row.text?.trim()).join('|')
+    === 'PONG|DONE|1 is the multiplicative identity —|AGAIN|RESUMED',
+  JSON.stringify(typed(captured, 'model-output')));
 
 const failed = results.filter((result) => !result.ok).length;
 console.log(`\n${results.length - failed} passed, ${failed} failed`);

@@ -43,7 +43,7 @@ import {
   type GrokTerminalSummary,
 } from './observe.ts';
 import {
-  discoverGrokStore,
+  findGrokStoredSession,
   type GrokStoredSession,
   type GrokUpdatesRead,
 } from './store.ts';
@@ -386,7 +386,14 @@ class LazyGrokAcpTransport implements GrokAcpTransport {
                   this.hooks.onUpdate(event.method, event.params as AcpSessionUpdateParams);
                   return null;
                 }
-                return undefined;
+                // Grok's other notices in its `_x.ai/` wire namespace carry nothing this child
+                // reads: turns settle from `session/prompt`, `_x.ai/session/update` and the
+                // durable log. Grok 1.0.92 sends many of them (one Drive capture: 275
+                // `_x.ai/session_notification`, mostly a `tool_call_delta_chunk` per streamed
+                // tool-argument chunk, plus `queue/changed`, `sessions/changed` and
+                // `session/prompt_complete`), and each one was a broker log line. Dropped here
+                // as the probe clients drop them; requests and other namespaces are still traced.
+                return event.kind === 'notification' && event.method.startsWith('_x.ai/') ? null : undefined;
               },
             },
           },
@@ -450,8 +457,9 @@ class LazyGrokAcpTransport implements GrokAcpTransport {
       && this.desiredMode !== 'default') {
       throw new Error(`Grok session/load omitted requested permission mode ${this.desiredMode}.`);
     }
-    const durable = (await discoverGrokStore({ root: this.session.storeRoot }))
-      .find((candidate) => candidate.id === this.session.id);
+    // Re-read, not read once: Grok rewrites summary.json around session/load (see
+    // findGrokStoredSession), and one miss here would revoke Drive for good.
+    const durable = await findGrokStoredSession(this.session.storeRoot, this.session.id);
     if (!durable) throw new Error('Grok session/load did not preserve the durable session identity.');
     if (this.desiredModel !== undefined && durable.model !== this.desiredModel) {
       throw new Error(`Grok durable summary reports model ${String(durable.model)}, not requested ${this.desiredModel}.`);

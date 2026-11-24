@@ -74,6 +74,7 @@ import {
 import {
   GROK_MINIMUM_SUPPORTED_VERSION,
   discoverGrokStore,
+  findGrokStoredSession,
   grokHistorySourceIdentity,
   grokStoreRoot,
   type GrokStoredSession,
@@ -118,17 +119,20 @@ export const GROK_AUTH_READY_TTL_MS = 10 * 60_000;
 export const GROK_AUTH_UNREADY_TTL_MS = 60_000;
 
 /**
- * Hooks for the probe children: auth readiness and the model catalogue.
+ * Hooks for the children that read no session updates: the auth-readiness and
+ * model-catalogue probes, and Create's child.
  *
- * A probe needs only `initialize` and `authenticate`, but Grok pushes vendor
- * notices such as `_x.ai/mcp/servers_updated` to every client it starts for.
- * With no `xai` hook, acp-client traces each one as an unhandled extension, so
- * every probe added at least one log line. A notification in Grok's wire
- * namespace `_x.ai/` is accepted and dropped here. Everything else is still
- * traced by the dispatcher: the `x.ai/` spelling, other vendors' namespaces,
- * unknown core methods, and any vendor request, which a probe cannot answer.
+ * Those children need only `initialize`, `authenticate` and, for Create,
+ * `session/new` and `session/load`, but Grok pushes vendor notices such as
+ * `_x.ai/mcp/servers_updated` to every client it starts for, and 1.0.92 adds a
+ * dozen `_x.ai/session/setup` progress notices to every `session/new`. With no
+ * `xai` hook, acp-client traces each one as an unhandled extension. A
+ * notification in Grok's wire namespace `_x.ai/` is accepted and dropped here.
+ * Everything else is still traced by the dispatcher: the `x.ai/` spelling,
+ * other vendors' namespaces, unknown core methods, and any vendor request,
+ * which these children cannot answer.
  */
-const GROK_PROBE_HOOKS: AcpClientHooks = {
+const GROK_SETUP_CHILD_HOOKS: AcpClientHooks = {
   extensions: {
     xai: (event) => (event.kind === 'notification' && event.method.startsWith('_x.ai/') ? null : undefined),
   },
@@ -397,7 +401,7 @@ export class GrokAdapter implements AgentBackend {
       cwd: process.cwd(),
       env: grokChildEnv(this.env),
       requestTimeoutMs: this.requestTimeoutMs,
-      hooks: GROK_PROBE_HOOKS,
+      hooks: GROK_SETUP_CHILD_HOOKS,
       closeEscalation: GROK_PROBE_CLOSE,
     };
   }
@@ -492,6 +496,7 @@ export class GrokAdapter implements AgentBackend {
       cwd,
       env: grokChildEnv(this.env),
       requestTimeoutMs: this.requestTimeoutMs,
+      hooks: GROK_SETUP_CHILD_HOOKS,
     });
     let createdId: string | undefined;
     let createdIsNew = false;
@@ -505,11 +510,7 @@ export class GrokAdapter implements AgentBackend {
         throw new Error(`Grok session/new reused existing durable session ${createdId}; refusing writer ownership.`);
       }
       createdIsNew = true;
-      let session: GrokStoredSession | undefined;
-      for (let attempt = 0; attempt < 40 && !session; attempt += 1) {
-        session = (await discoverGrokStore({ root: this.root })).find((candidate) => candidate.id === createdId);
-        if (!session) await new Promise((resolve) => setTimeout(resolve, 25));
-      }
+      const session = await findGrokStoredSession(this.root, createdId);
       if (!session) throw new Error(`Grok created ${createdId}, but no matching durable store row appeared.`);
       const loaded = await client.sessionLoad({ sessionId: createdId, cwd, mcpServers: [] });
       const loadedModels = isRecord(loaded.models) ? loaded.models : undefined;

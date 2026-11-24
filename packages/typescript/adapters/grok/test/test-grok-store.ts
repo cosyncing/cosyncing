@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 export {};
-import { appendFileSync, mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   discoverGrokStore,
@@ -243,6 +244,44 @@ try {
     lineageBounds.join(' | '));
 } finally {
   lineageTree.cleanup();
+}
+
+// The store files of a real Grok 1.0.92 session (GK-3 capture, 2026-11-24, scrubbed of paths,
+// host, agent ids and the custom model's name), in the layout Grok wrote them. 1.0.92 also writes
+// chat_history.jsonl, events.jsonl, usage.json and other files beside these; discovery reads
+// only these three.
+const capturedRoot = mkdtempSync(join(tmpdir(), 'cosyncing-grok-1092-'));
+try {
+  const capturedId = '01a20cf4-7344-7f02-ace8-e17183132705';
+  const capturedDir = join(capturedRoot, 'sessions', encodeURIComponent('/workspace/gk3'), capturedId);
+  mkdirSync(capturedDir, { recursive: true });
+  for (const file of ['summary.json', 'updates.jsonl', 'signals.json']) {
+    copyFileSync(join(import.meta.dir, 'fixtures', 'grok-1.0.92', file), join(capturedDir, file));
+  }
+  const capturedTraces: string[] = [];
+  const captured = await discoverGrokStore({ root: capturedRoot, trace: (event) => capturedTraces.push(`${event.op}:${event.detail}`) });
+  const capturedSession = captured[0];
+  check('a captured Grok 1.0.92 session is discovered with its id, cwd, model, title and message count',
+    captured.length === 1
+      && capturedTraces.length === 0
+      && capturedSession?.id === capturedId
+      && capturedSession.cwd === '/workspace/gk3'
+      && capturedSession.model === 'byok-model'
+      && capturedSession.title === 'Reply with exactly the single word PONG and nothing else.'
+      && capturedSession.messageCount === 32
+      && capturedSession.createdAt === Date.parse('2026-11-24T09:47:56.617Z'),
+    JSON.stringify({ captured, capturedTraces }));
+  const capturedSignals = await readGrokSignals(capturedSession!);
+  const capturedHistory = await readGrokUpdates(capturedSession!);
+  check('its signals and its updates log read whole, with numeric epoch-second timestamps',
+    capturedSignals?.contextTokensUsed === 11_661
+      && capturedSignals.contextWindowTokens === 256_000
+      && capturedHistory.entries.length === 32
+      && capturedHistory.issues.length === 0
+      && capturedHistory.entries.every((entry) => typeof entry.record.timestamp === 'number'),
+    JSON.stringify({ capturedSignals, entries: capturedHistory.entries.length, issues: capturedHistory.issues }));
+} finally {
+  rmSync(capturedRoot, { recursive: true, force: true });
 }
 
 const failed = results.filter((result) => !result.ok).length;

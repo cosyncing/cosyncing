@@ -151,7 +151,7 @@ export function writeFakeGrokBinary(
   writeFileSync(ledger, '');
   writeFileSync(configPath, JSON.stringify({ ledger, root, version, sessionId }));
   writeFileSync(path, `#!/usr/bin/env bun
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 const config = JSON.parse(readFileSync(process.env.FAKE_GROK_CONFIG, 'utf8'));
 const record = (value) => appendFileSync(config.ledger, JSON.stringify(value) + '\\n');
@@ -251,13 +251,14 @@ const handle = (frame) => {
       },
     } });
     if (process.env.FAKE_GROK_VENDOR_NOTICES === '1') {
-      // The first method name comes from a real broker log, which traced it thousands
-      // of times; its params were never logged, and no client here reads them. The
-      // other two are deliberately unknown, so a client must still trace them.
-      for (const method of ['_x.ai/mcp/servers_updated', '_vendor.test/notice', 'fake/unknown_notice']) {
+      // _x.ai/mcp/servers_updated and its params are as Grok 1.0.92 sends them after every
+      // initialize (GK-3 capture). The other two are deliberately unknown, so a client must
+      // still trace them.
+      send({ jsonrpc: '2.0', method: '_x.ai/mcp/servers_updated', params: { mcpServers: [] } });
+      for (const method of ['_vendor.test/notice', 'fake/unknown_notice']) {
         send({ jsonrpc: '2.0', method, params: {} });
       }
-      record({ kind: 'vendor-notices', pid: process.pid });
+      record({ kind: 'vendor-notices', at: 'initialize', pid: process.pid });
     }
     return;
   }
@@ -266,6 +267,13 @@ const handle = (frame) => {
     return;
   }
   if (frame.method === 'session/new') {
+    if (process.env.FAKE_GROK_VENDOR_NOTICES === '1') {
+      // Grok 1.0.92 reports session/new progress phases this way, a dozen per create (GK-3 capture).
+      for (const phase of ['auth', 'persistence_init', 'response_ready']) {
+        send({ jsonrpc: '2.0', method: '_x.ai/session/setup', params: { method: 'session/new', phase, sessionId: phase === 'auth' ? null : config.sessionId } });
+      }
+      record({ kind: 'vendor-notices', at: 'session/new', pid: process.pid });
+    }
     ensureSession(frame.params.cwd);
     send({ jsonrpc: '2.0', id: frame.id, result: { sessionId: config.sessionId } });
     return;
@@ -273,6 +281,30 @@ const handle = (frame) => {
   if (frame.method === 'session/load') {
     ensureSession(frame.params.cwd);
     send({ jsonrpc: '2.0', id: frame.id, result: { models, modes } });
+    // Grok 1.0.92 saves summary.json by writing a temp file and renaming it over the old one,
+    // five times within ~45 ms of session/load, some after its answer (GK-3 capture,
+    // 2026-11-24). Same mechanism here, repeated for a bounded window so that the client's
+    // first read after the answer lands inside it; the event loop is yielded every 5 ms so the
+    // answer is flushed first and later frames are still read.
+    const rewriteMs = Math.min(1000, Number(process.env.FAKE_GROK_LOAD_SUMMARY_REWRITE_MS || 0) || 0);
+    if (rewriteMs > 0) {
+      const summaryPath = sessionPaths(frame.params.cwd).summary;
+      const text = readFileSync(summaryPath);
+      const deadline = Date.now() + rewriteMs;
+      let count = 0;
+      const rewrite = () => {
+        const sliceEnd = Math.min(deadline, Date.now() + 5);
+        while (Date.now() < sliceEnd) {
+          const temporary = summaryPath + '.' + process.pid + '-' + count + '.tmp';
+          writeFileSync(temporary, text);
+          renameSync(temporary, summaryPath);
+          count += 1;
+        }
+        if (Date.now() < deadline) setTimeout(rewrite, 0);
+        else record({ kind: 'summary-rewrites-done', count, pid: process.pid });
+      };
+      setTimeout(rewrite, 0);
+    }
     return;
   }
   if (frame.method === 'session/close') {
@@ -290,6 +322,14 @@ const handle = (frame) => {
       update: { sessionUpdate: 'user_message_chunk', content: { type: 'text', text } },
     };
     const echoDelay = Math.max(0, Math.min(2000, Number(process.env.FAKE_GROK_ECHO_DELAY_MS || 0) || 0));
+    if (process.env.FAKE_GROK_VENDOR_NOTICES === '1') {
+      // Shapes as Grok 1.0.92 sends them during a turn (GK-3 capture): one
+      // tool_call_delta_chunk per streamed tool-argument chunk, and the prompt queue.
+      send({ jsonrpc: '2.0', method: '_x.ai/queue/changed', params: { sessionId: config.sessionId, entries: [] } });
+      send({ jsonrpc: '2.0', method: '_x.ai/session_notification', params: { sessionId: config.sessionId,
+        update: { sessionUpdate: 'tool_call_delta_chunk', tool_call_id: 'call-' + promptId, tool_index: 0, name: 'run_terminal_command' } } });
+      record({ kind: 'vendor-notices', at: 'session/prompt', pid: process.pid });
+    }
     setTimeout(() => {
       send({ jsonrpc: '2.0', method: 'session/update', params });
       const paths = ensureSession(process.cwd());

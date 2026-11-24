@@ -151,6 +151,39 @@ try {
     }
   }
 
+  // Create's child and a Drive child read the same way. Grok 1.0.92 sends a dozen
+  // `_x.ai/session/setup` notices per create and, during a turn, one
+  // `_x.ai/session_notification` per streamed tool-argument chunk (a captured Drive session
+  // traced 275). None is read, and none may become a broker log line.
+  {
+    const noticeFake = writeFakeGrokBinary(join(root, 'notice-bin'), join(root, 'notice-home'));
+    const noticeAdapter = new GrokAdapter({ command: noticeFake.path, env: noticeFake.env, requestTimeoutMs: 2_000 });
+    const logged: string[] = [];
+    const consoleError = console.error;
+    console.error = (...args: unknown[]) => { logged.push(args.map(String).join(' ')); };
+    let noticeDrive: GrokDriveConnection | undefined;
+    try {
+      noticeFake.env.FAKE_GROK_VENDOR_NOTICES = '1';
+      const noticeCreated = await noticeAdapter.createSession({ directory: cwd });
+      noticeDrive = await noticeAdapter.attach(noticeCreated.id, 'resume') as GrokDriveConnection;
+      const noticeLive: AgentMessage[] = [];
+      noticeDrive.subscribe((message) => noticeLive.push(message));
+      await noticeDrive.sendPrompt({ text: 'turn with vendor notices' });
+      const sentAt = noticeFake.events().filter((event) => event.kind === 'vendor-notices').map((event) => event.at);
+      check('Create and Drive children log no line for Grok\'s _x.ai notices and still trace other unknown ones',
+        sentAt.includes('session/new')
+          && sentAt.includes('session/prompt')
+          && noticeLive.some((message) => message.type === 'run-summary' && message.status === 'done')
+          && !logged.some((line) => line.includes('op=_x.ai/'))
+          && logged.some((line) => line.includes('unhandled-extension op=_vendor.test/notice')),
+        JSON.stringify({ sentAt, logged }));
+    } finally {
+      delete noticeFake.env.FAKE_GROK_VENDOR_NOTICES;
+      await noticeDrive?.close();
+      console.error = consoleError;
+    }
+  }
+
   const fake = writeFakeGrokBinary(bin, store);
   const adapter = new GrokAdapter({ command: fake.path, env: fake.env, homeDir: root, requestTimeoutMs: 2_000, testOnlyEnableUnverifiedDrive: true });
   check('the exact fake binary is available, authenticated, and create-enabled',
@@ -339,6 +372,34 @@ try {
       unguarded: starts.filter((event) => event.autoUpdateDisabled !== '1')
         .map((event) => ({ kind: event.kind, argv: event.argv })),
     }));
+
+  // Grok 1.0.92 renames a fresh summary.json over the old one several times around
+  // session/load, some after the answer (GK-3 capture). The relaunch's durable-identity read
+  // lands in that window; a single read there found no session and revoked Drive for good.
+  fake.env.FAKE_GROK_LOAD_SUMMARY_REWRITE_MS = '150';
+  const spawnsBeforeRewrites = fake.spawnCount();
+  let rewriteRelaunchError: unknown;
+  try {
+    await drive.sendPrompt({
+      text: 'relaunch while Grok rewrites its summary',
+      model: { providerID: 'xai', modelID: 'grok-4.6', reasoningEffort: 'low' },
+      permissionMode: 'default',
+    });
+  } catch (error) { rewriteRelaunchError = error; }
+  delete fake.env.FAKE_GROK_LOAD_SUMMARY_REWRITE_MS;
+  const drivingAfterRewrites = drive.driving;
+  const rewritesDone = await waitFor(
+    () => fake.events().some((event) => event.kind === 'summary-rewrites-done'), 3_000);
+  const rewrites = fake.events().filter((event) => event.kind === 'summary-rewrites-done');
+  check('a relaunch whose session/load is followed by Grok\'s summary.json rewrites keeps Drive',
+    rewriteRelaunchError === undefined
+      && drivingAfterRewrites
+      && fake.spawnCount() === spawnsBeforeRewrites + 1
+      && drive.info.currentModel?.reasoningEffort === 'low'
+      && rewritesDone
+      && rewrites.some((event) => typeof event.count === 'number' && event.count > 0)
+      && (await adapter.discoverSessions()).find((row) => row.id === created.id)?.control?.drive.state === 'driving',
+    JSON.stringify({ error: String(rewriteRelaunchError ?? ''), rewrites, driving: drive.driving }));
 
   const spawnsBeforeSwitch = fake.spawnCount();
   fake.env.FAKE_GROK_DONE_METHOD = 'x.ai/session/update';

@@ -24,10 +24,15 @@ import type { GrokUpdateEntry, GrokUpdateRecord } from './mapping.ts';
  * drifted 1.0.13 to 1.0.24 unattended, and Drive was refused for a build that
  * `scripts/adapters/compare-grok-acp-contract.ts` then showed to be identical
  * across all eleven releases on every point the adapter reads.
+ *
+ * 1.0.92 was driven live on 2026-11-24 (Create, Resume by a fresh adapter as after
+ * a broker restart, prompts, an approved and a rejected permission, Stop) in a
+ * throwaway home.
  */
 export const GROK_MEASURED_VERSIONS: readonly string[] = Object.freeze([
   '1.0.13',
   '1.0.24',
+  '1.0.92',
 ]);
 
 const GROK_MEASURED_VERSION_SET = new Set(GROK_MEASURED_VERSIONS);
@@ -621,6 +626,30 @@ export async function discoverGrokStore(options: GrokDiscoveryOptions = {}): Pro
       || publishedNativeIds.has(session.parentThreadId!));
   }
   return projected;
+}
+
+/**
+ * How long a durable-identity read keeps looking for one session's row: 40 reads, 25 ms apart.
+ *
+ * A row can be missing from one discovery while Grok is saving it. Grok 1.0.92 saves
+ * `summary.json` by writing a temporary file and renaming it over the old one, and it does so
+ * five times within about 45 ms of a `session/load` request, some of them after the answer
+ * (captured 2026-11-24). A read that opens the old file just before the rename sees a
+ * different file at the path when it re-checks, and the open check above refuses it, so that
+ * discovery leaves the session out. Reading once right after `session/load` therefore found no
+ * session about one time in five, and Drive treated that as a lost identity.
+ */
+export const GROK_DURABLE_READ_ATTEMPTS = 40;
+export const GROK_DURABLE_READ_INTERVAL_MS = 25;
+
+/** One session's discovered row, re-read while Grok may still be saving it; undefined after
+ *  {@link GROK_DURABLE_READ_ATTEMPTS} reads that all miss. */
+export async function findGrokStoredSession(root: string, id: string): Promise<GrokStoredSession | undefined> {
+  for (let attempt = 1; ; attempt += 1) {
+    const session = (await discoverGrokStore({ root })).find((candidate) => candidate.id === id);
+    if (session || attempt >= GROK_DURABLE_READ_ATTEMPTS) return session;
+    await new Promise((resolve) => setTimeout(resolve, GROK_DURABLE_READ_INTERVAL_MS));
+  }
 }
 
 export async function readGrokSignals(session: GrokStoredSession): Promise<Record<string, unknown> | undefined> {
