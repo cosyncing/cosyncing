@@ -386,7 +386,8 @@ default</textarea></label>
     '<a b="'.repeat(Math.floor(megabyte / 6)),
     '<'.repeat(megabyte),
     '<textarea name="t">' + '</textare'.repeat(Math.floor(megabyte / 10)),
-    Array.from({ length: 20_000 }, (_, index) => `<input type="checkbox" name="c" value="v${index % 5000}" checked>`).join(''),
+    // 19,000 checkboxes (about 1,021,560 characters, under the cap) carrying 5000 distinct values.
+    Array.from({ length: 19_000 }, (_, index) => `<input type="checkbox" name="c" value="v${index % 5000}" checked>`).join(''),
   ];
   const parseStarted = performance.now();
   const craftedResults = crafted.map((html) => parsePiFormDialog(html));
