@@ -383,12 +383,14 @@ try {
   check('Pi stats gap is closed by native stats evidence', !piOpenIds.has('pi.rpc.get_session_stats'), JSON.stringify(piReport?.openGaps ?? []));
   check('Pi fork gap is closed by native fork evidence', !piOpenIds.has('pi.rpc.fork'), JSON.stringify(piReport?.openGaps ?? []));
   check('Pi clone gap is closed by distinct native clone evidence', !piOpenIds.has('pi.rpc.clone'), JSON.stringify(piReport?.openGaps ?? []));
-  check('Pi import surface is blocked by reviewed unsafe policy', piBlockedIds.has('pi.rpc.import'), JSON.stringify(piReport?.blocked ?? []));
+  // Pi's RPC has no `import` (absent from the 1.1.0 and 1.6.0 RpcCommand unions), so the 1.6.0 seed
+  // carries no import surface to block.
+  check('Pi 1.6.0 seed carries no import surface', !piOpenIds.has('pi.rpc.import') && !piBlockedIds.has('pi.rpc.import'), JSON.stringify(piReport?.blocked ?? []));
   check('Pi switch_session is blocked by reviewed not-productized policy', piBlockedIds.has('pi.rpc.switch_session'), JSON.stringify(piReport?.blocked ?? []));
   check('Pi export_html gap is closed by Slice 6 transcriptExport evidence', !piOpenIds.has('pi.rpc.export_html'), JSON.stringify(piReport?.openGaps ?? []));
   check(
-    'Pi report has no open gaps after Slice 6 (import + switch_session blocked)',
-    piOpenIds.size === 0 && piBlockedIds.size === 2 && !existsSync(join(piOut, 'cards', 'pi.rpc.export_html.md')),
+    'Pi report has no open gaps after Slice 6 (switch_session blocked)',
+    piOpenIds.size === 0 && piBlockedIds.size === 1 && !existsSync(join(piOut, 'cards', 'pi.rpc.export_html.md')),
     JSON.stringify({ open: [...piOpenIds], blocked: [...piBlockedIds] }),
   );
 

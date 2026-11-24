@@ -236,7 +236,7 @@ export const SUPPORT_MATRIX_CLAIMS: SupportClaim[] = [
   }),
   claim('pi', 'F14', 'partial', 'create/reload/quit/fork/clone/name covered; switch excluded by review; export mapped (needs L2)', undefined, {
     capabilityIds: ['pi.rpc.set_session_name', 'pi.rpc.fork', 'pi.rpc.clone', 'pi.rpc.export_html'],
-    reviewedNativeVersions: { pi: '0.78.1' },
+    reviewedNativeVersions: { pi: '1.6.0' },
   }),
   claim('omp', 'F14', 'partial', 'create/reload/quit/name/export covered; fork on omp 19.1.0 (bare fork copies the whole session), none on 17.4.2; clone is unavailable through RPC', undefined, {
     reviewedNativeVersions: { omp: '19.1.0' },
