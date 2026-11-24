@@ -20,10 +20,10 @@ import {
   type ConformanceExtra,
   type ConformanceKit,
   type ConformanceProfile,
+  expectOneResetSince,
   type FakeController,
   installFakeExecutable,
   Ledger,
-  replacedLogResetsObserve,
   type SeededSession,
   type SeedOptions,
   treeSnapshot,
@@ -48,6 +48,9 @@ export const reasonixProfile: ConformanceProfile = {
   },
   driveFamily: 'broker-child',
   driveEligibility: 'stored-idle',
+  // Reasonix 2.61.0 republishes its transcript by rename on ordinary saves, so the same bytes under a
+  // new file are the same history (the extra below); only a changed row is a boundary change.
+  boundaryChanges: ['rewriteHistory'],
   version: {
     current: '1.25.2',
     below: '1.25.1',
@@ -151,7 +154,35 @@ function plantWithEdit(fake: FakeController, suffix: string, edit: (value: Recor
 }
 
 const reasonixExtras: ConformanceExtra[] = [
-  replacedLogResetsObserve('reasonix'),
+  {
+    // Reasonix 2.61.0 saves through a temporary file and a rename, appends included: a transcript
+    // renamed over with the same bytes is the same history, and one renamed over with a changed row
+    // is one rewrite.
+    title: 'an open Observe reader keeps its history across a same-bytes rename and resets once for a changed row',
+    async run(context) {
+      const seeded = context.fake.seedSession({ turns: 2 });
+      await context.client.waitForSession((row) => row.id === seeded.id);
+      const stream = await context.client.attach('reasonix', seeded.id);
+      await stream.waitForKind('history');
+      const from = stream.frames.length;
+      context.fake.replaceLog(seeded);
+      context.fake.appendTurn(seeded, 'after the same-bytes rename', 'answer after the same-bytes rename');
+      await stream.waitForMessage((message) => message.type === 'model-output'
+        && (message.text ?? message.delta) === 'answer after the same-bytes rename');
+      expect(stream.frames.slice(from).filter((frame) => frame.kind === 'history' && frame.reset === true)).toEqual([]);
+
+      const changedFrom = stream.frames.length;
+      const rows = readReasonixRows(context.fake.storeRoot, seeded.id);
+      rows[0] = { ...rows[0]!, content: 'rewritten first prompt', raw_content: 'rewritten first prompt' };
+      writeReasonixFiles(context.fake.storeRoot, seeded, rows, { transcriptByRename: true });
+      const reset = await stream.waitForFrame((frame) => frame.kind === 'history' && frame.reset === true,
+        { after: changedFrom, what: 'a reset after a changed row was renamed over the log' });
+      expect((reset.messages as any[]).filter((message) => message.type === 'user-message').map((message) => message.text))
+        .toEqual(['rewritten first prompt', seeded.texts[2], 'after the same-bytes rename']);
+      await expectOneResetSince(stream, context.fake, seeded, changedFrom);
+      stream.close();
+    },
+  },
   {
     title: 'Resume is refused while the native status is not idle or unknown, with no writer started',
     async run(context) {

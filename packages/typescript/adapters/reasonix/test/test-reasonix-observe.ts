@@ -74,7 +74,7 @@ let displayEntries: Array<{
   ...(index === 1 ? { starts_turn: true } : {}),
 }));
 
-function updateSidecars(revision: number): void {
+function updateSidecars(revision: number, revisionKnown = false): void {
   const transcriptLines = readFileSync(transcript, 'utf8')
     .split('\n')
     .filter((line) => line.trim());
@@ -101,7 +101,13 @@ function updateSidecars(revision: number): void {
     content_digest: `revision-${revision}`,
     writer_id: 'observe-fixture',
   });
-  json(displayPath, { schema_version: 1, revision, message_count: displayEntries.length, entries: displayEntries });
+  json(displayPath, {
+    schema_version: 1,
+    revision,
+    ...(revisionKnown ? { revision_known: true } : {}),
+    message_count: displayEntries.length,
+    entries: displayEntries,
+  });
   const meta = JSON.parse(readFileSync(metaPath, 'utf8')) as Record<string, unknown>;
   json(metaPath, { ...meta, revision, content_digest: `revision-${revision}` });
 }
@@ -543,7 +549,9 @@ try {
     role: 'assistant',
     authored_turn: 2,
   });
-  updateSidecars(43);
+  // From here the display index states its revision, as both measured Reasonix versions write it, so
+  // the reader judges a replacement by its source identity and bytes, not by the file's mtime.
+  updateSidecars(43, true);
   const settledSeen = await waitFor(() => replacedLive.some((message) =>
     message.type === 'model-output' && message.text === 'before the replacement'));
   await sleep(200);
@@ -556,12 +564,36 @@ try {
     settledSeen && replacementReads === readsBeforeForeign
       && !replacedLive.some((message) => message.type === 'history-reset'),
     JSON.stringify({ settledSeen, readsBeforeForeign, replacementReads }));
-  // The same bytes, written aside and renamed over the transcript; no sidecar changes.
+  // The same bytes, written aside and renamed over the transcript; no sidecar changes. Reasonix 2.61.0
+  // saves this way, appends included, so it is the same history: the next append tails, no reset.
   writeFileSync(`${transcript}.tmp`, readFileSync(transcript));
   renameSync(`${transcript}.tmp`, transcript);
-  const replacementReset = await waitFor(() => replacedLive.some((message) => message.type === 'history-reset'));
-  check('a transcript renamed over with the same bytes resets the open reader once',
-    replacementReset && replacedLive.filter((message) => message.type === 'history-reset').length === 1,
+  const afterRenameLine = JSON.stringify({ role: 'assistant', content: 'after the same-bytes rename' });
+  const afterRenameOffset = statSync(transcript).size;
+  appendFileSync(transcript, `${afterRenameLine}\n`);
+  displayEntries.push({
+    index: displayEntries.length,
+    offset: afterRenameOffset,
+    length: Buffer.byteLength(afterRenameLine),
+    role: 'assistant',
+    authored_turn: 2,
+  });
+  updateSidecars(44, true);
+  const afterRenameSeen = await waitFor(() => replacedLive.some((message) =>
+    message.type === 'model-output' && message.text === 'after the same-bytes rename'));
+  check('a transcript renamed over with the same bytes keeps the open reader\'s history',
+    afterRenameSeen && !replacedLive.some((message) => message.type === 'history-reset'),
+    JSON.stringify(replacedLive.map((message) => message.type)));
+  // A changed row renamed over the transcript is a rewrite: exactly one reset.
+  const changedText = readFileSync(transcript, 'utf8')
+    .replace(JSON.stringify(settledRow), JSON.stringify({ ...settledRow, content: 'edited before the replacement' }));
+  writeFileSync(`${transcript}.tmp`, changedText);
+  renameSync(`${transcript}.tmp`, transcript);
+  updateSidecars(45, true);
+  const changedReset = await waitFor(() => replacedLive.some((message) => message.type === 'history-reset'));
+  await sleep(300);
+  check('a transcript renamed over with a changed row resets the open reader once',
+    changedReset && replacedLive.filter((message) => message.type === 'history-reset').length === 1,
     JSON.stringify(replacedLive.map((message) => message.type)));
   await replaced.close();
 
