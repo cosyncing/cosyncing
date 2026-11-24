@@ -1346,6 +1346,14 @@ try {
       identities: new Map([[SPAWN_PID, SPAWNED]]),
       missingProcess: PROCESS_ABSENT,
       listeners,
+      // SIGTERM ends the child, as a real one would: it leaves the table and
+      // the address, and its exit is observed.
+      onSignal: (pid, signal, table) => {
+        if (signal !== 'SIGTERM') return;
+        table.delete(pid);
+        listeners.set(59999, HOST_ABSENT);
+        exit(143);
+      },
     });
     const spawn = effects.spawn.bind(effects);
     effects.spawn = (launch) => {
@@ -1359,11 +1367,17 @@ try {
       };
     };
     const memory = memoryStore();
-    const outcome = await ensureManagedHost(backend({
+    const launcher = backend({
       isAvailable: async () => order.includes('spawn'),
       managedLaunchEnded: (reason: string) => { order.push(`ended:${reason}`); },
-    }) as never, effects, memory.store, AUTHORIZED);
-    return { outcome, exit: (code: number) => exit(code), records: memory.records };
+    });
+    const outcome = await ensureManagedHost(launcher as never, effects, memory.store, AUTHORIZED);
+    return {
+      outcome,
+      exit: (code: number) => exit(code),
+      records: memory.records,
+      release: () => releaseManagedHost(launcher as never, effects, memory.store),
+    };
   };
   {
     const order: string[] = [];
@@ -1387,6 +1401,23 @@ try {
     await settle();
     check('an exit noticed after a newer launch took the record does not end the newer launch',
       outcome.action === 'started' && !order.includes('ended:host-exited'), JSON.stringify(order));
+  }
+  {
+    // A start and a release in one broker. The stop's SIGTERM ends the child,
+    // and its exit is seen while the record still names it, so the adapter
+    // hears the end twice: once from the exit and once from the stop. Each
+    // notice only lets go of what the launch left, so the second changes
+    // nothing.
+    const order: string[] = [];
+    const { outcome, release } = await launchOnce(order);
+    const stopped = await release();
+    await settle();
+    check('a start then a release in one broker ends the launch on its exit and again on the stop',
+      outcome.action === 'started' && stopped.action === 'stopped'
+        && JSON.stringify(order) === JSON.stringify([
+          'ended:superseded-by-new-launch', 'spawn', 'ended:host-exited', 'ended:stopped',
+        ]),
+      JSON.stringify({ outcome, stopped, order }));
   }
   {
     const ended: string[] = [];
