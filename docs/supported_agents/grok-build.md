@@ -1,7 +1,7 @@
 # Grok Build (experimental)
 
-The local-store and ACP contract is physically measured against Grok Build 1.0.13
-and 1.0.24. The shipped adapter offers Observe plus authenticated Create and
+The local-store and ACP contract is physically measured against Grok Build 1.0.13,
+1.0.24 and 1.0.92. The shipped adapter offers Observe plus authenticated Create and
 Resume on **1.0.13 or newer** — newer builds are not enumerated and do not need
 to be. Grok updates itself in place, so a gate keyed to a version list would cost
 you Create and Resume every time it did.
@@ -14,8 +14,12 @@ requirement that ACP and the durable store return the same new UUID. A future
 build that genuinely breaks the contract is refused there, with a message naming
 what broke, rather than by a version comparison that cannot say why.
 
-The measured versions completed installed wire/client physical acceptance,
-including model/mode propagation, exact output, and context usage.
+1.0.13 and 1.0.24 completed installed wire/client physical acceptance,
+including model/mode propagation, exact output, and context usage. 1.0.92 was
+driven through the adapter in a throwaway home: Create, Resume by a fresh
+adapter as after a broker restart, prompts, an approved and a rejected
+permission, and Stop. That run used a custom model with an API key, so its
+cached-token sign-in was not exercised.
 
 Install the official Grok Build CLI, then confirm that a new login shell can
 find the installed version:
@@ -53,27 +57,30 @@ deliberate nonstandard executable.
 - Prompt queue, allow-once/reject permission, commands, model/mode relaunch, and
   cross-client writer sharing are covered by deterministic regressions. Foreign
   writes or transcript rewrites terminate and revoke the broker writer.
+- In the default mode Grok 1.0.92 asks before writing a file and reads without
+  asking. Rejecting a write ends the turn as cancelled: Grok stops the turn
+  itself rather than letting the model continue.
 - Stop is offered as an action while driving. It sends ACP `session/cancel`,
   drops prompts not yet delivered, and keeps Drive; the turn closes as
   cancelled when Grok answers the prompt with `stopReason: cancelled`. If the
   prompt has not answered 10 seconds after Stop, the writer is stopped and the
   session becomes read-only with a notice. Grok lists no stop command of its
   own; its bundled hook documentation counts a client `session/cancel` as a user
-  interrupt.
+  interrupt. On 1.0.92 a Stop during a streamed answer closed the turn as
+  cancelled 48 ms later, the partial answer stayed in the stored log, and Drive
+  was kept.
 - The terminal hint uses `grok --cwd <workspace> --resume <uuid>`. It is a
   handoff to a separate process, not live synchronization with the ACP child.
 
 ## Limits
 
 - Drive is fail-closed below 1.0.13, without reusable cached-token auth, or for a
-  session that lacks durable app-created provenance.
-- Stop is verified against the conformance fake only. A capability probe of
-  Grok Build 1.0.41 (ACP `initialize` alone, in a throwaway home) answered
-  protocol version 1 with `loadSession` and session `list`/`resume`/`close`,
-  listed no stop command, and reported `_meta.cancelRewind: true`, whose effect
-  on the stored log is unmeasured. Measuring a real mid-turn Stop needs a model
-  call, so how Grok records a stopped turn, and how quickly it answers, are not
-  yet measured.
+  session that lacks durable app-created provenance. A signed-out Grok 1.0.92
+  set up with an API key offers `xai.api_key` and `grok.com` sign-in but no
+  cached token, so Create stays hidden there until `grok login`.
+- A real Stop has been measured on 1.0.92 only; older builds are covered by the
+  conformance fake. 1.0.92 still reports `_meta.cancelRewind: true`, as 1.0.41
+  did, but its stopped turn's log was not rewritten.
 - True terminal synchronization, files, images, artifact delivery, question
   dialogs, rename, fork, clone, export, and child-session identity are not
   exposed by this adapter.
