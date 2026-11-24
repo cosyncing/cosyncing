@@ -22,7 +22,7 @@ import { SessionTitleCache, sessionPromptPreview, isSessionInstruction } from '@
 import { homedir } from 'node:os';
 import { isOwnershipConflictError } from '@cosyncing/adapter-api';
 import { assertNoPiNativeOwner } from './native-presence.ts';
-import { parsePiFormDialog, piFormAnswerData, piFormQuestions, type PiFormDialog } from './form-dialog.ts';
+import { parsePiFormDialog, piFormAnswer, piFormQuestions, type PiFormDialog } from './form-dialog.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   closeSync,
@@ -2735,12 +2735,17 @@ class PiConnection implements SessionConnection {
         'request-not-pending',
       );
     }
+    // An approval of a form carries no values: the form goes back with its own defaults, and only
+    // when omp would accept them; otherwise the dialog stays open for an answer.
+    const defaults = decision !== 'reject' && ui.form ? piFormAnswer(ui.form, undefined) : undefined;
+    if (defaults && !defaults.ok) {
+      throw new Error(`${this.rt.dialect.displayName} form needs an answer: ${defaults.problem}`);
+    }
     this.pendingUi.delete(requestId);
     if (decision === 'reject') {
       this.write({ type: 'extension_ui_response', id: requestId, cancelled: true });
-    } else if (ui.form) {
-      // An approval carries no values: the form goes back with its own defaults.
-      this.write({ type: 'extension_ui_response', id: requestId, data: piFormAnswerData(ui.form, undefined) });
+    } else if (defaults?.ok) {
+      this.write({ type: 'extension_ui_response', id: requestId, data: defaults.data });
     } else if (ui.method === 'confirm') {
       this.write({ type: 'extension_ui_response', id: requestId, confirmed: true });
     } else {
@@ -2763,15 +2768,24 @@ class PiConnection implements SessionConnection {
   }
 
   /** Answer a `select` dialog with the user's ACTUAL choice (was: always options[0]), or an omp
-   *  `form` with one value per control, in the shape omp validates. */
+   *  `form` with one value per control, in the shape omp validates.
+   *
+   *  A form answer omp would refuse (`required`, `pattern`, a length or range, an email or URL
+   *  shape) is never sent: omp rejects the extension's whole dialog on one, after the card would
+   *  already show it answered. It is refused here instead, before anything changes, so the card
+   *  stays open. That refusal is a plain error (a `CLIENT_MESSAGE_FAILED` nack): neither
+   *  ControlRefusedError reason fits, since the request IS pending and answering IS supported. */
   async answerQuestion(requestId: string, answers: string[][]): Promise<void> {
     const ui = this.pendingQuestion(requestId);
-    this.pendingUi.delete(requestId);
     if (ui.form) {
-      this.write({ type: 'extension_ui_response', id: requestId, data: piFormAnswerData(ui.form, answers) });
+      const answer = piFormAnswer(ui.form, answers);
+      if (!answer.ok) throw new Error(`${this.rt.dialect.displayName} form answer not accepted: ${answer.problem}`);
+      this.pendingUi.delete(requestId);
+      this.write({ type: 'extension_ui_response', id: requestId, data: answer.data });
       this.emit({ type: 'question-resolved', requestId });
       return;
     }
+    this.pendingUi.delete(requestId);
     const choice = answers?.[0]?.[0];
     this.write({ type: 'extension_ui_response', id: requestId, value: choice ?? ui.options?.[0] ?? '' });
     this.emit({ type: 'question-resolved', requestId });

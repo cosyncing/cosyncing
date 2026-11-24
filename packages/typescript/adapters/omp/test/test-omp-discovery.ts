@@ -181,6 +181,128 @@ process.exit(73);
   process.env.COSYNCING_OMP_BRIDGE_AUTOINSTALL = '0';
   resetOmpRuntimeReadinessCache();
 
+  // ── omp 19.1.0 form dialogs, read and validated the way omp reads and validates them ──
+  const { parsePiFormDialog, piFormAnswer, piFormQuestions } = await import('../../../pi-engine/src/form-dialog.ts');
+  const controls = parsePiFormDialog(`<form>
+  <label>Region <select name="region"><option value="eu">Europe</option><option value="us" disabled>US</option><option value="ap">Asia</option></select></label>
+  <label>Tags <select name="tags" multiple><option value="a" selected>Alpha</option><option value="b">Beta</option></select></label>
+  <label>Replicas <input type="number" name="replicas" min="1" max="5" step="1" value="2"></label>
+  <label>Load <input type="range" name="load" min="0" max="100"></label>
+  <label>Notes <textarea name="notes" maxlength="10">
+default</textarea></label>
+</form>`);
+  check('select, multi-select, number, range and textarea become card questions',
+    JSON.stringify(controls && piFormQuestions(controls)) === JSON.stringify([
+      { question: 'Region', options: [{ label: 'Europe' }, { label: 'Asia' }], freeText: false },
+      { question: 'Tags', options: [{ label: 'Alpha' }, { label: 'Beta' }], multiple: true, freeText: false },
+      { question: 'Replicas', options: [], kind: 'number', min: 1, max: 5, step: 1 },
+      { question: 'Load', options: [], kind: 'number', min: 0, max: 100 },
+      { question: 'Notes', options: [], kind: 'text' },
+    ]),
+    JSON.stringify(controls && piFormQuestions(controls)));
+  const controlDefaults = controls && piFormAnswer(controls, undefined);
+  check('defaults: a single select takes its first enabled option, a textarea its content',
+    JSON.stringify(controlDefaults) === JSON.stringify({ ok: true, data: { region: 'eu', tags: ['a'], replicas: 2, notes: 'default' } }),
+    JSON.stringify(controlDefaults));
+  const controlAnswer = controls && piFormAnswer(controls, [['Asia'], ['Beta'], ['4'], ['50'], ['hi']]);
+  check('answers become option values, an array for the multi-select, numbers for number and range',
+    JSON.stringify(controlAnswer) === JSON.stringify({ ok: true, data: { region: 'ap', tags: ['b'], replicas: 4, load: 50, notes: 'hi' } }),
+    JSON.stringify(controlAnswer));
+  const outOfRange = controls && piFormAnswer(controls, [['Asia'], ['Beta'], ['9'], ['50'], ['hi']]);
+  const tooLong = controls && piFormAnswer(controls, [['Asia'], ['Beta'], ['4'], ['50'], ['far too long here']]);
+  check('a number past max and a textarea past maxlength are refused before sending',
+    outOfRange?.ok === false && /Replicas: Must be at most 5/.test(outOfRange.problem)
+      && tooLong?.ok === false && /Notes: At most 10 characters/.test(tooLong.problem),
+    JSON.stringify({ outOfRange, tooLong }));
+
+  // omp decides array or string over the options in the HTML, disabled and repeated ones counted.
+  const groups = parsePiFormDialog(`<form>
+  <fieldset><legend>Extras</legend>
+    <label><input type="checkbox" name="extras" value="cheese"> Cheese</label>
+    <label><input type="checkbox" name="extras" value="ham" disabled> Ham</label>
+  </fieldset>
+  <label><input type="checkbox" name="agree" value="yes"> I agree</label>
+  <fieldset><legend>Size</legend>
+    <label><input type="checkbox" name="size" value="m"> Medium</label>
+    <label><input type="checkbox" name="size" value="m" checked> Medium again</label>
+  </fieldset>
+</form>`);
+  const groupAnswer = groups && piFormAnswer(groups, [['Cheese'], ['I agree'], ['Medium']]);
+  check('a two-option checkbox group with one disabled option still answers an array; a lone checkbox a string',
+    JSON.stringify(groups?.fields.map((field) => [field.name, field.options.length, field.arrayAnswer])) === JSON.stringify([['extras', 1, true], ['agree', 1, false], ['size', 1, true]])
+      && JSON.stringify(groupAnswer) === JSON.stringify({ ok: true, data: { extras: ['cheese'], agree: 'yes', size: ['m'] } }),
+    JSON.stringify({ fields: groups?.fields, groupAnswer }));
+  const groupDefaults = groups && piFormAnswer(groups, undefined);
+  check('a repeated value that is checked is checked by default',
+    groupDefaults?.ok === true && JSON.stringify(groupDefaults.data.size) === JSON.stringify(['m']),
+    JSON.stringify(groupDefaults));
+
+  // omp's field rules (`fieldError`): an answer it would refuse never leaves the card.
+  const rules = parsePiFormDialog(`<form>
+  <label>Name <input name="name" required minlength="2"></label>
+  <label>Code <input name="code" pattern="[A-Z]{3}-\\d{2}"></label>
+  <label>Mail <input type="email" name="mail"></label>
+  <label>Site <input type="url" name="site"></label>
+  <label>Size <select name="size" required><option value="" disabled selected>Pick one</option><option value="s">Small</option></select></label>
+</form>`);
+  const rulesProblem = (answers: string[][] | undefined) => {
+    const answer = rules && piFormAnswer(rules, answers);
+    return answer && !answer.ok ? answer.problem : answer ? 'ok' : 'unparsed';
+  };
+  const valid = rules && piFormAnswer(rules, [['Al'], ['ABC-12'], ['a@b'], ['https://x.test'], ['Small']]);
+  check('a valid answer passes every rule',
+    JSON.stringify(valid) === JSON.stringify({ ok: true, data: { name: 'Al', code: 'ABC-12', mail: 'a@b', site: 'https://x.test', size: 's' } }),
+    JSON.stringify(valid));
+  const refusals = [
+    rulesProblem(undefined),
+    rulesProblem([['A'], ['ABC-12'], ['a@b'], ['https://x.test'], ['Small']]),
+    rulesProblem([['Al'], ['abc'], ['a@b'], ['https://x.test'], ['Small']]),
+    rulesProblem([['Al'], ['ABC-12'], ['nope'], ['https://x.test'], ['Small']]),
+    rulesProblem([['Al'], ['ABC-12'], ['a@b'], ['x'], ['Small']]),
+    rulesProblem([['Al'], ['ABC-12'], ['a@b'], ['https://x.test'], ['Huge']]),
+  ];
+  check('required, minlength, pattern, email, url and an unknown option are each refused',
+    /^Name: Required$/.test(refusals[0]!)
+      && /^Name: Needs at least 2 characters$/.test(refusals[1]!)
+      && /^Code: Must match /.test(refusals[2]!)
+      && /^Mail: Enter an email address$/.test(refusals[3]!)
+      && /^Site: Enter a full URL$/.test(refusals[4]!)
+      && /^Size: "Huge" is not one of its options$/.test(refusals[5]!),
+    JSON.stringify(refusals));
+
+  // Forms the card cannot carry exactly are not offered; an invalid pattern is ignored, as omp does.
+  const refused = {
+    file: parsePiFormDialog('<form><label>Doc <input type="file" name="doc"></label></form>'),
+    twoTexts: parsePiFormDialog('<form><input name="a"><input name="a"></form>'),
+    radioAndCheckbox: parsePiFormDialog('<form><input type="radio" name="a" value="1"><input type="checkbox" name="a" value="2"></form>'),
+    requiredNothingToPick: parsePiFormDialog('<form><input type="radio" name="a" value="1" required disabled></form>'),
+    backtracking: parsePiFormDialog('<form><input name="a" pattern="(\\w+\\s?)+"></form>'),
+    nothing: parsePiFormDialog('<form><p>Just text</p></form>'),
+  };
+  const invalidPattern = parsePiFormDialog('<form><label>A <input name="a" pattern="["></label></form>');
+  check('file inputs, repeated names, unanswerable required groups, backtracking patterns and empty forms are refused',
+    Object.values(refused).every((form) => form === undefined)
+      && invalidPattern?.fields.length === 1 && invalidPattern.fields[0]!.pattern === undefined,
+    JSON.stringify({ refused, invalidPattern }));
+
+  // The parser runs on the broker's event loop: crafted HTML up to the size cap stays linear.
+  const megabyte = 1024 * 1024 - 64;
+  const crafted = [
+    '<a '.repeat(Math.floor(megabyte / 3)),
+    '<!--'.repeat(Math.floor(megabyte / 4)),
+    '<a b="'.repeat(Math.floor(megabyte / 6)),
+    '<'.repeat(megabyte),
+    '<textarea name="t">' + '</textare'.repeat(Math.floor(megabyte / 10)),
+    Array.from({ length: 20_000 }, (_, index) => `<input type="checkbox" name="c" value="v${index % 5000}" checked>`).join(''),
+  ];
+  const parseStarted = performance.now();
+  const craftedResults = crafted.map((html) => parsePiFormDialog(html));
+  const parseMs = performance.now() - parseStarted;
+  check('crafted near-cap HTML parses in bounded time',
+    parseMs < 2_000 && craftedResults.slice(0, 4).every((form) => form === undefined)
+      && craftedResults[5]?.fields[0]?.options.length === 5000,
+    `${Math.round(parseMs)} ms`);
+
   // ── Path rules (pure dialect resolution; no adapter needed) ──
   const { inspectOmpPathCollision, OMP_DIALECT } = await import('../src/dialect.ts');
   const { PI_DIALECT, resolvePiDialectRuntime } = await import('@cosyncing/pi-engine');
