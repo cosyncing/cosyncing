@@ -257,6 +257,7 @@ async function startFake(
     maxFrameBytes?: number;
     signal?: AbortSignal;
     closeEscalation?: AcpCloseEscalation;
+    clientCapabilitiesMeta?: Record<string, unknown>;
   } = {},
 ): Promise<FakeRun> {
   const configPath = join(workdir, `fake-config-${configCounter++}.json`);
@@ -304,6 +305,7 @@ async function startFake(
       maxFrameBytes: options.maxFrameBytes,
       signal: options.signal,
       closeEscalation: options.closeEscalation,
+      ...(options.clientCapabilitiesMeta ? { clientCapabilitiesMeta: options.clientCapabilitiesMeta } : {}),
     });
   } catch (caught) {
     error = caught instanceof Error ? caught : new Error(String(caught));
@@ -386,6 +388,9 @@ try {
         ?.clientCapabilities as Record<string, unknown> | undefined;
       check('the v1 handshake declares fs and terminal ABSENT in clientCapabilities',
         capabilities !== undefined && !('fs' in capabilities) && !('terminal' in capabilities),
+        JSON.stringify(capabilities));
+      check('without an opt-in the handshake sends clientCapabilities exactly {}',
+        JSON.stringify(capabilities) === '{}',
         JSON.stringify(capabilities));
 
       const result = client.initializeResult as Record<string, unknown>;
@@ -554,6 +559,21 @@ try {
       rejected instanceof AcpRequestTimeoutError
         && run.traces.some((event) => event.kind === 'uncorrelated-response'),
       String(rejected));
+    await run.client?.close();
+  }
+
+  // ── Scenario A2: an extension opt-in rides clientCapabilities._meta only ──
+  {
+    // The shape Reasonix 2.61.0 reads to start `_reasonix.io/session/status_update`
+    // (captured 2026-11-24: without it, 2.61.0 sends no status notifications).
+    const meta = { 'reasonix.io': { statusUpdates: { supported: true } } };
+    const run = await startFake({ protocolVersion: 1 }, { clientCapabilitiesMeta: meta });
+    const capabilities = (initializeFrame(run)?.params as Record<string, unknown> | undefined)
+      ?.clientCapabilities as Record<string, unknown> | undefined;
+    check('clientCapabilitiesMeta is sent verbatim as clientCapabilities._meta and nothing else',
+      run.client !== null
+        && JSON.stringify(capabilities) === JSON.stringify({ _meta: meta }),
+      `${String(run.error)} ${JSON.stringify(capabilities)}`);
     await run.client?.close();
   }
 
