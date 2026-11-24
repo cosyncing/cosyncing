@@ -554,7 +554,7 @@ export class PiEngineAdapter implements AgentBackend {
         ? `${this.rt.dialect.displayName} CLI is not available on PATH, so ${PRODUCT_IDENTITY.productName} cannot Drive this session.`
         : readiness.message);
     }
-    const writeRefusal = this.rt.hooks.nativeWriteRefusal?.(path);
+    const writeRefusal = await this.rt.hooks.nativeWriteRefusal?.(path);
     if (writeRefusal) throw new NativeSessionUnresumableError(writeRefusal);
     const conn = new PiConnection(this.rt, path, cwd, info, this.userEchoRegistry(path));
     await conn.start();
@@ -595,7 +595,7 @@ export class PiEngineAdapter implements AgentBackend {
       throw new Error(`${this.rt.dialect.displayName} subagent sessions are owned by their parent and cannot be renamed independently.`);
     }
     // The broker keeps the name as its own alias instead.
-    const writeRefusal = this.rt.hooks.nativeWriteRefusal?.(path);
+    const writeRefusal = await this.rt.hooks.nativeWriteRefusal?.(path);
     if (writeRefusal) throw new NativeSessionRenameUnsupportedError(writeRefusal);
     const cwd = readSessionCwd(path) ?? decodeCwdDir(baseDir(path));
     const requested = title == null ? '' : Array.from(title.trim()).slice(0, 160).join('');
@@ -677,7 +677,7 @@ export async function runPiLifecycleAction(
   opts: { messageId?: string | null; brokerUrl: string; bridgeUsesIntegrationFile: boolean },
 ): Promise<SessionInfo> {
   const path = sessionFileOf(rt, sessionId);
-  const writeRefusal = rt.hooks.nativeWriteRefusal?.(path);
+  const writeRefusal = await rt.hooks.nativeWriteRefusal?.(path);
   if (writeRefusal) throw new NativeSessionUnresumableError(writeRefusal);
   const cwd = readSessionCwd(path) ?? decodeCwdDir(baseDir(path));
   const state = await runPiLifecycleRpc(rt, path, action, { messageId: opts.messageId });

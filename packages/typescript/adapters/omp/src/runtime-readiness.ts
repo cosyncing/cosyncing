@@ -6,6 +6,7 @@ import {
   realpathSync,
   statSync,
 } from 'node:fs';
+import { open as openFile, type FileHandle } from 'node:fs/promises';
 import { dirname, join, parse, win32 } from 'node:path';
 import {
   compareSemanticVersions,
@@ -51,65 +52,109 @@ export function ompSupportsRpcFork(version: unknown): boolean {
   return comparison !== undefined && comparison >= 0;
 }
 
-/** `"runtime":{"version":"…"` as omp 19.1.0 serializes the writer stamp on every entry it appends. */
-const OMP_WRITER_STAMP = /"runtime":\{"version":"([^"\\]{1,64})"/g;
+/** Where omp 19.1.0's writer stamp sits in a serialized entry; only a line that has it is parsed. */
+const OMP_WRITER_MARKER = '"runtime":{"version":"';
 const OMP_WRITER_SCAN_CHUNK_BYTES = 1024 * 1024;
+const OMP_WRITER_CACHE_LIMIT = 64;
+
+/** The omp writer stamps of one session file. */
+export interface OmpWriterStamps {
+  /** The newest version among the stamps that compare; undefined when there is none. */
+  newest?: string;
+  /** Some stamp's version does not compare, so no configured omp can be shown to be as new. */
+  incomparable: boolean;
+}
+
+const ompWriterStampCache = new Map<string, { size: number; mtimeMs: number; stamps: OmpWriterStamps }>();
 
 /**
- * The newest omp build that wrote any entry of a session file, from the `runtime.version` stamp
- * omp 19.1.0 sets on every entry it appends (measured; `SessionEntryBase.runtime`). omp 17.4.2
- * writes no stamp, so a file only it wrote has none: undefined. A stamp whose version does not
- * compare counts as the newest, so it is never taken for an older writer. Read in bounded chunks,
- * linear in the file's size; an unreadable file has no answer.
+ * The writer stamps of a session file, from the `runtime.version` omp 19.1.0 sets on every entry it
+ * appends (measured; `SessionEntryBase.runtime`). omp 17.4.2 writes none, so a file only it wrote
+ * has no newest version. Only an entry's own top-level `runtime` counts: a line that carries the
+ * marker is parsed, so an object of the same shape nested in it (a tool's `details`) is not taken
+ * for a writer. The file is read asynchronously in bounded chunks, linear in its size, and the
+ * result is cached by path, size and mtime, so the broker reads each version of a file once. An
+ * unreadable file has no stamps.
  */
-export function newestOmpWriterVersion(sessionFile: string): string | undefined {
-  let fd: number | undefined;
+export async function readOmpWriterStamps(sessionFile: string): Promise<OmpWriterStamps> {
+  let handle: FileHandle | undefined;
   try {
-    fd = openSync(sessionFile, 'r');
+    handle = await openFile(sessionFile, 'r');
+    const { size, mtimeMs } = await handle.stat();
+    const cached = ompWriterStampCache.get(sessionFile);
+    if (cached && cached.size === size && cached.mtimeMs === mtimeMs) return cached.stamps;
+    const stamps: OmpWriterStamps = { incomparable: false };
+    const take = (line: string): void => {
+      if (!line.includes(OMP_WRITER_MARKER)) return;
+      let entry: unknown;
+      try {
+        entry = JSON.parse(line);
+      } catch {
+        return;
+      }
+      const runtime = entry !== null && typeof entry === 'object' ? (entry as { runtime?: unknown }).runtime : undefined;
+      const version = runtime !== null && typeof runtime === 'object' ? (runtime as { version?: unknown }).version : undefined;
+      if (typeof version !== 'string') return;
+      if (compareSemanticVersions(version, version) === undefined) {
+        stamps.incomparable = true;
+        return;
+      }
+      if (stamps.newest === undefined || (compareSemanticVersions(version, stamps.newest) ?? 0) > 0) stamps.newest = version;
+    };
     const buffer = Buffer.alloc(OMP_WRITER_SCAN_CHUNK_BYTES);
     const decoder = new TextDecoder('utf-8');
-    let carry = '';
+    // The line still open at the end of the last chunk, in pieces, so a long line stays linear.
+    let pieces: string[] = [];
     let position = 0;
-    let newest: string | undefined;
     for (;;) {
-      const read = readSync(fd, buffer, 0, buffer.length, position);
-      if (read <= 0) break;
-      position += read;
-      const text = carry + decoder.decode(buffer.subarray(0, read), { stream: true });
-      for (const match of text.matchAll(OMP_WRITER_STAMP)) {
-        const version = match[1]!;
-        if (newest === undefined) {
-          newest = version;
-          continue;
-        }
-        const comparison = compareSemanticVersions(version, newest);
-        if (comparison === undefined || comparison > 0) newest = version;
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+      if (bytesRead <= 0) break;
+      position += bytesRead;
+      const text = decoder.decode(buffer.subarray(0, bytesRead), { stream: true });
+      let start = 0;
+      for (let newline = text.indexOf('\n'); newline >= 0; newline = text.indexOf('\n', start)) {
+        pieces.push(text.slice(start, newline));
+        take(pieces.join(''));
+        pieces = [];
+        start = newline + 1;
       }
-      // A stamp cut by the chunk boundary is matched again whole in the next window.
-      carry = text.slice(-128);
+      if (start < text.length) pieces.push(text.slice(start));
     }
-    return newest;
+    pieces.push(decoder.decode());
+    take(pieces.join(''));
+    ompWriterStampCache.delete(sessionFile);
+    if (ompWriterStampCache.size >= OMP_WRITER_CACHE_LIMIT) {
+      const oldest = ompWriterStampCache.keys().next().value;
+      if (oldest !== undefined) ompWriterStampCache.delete(oldest);
+    }
+    ompWriterStampCache.set(sessionFile, { size, mtimeMs, stamps });
+    return stamps;
   } catch {
-    return undefined;
+    return { incomparable: false };
   } finally {
-    if (fd !== undefined) closeSync(fd);
+    await handle?.close().catch(() => {});
   }
 }
 
 /**
- * Why the configured omp must not continue or change a session file: a newer omp wrote it. An older
- * omp does not know the newer one's replay rules (omp 17.4.2 ignores the `activeLeafId` that omp
- * 19.1.0 records for entries written off the active branch), so it could continue on the wrong
- * branch. Undefined when the configured omp is at least as new as every writer, or its version is
- * unknown (readiness refuses that case on its own).
+ * Why the configured omp must not continue or change a session file: a newer omp wrote it, or a
+ * stamp's version cannot be compared with the configured one. An older omp does not know the newer
+ * one's replay rules (omp 17.4.2 ignores the `activeLeafId` that omp 19.1.0 records for entries
+ * written off the active branch), so it could continue on the wrong branch. Undefined when the
+ * configured omp is at least as new as every writer, or its version is unknown (readiness refuses
+ * that case on its own).
  */
-export function ompNativeWriteRefusal(sessionFile: string, configuredVersion: string | undefined): string | undefined {
+export async function ompNativeWriteRefusal(sessionFile: string, configuredVersion: string | undefined): Promise<string | undefined> {
   if (!configuredVersion) return undefined;
-  const writer = newestOmpWriterVersion(sessionFile);
-  if (writer === undefined) return undefined;
-  const comparison = compareSemanticVersions(writer, configuredVersion);
+  const stamps = await readOmpWriterStamps(sessionFile);
+  const outcome = 'so cosyncing will not continue or change it. Continue it in a terminal with the omp that wrote it, or update the omp cosyncing uses; it stays readable here.';
+  if (stamps.incomparable) {
+    return `This omp session carries an omp version that cosyncing cannot compare with the omp ${configuredVersion} it runs, ${outcome}`;
+  }
+  if (stamps.newest === undefined) return undefined;
+  const comparison = compareSemanticVersions(stamps.newest, configuredVersion);
   if (comparison !== undefined && comparison <= 0) return undefined;
-  return `This omp session was written by omp ${writer}, which is newer than the omp ${configuredVersion} cosyncing runs, so cosyncing will not continue or change it. Continue it in a terminal with omp ${writer}, or update the omp cosyncing uses; it stays readable here.`;
+  return `This omp session was written by omp ${stamps.newest}, which is newer than the omp ${configuredVersion} cosyncing runs, ${outcome}`;
 }
 
 /** The verified versions as prose: `17.4.2 and 19.1.0`. */

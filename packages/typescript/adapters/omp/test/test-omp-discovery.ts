@@ -7,7 +7,7 @@
  * Fixture JSONL only, no real omp.
  */
 export {};
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -185,7 +185,7 @@ process.exit(73);
   // omp 19.1.0 stamps `runtime:{version}` on every entry it appends (captured; the shape below is
   // the captured one). omp 17.4.2 writes none and ignores 19.1.0's `activeLeafId`, so it could
   // continue such a file on the wrong branch: Resume and native rename refuse before any spawn.
-  const { newestOmpWriterVersion, ompNativeWriteRefusal } = await import('../src/index.ts');
+  const { readOmpWriterStamps, ompNativeWriteRefusal } = await import('../src/index.ts');
   const sessionD = join(sessionsRoot, '2026-11-24_dddd.jsonl');
   writeFileSync(sessionD, [
     JSON.stringify({ type: 'title', v: 1, title: '', updatedAt: '2026-11-24T08:25:35.080Z', pad: '' }),
@@ -193,14 +193,48 @@ process.exit(73);
     JSON.stringify({ type: 'model_change', id: 'd1', parentId: null, timestamp: '2026-11-24T08:25:35.173Z', runtime: { version: '19.0.3' }, model: 'fixture-provider/fixture-model' }),
     JSON.stringify({ type: 'message', id: 'd2', parentId: 'd1', timestamp: '2026-11-24T08:25:35.367Z', runtime: { version: '19.1.0' }, message: { role: 'user', content: [{ type: 'text', text: 'written by omp 19.1.0' }] } }),
   ].join('\n') + '\n');
+  const stampsD = await readOmpWriterStamps(sessionD);
+  const stampsA = await readOmpWriterStamps(sessionA);
   check('the newest writer stamp is read from the file',
-    newestOmpWriterVersion(sessionD) === '19.1.0' && newestOmpWriterVersion(sessionA) === undefined,
-    `${newestOmpWriterVersion(sessionD)}/${newestOmpWriterVersion(sessionA)}`);
+    stampsD.newest === '19.1.0' && !stampsD.incomparable && stampsA.newest === undefined && !stampsA.incomparable,
+    JSON.stringify({ stampsD, stampsA }));
   check('only an omp older than the file\'s newest writer is refused',
-    /written by omp 19\.1\.0, which is newer than the omp 17\.4\.2/.test(ompNativeWriteRefusal(sessionD, '17.4.2') ?? '')
-      && ompNativeWriteRefusal(sessionD, '19.1.0') === undefined
-      && ompNativeWriteRefusal(sessionA, '17.4.2') === undefined
-      && ompNativeWriteRefusal(sessionD, undefined) === undefined);
+    /written by omp 19\.1\.0, which is newer than the omp 17\.4\.2/.test(await ompNativeWriteRefusal(sessionD, '17.4.2') ?? '')
+      && await ompNativeWriteRefusal(sessionD, '19.1.0') === undefined
+      && await ompNativeWriteRefusal(sessionA, '17.4.2') === undefined
+      && await ompNativeWriteRefusal(sessionD, undefined) === undefined);
+  // The stamp rows below keep the captured entry shape and vary only the version, and a nested
+  // `runtime` (as in a tool's `details`): no omp other than 17.4.2 and 19.1.0 was captured.
+  const stampRow = (id: string, version: unknown, details?: unknown) => JSON.stringify({
+    type: 'message', id, parentId: null, timestamp: '2026-11-24T08:25:35.367Z',
+    ...(version === undefined ? {} : { runtime: { version } }),
+    message: { role: 'toolResult', content: [{ type: 'text', text: 'ok' }], ...(details === undefined ? {} : { details }) },
+  });
+  const stampFile = (name: string, rows: string[]) => {
+    const path = join(root, `${name}.jsonl`);
+    writeFileSync(path, rows.join('\n') + '\n');
+    return path;
+  };
+  const unknownFirst = stampFile('stamps-unknown-first', [stampRow('s1', 'dev-build'), stampRow('s2', '19.1.0')]);
+  const unknownLast = stampFile('stamps-unknown-last', [stampRow('s1', '19.1.0'), stampRow('s2', 'dev-build')]);
+  const unknownRefusals = [await ompNativeWriteRefusal(unknownFirst, '19.1.0'), await ompNativeWriteRefusal(unknownLast, '19.1.0')];
+  check('a stamp that does not compare refuses whatever its place in the file',
+    unknownRefusals.every((refusal) => /cannot compare with the omp 19\.1\.0/.test(refusal ?? '')),
+    JSON.stringify(unknownRefusals));
+  const nested = stampFile('stamps-nested', [
+    stampRow('s1', '19.1.0', { runtime: { version: '22.11.0' } }),
+    stampRow('s2', undefined, { runtime: { version: '22.11.0' } }),
+  ]);
+  const nestedStamps = await readOmpWriterStamps(nested);
+  check('only an entry\'s own runtime stamp counts, not one nested in its details',
+    nestedStamps.newest === '19.1.0' && !nestedStamps.incomparable && await ompNativeWriteRefusal(nested, '19.1.0') === undefined,
+    JSON.stringify(nestedStamps));
+  const growing = stampFile('stamps-growing', [stampRow('s1', '19.1.0')]);
+  const before = await ompNativeWriteRefusal(growing, '19.1.0');
+  appendFileSync(growing, stampRow('s2', '19.2.0') + '\n');
+  const after = await ompNativeWriteRefusal(growing, '19.1.0');
+  check('the cached reading follows the file when it changes',
+    before === undefined && /written by omp 19\.2\.0/.test(after ?? ''), JSON.stringify({ before, after }));
   const olderBin = join(root, 'omp-older');
   const olderSpawnMarker = join(root, 'older-runtime-spawned');
   writeFileSync(olderBin, `#!/usr/bin/env bun

@@ -42,9 +42,10 @@ export interface PiEngineHooks {
   /**
    * Why the configured runtime must not open this session file to continue or change it (Resume,
    * native rename, fork), or undefined when it may. omp: a file a newer omp wrote, whose replay
-   * rules (`activeLeafId`) an older one does not know. Pi has none.
+   * rules (`activeLeafId`) an older one does not know. Pi has none. May read the file
+   * asynchronously, so a large session does not hold the broker's event loop.
    */
-  nativeWriteRefusal?(sessionFile: string): string | undefined;
+  nativeWriteRefusal?(sessionFile: string): Promise<string | undefined> | string | undefined;
   diagnose(
     context: SetupDiagnosisContext,
     inspectBridge: (agentDir: string) => PiBridgeAssetInspection,
