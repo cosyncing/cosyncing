@@ -1074,7 +1074,8 @@ try {
       })) as unknown as typeof globalThis.fetch;
     const admitted = await probeClineHub({ env: capturedEnv, homeDir: fake.root, fetcher: serving(recorded.health) });
     check('the captured 3.0.75 Hub (core 0.2.1) record and /health are admitted for Drive',
-      admitted?.hubId === recorded.discovery.hubId
+      admitted !== undefined
+        && admitted.hubId === recorded.discovery.hubId
         && admitted.coreVersion === '0.2.1'
         && recorded.health.hubId === recorded.discovery.hubId,
       JSON.stringify(admitted && { hubId: admitted.hubId, coreVersion: admitted.coreVersion }));
