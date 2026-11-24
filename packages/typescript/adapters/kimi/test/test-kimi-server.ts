@@ -2398,7 +2398,10 @@ try {
   if (!capturedPage || !capturedUserItem || pageTurns.length === 0) {
     throw new Error('the 2.7.2 fixture is missing the approval conversation\'s turns page');
   }
-  const copies = Math.ceil(KIMI_WS_FRAME_MAX_BYTES / Buffer.byteLength(JSON.stringify(pageTurns))) + 1;
+  // Each copy adds the page's turns plus a separating comma, but not the page's
+  // own two brackets, so a small page needs more copies than ceiling / size.
+  const copyBytes = Math.max(1, Buffer.byteLength(JSON.stringify(pageTurns)) - 1);
+  const copies = Math.ceil(KIMI_WS_FRAME_MAX_BYTES / copyBytes) + 1;
   const oversizedPage = JSON.stringify({ ...capturedPage, turns: Array.from({ length: copies }, () => pageTurns).flat() });
   check('(setup) the repeated captured page is past the per-frame ceiling',
     Buffer.byteLength(oversizedPage) > KIMI_WS_FRAME_MAX_BYTES);
