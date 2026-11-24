@@ -114,6 +114,11 @@ describe('K3 server-identity gate', () => {
       const path = fake.host.plantRecord('other.json', { ...fake.host.registryRecord(), server_id: '01OTHERHOSTOTHERHOSTOTHERH' });
       return () => void import('node:fs').then((fs) => fs.rmSync(path, { force: true }));
     }],
+    // A record that names a product with an empty string is not a record this adapter can read.
+    ['a record whose product is empty (unreadable)', () => {
+      fake.host.register({ ...fake.host.registryRecord(), product: '' });
+      return () => fake.host.register();
+    }],
     ['a host that answers meta with an error (unreachable)', () => {
       fake.host.failRoute(/GET \/api\/v1\/meta/, { status: 500, times: 1000 });
       return () => fake.host.clearFaults();
@@ -145,9 +150,9 @@ describe('K3 server-identity gate', () => {
       });
       return () => fake.host.overrideMeta(undefined);
     }],
-    // The one field Kimi Code 2.7.2 adds to meta (`kap-server/src/routes/meta.ts`), announcing a protocol
-    // this adapter does not speak, whatever version the record claims.
-    ['meta announcing the Kimi Agent Protocol (unsupported protocol)', () => {
+    // The one field Kimi Code 2.7.x adds to meta (captured from 2.7.2), on a host whose record names a 0.x
+    // version: the announced wire must be the one the recorded version speaks.
+    ['meta announcing the Kimi Agent Protocol on a 0.x host (unsupported protocol)', () => {
       fake.host.overrideMeta((meta) => ({ ...meta, kimi_agent_protocol_version: '1.0.0' }));
       return () => fake.host.overrideMeta(undefined);
     }],
@@ -168,12 +173,13 @@ describe('K3 server-identity gate', () => {
     });
   }
 
-  test('a host past the supported range is unavailable with the range named, and is sent nothing at all', async () => {
+  test('a host between the supported ranges is unavailable with the ranges named, and is sent nothing at all', async () => {
     const session = seeded();
     await expectAdopted(session.id);
-    // Kimi Code 2.x replaced the local server protocol. The record keeps its `host_version` field there
-    // (`kap-server/src/instanceRegistry.ts`); the versions are ones npm lists, a canary among them.
-    for (const version of ['2.7.2', '3.0.0-canary.20261109125038-713a200']) {
+    // Kimi Code 2.0.0 to 2.6.x replaced the 0.x local server protocol part by part before the Kimi Agent Protocol
+    // settled it at 2.7.0. The record keeps its `host_version` field there (captured from 2.7.2); the versions
+    // are ones npm lists, a canary among them.
+    for (const version of ['2.0.0', '2.6.3', '2.6.0-canary.20261111095258-5518d54']) {
       fake.host.register({ ...fake.host.registryRecord(), host_version: version });
       fake.host.setApiVersion(version);
       try {
@@ -186,7 +192,7 @@ describe('K3 server-identity gate', () => {
         const created = await client.post('/api/sessions/kimi', { directory: fake.workspace('range') });
         expect(created.status, created.text).toBe(503);
         expect(created.body.detailCode).toBe('kimi-version-unsupported');
-        expect(created.body.error).toContain('>= 0.35.0 and < 2.0.0');
+        expect(created.body.error).toContain('>= 0.35.0 and < 2.0.0, or >= 2.7.0');
         expect((await kimiRows()).some((row) => row.id === session.id)).toBe(false);
         const attach = await client.attach('kimi', session.id);
         expect((await attach.waitForFrame((frame) => frame.kind === 'error' || frame.kind === 'history')).kind).toBe('error');
@@ -198,6 +204,29 @@ describe('K3 server-identity gate', () => {
         fake.host.register();
         fake.host.setApiVersion(fake.host.version);
       }
+    }
+    await expectAdopted(session.id);
+  });
+
+  test('a server another Kimi product registered beside `kimi web` is ignored, not counted as a second host', async () => {
+    // Owner decision: only `product: "kimi-code-cli"` records are addressed. A Kimi Desktop sharing the home
+    // registers its own server there under another product; counted, it would make every operation refuse as
+    // ambiguous. The other product value is this test's, not a captured one.
+    const session = seeded();
+    await expectAdopted(session.id);
+    fake.host.register({ ...fake.host.registryRecord(), product: 'kimi-code-cli' });
+    const path = fake.host.plantRecord('another-product.json', {
+      ...fake.host.registryRecord(), server_id: '01OTHERPRODUCTOTHERPRODUCT', product: 'another-product',
+    });
+    try {
+      await expectAdopted(session.id);
+      const stream = await client.attach('kimi', session.id);
+      expect((await stream.waitForFrame((frame) => frame.kind === 'error' || frame.kind === 'history')).kind).toBe('history');
+      stream.close();
+    } finally {
+      const fs = await import('node:fs');
+      fs.rmSync(path, { force: true });
+      fake.host.register();
     }
     await expectAdopted(session.id);
   });

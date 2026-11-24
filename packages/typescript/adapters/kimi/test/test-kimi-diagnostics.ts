@@ -29,6 +29,17 @@ const FIXTURE = await Bun.file(new URL('./fixtures/kimi-0.35.0.json', import.met
   instanceRecord: Record<string, unknown>;
 };
 
+/**
+ * The Kimi Code 2.7.2 capture (Kimi Agent Protocol 1.0.0): its registry record,
+ * health answer and metadata, served unmodified to the doctor below.
+ */
+const KAP_FIXTURE = await Bun.file(new URL('./fixtures/kimi-2.7.2.json', import.meta.url)).json() as {
+  instanceRecord: Record<string, unknown>;
+  rest: { healthz: { response: unknown }; meta: unknown };
+};
+/** The supported ranges, spelled out once so every check below pins the exact text. */
+const SUPPORTED_RANGE = '>= 0.35.0 and < 2.0.0, or >= 2.7.0 (Kimi Agent Protocol 1.x)';
+
 const results: Array<{ name: string; ok: boolean; detail: string }> = [];
 function check(name: string, ok: boolean, detail = ''): void {
   results.push({ name, ok, detail });
@@ -368,19 +379,19 @@ check('doctor passes on the CAPTURED record and metadata — the shape a real ho
   byId(matched, 'kimi.server')?.status === 'pass',
   `${byId(matched, 'kimi.server')?.status}/${byId(matched, 'kimi.server')?.detailCode}`);
 
-// A server whose metadata announces the Kimi Agent Protocol is refused whatever
-// version its record claims (Kimi Code Desktop serves KAP under its own 1.x
-// numbering). The captured meta plus the one field upstream 2.7.2 adds
-// (`kap-server/src/routes/meta.ts`: `kimi_agent_protocol_version: '1.0.0'`).
+// A 0.x record whose server announces the Kimi Agent Protocol is refused: the
+// wire the server announces must be the one its recorded version speaks. The
+// captured 0.35.0 meta plus the one field 2.7.2 adds (captured live from 2.7.2:
+// `kimi_agent_protocol_version: '1.0.0'`).
 const agentProtocol = await diagnoseKimiSetup(
   metaPatched((data) => ({ ...data, kimi_agent_protocol_version: '1.0.0' })),
   { instances: liveOne, token: 't' },
 );
 const agentProtocolCheck = byId(agentProtocol, 'kimi.server');
-check('doctor fails a server whose metadata announces the Kimi Agent Protocol, naming the range',
+check('doctor fails a 0.x server whose metadata announces the Kimi Agent Protocol, naming the ranges',
   agentProtocolCheck?.status === 'fail'
     && agentProtocolCheck.detailCode === 'server-protocol-unsupported'
-    && agentProtocolCheck.evidence?.supportedRange === '>= 0.35.0 and < 2.0.0'
+    && agentProtocolCheck.evidence?.supportedRange === SUPPORTED_RANGE
     && agentProtocolCheck.remediation?.command === undefined,
   JSON.stringify(agentProtocolCheck));
 
@@ -415,12 +426,13 @@ check('the version floor is still enforced through the fallback binary',
   byId(oldOffPath, 'kimi.version')?.status === 'fail'
     && byId(oldOffPath, 'kimi.version')?.detailCode === 'version-below-minimum',
   `${byId(oldOffPath, 'kimi.version')?.status}/${byId(oldOffPath, 'kimi.version')?.detailCode}`);
-// `kimi update` installs the newest release, which is 2.x: past the top of the
-// range. Setup's preflight repeats a version check's command as its fix, so the
-// floor's remediation names the range instead of handing over that command.
-check('the floor remediation names the supported range and no longer offers `kimi update` to run',
+// `kimi update` installs whatever release is newest, which need not be one
+// cosyncing supports. Setup's preflight repeats a version check's command as
+// its fix, so the floor's remediation names the ranges instead of handing over
+// that command.
+check('the floor remediation names the supported ranges and no longer offers `kimi update` to run',
   byId(oldOffPath, 'kimi.version')?.remediation?.command === undefined
-    && (byId(oldOffPath, 'kimi.version')?.remediation?.message ?? '').includes('>= 0.35.0 and < 2.0.0'),
+    && (byId(oldOffPath, 'kimi.version')?.remediation?.message ?? '').includes(SUPPORTED_RANGE),
   JSON.stringify(byId(oldOffPath, 'kimi.version')?.remediation));
 
 // The version probe EXECUTES the installed `kimi`, and a native Kimi Code swaps
@@ -444,29 +456,37 @@ check('the floor remediation names the supported range and no longer offers `kim
     `${probeArgs.join(' ')} ${JSON.stringify(probeEnv)}`);
 }
 
-// ── The top of the range ────────────────────────────────────────────────────
+// ── The gap between the ranges ──────────────────────────────────────────────
 //
-// Kimi Code went from 0.43.1 to 2.0.0, and 2.x replaced the local server
-// protocol. Every version here is one the npm registry lists for
-// `@moonshot-ai/kimi-code`: the first and the current 2.x, and one canary from
-// each prerelease line, whose tags must not slip a 2.x or 3.x build under a
-// bound written as 2.0.0.
+// Kimi Code went from 0.43.1 to 2.0.0, and 2.0.0 to 2.6.x replaced the 0.x
+// local server protocol part by part before the Kimi Agent Protocol settled it
+// at 2.7.0 (the lowest release whose bundle serves it). Every version here is
+// one the npm registry lists for `@moonshot-ai/kimi-code`: the first 2.x, the
+// last release before 2.7.0, and a canary of that line, whose tag must not slip
+// a gap build past a bound written as 2.7.0.
 for (const version of [
   '2.0.0',
-  '2.7.2',
-  '2.7.0-canary.20261120021741-0947717',
-  '3.0.0-canary.20261109125038-713a200',
+  '2.6.3',
+  '2.6.0-canary.20261111095258-5518d54',
 ]) {
   const report = await diagnoseKimiSetup(offPathContext(version), { instances: liveOne, token: 't' });
   const versionCheck = byId(report, 'kimi.version');
-  check(`doctor refuses Kimi Code ${version} as outside the supported range, naming the range`,
+  check(`doctor refuses Kimi Code ${version} as outside the supported ranges, naming them`,
     versionCheck?.status === 'fail'
       && versionCheck.detailCode === 'version-unsupported'
       && versionCheck.evidence?.installedVersion === version
-      && versionCheck.evidence?.supportedRange === '>= 0.35.0 and < 2.0.0'
-      && (versionCheck.remediation?.message ?? '').includes('>= 0.35.0 and < 2.0.0')
+      && versionCheck.evidence?.supportedRange === SUPPORTED_RANGE
+      && (versionCheck.remediation?.message ?? '').includes(SUPPORTED_RANGE)
       && versionCheck.remediation?.command === undefined,
     JSON.stringify(versionCheck));
+}
+// The Kimi Agent Protocol range: the release the capture ran, and a canary of
+// the first KAP line.
+for (const version of ['2.7.2', '2.7.0-canary.20261120021741-0947717']) {
+  const report = await diagnoseKimiSetup(offPathContext(version), { instances: liveOne, token: 't' });
+  check(`doctor passes Kimi Code ${version}, inside the Kimi Agent Protocol range`,
+    byId(report, 'kimi.version')?.status === 'pass',
+    JSON.stringify(byId(report, 'kimi.version')));
 }
 // The newest 0.x release, and the one this repository's production host runs,
 // sit inside the range: the bound is a ceiling, not a floor in disguise.
@@ -477,12 +497,11 @@ for (const version of ['0.43.0', '0.43.1']) {
     JSON.stringify(byId(report, 'kimi.version')));
 }
 
-// A RUNNING server past the range is refused from its registry record alone,
-// before the health probe: doctor sends nothing to a server cosyncing does not
-// speak. The record is the captured one with only `host_version` moved —
-// upstream 2.7.2 still writes that field (`kap-server/src/instanceRegistry.ts`).
-// An unreadable version is refused the same way: it cannot be shown to be below
-// the bound.
+// A RUNNING server between the ranges is refused from its registry record
+// alone, before the health probe: doctor sends nothing to a server cosyncing
+// does not speak. The record is the captured one with only `host_version`
+// moved — 2.7.2 still writes that field (captured). An unreadable version is
+// refused the same way: it cannot be placed in either range.
 {
   const fetched: string[] = [];
   const recording = context({
@@ -493,7 +512,7 @@ for (const version of ['0.43.0', '0.43.1']) {
         : { status: 'ok' as const, json: FIXTURE.rest.meta };
     },
   });
-  for (const hostVersion of ['2.7.2', '3.0.0-canary.20261109125038-713a200', 'not-a-version']) {
+  for (const hostVersion of ['2.0.0', '2.6.3', 'not-a-version']) {
     fetched.length = 0;
     const report = await diagnoseKimiSetup(recording, {
       instances: { ...liveOne, live: [{ ...liveOne.live[0]!, hostVersion }] },
@@ -504,13 +523,52 @@ for (const version of ['0.43.0', '0.43.1']) {
       serverCheck?.status === 'fail'
         && serverCheck.detailCode === 'server-version-unsupported'
         && serverCheck.evidence?.hostVersion === hostVersion
-        && serverCheck.evidence?.supportedRange === '>= 0.35.0 and < 2.0.0'
+        && serverCheck.evidence?.supportedRange === SUPPORTED_RANGE
         && serverCheck.remediation?.command === undefined
         && !/kimi web/.test(serverCheck.remediation?.message ?? ''),
       JSON.stringify(serverCheck));
     check(`...and doctor sends the ${hostVersion} server nothing, not even the health probe`,
       fetched.length === 0, fetched.join(','));
   }
+}
+
+// A RUNNING 2.7.2 server, exactly as captured — its registry record, health
+// answer and KAP metadata, unmodified — passes on the KAP wire. A 2.7.2 record
+// whose server answers WITHOUT the KAP field is refused as a protocol mismatch.
+{
+  const kapRecord = decodeKimiInstanceRecord(KAP_FIXTURE.instanceRecord)!;
+  const kapInstances = {
+    ...liveOne,
+    live: [{
+      ...liveOne.live[0]!,
+      serverId: kapRecord.serverId,
+      hostVersion: kapRecord.hostVersion,
+      startedAt: kapRecord.startedAt,
+    }],
+  };
+  const kapContext = (meta: unknown) => context({
+    runReadOnly: async () => ({ status: 'ok', exitCode: 0, stdout: '2.7.2', stderr: '' }),
+    fetchJson: async (url: string) => url.endsWith('/healthz')
+      ? { status: 'ok' as const, json: KAP_FIXTURE.rest.healthz.response }
+      : { status: 'ok' as const, json: meta },
+  });
+  const kapReport = await diagnoseKimiSetup(kapContext(KAP_FIXTURE.rest.meta), { instances: kapInstances, token: 'fixture-token' });
+  const kapServer = byId(kapReport, 'kimi.server');
+  check('doctor passes the captured 2.7.2 server, on the Kimi Agent Protocol wire',
+    byId(kapReport, 'kimi.version')?.status === 'pass'
+      && kapServer?.status === 'pass' && kapServer.evidence?.wire === 'kap'
+      && kapServer.evidence?.serverVersion === '2.7.2',
+    JSON.stringify(kapServer));
+  const withoutKap = structuredClone(KAP_FIXTURE.rest.meta) as { data: Record<string, unknown> };
+  delete withoutKap.data.kimi_agent_protocol_version;
+  const mismatched = byId(
+    await diagnoseKimiSetup(kapContext(withoutKap), { instances: kapInstances, token: 'fixture-token' }),
+    'kimi.server',
+  );
+  check('doctor fails a 2.7.2 server that does not announce the protocol its version speaks',
+    mismatched?.status === 'fail' && mismatched.detailCode === 'server-protocol-unsupported'
+      && mismatched.evidence?.supportedRange === SUPPORTED_RANGE,
+    JSON.stringify(mismatched));
 }
 
 // ── The bearer token never reaches a check ──────────────────────────────────

@@ -49,9 +49,23 @@ import {
 import type { KimiSocketLike } from '../src/observe.ts';
 import {
   KIMI_IDEMPOTENT_WRITE_CODES,
+  KIMI_SESSION_LOCKED_CODE,
   KimiDriveHttp,
   isKimiIdempotentWriteCode,
+  isKimiWriteError,
 } from '../src/drive-http.ts';
+import { KimiKapHub } from '../src/kap.ts';
+import {
+  mapKimiApprovalRequest,
+  mapKimiCreatedSession,
+  mapKimiQuestionRequest,
+  mapKimiSessionPage,
+  mapKimiTurnFailure,
+  mapKimiWorkChanged,
+  type KimiV1Session,
+  type KimiV2SessionPage,
+} from '../src/mapping.ts';
+import type { AgentMessage } from '@cosyncing/adapter-api';
 import { isOwnershipConflictError, isSessionCreateTemporarilyUnavailableError } from '@cosyncing/adapter-api';
 import {
   KIMI_ACTIVE_GAP_CAP_MS,
@@ -138,7 +152,7 @@ function boundMeta(extra: Record<string, unknown> = {}): Record<string, unknown>
   // must reach a write only by calling one of that file's ten named methods.
   const adapterSources = [
     'index.ts', 'implementation.ts', 'observe.ts', 'mapping.ts', 'diagnostics.ts',
-    'drive.ts', 'usage.ts', 'timing.ts', 'server.ts',
+    'drive.ts', 'usage.ts', 'timing.ts', 'server.ts', 'kap.ts',
   ];
   let strayVerb = '';
   for (const name of adapterSources) {
@@ -539,19 +553,18 @@ function boundMeta(extra: Record<string, unknown> = {}): Record<string, unknown>
   check('a non-boolean dangerous_bypass_auth refuses rather than being coerced',
     !bypassNonBoolean.ok && bypassNonBoolean.reason === 'metadata-invalid');
 
-  // THE TOP OF THE SUPPORTED RANGE, decided from the registry record alone.
-  // Kimi Code 2.x replaced the local server protocol, yet its `/api/v1/meta`
-  // still carries every field the binding reads, so a 2.x host would pass the
-  // checks above and fail on everything after them. The record here is the
-  // captured one with only `host_version` moved (upstream 2.7.2 still writes
-  // that field, `kap-server/src/instanceRegistry.ts`), and the versions are
-  // ones the npm registry lists, the canaries included. No client is built for
-  // any of them: nothing, not even the token, is sent.
+  // THE GAP BETWEEN THE TWO SUPPORTED RANGES, decided from the registry record
+  // alone. Kimi Code 2.0.0 to 2.6.x replaced the 0.x local server protocol part
+  // by part before KAP 1.0 settled it at 2.7.0, yet its `/api/v1/meta` still
+  // carries every field the binding reads, so such a host would pass the checks
+  // above and fail on everything after them. The record here is the captured
+  // one with only `host_version` moved, and the versions are ones the npm
+  // registry lists, the canary included. No client is built for any of them:
+  // nothing, not even the token, is sent.
   for (const hostVersion of [
     '2.0.0',
-    '2.7.2',
-    '2.7.0-canary.20261120021741-0947717',
-    '3.0.0-canary.20261109125038-713a200',
+    '2.6.3',
+    '2.6.0-canary.20261111095258-5518d54',
     'not-a-version',
   ]) {
     let clients = 0;
@@ -567,14 +580,41 @@ function boundMeta(extra: Record<string, unknown> = {}): Record<string, unknown>
       refused.ok ? 'resolved' : `${refused.reason} clients=${clients}`);
   }
 
-  // The second line: metadata that announces the Kimi Agent Protocol, whatever
-  // version the record claims. The captured meta plus the one field upstream
-  // 2.7.2 adds (`kap-server/src/routes/meta.ts`).
+  // The second line: the wire the server ANNOUNCES must be the one its
+  // recorded version speaks. A 0.x record answering with the KAP field (the
+  // one field 2.7.x adds to meta, captured live from 2.7.2) refuses ahead of
+  // the binding, and so does a 2.7.x record answering without it, or with a
+  // KAP major this adapter does not speak.
   const agentProtocol = await resolveVerifiedInstance(one,
     gateClient((data) => ({ ...data, kimi_agent_protocol_version: '1.0.0' })));
-  check('metadata announcing the Kimi Agent Protocol refuses, ahead of the binding',
+  check('a 0.x record whose metadata announces the Kimi Agent Protocol refuses, ahead of the binding',
     !agentProtocol.ok && agentProtocol.reason === 'unsupported-protocol',
     agentProtocol.ok ? 'resolved' : agentProtocol.reason);
+  for (const [label, hostVersion, patch] of [
+    ['a 2.7.2 record answering with 0.x metadata', '2.7.2', (data: Record<string, unknown>) => ({ ...data, server_version: '2.7.2' })],
+    ['a 2.7.2 record announcing KAP 2', '2.7.2', (data: Record<string, unknown>) => ({ ...data, server_version: '2.7.2', kimi_agent_protocol_version: '2.0.0' })],
+    ['a 2.7.2 record announcing an unreadable protocol', '2.7.2', (data: Record<string, unknown>) => ({ ...data, server_version: '2.7.2', kimi_agent_protocol_version: '' })],
+  ] as const) {
+    const mismatched = await resolveVerifiedInstance(
+      { live: [{ ...instance, hostVersion }], stale: 0, invalid: 0, truncated: false },
+      gateClient(patch),
+    );
+    check(`${label} refuses as an unsupported protocol`,
+      !mismatched.ok && mismatched.reason === 'unsupported-protocol',
+      mismatched.ok ? 'resolved' : mismatched.reason);
+  }
+  // The KAP range itself: a 2.7.x record whose metadata announces KAP 1.x
+  // resolves on the KAP wire (the captured 2.7.2 pair is exercised in the
+  // KAP section below; this is the gate's arithmetic on the canary too).
+  for (const hostVersion of ['2.7.2', '2.7.0-canary.20261120021741-0947717']) {
+    const kapResolved = await resolveVerifiedInstance(
+      { live: [{ ...instance, hostVersion }], stale: 0, invalid: 0, truncated: false },
+      gateClient((data) => ({ ...data, server_version: hostVersion, kimi_agent_protocol_version: '1.0.0' })),
+    );
+    check(`a ${hostVersion} record announcing KAP 1.0.0 resolves on the KAP wire`,
+      kapResolved.ok && kapResolved.wire === 'kap',
+      kapResolved.ok ? kapResolved.wire : kapResolved.reason);
+  }
 }
 
 // ── 4. The response-body ceiling ────────────────────────────────────────────
@@ -1682,54 +1722,55 @@ try {
   check('a healthy, supported host is never claimed as the adapter\'s readiness fault',
     (await verified.managedHostReadinessFault()).kind === 'host');
 
-  // ── The supported range, on every consuming path ───────────────────────────
+  // ── The supported ranges, on every consuming path ──────────────────────────
   //
-  // A host whose registry record names Kimi Code 2.x (the captured record with
-  // only `host_version` moved) is refused on every path from the record alone:
-  // the fake server must see NO request at all, not even the identity probe.
+  // A host whose registry record names a Kimi Code between the two ranges (the
+  // captured record with only `host_version` moved) is refused on every path
+  // from the record alone: the fake server must see NO request at all, not
+  // even the identity probe.
   {
     const beyond = new KimiAdapter({
       env: {}, homeDir: '/fixture/home',
-      instanceScan: () => ({ live: [{ ...fixtureInstance, hostVersion: '2.7.2' }], stale: 0, invalid: 0, truncated: false }),
+      instanceScan: () => ({ live: [{ ...fixtureInstance, hostVersion: '2.6.3' }], stale: 0, invalid: 0, truncated: false }),
       readToken: () => 'fixture-token',
     });
     const before = requests.length;
-    check('a 2.x host makes the adapter unavailable', !(await beyond.isAvailable()));
-    check('a 2.x host yields no sessions', (await beyond.discoverSessions()).length === 0);
-    check('a 2.x host cannot create', (await beyond.canCreateSession?.()) === false);
+    check('a 2.6.3 host makes the adapter unavailable', !(await beyond.isAvailable()));
+    check('a 2.6.3 host yields no sessions', (await beyond.discoverSessions()).length === 0);
+    check('a 2.6.3 host cannot create', (await beyond.canCreateSession?.()) === false);
     const createRefused = await beyond.prepareCreateSession?.().then(() => undefined, (error: unknown) => error);
-    check('a 2.x host fails the create boundary with the typed 503, naming the range and doctor, not a retry',
+    check('a 2.6.3 host fails the create boundary with the typed 503, naming the range and doctor, not a retry',
       isSessionCreateTemporarilyUnavailableError(createRefused)
         && createRefused.detailCode === 'kimi-version-unsupported'
-        && createRefused.message.includes('>= 0.35.0 and < 2.0.0')
+        && createRefused.message.includes('>= 0.35.0 and < 2.0.0, or >= 2.7.0')
         && /cosyncing doctor/.test(createRefused.message)
         && !/retry shortly/.test(createRefused.message),
       String((createRefused as Error | undefined)?.message));
-    check('a 2.x host refuses attach with the supported range',
+    check('a 2.6.3 host refuses attach with the supported range',
       await beyond.attach(FIXTURE.sessionId).then(() => false, (error: Error) =>
-        /does not support yet/.test(error.message) && error.message.includes('>= 0.35.0 and < 2.0.0')));
-    check('a 2.x host offers no model catalog', (await beyond.listModels?.())?.length === 0);
-    check('a 2.x host refuses a native rename',
-      await beyond.renameSession(FIXTURE.sessionId, 'renamed').then(() => false, (error: Error) => /does not support yet/.test(error.message)));
+        /does not support/.test(error.message) && error.message.includes('>= 0.35.0 and < 2.0.0, or >= 2.7.0')));
+    check('a 2.6.3 host offers no model catalog', (await beyond.listModels?.())?.length === 0);
+    check('a 2.6.3 host refuses a native rename',
+      await beyond.renameSession(FIXTURE.sessionId, 'renamed').then(() => false, (error: Error) => /does not support/.test(error.message)));
     // Supervision is told the host is not the problem, so it neither stops a
     // host the operator runs nor cycles the same binary back up as 2.x.
     const fault = await beyond.managedHostReadinessFault();
-    check('a 2.x host is claimed as a contract fault, so supervision leaves it alone',
-      fault.kind === 'adapter' && fault.remedy === 'contract' && fault.detail.includes('>= 0.35.0 and < 2.0.0'),
+    check('a 2.6.3 host is claimed as a contract fault, so supervision leaves it alone',
+      fault.kind === 'adapter' && fault.remedy === 'contract' && fault.detail.includes('>= 0.35.0 and < 2.0.0, or >= 2.7.0'),
       JSON.stringify(fault));
-    check('nothing at all reached the 2.x host on any of those paths',
+    check('nothing at all reached the 2.6.3 host on any of those paths',
       requests.length === before, requests.slice(before).map((entry) => `${entry.method} ${entry.path}`).join(','));
   }
 
-  // A host that announces the Kimi Agent Protocol in its metadata is refused
-  // after that one read and before anything else.
+  // A 0.x host that announces the Kimi Agent Protocol in its metadata is
+  // refused after that one read and before anything else.
   {
     metaPatch = (data) => ({ ...data, kimi_agent_protocol_version: '1.0.0' });
     const before = requests.length;
     check('a host announcing the Kimi Agent Protocol is unavailable', !(await verified.isAvailable()));
     check('...yields no sessions', (await verified.discoverSessions()).length === 0);
     check('...refuses attach, naming the protocol',
-      await verified.attach(FIXTURE.sessionId).then(() => false, (error: Error) => /Kimi Agent Protocol/.test(error.message)));
+      await verified.attach(FIXTURE.sessionId).then(() => false, (error: Error) => /protocol cosyncing does not support/.test(error.message)));
     const fault = await verified.managedHostReadinessFault();
     check('...and is claimed as a contract fault',
       fault.kind === 'adapter' && fault.remedy === 'contract', JSON.stringify(fault));
@@ -1864,6 +1905,621 @@ try {
   check('test harness completed', false, error instanceof Error ? error.message : String(error));
 } finally {
   server.stop(true);
+}
+
+// ── 9. The Kimi Agent Protocol (Kimi Code 2.7+), against the 2.7.2 capture ──
+//
+// Owner decision D4: both wires, chosen from `/api/v1/meta`. On KAP the
+// 0.x-shaped connections are kept and the transport is translated at its three
+// seams — the read door and the socket (`kap.ts`), and the write door
+// (`drive-http.ts`). Every answer below is what a real Kimi Code 2.7.2 server
+// answered (fixtures/kimi-2.7.2.json, scrubbed), served or replayed verbatim;
+// what is asserted is what the 0.x surface receives after translation, read
+// through the same mappers the connections use.
+
+interface KapExchange { method: string; path: string; httpStatus: number; body?: unknown; response: Record<string, unknown> }
+interface KapFrameRow { dir: string; frame?: Record<string, unknown>; code?: number }
+const KAP = await Bun.file(new URL('./fixtures/kimi-2.7.2.json', import.meta.url)).json() as {
+  kimiVersion: string;
+  sessionId: string;
+  failedSessionId: string;
+  lockedSessionId: string;
+  instanceRecord: Record<string, unknown>;
+  rest: Record<string, Record<string, unknown> | undefined>;
+  ws: Record<string, KapFrameRow[] | undefined>;
+};
+/** A captured exchange; `meta` and `models` were captured as bare envelopes. */
+const kapExchange = (key: string): KapExchange => {
+  const entry = KAP.rest[key];
+  if (!entry) throw new Error(`the 2.7.2 fixture has no rest.${key}`);
+  return 'response' in entry
+    ? entry as unknown as KapExchange
+    : { method: 'GET', path: '', httpStatus: 200, response: entry };
+};
+const kapServe = (key: string): Response => {
+  const exchange = kapExchange(key);
+  return Response.json(exchange.response, { status: exchange.httpStatus });
+};
+const KAP_LIVE = KAP.sessionId;
+const KAP_FAILED = KAP.failedSessionId;
+const KAP_LOCKED = KAP.lockedSessionId;
+const KAP_APPROVAL_ID = 'approval_ef926868-8f8b-4efa-8fb2-9055513707b0';
+const KAP_QUESTION_ID = 'question_e4a132db-bc50-41d1-b7ad-06de25205563';
+const KAP_DISMISSED_ID = 'question_2ae05e8c-9a06-4a25-9606-a8c83cd82641';
+
+const kapRequests: Array<{ method: string; path: string; query: URLSearchParams; body?: unknown }> = [];
+/** Which captured interaction list the live session answers with. */
+let kapInteractions = 'interactionsEmpty';
+/** Which captured `:cancel` answer: a running turn's, or an idle session's. */
+let kapCancel = 'cancel';
+/**
+ * Serve the live session's history as the three pages the capture paged
+ * through (the newest two turns, the two before them, the first two) instead
+ * of the whole-history page.
+ */
+let kapPagedHistory = false;
+
+const kapServer = Bun.serve({
+  hostname: '127.0.0.1',
+  port: 0,
+  async fetch(request) {
+    const url = new URL(request.url);
+    const path = decodeURIComponent(url.pathname);
+    let body: unknown;
+    if (request.method === 'POST' && (request.headers.get('content-type') ?? '').includes('application/json')) {
+      body = await request.json().catch(() => undefined);
+    }
+    kapRequests.push({ method: request.method, path, query: url.searchParams, ...(body !== undefined ? { body } : {}) });
+    if (path === '/api/v1/healthz') return kapServe('healthz');
+    if (request.headers.get('authorization') !== 'Bearer fixture-token') return new Response('unauthorized', { status: 401 });
+    if (request.method === 'GET') {
+      if (path === '/api/v1/meta') return kapServe('meta');
+      if (path === '/api/v1/models') return kapServe('models');
+      if (path === '/api/v1/sessions') return kapServe('sessionsList');
+      if (path === `/api/v1/sessions/${KAP_LIVE}`) return kapServe('sessionGet');
+      if (path === `/api/v1/sessions/${KAP_FAILED}`) return kapServe('sessionFailed');
+      if (path === `/api/v1/sessions/${KAP_LIVE}/interactions`) return kapServe(kapInteractions);
+      if (path === `/api/v1/sessions/${KAP_FAILED}/agents/main/turns`) return kapServe('turnsFailed');
+      if (path === `/api/v1/sessions/${KAP_LIVE}/agents/main/turns`) {
+        if (!kapPagedHistory) return kapServe('turnsAttach');
+        const before = url.searchParams.get('before_ordinal');
+        if (before === null) return kapServe('turnsLatest');
+        if (before === '4') return kapServe('turnsOlder');
+        if (before === '2') return kapServe('turnsApproval');
+      }
+      // The 0.x routes are gone on 2.7.2 (captured 404s). Answering them the
+      // way the real server does makes an untranslated read fail visibly.
+      if (path === '/api/v2/sessions') return kapServe('oldV2Sessions');
+      if (/\/(approvals|questions|messages|status|goal)$/.test(path)) return kapServe('oldApprovals');
+      return kapServe('sessionUnknown');
+    }
+    if (request.method === 'POST') {
+      if (path === '/api/v1/sessions') return kapServe('createSession');
+      const target = path.match(/^\/api\/v1\/sessions\/([^/:]+)(?::(\w+))?(?:\/(.+))?$/);
+      if (target) {
+        const [, sessionId, action, tail] = target;
+        if (action === 'cancel') return kapServe(kapCancel);
+        if (action === 'abort') return kapServe('oldAbort');
+        if (tail === 'prompts') return kapServe(sessionId === KAP_LOCKED ? 'promptWhileLocked' : 'submitPrompt');
+        if (tail === 'profile') return kapServe(sessionId === KAP_LOCKED ? 'renameWhileLocked' : 'rename');
+        if (tail?.startsWith('interactions/')) {
+          const answer = body as { kind?: unknown; decision?: unknown; dismissed?: unknown } | undefined;
+          if (answer?.kind === 'approval') return kapServe(answer.decision === 'rejected' ? 'approvalReject' : 'approvalApprove');
+          if (answer?.kind === 'question') return kapServe(answer.dismissed === true ? 'questionDismiss' : 'questionAnswer');
+          return kapServe('interactionUnknown');
+        }
+      }
+    }
+    return new Response('method not allowed', { status: 405 });
+  },
+});
+const kapPort = kapServer.port ?? 0;
+const kapBaseUrl = `http://127.0.0.1:${kapPort}`;
+const KAP_RECORD = decodeKimiInstanceRecord(KAP.instanceRecord)!;
+// The captured registry record with only its address redirected at the fake.
+const kapScan: KimiInstanceScan = {
+  live: [{
+    baseUrl: kapBaseUrl,
+    port: kapPort,
+    pid: KAP_RECORD.pid,
+    serverId: KAP_RECORD.serverId,
+    hostVersion: KAP_RECORD.hostVersion,
+    startedAt: KAP_RECORD.startedAt,
+    product: KAP_RECORD.product,
+  }],
+  stale: 0,
+  invalid: 0,
+  truncated: false,
+};
+
+/** The socket under the KAP shim: what the shim sends, and a way to play server frames into it. */
+class KapWire implements KimiSocketLike {
+  readonly sent: Array<Record<string, unknown>> = [];
+  private readonly listeners = new Map<string, Array<(event: unknown) => void>>();
+  send(data: string): void { this.sent.push(JSON.parse(data) as Record<string, unknown>); }
+  close(): void { this.fire('close', {}); }
+  addEventListener(type: string, listener: (event: unknown) => void): void {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+  }
+  fire(type: string, event: unknown): void {
+    for (const listener of [...(this.listeners.get(type) ?? [])]) listener(event);
+  }
+  deliver(frame: unknown): void { this.fire('message', { data: JSON.stringify(frame) }); }
+}
+
+/**
+ * One captured socket conversation through the shim, exactly as a connection
+ * holds it: the connection's 0.x opening frames go out, the captured server
+ * frames come back in order (the subscribe `response` re-keyed to the request
+ * id the shim minted), and every frame the connection would receive is kept.
+ */
+function kapReplay(hub: KimiKapHub, sequence: KapFrameRow[] | undefined, sessionId: string): {
+  wire: KapWire;
+  socket: KimiSocketLike;
+  received: Array<Record<string, unknown>>;
+} {
+  if (!sequence) throw new Error('the 2.7.2 fixture is missing a socket sequence');
+  const wire = new KapWire();
+  const socket = hub.socketFactory(() => wire)(`${kapBaseUrl.replace(/^http/, 'ws')}/api/v1/ws`, 'fixture-token');
+  const received: Array<Record<string, unknown>> = [];
+  socket.addEventListener('message', (event) => {
+    received.push(JSON.parse(String((event as { data?: unknown }).data)) as Record<string, unknown>);
+  });
+  socket.send(JSON.stringify({ type: 'client_hello', id: 'hello', payload: { client_id: 'cosyncing' } }));
+  socket.send(JSON.stringify({ type: 'subscribe', id: 'subscribe', payload: { session_ids: [sessionId], cursors: {} } }));
+  socket.send(JSON.stringify({ type: 'subscribe_v2', id: 'subscribe-v2', payload: { session_id: sessionId, transcript: {} } }));
+  const requestId = wire.sent.find((frame) => frame.type === 'subscribe')?.request_id;
+  for (const row of sequence) {
+    if (row.dir !== 'in' || !row.frame) continue;
+    wire.deliver(row.frame.type === 'response' ? { ...row.frame, request_id: requestId } : row.frame);
+  }
+  return { wire, socket, received };
+}
+const kapEvents = (received: Array<Record<string, unknown>>): Array<Record<string, unknown>> =>
+  received.filter((frame) => frame.type !== 'ack' && frame.type !== 'ping');
+const kapPayloads = (events: Array<Record<string, unknown>>, type: string): Array<Record<string, unknown>> =>
+  events.filter((frame) => frame.type === type).map((frame) => frame.payload as Record<string, unknown>);
+
+try {
+  // ── 9a. The gate, the roster, the catalog, rename and create ──────────────
+  const kapWires: KapWire[] = [];
+  const kapAdapter = new KimiAdapter({
+    env: {},
+    homeDir: '/fixture/home',
+    instanceScan: () => kapScan,
+    readToken: () => 'fixture-token',
+    observe: {
+      socketFactory: () => {
+        const wire = new KapWire();
+        kapWires.push(wire);
+        return wire;
+      },
+      setInterval: () => 1,
+      clearInterval: () => {},
+    },
+  });
+  check('a 2.7.2 host whose metadata announces KAP 1.0.0 is available', await kapAdapter.isAvailable());
+  check('...and is never claimed as the adapter\'s readiness fault',
+    (await kapAdapter.managedHostReadinessFault()).kind === 'host');
+
+  const kapRoster = await kapAdapter.discoverSessions();
+  const kapListed = (kapExchange('sessionsList').response.data as { items: Array<{ id: string; title: string }> }).items;
+  check('the KAP roster lists every session the server lists, in its workspace, idle and observe-only',
+    kapRoster.length === kapListed.length
+      && kapListed.every((row) => kapRoster.some((session) => session.id === row.id
+        && (row.title === '' || session.title === row.title)
+        && session.cwd === '/fixture/workspace'
+        && session.status === 'idle'
+        && session.attachMode === 'observe')),
+    kapRoster.map((session) => `${session.id}:${session.title}:${session.status}:${session.cwd}`).join(','));
+  check('the roster is read from the KAP listing, never from the 0.x routes',
+    kapRequests.some((entry) => entry.method === 'GET' && entry.path === '/api/v1/sessions'
+      && entry.query.get('archived') === 'false' && entry.query.get('sort') === 'updated_at_desc')
+      && !kapRequests.some((entry) => entry.path === '/api/v2/sessions'),
+    kapRequests.map((entry) => `${entry.method} ${entry.path}`).join(','));
+
+  const kapModels = await kapAdapter.listModels?.() ?? [];
+  check('the model catalog keeps its shape on KAP',
+    kapModels.length === 1
+      && kapModels[0]?.modelID === 'vllm/qwen3.8-flash-next'
+      && kapModels[0]?.label === 'Qwen 3.8 Flash Next'
+      && (kapModels[0]?.reasoningEfforts ?? []).map((effort) => effort.effort).join(',') === 'low,medium,high',
+    JSON.stringify(kapModels));
+
+  const kapPosts = () => kapRequests.filter((entry) => entry.method === 'POST');
+  const renamed = await kapAdapter.renameSession(KAP_LIVE, 'km2 live');
+  check('a native rename posts the title to the KAP profile route',
+    kapPosts().at(-1)?.path === `/api/v1/sessions/${KAP_LIVE}/profile`
+      && JSON.stringify(kapPosts().at(-1)?.body) === JSON.stringify({ title: 'km2 live' })
+      && !!renamed && renamed.title === 'km2 live',
+    JSON.stringify(kapPosts().at(-1)));
+  const lockedRename = await kapAdapter.renameSession(KAP_LOCKED, 'renamed while locked')
+    .then(() => undefined, (error: Error) => error);
+  check('a rename of a session another Kimi process holds fails with the server\'s own reason',
+    !!lockedRename && /in use by another Kimi Code/.test(lockedRename.message), lockedRename?.message);
+
+  const created = await kapAdapter.createSession?.({ directory: '/fixture/workspace', title: 'km2 live' });
+  check('create sends the workspace as KAP\'s top-level cwd',
+    kapPosts().at(-1)?.path === '/api/v1/sessions'
+      && JSON.stringify(kapPosts().at(-1)?.body) === JSON.stringify({ title: 'km2 live', cwd: '/fixture/workspace' }),
+    JSON.stringify(kapPosts().at(-1)?.body));
+  check('the created session maps from KAP\'s flat row: id, workspace, idle, drivable',
+    created?.id === KAP_LIVE && created.cwd === '/fixture/workspace' && created.status === 'idle'
+      && created.control?.drive.supported === true,
+    JSON.stringify(created));
+
+  // ── 9b. An observe attach: history, and a live card through the shim ──────
+  {
+    kapInteractions = 'interactionsApproval';
+    const observed = await kapAdapter.attach(KAP_LIVE);
+    const seen: AgentMessage[] = [];
+    observed.subscribe((message) => seen.push(message));
+    const history = await observed.getHistory();
+    const users = history.filter((message): message is Extract<AgentMessage, { type: 'user-message' }> =>
+      message.type === 'user-message').map((message) => message.text);
+    const outputs = history.filter((message): message is Extract<AgentMessage, { type: 'model-output' }> =>
+      message.type === 'model-output').map((message) => message.text ?? '');
+    const toolResults = history.filter((message): message is Extract<AgentMessage, { type: 'tool-result' }> =>
+      message.type === 'tool-result');
+    check('attach history folds the KAP turns into the session\'s prompts, oldest first',
+      users[0] === 'Reply with the single word: pong'
+        && users.some((text) => text.startsWith('Write the numbers from 1 to 400'))
+        && users.indexOf('Reply with the single word: pong') < users.findIndex((text) => text.startsWith('What colour is the attached image')),
+      JSON.stringify(users));
+    check('...with the model\'s replies and reasoning',
+      outputs.some((text) => text.includes('pong')) && outputs.some((text) => text.includes('km2-approval-one'))
+        && history.some((message) => message.type === 'thinking'),
+      JSON.stringify(outputs));
+    check('...with the tool calls and their results, a rejected call\'s result marked as an error',
+      history.filter((message) => message.type === 'tool-call' && message.toolName === 'Bash').length === 2
+        && toolResults.some((message) => message.isError === true && String(message.result).includes('rejected the approval request'))
+        && toolResults.some((message) => message.isError !== true && String(message.result).includes('km2-approval-one')),
+      JSON.stringify(toolResults.map((message) => [message.isError, message.result])));
+    check('...and the attached image and file as the sent image and the attached-file notice',
+      history.some((message) => message.type === 'file-artifact' && message.mimeType === 'image/png'
+        && typeof message.url === 'string' && message.url.startsWith('data:image/png;base64,'))
+        && users.includes('Attached file "km2-note.txt" (text/plain, 48 bytes)'),
+      JSON.stringify(history.filter((message) => message.type === 'file-artifact')));
+    check('the history is read from the KAP turns route, in pages of whole turns',
+      kapRequests.some((entry) => entry.path === `/api/v1/sessions/${KAP_LIVE}/agents/main/turns`
+        && entry.query.get('page_size') === '4')
+        && !kapRequests.some((entry) => /\/(messages|approvals|questions|status|goal)$/.test(entry.path)),
+      kapRequests.filter((entry) => entry.method === 'GET').map((entry) => `${entry.path}?${entry.query}`).join(','));
+
+    const wire = kapWires.at(-1);
+    wire?.fire('open', {});
+    const subscribe = wire?.sent[0];
+    check('the connection\'s opening frames reach KAP as one subscribe carrying a request id, nothing else',
+      wire?.sent.length === 1 && subscribe?.type === 'subscribe' && subscribe.session_id === KAP_LIVE
+        && typeof subscribe.request_id === 'string',
+      JSON.stringify(wire?.sent));
+    const pending = KAP.ws.approval?.find((row) => row.frame?.type === 'interaction' && row.frame.status === 'pending')?.frame;
+    wire?.deliver({ type: 'response', request_id: subscribe?.request_id, code: 0 });
+    wire?.deliver(pending);
+    const card = seen.find((message): message is Extract<AgentMessage, { type: 'permission-request' }> =>
+      message.type === 'permission-request');
+    check('a pending KAP approval reaches an observer as the existing read-only approval card',
+      card?.requestId === KAP_APPROVAL_ID && card.readOnly === true && card.toolName === 'Bash',
+      JSON.stringify(card));
+    await observed.close();
+    kapInteractions = 'interactionsEmpty';
+  }
+
+  // ── 9c. The read door, directly ──────────────────────────────────────────
+  const hub = new KimiKapHub();
+  hub.noteVerified(kapBaseUrl, 'kap', 'api-generation');
+  const kapHttp = new KimiReadOnlyHttp({ baseUrl: kapBaseUrl, token: 'fixture-token' }).speaking(hub.translator());
+
+  const listing = await kapHttp.getJson<KimiV2SessionPage>('/api/v2/sessions', { page_size: 50, 'meta.archived': 'false' });
+  const listed = listing.ok ? mapKimiSessionPage(listing.data).sessions : [];
+  check('the 0.x listing read is answered from the KAP listing, every row mapped',
+    listed.length === kapListed.length && listed.every((session) => session.cwd === '/fixture/workspace'),
+    JSON.stringify(listed.map((session) => session.id)));
+  const recent = await kapHttp.getJson<{ items: unknown[]; has_more: boolean }>('/api/v2/sessions', {
+    page_size: 50, 'meta.archived': 'false', 'meta.updated_after': Date.parse('2026-11-24T08:19:00.000Z'),
+  });
+  check('the 0.x updated-after bound is applied to the KAP rows',
+    recent.ok && recent.data.items.length === 2 && recent.data.has_more === false,
+    recent.ok ? String(recent.data.items.length) : recent.reason);
+
+  kapPagedHistory = true;
+  const turnReads: string[] = [];
+  const pageEdges: string[] = [];
+  let beforeId: string | undefined;
+  for (let page = 0; page < 4; page += 1) {
+    const before = kapRequests.length;
+    const result = await kapHttp.getJson<{ items: Array<{ id: string }>; has_more: boolean }>(
+      `/api/v1/sessions/${KAP_LIVE}/messages`,
+      { page_size: 100, ...(beforeId ? { before_id: beforeId } : {}) },
+    );
+    turnReads.push(...kapRequests.slice(before).map((entry) => entry.query.toString()));
+    if (!result.ok) break;
+    const items = result.data.items;
+    pageEdges.push(`${items[0]?.id}..${items.at(-1)?.id}:${result.data.has_more}`);
+    if (!result.data.has_more || items.length === 0) break;
+    beforeId = items.at(-1)?.id;
+  }
+  kapPagedHistory = false;
+  check('the 0.x history walk pages KAP turns newest first, continuing from the oldest turn it holds',
+    JSON.stringify(turnReads) === JSON.stringify(['page_size=4', 'page_size=4&before_ordinal=4', 'page_size=4&before_ordinal=2'])
+      && JSON.stringify(pageEdges) === JSON.stringify([
+        '727639a0-8826-4e5d-ae90-1bd3935acfb3:1..cancel-1:true',
+        '66d6df6d-1e00-458c-8db7-ccadeccf3ba5:1..question-1:true',
+        '4118522b-8b0e-4dba-aec1-fa84f0bb91d4:1..live-1:false',
+      ]),
+    `${JSON.stringify(turnReads)} ${JSON.stringify(pageEdges)}`);
+  const readsBeforeStale = kapRequests.length;
+  const stale = await kapHttp.getJson<{ items: unknown[]; has_more: boolean }>(
+    `/api/v1/sessions/${KAP_LIVE}/messages`, { page_size: 100, before_id: 'never-issued' });
+  check('a continuation this side never issued ends the walk, without a request',
+    stale.ok && stale.data.items.length === 0 && stale.data.has_more === false && kapRequests.length === readsBeforeStale);
+
+  kapInteractions = 'interactionsApproval';
+  const approvals = await kapHttp.getJson<{ items: unknown[] }>(`/api/v1/sessions/${KAP_LIVE}/approvals`, { status: 'pending' });
+  const noQuestions = await kapHttp.getJson<{ items: unknown[] }>(`/api/v1/sessions/${KAP_LIVE}/questions`, { status: 'pending' });
+  const approvalCard = approvals.ok ? mapKimiApprovalRequest(approvals.data.items[0], false) : undefined;
+  check('pending KAP approvals read as the 0.x approval list and map to the existing card',
+    approvals.ok && approvals.data.items.length === 1
+      && approvalCard?.requestId === KAP_APPROVAL_ID && approvalCard.toolName === 'Bash'
+      && approvalCard.title === 'Bash — Running: echo km2-approval-one'
+      && noQuestions.ok && noQuestions.data.items.length === 0,
+    JSON.stringify(approvalCard));
+  kapInteractions = 'interactionsQuestion';
+  const questions = await kapHttp.getJson<{ items: unknown[] }>(`/api/v1/sessions/${KAP_LIVE}/questions`, { status: 'pending' });
+  const pendingQuestion = questions.ok ? mapKimiQuestionRequest(questions.data.items[0], false) : undefined;
+  check('pending KAP questions read as the 0.x question list, keeping the native item and option ids',
+    pendingQuestion?.message.requestId === KAP_QUESTION_ID
+      && pendingQuestion.message.questions[0]?.question === 'Which colour do you prefer?'
+      && pendingQuestion.record.items[0]?.id === 'q_0'
+      && pendingQuestion.record.items[0]?.options.map((option) => `${option.id}:${option.label}`).join(',') === 'opt_0_0:Red,opt_0_1:Blue',
+    JSON.stringify(pendingQuestion?.record));
+  kapInteractions = 'interactionsEmpty';
+
+  const statusBefore = await kapHttp.getJson<unknown>(`/api/v1/sessions/${KAP_LIVE}/status`);
+  const goalBefore = await kapHttp.getJson<unknown>(`/api/v1/sessions/${KAP_LIVE}/goal`);
+  check('status and goal are refused, never invented, until the session\'s socket has spoken',
+    !statusBefore.ok && !goalBefore.ok);
+
+  // ── 9d. The socket shim, replaying the captured conversations ─────────────
+  const approval = kapReplay(hub, KAP.ws.approval, KAP_LIVE);
+  check('the 0.x opening frames reach KAP as one subscribe with a request id; hello and subscribe_v2 are not sent',
+    approval.wire.sent.length === 1 && approval.wire.sent[0]?.type === 'subscribe'
+      && approval.wire.sent[0]?.session_id === KAP_LIVE && typeof approval.wire.sent[0]?.request_id === 'string',
+    JSON.stringify(approval.wire.sent));
+  const ack = approval.received[0];
+  const ackPayload = ack?.payload as { accepted?: unknown; cursors?: Record<string, { seq?: unknown; epoch?: unknown }> } | undefined;
+  check('the KAP subscribe response becomes the 0.x ack, carrying this session\'s cursor',
+    ack?.type === 'ack' && ack.id === 'subscribe' && ack.code === 0
+      && JSON.stringify(ackPayload?.accepted) === JSON.stringify([KAP_LIVE])
+      && ackPayload?.cursors?.[KAP_LIVE]?.epoch === 'kap:api-generation',
+    JSON.stringify(ack));
+  const approvalEvents = kapEvents(approval.received);
+  check('every translated event is a 0.x envelope on this session, rising seq, the server generation as its epoch',
+    approvalEvents.length > 0 && approvalEvents.every((frame, index) => frame.session_id === KAP_LIVE
+      && frame.epoch === 'kap:api-generation'
+      && typeof frame.seq === 'number'
+      && (index === 0 || (frame.seq as number) > (approvalEvents[index - 1]!.seq as number))
+      && (frame.payload as { agentId?: unknown }).agentId === 'main'),
+    JSON.stringify(approvalEvents.map((frame) => [frame.type, frame.seq])));
+  const approvalTypes = approvalEvents.map((frame) => String(frame.type));
+  check('approvals arrive as the 0.x request/resolution pairs with their decisions',
+    JSON.stringify(approvalTypes.filter((type) => type.startsWith('event.approval'))) === JSON.stringify([
+      'event.approval.requested', 'event.approval.resolved', 'event.approval.requested', 'event.approval.resolved',
+    ])
+      && kapPayloads(approvalEvents, 'event.approval.resolved').map((payload) => payload.decision).join(',') === 'approved,rejected',
+    approvalTypes.join(','));
+  const liveCard = mapKimiApprovalRequest(kapPayloads(approvalEvents, 'event.approval.requested')[0], false);
+  check('...and a requested payload maps to the existing approval card',
+    liveCard?.requestId === KAP_APPROVAL_ID && liveCard.toolName === 'Bash', JSON.stringify(liveCard));
+  const runStates = kapPayloads(approvalEvents, 'event.session.work_changed').map((payload) => mapKimiWorkChanged(payload));
+  check('the session frames drive the 0.x run state: idle, working, held on each approval, idle at the end',
+    runStates[0] === 'idle' && runStates.includes('working') && runStates.filter((state) => state === 'needs-input').length === 2
+      && runStates.at(-1) === 'idle',
+    runStates.join(','));
+  const approvalEnded = kapPayloads(approvalEvents, 'turn.ended')[0];
+  check('the turn opens and ends under its turn number, and its prompt settles after it',
+    kapPayloads(approvalEvents, 'turn.started')[0]?.turnId === 1
+      && approvalEnded?.turnId === 1 && approvalEnded.reason === 'completed'
+      && kapPayloads(approvalEvents, 'prompt.completed')[0]?.promptId === 'approval-1'
+      && approvalTypes.indexOf('prompt.completed') > approvalTypes.indexOf('turn.ended'),
+    JSON.stringify(approvalEnded));
+  check('the transcript is re-read when KAP replaces it, when the prompt is written, and after every step',
+    approvalTypes[0] === 'transcript.reset' && approvalTypes.includes('transcript.ops')
+      && approvalTypes.filter((type) => type === 'turn.step.completed').length === 3,
+    approvalTypes.join(','));
+  approval.socket.send(JSON.stringify({ type: 'pong', payload: {} }));
+  check('a KAP ping reaches the connection, and its pong goes back as KAP\'s',
+    approval.received.some((frame) => frame.type === 'ping')
+      && JSON.stringify(approval.wire.sent.at(-1)) === JSON.stringify({ type: 'pong' }),
+    JSON.stringify(approval.wire.sent.at(-1)));
+
+  const statusAfter = await kapHttp.getJson<Record<string, unknown>>(`/api/v1/sessions/${KAP_LIVE}/status`);
+  check('status is answered from the live agent and context frames, in the 0.x field names',
+    statusAfter.ok && statusAfter.data.model === 'vllm/qwen3.8-flash-next'
+      && statusAfter.data.thinking_level === 'medium' && statusAfter.data.permission === 'manual'
+      && typeof statusAfter.data.context_tokens === 'number' && statusAfter.data.max_context_tokens === 262_144
+      && statusAfter.data.busy === false,
+    JSON.stringify(statusAfter));
+
+  const cancelEvents = kapEvents(kapReplay(hub, KAP.ws.cancel, KAP_LIVE).received);
+  const cancelEnded = kapPayloads(cancelEvents, 'turn.ended')[0];
+  check('an interrupted KAP turn ends as cancelled, and its prompt is reported aborted',
+    cancelEnded?.turnId === 4 && cancelEnded.reason === 'cancelled'
+      && kapPayloads(cancelEvents, 'prompt.aborted')[0]?.promptId === 'cancel-1'
+      && kapPayloads(cancelEvents, 'prompt.completed').length === 0,
+    JSON.stringify(cancelEnded));
+
+  const failedEvents = kapEvents(kapReplay(hub, KAP.ws.failed, KAP_FAILED).received);
+  const failedEnded = kapPayloads(failedEvents, 'turn.ended')[0];
+  check('a failed KAP turn ends as failed, and the existing failure banner reads the server\'s message',
+    failedEnded?.reason === 'failed' && mapKimiTurnFailure(failedEnded) === 'Model not set'
+      && kapPayloads(failedEvents, 'prompt.completed')[0]?.promptId === 'fail-nosignin-1'
+      && kapPayloads(failedEvents, 'prompt.completed')[0]?.reason === 'failed',
+    JSON.stringify(failedEnded));
+
+  const questionEvents = kapEvents(kapReplay(hub, KAP.ws.question, KAP_LIVE).received);
+  const liveQuestion = mapKimiQuestionRequest(kapPayloads(questionEvents, 'event.question.requested')[0], false);
+  check('a KAP question arrives as the existing question card, then as answered',
+    liveQuestion?.message.requestId === KAP_QUESTION_ID
+      && liveQuestion.record.items[0]?.options.map((option) => option.label).join(',') === 'Red,Blue'
+      && kapPayloads(questionEvents, 'event.question.answered')[0]?.question_id === KAP_QUESTION_ID,
+    JSON.stringify(questionEvents.map((frame) => frame.type)));
+  const dismissEvents = kapEvents(kapReplay(hub, KAP.ws.questionDismiss, KAP_LIVE).received);
+  check('a dismissed KAP question arrives as dismissed',
+    kapPayloads(dismissEvents, 'event.question.dismissed')[0]?.question_id === KAP_DISMISSED_ID,
+    JSON.stringify(dismissEvents.map((frame) => frame.type)));
+
+  kapReplay(hub, KAP.ws.goal, KAP_LIVE);
+  const goal = await kapHttp.getJson<{ objective?: unknown; status?: unknown }>(`/api/v1/sessions/${KAP_LIVE}/goal`);
+  check('the goal read answers from the session\'s last goal frame',
+    goal.ok && goal.data.objective === 'Keep the km2 capture short' && goal.data.status === 'paused',
+    JSON.stringify(goal));
+
+  const elsewhere = kapReplay(hub, KAP.ws.approval, KAP_FAILED);
+  check('frames about a session the socket did not subscribe are not delivered',
+    elsewhere.received.every((frame) => frame.type === 'ack' || frame.type === 'ping'),
+    JSON.stringify(elsewhere.received.map((frame) => frame.type)));
+  const plain = new KapWire();
+  check('a socket to a server the gate did not verify as KAP is passed through untouched',
+    hub.socketFactory(() => plain)(`ws://127.0.0.1:${KIMI_DEFAULT_PORT}/api/v1/ws`, undefined) === plain);
+
+  // ── 9e. The write door on KAP ─────────────────────────────────────────────
+  const kapDoor = new KimiDriveHttp({ baseUrl: kapBaseUrl, token: 'fixture-token', wire: 'kap' });
+  const lastPost = () => kapPosts().at(-1);
+  const createdOutcome = await kapDoor.createSession({ title: 'km2 live', metadata: { cwd: '/fixture/workspace' } });
+  const createdInfo = mapKimiCreatedSession(createdOutcome.data as KimiV1Session);
+  check('the write door\'s create answers the 0.x row the create mapping reads',
+    createdInfo?.id === KAP_LIVE && createdInfo.cwd === '/fixture/workspace' && createdInfo.status === 'idle',
+    JSON.stringify(createdOutcome.data));
+
+  kapCancel = 'cancel';
+  const cancelled = await kapDoor.abortSession(KAP_LIVE);
+  check('stop posts KAP\'s `:cancel` with the captured body and reads `{cancelled}` as the 0.x `{aborted}`',
+    lastPost()?.path === `/api/v1/sessions/${KAP_LIVE}:cancel`
+      && JSON.stringify(lastPost()?.body) === JSON.stringify(kapExchange('cancel').body)
+      && cancelled.code === 0 && (cancelled.data as { aborted?: unknown }).aborted === true,
+    `${lastPost()?.path} ${JSON.stringify(cancelled.data)}`);
+  kapCancel = 'cancelIdle';
+  const idleStop = await kapDoor.abortSession(KAP_LIVE);
+  check('an idle session\'s `{cancelled:false}` reads as `{aborted:false}`, the already-done notice',
+    (idleStop.data as { aborted?: unknown }).aborted === false, JSON.stringify(idleStop.data));
+  kapCancel = 'cancel';
+
+  await kapDoor.resolveApproval(KAP_LIVE, KAP_APPROVAL_ID, { decision: 'approved' });
+  check('an approval answer posts the captured KAP interaction body to the interaction route',
+    lastPost()?.path === `/api/v1/sessions/${KAP_LIVE}/interactions/${KAP_APPROVAL_ID}`
+      && JSON.stringify(lastPost()?.body) === JSON.stringify(kapExchange('approvalApprove').body),
+    JSON.stringify(lastPost()));
+  await kapDoor.resolveApproval(KAP_LIVE, KAP_APPROVAL_ID, { decision: 'approved', scope: 'session' });
+  check('a session-scoped approval keeps its scope on KAP',
+    JSON.stringify(lastPost()?.body) === JSON.stringify({ kind: 'approval', decision: 'approved', scope: 'session' }),
+    JSON.stringify(lastPost()?.body));
+  await kapDoor.answerQuestion(KAP_LIVE, KAP_QUESTION_ID, { answers: { q_0: { kind: 'single', option_id: 'opt_0_0' } } });
+  check('a question answer posts the captured KAP interaction body',
+    lastPost()?.path === `/api/v1/sessions/${KAP_LIVE}/interactions/${KAP_QUESTION_ID}`
+      && JSON.stringify(lastPost()?.body) === JSON.stringify(kapExchange('questionAnswer').body),
+    JSON.stringify(lastPost()?.body));
+  const dismissed = await kapDoor.dismissQuestion(KAP_LIVE, KAP_DISMISSED_ID);
+  check('a dismissal posts the captured KAP interaction body and succeeds',
+    lastPost()?.path === `/api/v1/sessions/${KAP_LIVE}/interactions/${KAP_DISMISSED_ID}`
+      && JSON.stringify(lastPost()?.body) === JSON.stringify(kapExchange('questionDismiss').body)
+      && dismissed.code === 0,
+    JSON.stringify(lastPost()?.body));
+  const lockedPrompt = await kapDoor.submitPrompt(KAP_LOCKED, { content: [{ type: 'text', text: 'hello from the server' }] })
+    .then(() => undefined, (error: unknown) => error);
+  check('a prompt to a session another Kimi process holds throws the 40931 lock code drive demotes on',
+    isKimiWriteError(lockedPrompt) && lockedPrompt.code === KIMI_SESSION_LOCKED_CODE
+      && /in use by another Kimi Code/.test(lockedPrompt.message),
+    String(lockedPrompt));
+  // NEGATIVE CONTROL: the 0.x door is unchanged, and 2.7.2 refuses its stop.
+  const legacyStop = await new KimiDriveHttp({ baseUrl: kapBaseUrl, token: 'fixture-token' }).abortSession(KAP_LIVE)
+    .then(() => undefined, (error: unknown) => error);
+  check('the 0.x door still posts `:abort`, which 2.7.2 refuses as an unsupported action (captured)',
+    lastPost()?.path === `/api/v1/sessions/${KAP_LIVE}:abort` && isKimiWriteError(legacyStop) && legacyStop.code === 40001,
+    String(legacyStop));
+
+  // ── 9f. Kimi Desktop beside `kimi web`: only the CLI server is addressed ───
+  //
+  // Owner decision: Desktop registers its own server in the same registry under
+  // another `product`; this adapter addresses the CLI's alone, so one Desktop
+  // beside one `kimi web` is still exactly one server rather than an ambiguous
+  // two. (The other product value below is the test's, not a captured one.)
+  {
+    const records: Record<string, unknown> = {
+      'cli.json': KAP.instanceRecord,
+      'other.json': { ...KAP.instanceRecord, server_id: 'another-product-server', port: KIMI_DEFAULT_PORT + 7, product: 'another-product' },
+      'empty.json': { ...KAP.instanceRecord, server_id: 'empty-product-server', product: '' },
+    };
+    const scanned = scanKimiInstances('/h', {
+      listFiles: () => ({ names: Object.keys(records), truncated: false }),
+      readJson: (path) => records[path.slice(path.lastIndexOf('/') + 1)],
+      pidAlive: () => true,
+    });
+    check('a server registered by another Kimi product is ignored, and the CLI server stays the one server',
+      scanned.live.length === 1 && scanned.live[0]?.serverId === KAP_RECORD.serverId
+        && scanned.live[0]?.product === 'kimi-code-cli'
+        && scanned.otherProducts === 1 && scanned.invalid === 1,
+      JSON.stringify(scanned));
+  }
+
+  // ── 9g. A refused launch is not offered again until the binary changes ────
+  //
+  // T1 residual. With no host running the broker starts `kimi web` from the
+  // installed binary; when that binary is a version the gate refuses, every
+  // start produced a refused host and the next pass started it again. The
+  // adapter now attributes the refusal to its own offer and withholds the
+  // launch while the binary is unchanged.
+  {
+    let now = 1_795_507_000_000;
+    let identity = 'binary-a';
+    let live: KimiInstanceScan['live'] = [];
+    const unsupportedHost = (startedAt: number) => ({
+      baseUrl: `http://127.0.0.1:${KIMI_DEFAULT_PORT}`, port: KIMI_DEFAULT_PORT, pid: 4242,
+      serverId: 'refused-host', hostVersion: '2.6.3', startedAt,
+    });
+    const supervised = new KimiAdapter({
+      env: {}, homeDir: '/fixture/home',
+      instanceScan: () => ({ live, stale: 0, invalid: 0, truncated: false }),
+      readToken: () => 'fixture-token',
+      resolveExecutable: (command: string) => (command === 'kimi' ? '/fixture/bin/kimi' : undefined),
+      executableIdentity: () => identity,
+      now: () => now,
+    });
+    const offered = await supervised.describeManagedHost();
+    check('with no host running, a launch is offered',
+      !!offered?.launch && offered.locator.kind === 'absent', JSON.stringify(offered?.launch));
+    live = [unsupportedHost(now + 1_500)];
+    now += 5_000;
+    check('the host that launch produced is refused for its version', !(await supervised.isAvailable()));
+    live = [];
+    const withheld = await supervised.describeManagedHost();
+    check('the same binary is not offered again once a launch of it was refused',
+      withheld !== null && withheld.launch === null && withheld.locator.kind === 'absent',
+      JSON.stringify(withheld?.launch));
+    check('...on every later pass', (await supervised.describeManagedHost())?.launch === null);
+    identity = 'binary-b';
+    check('replacing the binary (an upgrade, a reinstall) lifts the hold',
+      !!(await supervised.describeManagedHost())?.launch);
+
+    let userLive: KimiInstanceScan['live'] = [unsupportedHost(now - 60_000)];
+    const userStarted = new KimiAdapter({
+      env: {}, homeDir: '/fixture/home',
+      instanceScan: () => ({ live: userLive, stale: 0, invalid: 0, truncated: false }),
+      readToken: () => 'fixture-token',
+      resolveExecutable: (command: string) => (command === 'kimi' ? '/fixture/bin/kimi' : undefined),
+      executableIdentity: () => 'binary-a',
+      now: () => now,
+    });
+    await userStarted.describeManagedHost();
+    check('an unsupported host the user started is refused too', !(await userStarted.isAvailable()));
+    userLive = [];
+    check('...but suppresses nothing: no launch of this adapter produced it',
+      !!(await userStarted.describeManagedHost())?.launch);
+  }
+} catch (error) {
+  check('KAP harness completed', false, error instanceof Error ? `${error.message}\n${error.stack}` : String(error));
+} finally {
+  kapServer.stop(true);
 }
 
 const failed = results.filter((r) => !r.ok).length;
