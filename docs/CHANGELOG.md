@@ -41,7 +41,7 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 - The broker accepts up to eight inline images per prompt, each up to 1 MiB, for
   API clients. The first-party app uses staged attachments and never sends inline
-  images. Delivery at this limit is verified only for OpenCode 2.
+  images.
 - Reasonix: 2.61.0, the final release, is supported alongside 1.25.2. Drive,
   Create and Resume work on exactly these two versions; every other version opens
   sessions in Observe mode only, and `cosy doctor` recommends
