@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 export {};
-import { readFileSync, renameSync, symlinkSync } from 'node:fs';
+import { readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   clineDataRoot,
   clinePathContained,
@@ -8,7 +9,7 @@ import {
   discoverClineStore,
   readClineMessages,
 } from '../src/store.ts';
-import { buildClineFixtureTree, fixtureParentMessages } from './fixtures/tree.ts';
+import { buildClineFixtureTree, fixtureChildMessages, fixtureParentMessages } from './fixtures/tree.ts';
 
 const results: Array<{ name: string; ok: boolean; detail: string }> = [];
 function check(name: string, ok: boolean, detail = ''): void {
@@ -66,6 +67,58 @@ try {
       && legacyObserved.some((session) => session.id === tree.childId));
   tree.writeParent(fixtureParentMessages());
   tree.writeChild([]);
+
+  // Cline 3.0.75 (core 0.2.1), captured from its own CLI writes: the same document, stamped
+  // `origin.version: 3.0.75`, and subagent files named `agent_<uuid>` instead of
+  // `agent_<epoch ms>_<base36>`. Before it was listed, the parent was refused outright and the
+  // child never matched the sibling pattern, so the session vanished from the roster.
+  const captured = JSON.parse(readFileSync(new URL('./fixtures/cline-3.0.75-redacted.json', import.meta.url), 'utf8'));
+  const capturedChild = captured.subagent.origin.subagent as string;
+  check('the redacted 3.0.75 fixture pins the captured CLI parent and agent_<uuid> child discriminators',
+    captured.nativeVersion === '3.0.75'
+      && captured.parent.agent === 'lead' && captured.parent.origin.version === '3.0.75'
+      && captured.subagent.agent === 'subagent' && captured.subagent.taskType === 'subagent_task'
+      && captured.subagent.file === `${capturedChild}.messages.json`
+      && /^agent_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(capturedChild));
+  const uuidChildId = `${tree.id}__${capturedChild}`;
+  const uuidChildPath = join(tree.sessionDir, captured.subagent.file);
+  const writeCapturedTree = (version: string): void => {
+    tree.writeParent(fixtureParentMessages(), undefined, {
+      origin: { ...captured.parent.origin, sessionId: tree.id, version },
+    });
+    writeFileSync(uuidChildPath, `${JSON.stringify({
+      version: captured.messagesDocumentVersion,
+      agent: captured.subagent.agent,
+      taskType: captured.subagent.taskType,
+      sessionId: uuidChildId,
+      updated_at: '2026-08-23T10:00:05.000Z',
+      origin: { ...captured.subagent.origin, sessionId: uuidChildId, parentThreadId: tree.id, version },
+      messages: fixtureChildMessages(),
+    })}\n`);
+  };
+  writeCapturedTree('3.0.75');
+  const observed075 = await discoverClineStore({ env: { CLINE_DIR: tree.root }, processAlive: () => false });
+  const parent075 = observed075.find((session) => session.id === tree.id);
+  const child075 = observed075.find((session) => session.id === uuidChildId);
+  check('a 3.0.75 parent and its agent_<uuid> subagent are observed with their linkage',
+    parent075 !== undefined
+      && child075?.origin === 'subagent'
+      && child075.parentThreadId === tree.id
+      && child075.nativeId === uuidChildId
+      && child075.messagesPath === uuidChildPath,
+    observed075.map((session) => session.id).join(','));
+  const replay075 = parent075 ? await readClineMessages(parent075) : undefined;
+  check('the 3.0.75 parent transcript replays in full',
+    replay075?.issues.length === 0 && replay075.messages.length === fixtureParentMessages().length,
+    JSON.stringify(replay075?.issues));
+  // Still an enumeration: the next, uncaptured build is not read on the strength of ordering.
+  writeCapturedTree('3.0.76');
+  const unmeasured = await discoverClineStore({ env: { CLINE_DIR: tree.root }, processAlive: () => false });
+  check('a snapshot stamped by an uncaptured newer build is still refused, parent and child',
+    !unmeasured.some((session) => session.id === tree.id || session.id === uuidChildId),
+    unmeasured.map((session) => session.id).join(','));
+  rmSync(uuidChildPath);
+  tree.writeParent(fixtureParentMessages());
 
   const dead = await discoverClineStore({ env: { CLINE_DIR: tree.root }, processAlive: () => false });
   check('dead-pid running metadata is interrupted and never live',

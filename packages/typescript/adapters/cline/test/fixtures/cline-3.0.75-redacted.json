@@ -1,0 +1,187 @@
+{
+  "nativeVersion": "3.0.75",
+  "hubCoreVersion": "0.2.1",
+  "messagesDocumentVersion": 1,
+  "captured": "2026-11-24, isolated home, CLI and managed Hub; scrubbed: Hub auth token, workspace paths, prompts and message bodies (only discriminators kept)",
+  "parent": {
+    "agent": "lead",
+    "sessionId": "1795508112872_lnqww",
+    "origin": {
+      "source": "cli",
+      "mode": "user",
+      "sessionId": "1795508112872_lnqww",
+      "version": "3.0.75"
+    },
+    "documentKeys": [
+      "agent",
+      "messages",
+      "origin",
+      "sessionId",
+      "system_prompt",
+      "updated_at",
+      "version"
+    ],
+    "assistantModelInfo": {
+      "id": "qwen3:4b",
+      "provider": "openai-compatible"
+    }
+  },
+  "parentMetadataOrigin": {
+    "mode": "user",
+    "version": "3.0.75"
+  },
+  "subagent": {
+    "file": "agent_011dc55a-ec31-4938-bb12-2e575b42698b.messages.json",
+    "agent": "subagent",
+    "taskType": "subagent_task",
+    "sessionId": "1795508112872_lnqww__agent_011dc55a-ec31-4938-bb12-2e575b42698b",
+    "origin": {
+      "source": "cli",
+      "mode": "subagent",
+      "sessionId": "1795508112872_lnqww__agent_011dc55a-ec31-4938-bb12-2e575b42698b",
+      "parentThreadId": "1795508112872_lnqww",
+      "subagent": "agent_011dc55a-ec31-4938-bb12-2e575b42698b",
+      "version": "3.0.75"
+    },
+    "documentKeys": [
+      "agent",
+      "messages",
+      "origin",
+      "sessionId",
+      "taskType",
+      "updated_at",
+      "version"
+    ],
+    "assistantModelInfo": {
+      "id": "qwen3:4b",
+      "provider": "openai-compatible"
+    }
+  },
+  "managedParent": {
+    "agent": "lead",
+    "sessionId": "1795508048761_4ymgg",
+    "origin": {
+      "source": "cosyncing",
+      "mode": "user",
+      "sessionId": "1795508048761_4ymgg"
+    },
+    "documentKeys": [
+      "agent",
+      "messages",
+      "origin",
+      "sessionId",
+      "system_prompt",
+      "updated_at",
+      "version"
+    ],
+    "assistantModelInfo": {
+      "id": "qwen3:4b",
+      "provider": "openai-compatible"
+    }
+  },
+  "managedSubagent": {
+    "file": "agent_ff3321a1-b270-402b-8d35-1339cc7ee23a.messages.json",
+    "agent": "subagent",
+    "taskType": "subagent_task",
+    "sessionId": "1795508048761_4ymgg__agent_ff3321a1-b270-402b-8d35-1339cc7ee23a",
+    "origin": {
+      "source": "cosyncing",
+      "mode": "subagent",
+      "sessionId": "1795508048761_4ymgg__agent_ff3321a1-b270-402b-8d35-1339cc7ee23a",
+      "parentThreadId": "1795508048761_4ymgg",
+      "subagent": "agent_ff3321a1-b270-402b-8d35-1339cc7ee23a"
+    },
+    "documentKeys": [
+      "agent",
+      "messages",
+      "origin",
+      "sessionId",
+      "taskType",
+      "updated_at",
+      "version"
+    ],
+    "assistantModelInfo": {
+      "id": "qwen3:4b",
+      "provider": "openai-compatible"
+    }
+  },
+  "hub": {
+    "discovery": {
+      "hubId": "hub_1795507791581_byd9a",
+      "protocolVersion": "v1",
+      "minClientProtocolVersion": "v1",
+      "maxClientProtocolVersion": "v1",
+      "capabilities": [
+        "mcp.oauth.start",
+        "mcp.oauth.next",
+        "mcp.oauth.cancel",
+        "mcp.servers.list",
+        "mcp.servers.upsert",
+        "mcp.servers.set_disabled",
+        "mcp.servers.delete",
+        "mcp.settings.ensure",
+        "mcp.servers.inspect",
+        "mcp.servers.install",
+        "providers.list",
+        "providers.models.list",
+        "providers.models.recommended",
+        "providers.settings.save",
+        "providers.add",
+        "providers.models.update",
+        "client.register",
+        "client.list",
+        "session.create",
+        "session.list",
+        "session.get",
+        "session.run",
+        "session.abort",
+        "schedule.create",
+        "schedule.list",
+        "task.create",
+        "task.list",
+        "task.get",
+        "task.update",
+        "task.approve",
+        "task.cancel",
+        "task.run",
+        "task.automation.get",
+        "task.automation.set",
+        "settings.get",
+        "settings.set",
+        "connector.start",
+        "connector.stop",
+        "connector.supervised",
+        "run.enqueue",
+        "run.list",
+        "hub.drain",
+        "hub.status",
+        "plugins.list",
+        "plugins.status",
+        "plugins.reload",
+        "stream.replay"
+      ],
+      "coreVersion": "0.2.1",
+      "buildId": "source-0.2.1",
+      "authToken": "<scrubbed>",
+      "host": "127.0.0.1",
+      "port": 25531,
+      "url": "ws://127.0.0.1:25531/hub",
+      "pid": 376024,
+      "startedAt": "2026-11-24T08:09:51.694Z",
+      "updatedAt": "2026-11-24T08:09:51.694Z"
+    },
+    "health": {
+      "ok": true,
+      "hubId": "hub_1795507791581_byd9a",
+      "protocolVersion": "v1",
+      "minClientProtocolVersion": "v1",
+      "maxClientProtocolVersion": "v1",
+      "coreVersion": "0.2.1",
+      "buildId": "source-0.2.1",
+      "draining": false,
+      "host": "127.0.0.1",
+      "port": 25531,
+      "url": "ws://127.0.0.1:25531/hub"
+    }
+  }
+}
