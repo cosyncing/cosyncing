@@ -1909,13 +1909,14 @@ try {
 
 // ── 9. The Kimi Agent Protocol (Kimi Code 2.7+), against the 2.7.2 capture ──
 //
-// Owner decision D4: both wires, chosen from `/api/v1/meta`. On KAP the
-// 0.x-shaped connections are kept and the transport is translated at its three
-// seams — the read door and the socket (`kap.ts`), and the write door
-// (`drive-http.ts`). Every answer below is what a real Kimi Code 2.7.2 server
-// answered (fixtures/kimi-2.7.2.json, scrubbed), served or replayed verbatim;
-// what is asserted is what the 0.x surface receives after translation, read
-// through the same mappers the connections use.
+// Both wires are kept, and the one a server speaks is chosen from its
+// `/api/v1/meta`. On KAP the 0.x-shaped connections are kept and the
+// transport is translated at its three seams — the read door and the socket
+// (`kap.ts`), and the write door (`drive-http.ts`). Every answer below is what
+// a real Kimi Code 2.7.2 server answered (fixtures/kimi-2.7.2.json, scrubbed),
+// served or replayed verbatim; what is asserted is what the 0.x surface
+// receives after translation, read through the same mappers the connections
+// use.
 
 interface KapExchange { method: string; path: string; httpStatus: number; body?: unknown; response: Record<string, unknown> }
 interface KapFrameRow { dir: string; frame?: Record<string, unknown>; code?: number }
@@ -2127,21 +2128,21 @@ try {
     JSON.stringify(kapModels));
 
   const kapPosts = () => kapRequests.filter((entry) => entry.method === 'POST');
-  const renamed = await kapAdapter.renameSession(KAP_LIVE, 'km2 live');
+  const renamed = await kapAdapter.renameSession(KAP_LIVE, 'kap live');
   check('a native rename posts the title to the KAP profile route',
     kapPosts().at(-1)?.path === `/api/v1/sessions/${KAP_LIVE}/profile`
-      && JSON.stringify(kapPosts().at(-1)?.body) === JSON.stringify({ title: 'km2 live' })
-      && !!renamed && renamed.title === 'km2 live',
+      && JSON.stringify(kapPosts().at(-1)?.body) === JSON.stringify({ title: 'kap live' })
+      && !!renamed && renamed.title === 'kap live',
     JSON.stringify(kapPosts().at(-1)));
   const lockedRename = await kapAdapter.renameSession(KAP_LOCKED, 'renamed while locked')
     .then(() => undefined, (error: Error) => error);
   check('a rename of a session another Kimi process holds fails with the server\'s own reason',
     !!lockedRename && /in use by another Kimi Code/.test(lockedRename.message), lockedRename?.message);
 
-  const created = await kapAdapter.createSession?.({ directory: '/fixture/workspace', title: 'km2 live' });
+  const created = await kapAdapter.createSession?.({ directory: '/fixture/workspace', title: 'kap live' });
   check('create sends the workspace as KAP\'s top-level cwd',
     kapPosts().at(-1)?.path === '/api/v1/sessions'
-      && JSON.stringify(kapPosts().at(-1)?.body) === JSON.stringify({ title: 'km2 live', cwd: '/fixture/workspace' }),
+      && JSON.stringify(kapPosts().at(-1)?.body) === JSON.stringify({ title: 'kap live', cwd: '/fixture/workspace' }),
     JSON.stringify(kapPosts().at(-1)?.body));
   check('the created session maps from KAP\'s flat row: id, workspace, idle, drivable',
     created?.id === KAP_LIVE && created.cwd === '/fixture/workspace' && created.status === 'idle'
@@ -2167,18 +2168,18 @@ try {
         && users.indexOf('Reply with the single word: pong') < users.findIndex((text) => text.startsWith('What colour is the attached image')),
       JSON.stringify(users));
     check('...with the model\'s replies and reasoning',
-      outputs.some((text) => text.includes('pong')) && outputs.some((text) => text.includes('km2-approval-one'))
+      outputs.some((text) => text.includes('pong')) && outputs.some((text) => text.includes('kap-approval-one'))
         && history.some((message) => message.type === 'thinking'),
       JSON.stringify(outputs));
     check('...with the tool calls and their results, a rejected call\'s result marked as an error',
       history.filter((message) => message.type === 'tool-call' && message.toolName === 'Bash').length === 2
         && toolResults.some((message) => message.isError === true && String(message.result).includes('rejected the approval request'))
-        && toolResults.some((message) => message.isError !== true && String(message.result).includes('km2-approval-one')),
+        && toolResults.some((message) => message.isError !== true && String(message.result).includes('kap-approval-one')),
       JSON.stringify(toolResults.map((message) => [message.isError, message.result])));
     check('...and the attached image and file as the sent image and the attached-file notice',
       history.some((message) => message.type === 'file-artifact' && message.mimeType === 'image/png'
         && typeof message.url === 'string' && message.url.startsWith('data:image/png;base64,'))
-        && users.includes('Attached file "km2-note.txt" (text/plain, 48 bytes)'),
+        && users.includes('Attached file "kap-note.txt" (text/plain, 48 bytes)'),
       JSON.stringify(history.filter((message) => message.type === 'file-artifact')));
     check('the history is read from the KAP turns route, in pages of whole turns',
       kapRequests.some((entry) => entry.path === `/api/v1/sessions/${KAP_LIVE}/agents/main/turns`
@@ -2261,7 +2262,7 @@ try {
   check('pending KAP approvals read as the 0.x approval list and map to the existing card',
     approvals.ok && approvals.data.items.length === 1
       && approvalCard?.requestId === KAP_APPROVAL_ID && approvalCard.toolName === 'Bash'
-      && approvalCard.title === 'Bash — Running: echo km2-approval-one'
+      && approvalCard.title === 'Bash — Running: echo kap-approval-one'
       && noQuestions.ok && noQuestions.data.items.length === 0,
     JSON.stringify(approvalCard));
   kapInteractions = 'interactionsQuestion';
@@ -2372,7 +2373,7 @@ try {
   kapReplay(hub, KAP.ws.goal, KAP_LIVE);
   const goal = await kapHttp.getJson<{ objective?: unknown; status?: unknown }>(`/api/v1/sessions/${KAP_LIVE}/goal`);
   check('the goal read answers from the session\'s last goal frame',
-    goal.ok && goal.data.objective === 'Keep the km2 capture short' && goal.data.status === 'paused',
+    goal.ok && goal.data.objective === 'Keep the kap capture short' && goal.data.status === 'paused',
     JSON.stringify(goal));
 
   const elsewhere = kapReplay(hub, KAP.ws.approval, KAP_FAILED);
@@ -2450,7 +2451,7 @@ try {
   // ── 9e. The write door on KAP ─────────────────────────────────────────────
   const kapDoor = new KimiDriveHttp({ baseUrl: kapBaseUrl, token: 'fixture-token', wire: 'kap' });
   const lastPost = () => kapPosts().at(-1);
-  const createdOutcome = await kapDoor.createSession({ title: 'km2 live', metadata: { cwd: '/fixture/workspace' } });
+  const createdOutcome = await kapDoor.createSession({ title: 'kap live', metadata: { cwd: '/fixture/workspace' } });
   const createdInfo = mapKimiCreatedSession(createdOutcome.data as KimiV1Session);
   check('the write door\'s create answers the 0.x row the create mapping reads',
     createdInfo?.id === KAP_LIVE && createdInfo.cwd === '/fixture/workspace' && createdInfo.status === 'idle',
@@ -2504,10 +2505,10 @@ try {
 
   // ── 9f. Kimi Desktop beside `kimi web`: only the CLI server is addressed ───
   //
-  // Owner decision: Desktop registers its own server in the same registry under
-  // another `product`; this adapter addresses the CLI's alone, so one Desktop
-  // beside one `kimi web` is still exactly one server rather than an ambiguous
-  // two. (The other product value below is the test's, not a captured one.)
+  // Desktop registers its own server in the same registry under another
+  // `product`; this adapter addresses the CLI's alone, so one Desktop beside
+  // one `kimi web` is still exactly one server rather than an ambiguous two.
+  // (The other product value below is the test's, not a captured one.)
   {
     const records: Record<string, unknown> = {
       'cli.json': KAP.instanceRecord,

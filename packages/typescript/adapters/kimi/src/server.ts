@@ -715,7 +715,8 @@ export const KIMI_UNSUPPORTED_FROM_VERSION = '2.0.0';
 
 /**
  * The first Kimi Code version that serves KAP 1.x, which this adapter speaks
- * beside the 0.x wire (owner decision D4: keep both, select by `/api/v1/meta`).
+ * beside the 0.x wire; the wire a server speaks is selected from its
+ * `/api/v1/meta`.
  *
  * Proven from the published bundles: 2.6.3 has no `KIMI_AGENT_PROTOCOL_VERSION`
  * and still emits `event.session.work_changed`; 2.7.0, 2.7.1, 2.7.2 and 2.7.3

@@ -209,7 +209,7 @@ describe('K3 server-identity gate', () => {
   });
 
   test('a server another Kimi product registered beside `kimi web` is ignored, not counted as a second host', async () => {
-    // Owner decision: only `product: "kimi-code-cli"` records are addressed. A Kimi Desktop sharing the home
+    // Only `product: "kimi-code-cli"` records are addressed. A Kimi Desktop sharing the home
     // registers its own server there under another product; counted, it would make every operation refuse as
     // ambiguous. The other product value is this test's, not a captured one.
     const session = seeded();

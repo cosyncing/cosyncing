@@ -1,5 +1,5 @@
 {
- "_note": "Scrubbed capture from a real Kimi Code 2.7.2 `kimi web` server (Kimi Agent Protocol 1.0.0), installed from npm into an isolated prefix with an isolated KIMI_CODE_HOME and KIMI_CODE_NO_AUTO_UPDATE=1, run in a bubblewrap sandbox on 2026-11-24. No Kimi account was signed in; model turns ran against an OpenAI-compatible provider configured in the isolated home (provider id `vllm`, model `vllm/qwen3.8-flash-next`), so model, effort and reasoning content are that model's, not Kimi's own. Every prompt was written for the capture. Scrubbed: the workspace path (replaced by /fixture/workspace, and its directory name inside workspace ids), the session-lock holder's hostname, pid and lock token (40931 details), and the registry pid. No provider key, base URL or bearer token was ever written into this file. Server ids, session ids, item ids, request ids and timestamps are the server's own. WebSocket sequences are complete except `ws.attach`, which is omitted (its 900+ frames are text deltas), and `item.delta` frames are dropped from every sequence except `ws.live`.",
+ "_note": "Scrubbed capture from a real Kimi Code 2.7.2 `kimi web` server (Kimi Agent Protocol 1.0.0), installed from npm into an isolated prefix with an isolated KIMI_CODE_HOME and KIMI_CODE_NO_AUTO_UPDATE=1, run in a bubblewrap sandbox on 2026-11-24. No Kimi account was signed in; model turns ran against an OpenAI-compatible provider configured in the isolated home (provider id `vllm`, model `vllm/qwen3.8-flash-next`), so model, effort and reasoning content are that model's, not Kimi's own. Every prompt was written for the capture. Scrubbed: the workspace path (replaced by /fixture/workspace, and its directory name inside workspace ids), the session-lock holder's hostname, pid and lock token (40931 details), and the registry pid, and a work-item label in the capture's own titles, prompts and file names (replaced by `kap`, the same length). No provider key, base URL or bearer token was ever written into this file. Server ids, session ids, item ids, request ids and timestamps are the server's own. WebSocket sequences are complete except `ws.attach`, which is omitted (its 900+ frames are text deltas), and `item.delta` frames are dropped from every sequence except `ws.live`.",
  "kimiVersion": "2.7.2",
  "kimiAgentProtocolVersion": "1.0.0",
  "capturedAt": "2026-11-24",
@@ -202,7 +202,7 @@
        "id": "session_631102b5-680f-4153-898b-006fdc690094",
        "workspace_id": "wd_workspace_ba3799125083",
        "cwd": "/fixture/workspace",
-       "title": "km2 lock",
+       "title": "kap lock",
        "created_at": "2026-11-24T08:19:20.450Z",
        "updated_at": "2026-11-24T08:19:26.692Z",
        "activity": "idle",
@@ -215,20 +215,20 @@
        "id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
        "workspace_id": "wd_workspace_ba3799125083",
        "cwd": "/fixture/workspace",
-       "title": "km2 live",
+       "title": "kap live",
        "created_at": "2026-11-24T08:16:53.860Z",
        "updated_at": "2026-11-24T08:18:47.071Z",
        "activity": "idle",
        "pending_interaction": "none",
        "last_turn_outcome": "completed",
        "archived": false,
-       "last_prompt": "What colour is the attached image, and what is the second line of the attached text file? Answer in one short sentence. Do not use any tools. [image] Attached file \"km2-note.txt\" (text/plain, 48 bytes): /[redacted].7.[redacted].txt — open it with the Read tool"
+       "last_prompt": "What colour is the attached image, and what is the second line of the attached text file? Answer in one short sentence. Do not use any tools. [image] Attached file \"kap-note.txt\" (text/plain, 48 bytes): /[redacted].7.[redacted].txt — open it with the Read tool"
       },
       {
        "id": "session_17829bd2-042e-4af3-86d6-2076e3a81eac",
        "workspace_id": "wd_workspace_ba3799125083",
        "cwd": "/fixture/workspace",
-       "title": "km2 capture renamed",
+       "title": "kap capture renamed",
        "created_at": "2026-11-24T08:02:02.730Z",
        "updated_at": "2026-11-24T08:02:21.043Z",
        "activity": "idle",
@@ -257,7 +257,7 @@
        "id": "session_8b2ca989-e660-4b77-a3a5-f871901b500f",
        "workspace_id": "wd_workspace_ba3799125083",
        "cwd": "/fixture/workspace",
-       "title": "km2 roster renamed",
+       "title": "kap roster renamed",
        "created_at": "2026-11-24T08:05:08.447Z",
        "updated_at": "2026-11-24T08:05:08.447Z",
        "archived_at": "2026-11-24T08:05:09.483Z",
@@ -283,7 +283,7 @@
      "id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
      "workspace_id": "wd_workspace_ba3799125083",
      "cwd": "/fixture/workspace",
-     "title": "km2 live",
+     "title": "kap live",
      "created_at": "2026-11-24T08:16:53.860Z",
      "updated_at": "2026-11-24T08:16:59.221Z",
      "activity": "idle",
@@ -403,7 +403,7 @@
           {
            "kind": "file",
            "file_id": "f_7dec8ef9-cf52-4137-b90a-76602895d36d",
-           "name": "km2-note.txt",
+           "name": "kap-note.txt",
            "media_type": "text/plain",
            "size": 48,
            "ordinal": 2
@@ -857,7 +857,7 @@
          "origin": {
           "kind": "user"
          },
-         "text": "Use your shell tool to run the command `echo km2-approval-one`, then use it again to run `echo km2-approval-two`. Run them as two separate tool calls, one after the other, and then tell me both outputs.",
+         "text": "Use your shell tool to run the command `echo kap-approval-one`, then use it again to run `echo kap-approval-two`. Run them as two separate tool calls, one after the other, and then tell me both outputs.",
          "attachments": [],
          "skills": []
         },
@@ -880,18 +880,18 @@
          "created_at": "2026-11-24T08:17:16.101Z",
          "name": "Bash",
          "input": {
-          "command": "echo km2-approval-one"
+          "command": "echo kap-approval-one"
          },
          "display": {
           "kind": "command",
-          "command": "echo km2-approval-one",
+          "command": "echo kap-approval-one",
           "cwd": "/fixture/workspace",
           "language": "bash"
          },
          "started_at": "2026-11-24T08:17:16.101Z",
          "interaction_id": "approval_ef926868-8f8b-4efa-8fb2-9055513707b0",
          "outcome": "completed",
-         "output": "km2-approval-one\n",
+         "output": "kap-approval-one\n",
          "ended_at": "2026-11-24T08:17:16.206Z"
         },
         {
@@ -913,11 +913,11 @@
          "created_at": "2026-11-24T08:17:18.349Z",
          "name": "Bash",
          "input": {
-          "command": "echo km2-approval-two"
+          "command": "echo kap-approval-two"
          },
          "display": {
           "kind": "command",
-          "command": "echo km2-approval-two",
+          "command": "echo kap-approval-two",
           "cwd": "/fixture/workspace",
           "language": "bash"
          },
@@ -934,7 +934,7 @@
          "status": "ended",
          "outcome": "completed",
          "created_at": "2026-11-24T08:17:19.067Z",
-         "text": "The second command was rejected by the user. I should report both results: the first output was km2-approval-one, and the second was not executed because approval was rejected. Do not retry or work around it.\n",
+         "text": "The second command was rejected by the user. I should report both results: the first output was kap-approval-one, and the second was not executed because approval was rejected. Do not retry or work around it.\n",
          "started_at": "2026-11-24T08:17:19.067Z",
          "duration_ms": 1241
         },
@@ -945,7 +945,7 @@
          "status": "ended",
          "outcome": "completed",
          "created_at": "2026-11-24T08:17:20.394Z",
-         "text": "\n\nHere are the results:\n\n1. `echo km2-approval-one` — ran successfully, output: `km2-approval-one`\n2. `echo km2-approval-two` — **not run**: you rejected the approval request (reason given: \"rejected on purpose\"), so there is no output.\n\nI won't retry it. Let me know if you'd like me to run it after all."
+         "text": "\n\nHere are the results:\n\n1. `echo kap-approval-one` — ran successfully, output: `kap-approval-one`\n2. `echo kap-approval-two` — **not run**: you rejected the approval request (reason given: \"rejected on purpose\"), so there is no output.\n\nI won't retry it. Let me know if you'd like me to run it after all."
         }
        ],
        "usage": {
@@ -1106,7 +1106,7 @@
          "origin": {
           "kind": "user"
          },
-         "text": "Use your shell tool to run the command `echo km2-approval-one`, then use it again to run `echo km2-approval-two`. Run them as two separate tool calls, one after the other, and then tell me both outputs.",
+         "text": "Use your shell tool to run the command `echo kap-approval-one`, then use it again to run `echo kap-approval-two`. Run them as two separate tool calls, one after the other, and then tell me both outputs.",
          "attachments": [],
          "skills": []
         },
@@ -1129,18 +1129,18 @@
          "created_at": "2026-11-24T08:17:16.101Z",
          "name": "Bash",
          "input": {
-          "command": "echo km2-approval-one"
+          "command": "echo kap-approval-one"
          },
          "display": {
           "kind": "command",
-          "command": "echo km2-approval-one",
+          "command": "echo kap-approval-one",
           "cwd": "/fixture/workspace",
           "language": "bash"
          },
          "started_at": "2026-11-24T08:17:16.101Z",
          "interaction_id": "approval_ef926868-8f8b-4efa-8fb2-9055513707b0",
          "outcome": "completed",
-         "output": "km2-approval-one\n",
+         "output": "kap-approval-one\n",
          "ended_at": "2026-11-24T08:17:16.206Z"
         },
         {
@@ -1162,11 +1162,11 @@
          "created_at": "2026-11-24T08:17:18.349Z",
          "name": "Bash",
          "input": {
-          "command": "echo km2-approval-two"
+          "command": "echo kap-approval-two"
          },
          "display": {
           "kind": "command",
-          "command": "echo km2-approval-two",
+          "command": "echo kap-approval-two",
           "cwd": "/fixture/workspace",
           "language": "bash"
          },
@@ -1183,7 +1183,7 @@
          "status": "ended",
          "outcome": "completed",
          "created_at": "2026-11-24T08:17:19.067Z",
-         "text": "The second command was rejected by the user. I should report both results: the first output was km2-approval-one, and the second was not executed because approval was rejected. Do not retry or work around it.\n",
+         "text": "The second command was rejected by the user. I should report both results: the first output was kap-approval-one, and the second was not executed because approval was rejected. Do not retry or work around it.\n",
          "started_at": "2026-11-24T08:17:19.067Z",
          "duration_ms": 1241
         },
@@ -1194,7 +1194,7 @@
          "status": "ended",
          "outcome": "completed",
          "created_at": "2026-11-24T08:17:20.394Z",
-         "text": "\n\nHere are the results:\n\n1. `echo km2-approval-one` — ran successfully, output: `km2-approval-one`\n2. `echo km2-approval-two` — **not run**: you rejected the approval request (reason given: \"rejected on purpose\"), so there is no output.\n\nI won't retry it. Let me know if you'd like me to run it after all."
+         "text": "\n\nHere are the results:\n\n1. `echo kap-approval-one` — ran successfully, output: `kap-approval-one`\n2. `echo kap-approval-two` — **not run**: you rejected the approval request (reason given: \"rejected on purpose\"), so there is no output.\n\nI won't retry it. Let me know if you'd like me to run it after all."
         }
        ],
        "usage": {
@@ -1547,7 +1547,7 @@
           {
            "kind": "file",
            "file_id": "f_7dec8ef9-cf52-4137-b90a-76602895d36d",
-           "name": "km2-note.txt",
+           "name": "kap-note.txt",
            "media_type": "text/plain",
            "size": 48,
            "ordinal": 2
@@ -1656,7 +1656,7 @@
      "id": "session_17829bd2-042e-4af3-86d6-2076e3a81eac",
      "workspace_id": "wd_workspace_ba3799125083",
      "cwd": "/fixture/workspace",
-     "title": "km2 capture renamed",
+     "title": "kap capture renamed",
      "created_at": "2026-11-24T08:02:02.730Z",
      "updated_at": "2026-11-24T08:02:21.043Z",
      "activity": "idle",
@@ -1699,10 +1699,10 @@
        "kind": "approval",
        "request": {
         "tool_name": "Bash",
-        "action": "Running: echo km2-approval-one",
+        "action": "Running: echo kap-approval-one",
         "tool_input_display": {
          "kind": "command",
-         "command": "echo km2-approval-one",
+         "command": "echo kap-approval-one",
          "cwd": "/fixture/workspace",
          "language": "bash"
         },
@@ -1769,7 +1769,7 @@
      "id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
      "workspace_id": "wd_workspace_ba3799125083",
      "cwd": "/fixture/workspace",
-     "title": "km2 live",
+     "title": "kap live",
      "created_at": "2026-11-24T08:16:53.860Z",
      "updated_at": "2026-11-24T08:16:53.860Z",
      "activity": "idle",
@@ -1780,7 +1780,7 @@
    },
    "body": {
     "cwd": "/fixture/workspace",
-    "title": "km2 live",
+    "title": "kap live",
     "agent_config": {
      "permission_mode": "manual"
     }
@@ -1798,7 +1798,7 @@
       "id": "session_17829bd2-042e-4af3-86d6-2076e3a81eac",
       "workspace_id": "wd_workspace_ba3799125083",
       "cwd": "/fixture/workspace",
-      "title": "km2 capture renamed",
+      "title": "kap capture renamed",
       "created_at": "2026-11-24T08:02:02.730Z",
       "updated_at": "2026-11-24T08:02:02.730Z",
       "activity": "idle",
@@ -1817,7 +1817,7 @@
     "request_id": "01M8696ZZCT04JSSC1YB9QQRRH"
    },
    "body": {
-    "title": "km2 capture renamed"
+    "title": "kap capture renamed"
    }
   },
   "submitPrompt": {
@@ -1860,7 +1860,7 @@
     "msg": "success",
     "data": {
      "id": "f_7dec8ef9-cf52-4137-b90a-76602895d36d",
-     "name": "km2-note.txt",
+     "name": "kap-note.txt",
      "media_type": "text/plain",
      "size": 48,
      "created_at": "2026-11-24T08:18:09.732Z"
@@ -2044,7 +2044,7 @@
     }
    },
    "body": {
-    "title": "km2 renamed while locked"
+    "title": "kap renamed while locked"
    }
   },
   "goalControl": {
@@ -2059,14 +2059,14 @@
       "id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
       "workspace_id": "wd_workspace_ba3799125083",
       "cwd": "/fixture/workspace",
-      "title": "km2 live",
+      "title": "kap live",
       "created_at": "2026-11-24T08:16:53.860Z",
       "updated_at": "2026-11-24T08:18:47.071Z",
       "activity": "idle",
       "pending_interaction": "none",
       "last_turn_outcome": "completed",
       "archived": false,
-      "last_prompt": "What colour is the attached image, and what is the second line of the attached text file? Answer in one short sentence. Do not use any tools. [image] Attached file \"km2-note.txt\" (text/plain, 48 bytes): /[redacted].7.[redacted].txt — open it with the Read tool"
+      "last_prompt": "What colour is the attached image, and what is the second line of the attached text file? Answer in one short sentence. Do not use any tools. [image] Attached file \"kap-note.txt\" (text/plain, 48 bytes): /[redacted].7.[redacted].txt — open it with the Read tool"
      },
      "agent": {
       "status": "idle",
@@ -2083,7 +2083,7 @@
    },
    "body": {
     "agent_config": {
-     "goal_objective": "Keep the km2 capture short",
+     "goal_objective": "Keep the kap capture short",
      "goal_control": "pause"
     }
    }
@@ -2378,7 +2378,7 @@
       "id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
       "workspace_id": "wd_workspace_ba3799125083",
       "cwd": "/fixture/workspace",
-      "title": "km2 live",
+      "title": "kap live",
       "created_at": "2026-11-24T08:16:53.860Z",
       "updated_at": "2026-11-24T08:16:54.472Z",
       "activity": "idle",
@@ -2460,7 +2460,7 @@
       "id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
       "workspace_id": "wd_workspace_ba3799125083",
       "cwd": "/fixture/workspace",
-      "title": "km2 live",
+      "title": "kap live",
       "created_at": "2026-11-24T08:16:53.860Z",
       "updated_at": "2026-11-24T08:16:54.472Z",
       "activity": "turn",
@@ -2792,7 +2792,7 @@
       "id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
       "workspace_id": "wd_workspace_ba3799125083",
       "cwd": "/fixture/workspace",
-      "title": "km2 live",
+      "title": "kap live",
       "created_at": "2026-11-24T08:16:53.860Z",
       "updated_at": "2026-11-24T08:16:59.221Z",
       "activity": "idle",
@@ -2986,14 +2986,14 @@
       "id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
       "workspace_id": "wd_workspace_ba3799125083",
       "cwd": "/fixture/workspace",
-      "title": "km2 live",
+      "title": "kap live",
       "created_at": "2026-11-24T08:16:53.860Z",
       "updated_at": "2026-11-24T08:17:12.153Z",
       "activity": "idle",
       "pending_interaction": "none",
       "last_turn_outcome": "completed",
       "archived": false,
-      "last_prompt": "Use your shell tool to run the command `echo km2-approval-one`, then use it again to run `echo km2-approval-two`. Run them as two separate tool calls, one after the other, and then tell me both outputs."
+      "last_prompt": "Use your shell tool to run the command `echo kap-approval-one`, then use it again to run `echo kap-approval-two`. Run them as two separate tool calls, one after the other, and then tell me both outputs."
      },
      "event_created_at": "2026-11-24T08:17:12.158Z"
     }
@@ -3034,7 +3034,7 @@
       "origin": {
        "kind": "user"
       },
-      "text": "Use your shell tool to run the command `echo km2-approval-one`, then use it again to run `echo km2-approval-two`. Run them as two separate tool calls, one after the other, and then tell me both outputs.",
+      "text": "Use your shell tool to run the command `echo kap-approval-one`, then use it again to run `echo kap-approval-two`. Run them as two separate tool calls, one after the other, and then tell me both outputs.",
       "attachments": [],
       "skills": []
      },
@@ -3069,13 +3069,13 @@
       "id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
       "workspace_id": "wd_workspace_ba3799125083",
       "cwd": "/fixture/workspace",
-      "title": "km2 live",
+      "title": "kap live",
       "created_at": "2026-11-24T08:16:53.860Z",
       "updated_at": "2026-11-24T08:17:12.153Z",
       "activity": "turn",
       "pending_interaction": "none",
       "archived": false,
-      "last_prompt": "Use your shell tool to run the command `echo km2-approval-one`, then use it again to run `echo km2-approval-two`. Run them as two separate tool calls, one after the other, and then tell me both outputs."
+      "last_prompt": "Use your shell tool to run the command `echo kap-approval-one`, then use it again to run `echo kap-approval-two`. Run them as two separate tool calls, one after the other, and then tell me both outputs."
      },
      "event_created_at": "2026-11-24T08:17:12.162Z"
     }
@@ -3165,10 +3165,10 @@
      "kind": "approval",
      "request": {
       "tool_name": "Bash",
-      "action": "Running: echo km2-approval-one",
+      "action": "Running: echo kap-approval-one",
       "tool_input_display": {
        "kind": "command",
-       "command": "echo km2-approval-one",
+       "command": "echo kap-approval-one",
        "cwd": "/fixture/workspace",
        "language": "bash"
       },
@@ -3187,7 +3187,7 @@
       "stage": "awaiting_approval",
       "display": {
        "kind": "command",
-       "command": "echo km2-approval-one",
+       "command": "echo kap-approval-one",
        "cwd": "/fixture/workspace",
        "language": "bash"
       },
@@ -3208,13 +3208,13 @@
       "id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
       "workspace_id": "wd_workspace_ba3799125083",
       "cwd": "/fixture/workspace",
-      "title": "km2 live",
+      "title": "kap live",
       "created_at": "2026-11-24T08:16:53.860Z",
       "updated_at": "2026-11-24T08:17:12.161Z",
       "activity": "turn",
       "pending_interaction": "approval",
       "archived": false,
-      "last_prompt": "Use your shell tool to run the command `echo km2-approval-one`, then use it again to run `echo km2-approval-two`. Run them as two separate tool calls, one after the other, and then tell me both outputs."
+      "last_prompt": "Use your shell tool to run the command `echo kap-approval-one`, then use it again to run `echo kap-approval-two`. Run them as two separate tool calls, one after the other, and then tell me both outputs."
      },
      "event_created_at": "2026-11-24T08:17:16.102Z"
     }
@@ -3234,10 +3234,10 @@
      "kind": "approval",
      "request": {
       "tool_name": "Bash",
-      "action": "Running: echo km2-approval-one",
+      "action": "Running: echo kap-approval-one",
       "tool_input_display": {
        "kind": "command",
-       "command": "echo km2-approval-one",
+       "command": "echo kap-approval-one",
        "cwd": "/fixture/workspace",
        "language": "bash"
       },
@@ -3271,13 +3271,13 @@
       "id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
       "workspace_id": "wd_workspace_ba3799125083",
       "cwd": "/fixture/workspace",
-      "title": "km2 live",
+      "title": "kap live",
       "created_at": "2026-11-24T08:16:53.860Z",
       "updated_at": "2026-11-24T08:17:12.161Z",
       "activity": "turn",
       "pending_interaction": "none",
       "archived": false,
-      "last_prompt": "Use your shell tool to run the command `echo km2-approval-one`, then use it again to run `echo km2-approval-two`. Run them as two separate tool calls, one after the other, and then tell me both outputs."
+      "last_prompt": "Use your shell tool to run the command `echo kap-approval-one`, then use it again to run `echo kap-approval-two`. Run them as two separate tool calls, one after the other, and then tell me both outputs."
      },
      "event_created_at": "2026-11-24T08:17:16.189Z"
     }
@@ -3304,7 +3304,7 @@
      "item_id": "chatcmpl-tool-8b72329afc50d5eb",
      "set": {
       "input": {
-       "command": "echo km2-approval-one"
+       "command": "echo kap-approval-one"
       }
      },
      "session_id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
@@ -3322,8 +3322,8 @@
       "fields": {
        "task": {
         "kind": "process",
-        "description": "Bash: echo km2-approval-one",
-        "command": "echo km2-approval-one",
+        "description": "Bash: echo kap-approval-one",
+        "command": "echo kap-approval-one",
         "pid": 424242,
         "exitCode": null,
         "parentToolCallId": "chatcmpl-tool-8b72329afc50d5eb",
@@ -3347,9 +3347,9 @@
      "kind": "shell",
      "status": "running",
      "detached": false,
-     "description": "Bash: echo km2-approval-one",
+     "description": "Bash: echo kap-approval-one",
      "parent_tool_call_id": "chatcmpl-tool-8b72329afc50d5eb",
-     "command": "echo km2-approval-one",
+     "command": "echo kap-approval-one",
      "started_at": "2026-11-24T08:17:16.190Z"
     }
    },
@@ -3363,8 +3363,8 @@
       "fields": {
        "task": {
         "kind": "process",
-        "description": "Bash: echo km2-approval-one",
-        "command": "echo km2-approval-one",
+        "description": "Bash: echo kap-approval-one",
+        "command": "echo kap-approval-one",
         "pid": 424242,
         "exitCode": 0,
         "parentToolCallId": "chatcmpl-tool-8b72329afc50d5eb",
@@ -3388,9 +3388,9 @@
      "kind": "shell",
      "status": "running",
      "detached": false,
-     "description": "Bash: echo km2-approval-one",
+     "description": "Bash: echo kap-approval-one",
      "parent_tool_call_id": "chatcmpl-tool-8b72329afc50d5eb",
-     "command": "echo km2-approval-one",
+     "command": "echo kap-approval-one",
      "started_at": "2026-11-24T08:17:16.190Z"
     }
    },
@@ -3405,9 +3405,9 @@
      "kind": "shell",
      "status": "running",
      "detached": false,
-     "description": "Bash: echo km2-approval-one",
+     "description": "Bash: echo kap-approval-one",
      "parent_tool_call_id": "chatcmpl-tool-8b72329afc50d5eb",
-     "command": "echo km2-approval-one",
+     "command": "echo kap-approval-one",
      "started_at": "2026-11-24T08:17:16.190Z",
      "ended_at": "2026-11-24T08:17:16.201Z"
     }
@@ -3424,9 +3424,9 @@
      "status": "ended",
      "outcome": "completed",
      "detached": false,
-     "description": "Bash: echo km2-approval-one",
+     "description": "Bash: echo kap-approval-one",
      "parent_tool_call_id": "chatcmpl-tool-8b72329afc50d5eb",
-     "command": "echo km2-approval-one",
+     "command": "echo kap-approval-one",
      "started_at": "2026-11-24T08:17:16.190Z",
      "ended_at": "2026-11-24T08:17:16.201Z"
     }
@@ -3444,18 +3444,18 @@
       "created_at": "2026-11-24T08:17:16.101Z",
       "name": "Bash",
       "input": {
-       "command": "echo km2-approval-one"
+       "command": "echo kap-approval-one"
       },
       "display": {
        "kind": "command",
-       "command": "echo km2-approval-one",
+       "command": "echo kap-approval-one",
        "cwd": "/fixture/workspace",
        "language": "bash"
       },
       "started_at": "2026-11-24T08:17:16.101Z",
       "interaction_id": "approval_ef926868-8f8b-4efa-8fb2-9055513707b0",
       "outcome": "completed",
-      "output": "km2-approval-one\n",
+      "output": "kap-approval-one\n",
       "ended_at": "2026-11-24T08:17:16.206Z"
      },
      "session_id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
@@ -3571,10 +3571,10 @@
      "kind": "approval",
      "request": {
       "tool_name": "Bash",
-      "action": "Running: echo km2-approval-two",
+      "action": "Running: echo kap-approval-two",
       "tool_input_display": {
        "kind": "command",
-       "command": "echo km2-approval-two",
+       "command": "echo kap-approval-two",
        "cwd": "/fixture/workspace",
        "language": "bash"
       },
@@ -3593,7 +3593,7 @@
       "stage": "awaiting_approval",
       "display": {
        "kind": "command",
-       "command": "echo km2-approval-two",
+       "command": "echo kap-approval-two",
        "cwd": "/fixture/workspace",
        "language": "bash"
       },
@@ -3614,13 +3614,13 @@
       "id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
       "workspace_id": "wd_workspace_ba3799125083",
       "cwd": "/fixture/workspace",
-      "title": "km2 live",
+      "title": "kap live",
       "created_at": "2026-11-24T08:16:53.860Z",
       "updated_at": "2026-11-24T08:17:12.161Z",
       "activity": "turn",
       "pending_interaction": "approval",
       "archived": false,
-      "last_prompt": "Use your shell tool to run the command `echo km2-approval-one`, then use it again to run `echo km2-approval-two`. Run them as two separate tool calls, one after the other, and then tell me both outputs."
+      "last_prompt": "Use your shell tool to run the command `echo kap-approval-one`, then use it again to run `echo kap-approval-two`. Run them as two separate tool calls, one after the other, and then tell me both outputs."
      },
      "event_created_at": "2026-11-24T08:17:18.349Z"
     }
@@ -3640,10 +3640,10 @@
      "kind": "approval",
      "request": {
       "tool_name": "Bash",
-      "action": "Running: echo km2-approval-two",
+      "action": "Running: echo kap-approval-two",
       "tool_input_display": {
        "kind": "command",
-       "command": "echo km2-approval-two",
+       "command": "echo kap-approval-two",
        "cwd": "/fixture/workspace",
        "language": "bash"
       },
@@ -3678,13 +3678,13 @@
       "id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
       "workspace_id": "wd_workspace_ba3799125083",
       "cwd": "/fixture/workspace",
-      "title": "km2 live",
+      "title": "kap live",
       "created_at": "2026-11-24T08:16:53.860Z",
       "updated_at": "2026-11-24T08:17:12.161Z",
       "activity": "turn",
       "pending_interaction": "none",
       "archived": false,
-      "last_prompt": "Use your shell tool to run the command `echo km2-approval-one`, then use it again to run `echo km2-approval-two`. Run them as two separate tool calls, one after the other, and then tell me both outputs."
+      "last_prompt": "Use your shell tool to run the command `echo kap-approval-one`, then use it again to run `echo kap-approval-two`. Run them as two separate tool calls, one after the other, and then tell me both outputs."
      },
      "event_created_at": "2026-11-24T08:17:18.404Z"
     }
@@ -3711,7 +3711,7 @@
      "item_id": "chatcmpl-tool-83babdf35b1cbd3b",
      "set": {
       "input": {
-       "command": "echo km2-approval-two"
+       "command": "echo kap-approval-two"
       }
      },
      "session_id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
@@ -3732,11 +3732,11 @@
       "created_at": "2026-11-24T08:17:18.349Z",
       "name": "Bash",
       "input": {
-       "command": "echo km2-approval-two"
+       "command": "echo kap-approval-two"
       },
       "display": {
        "kind": "command",
-       "command": "echo km2-approval-two",
+       "command": "echo kap-approval-two",
        "cwd": "/fixture/workspace",
        "language": "bash"
       },
@@ -3852,7 +3852,7 @@
       "status": "ended",
       "outcome": "completed",
       "created_at": "2026-11-24T08:17:19.067Z",
-      "text": "The second command was rejected by the user. I should report both results: the first output was km2-approval-one, and the second was not executed because approval was rejected. Do not retry or work around it.\n",
+      "text": "The second command was rejected by the user. I should report both results: the first output was kap-approval-one, and the second was not executed because approval was rejected. Do not retry or work around it.\n",
       "started_at": "2026-11-24T08:17:19.067Z",
       "duration_ms": 1241
      },
@@ -3873,7 +3873,7 @@
       "status": "ended",
       "outcome": "completed",
       "created_at": "2026-11-24T08:17:20.394Z",
-      "text": "\n\nHere are the results:\n\n1. `echo km2-approval-one` — ran successfully, output: `km2-approval-one`\n2. `echo km2-approval-two` — **not run**: you rejected the approval request (reason given: \"rejected on purpose\"), so there is no output.\n\nI won't retry it. Let me know if you'd like me to run it after all."
+      "text": "\n\nHere are the results:\n\n1. `echo kap-approval-one` — ran successfully, output: `kap-approval-one`\n2. `echo kap-approval-two` — **not run**: you rejected the approval request (reason given: \"rejected on purpose\"), so there is no output.\n\nI won't retry it. Let me know if you'd like me to run it after all."
      },
      "session_id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
      "agent_id": "main",
@@ -3996,14 +3996,14 @@
       "id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
       "workspace_id": "wd_workspace_ba3799125083",
       "cwd": "/fixture/workspace",
-      "title": "km2 live",
+      "title": "kap live",
       "created_at": "2026-11-24T08:16:53.860Z",
       "updated_at": "2026-11-24T08:17:22.768Z",
       "activity": "idle",
       "pending_interaction": "none",
       "last_turn_outcome": "completed",
       "archived": false,
-      "last_prompt": "Use your shell tool to run the command `echo km2-approval-one`, then use it again to run `echo km2-approval-two`. Run them as two separate tool calls, one after the other, and then tell me both outputs."
+      "last_prompt": "Use your shell tool to run the command `echo kap-approval-one`, then use it again to run `echo kap-approval-two`. Run them as two separate tool calls, one after the other, and then tell me both outputs."
      },
      "event_created_at": "2026-11-24T08:17:22.769Z"
     }
@@ -4239,7 +4239,7 @@
          "origin": {
           "kind": "user"
          },
-         "text": "Use your shell tool to run the command `echo km2-approval-one`, then use it again to run `echo km2-approval-two`. Run them as two separate tool calls, one after the other, and then tell me both outputs.",
+         "text": "Use your shell tool to run the command `echo kap-approval-one`, then use it again to run `echo kap-approval-two`. Run them as two separate tool calls, one after the other, and then tell me both outputs.",
          "attachments": [],
          "skills": []
         },
@@ -4262,18 +4262,18 @@
          "created_at": "2026-11-24T08:17:16.101Z",
          "name": "Bash",
          "input": {
-          "command": "echo km2-approval-one"
+          "command": "echo kap-approval-one"
          },
          "display": {
           "kind": "command",
-          "command": "echo km2-approval-one",
+          "command": "echo kap-approval-one",
           "cwd": "/fixture/workspace",
           "language": "bash"
          },
          "started_at": "2026-11-24T08:17:16.101Z",
          "interaction_id": "approval_ef926868-8f8b-4efa-8fb2-9055513707b0",
          "outcome": "completed",
-         "output": "km2-approval-one\n",
+         "output": "kap-approval-one\n",
          "ended_at": "2026-11-24T08:17:16.206Z"
         },
         {
@@ -4295,11 +4295,11 @@
          "created_at": "2026-11-24T08:17:18.349Z",
          "name": "Bash",
          "input": {
-          "command": "echo km2-approval-two"
+          "command": "echo kap-approval-two"
          },
          "display": {
           "kind": "command",
-          "command": "echo km2-approval-two",
+          "command": "echo kap-approval-two",
           "cwd": "/fixture/workspace",
           "language": "bash"
          },
@@ -4316,7 +4316,7 @@
          "status": "ended",
          "outcome": "completed",
          "created_at": "2026-11-24T08:17:19.067Z",
-         "text": "The second command was rejected by the user. I should report both results: the first output was km2-approval-one, and the second was not executed because approval was rejected. Do not retry or work around it.\n",
+         "text": "The second command was rejected by the user. I should report both results: the first output was kap-approval-one, and the second was not executed because approval was rejected. Do not retry or work around it.\n",
          "started_at": "2026-11-24T08:17:19.067Z",
          "duration_ms": 1241
         },
@@ -4327,7 +4327,7 @@
          "status": "ended",
          "outcome": "completed",
          "created_at": "2026-11-24T08:17:20.394Z",
-         "text": "\n\nHere are the results:\n\n1. `echo km2-approval-one` — ran successfully, output: `km2-approval-one`\n2. `echo km2-approval-two` — **not run**: you rejected the approval request (reason given: \"rejected on purpose\"), so there is no output.\n\nI won't retry it. Let me know if you'd like me to run it after all."
+         "text": "\n\nHere are the results:\n\n1. `echo kap-approval-one` — ran successfully, output: `kap-approval-one`\n2. `echo kap-approval-two` — **not run**: you rejected the approval request (reason given: \"rejected on purpose\"), so there is no output.\n\nI won't retry it. Let me know if you'd like me to run it after all."
         }
        ],
        "usage": {
@@ -4353,7 +4353,7 @@
       "id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
       "workspace_id": "wd_workspace_ba3799125083",
       "cwd": "/fixture/workspace",
-      "title": "km2 live",
+      "title": "kap live",
       "created_at": "2026-11-24T08:16:53.860Z",
       "updated_at": "2026-11-24T08:17:32.444Z",
       "activity": "idle",
@@ -4436,7 +4436,7 @@
       "id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
       "workspace_id": "wd_workspace_ba3799125083",
       "cwd": "/fixture/workspace",
-      "title": "km2 live",
+      "title": "kap live",
       "created_at": "2026-11-24T08:16:53.860Z",
       "updated_at": "2026-11-24T08:17:32.444Z",
       "activity": "turn",
@@ -4647,7 +4647,7 @@
       "id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
       "workspace_id": "wd_workspace_ba3799125083",
       "cwd": "/fixture/workspace",
-      "title": "km2 live",
+      "title": "kap live",
       "created_at": "2026-11-24T08:16:53.860Z",
       "updated_at": "2026-11-24T08:17:32.452Z",
       "activity": "turn",
@@ -4709,7 +4709,7 @@
       "id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
       "workspace_id": "wd_workspace_ba3799125083",
       "cwd": "/fixture/workspace",
-      "title": "km2 live",
+      "title": "kap live",
       "created_at": "2026-11-24T08:16:53.860Z",
       "updated_at": "2026-11-24T08:17:32.452Z",
       "activity": "turn",
@@ -5008,7 +5008,7 @@
       "id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
       "workspace_id": "wd_workspace_ba3799125083",
       "cwd": "/fixture/workspace",
-      "title": "km2 live",
+      "title": "kap live",
       "created_at": "2026-11-24T08:16:53.860Z",
       "updated_at": "2026-11-24T08:17:39.136Z",
       "activity": "idle",
@@ -5251,7 +5251,7 @@
          "origin": {
           "kind": "user"
          },
-         "text": "Use your shell tool to run the command `echo km2-approval-one`, then use it again to run `echo km2-approval-two`. Run them as two separate tool calls, one after the other, and then tell me both outputs.",
+         "text": "Use your shell tool to run the command `echo kap-approval-one`, then use it again to run `echo kap-approval-two`. Run them as two separate tool calls, one after the other, and then tell me both outputs.",
          "attachments": [],
          "skills": []
         },
@@ -5274,18 +5274,18 @@
          "created_at": "2026-11-24T08:17:16.101Z",
          "name": "Bash",
          "input": {
-          "command": "echo km2-approval-one"
+          "command": "echo kap-approval-one"
          },
          "display": {
           "kind": "command",
-          "command": "echo km2-approval-one",
+          "command": "echo kap-approval-one",
           "cwd": "/fixture/workspace",
           "language": "bash"
          },
          "started_at": "2026-11-24T08:17:16.101Z",
          "interaction_id": "approval_ef926868-8f8b-4efa-8fb2-9055513707b0",
          "outcome": "completed",
-         "output": "km2-approval-one\n",
+         "output": "kap-approval-one\n",
          "ended_at": "2026-11-24T08:17:16.206Z"
         },
         {
@@ -5307,11 +5307,11 @@
          "created_at": "2026-11-24T08:17:18.349Z",
          "name": "Bash",
          "input": {
-          "command": "echo km2-approval-two"
+          "command": "echo kap-approval-two"
          },
          "display": {
           "kind": "command",
-          "command": "echo km2-approval-two",
+          "command": "echo kap-approval-two",
           "cwd": "/fixture/workspace",
           "language": "bash"
          },
@@ -5328,7 +5328,7 @@
          "status": "ended",
          "outcome": "completed",
          "created_at": "2026-11-24T08:17:19.067Z",
-         "text": "The second command was rejected by the user. I should report both results: the first output was km2-approval-one, and the second was not executed because approval was rejected. Do not retry or work around it.\n",
+         "text": "The second command was rejected by the user. I should report both results: the first output was kap-approval-one, and the second was not executed because approval was rejected. Do not retry or work around it.\n",
          "started_at": "2026-11-24T08:17:19.067Z",
          "duration_ms": 1241
         },
@@ -5339,7 +5339,7 @@
          "status": "ended",
          "outcome": "completed",
          "created_at": "2026-11-24T08:17:20.394Z",
-         "text": "\n\nHere are the results:\n\n1. `echo km2-approval-one` — ran successfully, output: `km2-approval-one`\n2. `echo km2-approval-two` — **not run**: you rejected the approval request (reason given: \"rejected on purpose\"), so there is no output.\n\nI won't retry it. Let me know if you'd like me to run it after all."
+         "text": "\n\nHere are the results:\n\n1. `echo kap-approval-one` — ran successfully, output: `kap-approval-one`\n2. `echo kap-approval-two` — **not run**: you rejected the approval request (reason given: \"rejected on purpose\"), so there is no output.\n\nI won't retry it. Let me know if you'd like me to run it after all."
         }
        ],
        "usage": {
@@ -5491,7 +5491,7 @@
       "id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
       "workspace_id": "wd_workspace_ba3799125083",
       "cwd": "/fixture/workspace",
-      "title": "km2 live",
+      "title": "kap live",
       "created_at": "2026-11-24T08:16:53.860Z",
       "updated_at": "2026-11-24T08:17:41.731Z",
       "activity": "idle",
@@ -5574,7 +5574,7 @@
       "id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
       "workspace_id": "wd_workspace_ba3799125083",
       "cwd": "/fixture/workspace",
-      "title": "km2 live",
+      "title": "kap live",
       "created_at": "2026-11-24T08:16:53.860Z",
       "updated_at": "2026-11-24T08:17:41.731Z",
       "activity": "turn",
@@ -5785,7 +5785,7 @@
       "id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
       "workspace_id": "wd_workspace_ba3799125083",
       "cwd": "/fixture/workspace",
-      "title": "km2 live",
+      "title": "kap live",
       "created_at": "2026-11-24T08:16:53.860Z",
       "updated_at": "2026-11-24T08:17:41.737Z",
       "activity": "turn",
@@ -5842,7 +5842,7 @@
       "id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
       "workspace_id": "wd_workspace_ba3799125083",
       "cwd": "/fixture/workspace",
-      "title": "km2 live",
+      "title": "kap live",
       "created_at": "2026-11-24T08:16:53.860Z",
       "updated_at": "2026-11-24T08:17:41.737Z",
       "activity": "turn",
@@ -6141,7 +6141,7 @@
       "id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
       "workspace_id": "wd_workspace_ba3799125083",
       "cwd": "/fixture/workspace",
-      "title": "km2 live",
+      "title": "kap live",
       "created_at": "2026-11-24T08:16:53.860Z",
       "updated_at": "2026-11-24T08:17:48.110Z",
       "activity": "idle",
@@ -6384,7 +6384,7 @@
          "origin": {
           "kind": "user"
          },
-         "text": "Use your shell tool to run the command `echo km2-approval-one`, then use it again to run `echo km2-approval-two`. Run them as two separate tool calls, one after the other, and then tell me both outputs.",
+         "text": "Use your shell tool to run the command `echo kap-approval-one`, then use it again to run `echo kap-approval-two`. Run them as two separate tool calls, one after the other, and then tell me both outputs.",
          "attachments": [],
          "skills": []
         },
@@ -6407,18 +6407,18 @@
          "created_at": "2026-11-24T08:17:16.101Z",
          "name": "Bash",
          "input": {
-          "command": "echo km2-approval-one"
+          "command": "echo kap-approval-one"
          },
          "display": {
           "kind": "command",
-          "command": "echo km2-approval-one",
+          "command": "echo kap-approval-one",
           "cwd": "/fixture/workspace",
           "language": "bash"
          },
          "started_at": "2026-11-24T08:17:16.101Z",
          "interaction_id": "approval_ef926868-8f8b-4efa-8fb2-9055513707b0",
          "outcome": "completed",
-         "output": "km2-approval-one\n",
+         "output": "kap-approval-one\n",
          "ended_at": "2026-11-24T08:17:16.206Z"
         },
         {
@@ -6440,11 +6440,11 @@
          "created_at": "2026-11-24T08:17:18.349Z",
          "name": "Bash",
          "input": {
-          "command": "echo km2-approval-two"
+          "command": "echo kap-approval-two"
          },
          "display": {
           "kind": "command",
-          "command": "echo km2-approval-two",
+          "command": "echo kap-approval-two",
           "cwd": "/fixture/workspace",
           "language": "bash"
          },
@@ -6461,7 +6461,7 @@
          "status": "ended",
          "outcome": "completed",
          "created_at": "2026-11-24T08:17:19.067Z",
-         "text": "The second command was rejected by the user. I should report both results: the first output was km2-approval-one, and the second was not executed because approval was rejected. Do not retry or work around it.\n",
+         "text": "The second command was rejected by the user. I should report both results: the first output was kap-approval-one, and the second was not executed because approval was rejected. Do not retry or work around it.\n",
          "started_at": "2026-11-24T08:17:19.067Z",
          "duration_ms": 1241
         },
@@ -6472,7 +6472,7 @@
          "status": "ended",
          "outcome": "completed",
          "created_at": "2026-11-24T08:17:20.394Z",
-         "text": "\n\nHere are the results:\n\n1. `echo km2-approval-one` — ran successfully, output: `km2-approval-one`\n2. `echo km2-approval-two` — **not run**: you rejected the approval request (reason given: \"rejected on purpose\"), so there is no output.\n\nI won't retry it. Let me know if you'd like me to run it after all."
+         "text": "\n\nHere are the results:\n\n1. `echo kap-approval-one` — ran successfully, output: `kap-approval-one`\n2. `echo kap-approval-two` — **not run**: you rejected the approval request (reason given: \"rejected on purpose\"), so there is no output.\n\nI won't retry it. Let me know if you'd like me to run it after all."
         }
        ],
        "usage": {
@@ -6750,7 +6750,7 @@
       "id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
       "workspace_id": "wd_workspace_ba3799125083",
       "cwd": "/fixture/workspace",
-      "title": "km2 live",
+      "title": "kap live",
       "created_at": "2026-11-24T08:16:53.860Z",
       "updated_at": "2026-11-24T08:17:58.659Z",
       "activity": "idle",
@@ -6833,7 +6833,7 @@
       "id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
       "workspace_id": "wd_workspace_ba3799125083",
       "cwd": "/fixture/workspace",
-      "title": "km2 live",
+      "title": "kap live",
       "created_at": "2026-11-24T08:16:53.860Z",
       "updated_at": "2026-11-24T08:17:58.659Z",
       "activity": "turn",
@@ -6958,7 +6958,7 @@
       "id": "session_c1b384de-f5a6-41ba-8334-574bb06043d2",
       "workspace_id": "wd_workspace_ba3799125083",
       "cwd": "/fixture/workspace",
-      "title": "km2 live",
+      "title": "kap live",
       "created_at": "2026-11-24T08:16:53.860Z",
       "updated_at": "2026-11-24T08:18:00.088Z",
       "activity": "idle",
@@ -7201,7 +7201,7 @@
          "origin": {
           "kind": "user"
          },
-         "text": "Use your shell tool to run the command `echo km2-approval-one`, then use it again to run `echo km2-approval-two`. Run them as two separate tool calls, one after the other, and then tell me both outputs.",
+         "text": "Use your shell tool to run the command `echo kap-approval-one`, then use it again to run `echo kap-approval-two`. Run them as two separate tool calls, one after the other, and then tell me both outputs.",
          "attachments": [],
          "skills": []
         },
@@ -7224,18 +7224,18 @@
          "created_at": "2026-11-24T08:17:16.101Z",
          "name": "Bash",
          "input": {
-          "command": "echo km2-approval-one"
+          "command": "echo kap-approval-one"
          },
          "display": {
           "kind": "command",
-          "command": "echo km2-approval-one",
+          "command": "echo kap-approval-one",
           "cwd": "/fixture/workspace",
           "language": "bash"
          },
          "started_at": "2026-11-24T08:17:16.101Z",
          "interaction_id": "approval_ef926868-8f8b-4efa-8fb2-9055513707b0",
          "outcome": "completed",
-         "output": "km2-approval-one\n",
+         "output": "kap-approval-one\n",
          "ended_at": "2026-11-24T08:17:16.206Z"
         },
         {
@@ -7257,11 +7257,11 @@
          "created_at": "2026-11-24T08:17:18.349Z",
          "name": "Bash",
          "input": {
-          "command": "echo km2-approval-two"
+          "command": "echo kap-approval-two"
          },
          "display": {
           "kind": "command",
-          "command": "echo km2-approval-two",
+          "command": "echo kap-approval-two",
           "cwd": "/fixture/workspace",
           "language": "bash"
          },
@@ -7278,7 +7278,7 @@
          "status": "ended",
          "outcome": "completed",
          "created_at": "2026-11-24T08:17:19.067Z",
-         "text": "The second command was rejected by the user. I should report both results: the first output was km2-approval-one, and the second was not executed because approval was rejected. Do not retry or work around it.\n",
+         "text": "The second command was rejected by the user. I should report both results: the first output was kap-approval-one, and the second was not executed because approval was rejected. Do not retry or work around it.\n",
          "started_at": "2026-11-24T08:17:19.067Z",
          "duration_ms": 1241
         },
@@ -7289,7 +7289,7 @@
          "status": "ended",
          "outcome": "completed",
          "created_at": "2026-11-24T08:17:20.394Z",
-         "text": "\n\nHere are the results:\n\n1. `echo km2-approval-one` — ran successfully, output: `km2-approval-one`\n2. `echo km2-approval-two` — **not run**: you rejected the approval request (reason given: \"rejected on purpose\"), so there is no output.\n\nI won't retry it. Let me know if you'd like me to run it after all."
+         "text": "\n\nHere are the results:\n\n1. `echo kap-approval-one` — ran successfully, output: `kap-approval-one`\n2. `echo kap-approval-two` — **not run**: you rejected the approval request (reason given: \"rejected on purpose\"), so there is no output.\n\nI won't retry it. Let me know if you'd like me to run it after all."
         }
        ],
        "usage": {
@@ -7642,7 +7642,7 @@
           {
            "kind": "file",
            "file_id": "f_7dec8ef9-cf52-4137-b90a-76602895d36d",
-           "name": "km2-note.txt",
+           "name": "kap-note.txt",
            "media_type": "text/plain",
            "size": 48,
            "ordinal": 2
@@ -7693,7 +7693,7 @@
      "agent_id": "main",
      "event_created_at": "2026-11-24T08:19:01.408Z",
      "goal": {
-      "objective": "Keep the km2 capture short",
+      "objective": "Keep the kap capture short",
       "status": "active",
       "turns_used": 0,
       "tokens_used": 0,
@@ -7709,7 +7709,7 @@
      "agent_id": "main",
      "event_created_at": "2026-11-24T08:19:01.410Z",
      "goal": {
-      "objective": "Keep the km2 capture short",
+      "objective": "Keep the kap capture short",
       "status": "paused",
       "turns_used": 0,
       "tokens_used": 0,
@@ -7813,7 +7813,7 @@
       "id": "session_17829bd2-042e-4af3-86d6-2076e3a81eac",
       "workspace_id": "wd_workspace_ba3799125083",
       "cwd": "/fixture/workspace",
-      "title": "km2 capture renamed",
+      "title": "kap capture renamed",
       "created_at": "2026-11-24T08:02:02.730Z",
       "updated_at": "2026-11-24T08:02:21.004Z",
       "activity": "idle",
@@ -7893,7 +7893,7 @@
       "id": "session_17829bd2-042e-4af3-86d6-2076e3a81eac",
       "workspace_id": "wd_workspace_ba3799125083",
       "cwd": "/fixture/workspace",
-      "title": "km2 capture renamed",
+      "title": "kap capture renamed",
       "created_at": "2026-11-24T08:02:02.730Z",
       "updated_at": "2026-11-24T08:02:21.004Z",
       "activity": "turn",
@@ -7969,7 +7969,7 @@
       "id": "session_17829bd2-042e-4af3-86d6-2076e3a81eac",
       "workspace_id": "wd_workspace_ba3799125083",
       "cwd": "/fixture/workspace",
-      "title": "km2 capture renamed",
+      "title": "kap capture renamed",
       "created_at": "2026-11-24T08:02:02.730Z",
       "updated_at": "2026-11-24T08:02:21.043Z",
       "activity": "idle",
