@@ -26,7 +26,17 @@
  */
 import { DshUnaryTransport, transportFailure, type DshFetch, type DshOutcome, type DshUnaryCallOptions } from './envelope.ts';
 
-/** The gateway's own error-code namespace, for the codes this client must read. */
+/**
+ * The gateway's own error-code namespace, for the codes this client must read.
+ *
+ * The last three arrived with 0.2.2 (read from the 0.2.2-rc.5 gateway and session
+ * controller): `gateway/interactions-forbidden` refuses a forwarded-event answer
+ * from a Peer that may not answer, `gateway/peer-disposed` refuses a call whose
+ * Peer has already been disposed, and `session/migration-required` refuses a
+ * fork of a stored session in an older format. Where each lands is decided in
+ * `remote-host.ts` (stream terminality, unary generation loss); a cookie-enrolled
+ * owner Peer did not produce the first two in the capture.
+ */
 export const DSH_GATEWAY_ERROR_CODES = Object.freeze([
   'gateway/arguments-invalid',
   'gateway/definition-unavailable',
@@ -38,7 +48,23 @@ export const DSH_GATEWAY_ERROR_CODES = Object.freeze([
   'gateway/uplink-overflow',
   'session/writer-held',
   'session/model-unavailable',
+  'gateway/interactions-forbidden',
+  'gateway/peer-disposed',
+  'session/migration-required',
 ] as const);
+
+/**
+ * The two request shapes of `session/attachment`.
+ *
+ * 0.2.0-rc.2 names the image by `attachmentId`; 0.2.2 takes the durable
+ * `attachment` reference itself (`{attachmentId, mediaType, bytes, width,
+ * height, name?}`, exactly what the session log recorded). Each host refuses the
+ * other's shape with `gateway/input-invalid` at the boundary, before any read.
+ */
+export type DshAttachmentRequestShape = 'attachment-id' | 'attachment-ref';
+
+/** A durable image reference as the session log recorded it, passed back verbatim. */
+export type DshImageAttachmentRef = Readonly<Record<string, unknown>> & { readonly attachmentId: string };
 
 /**
  * Endpoints this adapter may call.
@@ -229,7 +255,13 @@ export const DshRemoteArgs = Object.freeze({
     },
   }),
   projections: (sessionId: string): Record<string, unknown> => ({ request: { sessionId } }),
-  attachment: (sessionId: string, attachmentId: string): Record<string, unknown> => ({ request: { sessionId, attachmentId } }),
+  attachment: (
+    sessionId: string,
+    ref: DshImageAttachmentRef,
+    shape: DshAttachmentRequestShape = 'attachment-id',
+  ): Record<string, unknown> => (shape === 'attachment-ref'
+    ? { request: { sessionId, attachment: { ...ref } } }
+    : { request: { sessionId, attachmentId: ref.attachmentId } }),
   updateQueue: (request: Record<string, unknown>): Record<string, unknown> => ({ request }),
   permissionCatalog: (): Record<string, unknown> => ({}),
   commands: (agentId: string): Record<string, unknown> => ({ agentId }),

@@ -37,6 +37,7 @@ import type { DshReceipt, DshRpcClient } from './server.ts';
 import type { DshHistoryEntry } from './mapping.ts';
 import { classifyDshVersion, mayFallBackToLegacyAfterProbe, probeDshContract, type DshContractFamily, type DshContractProbe, type DshProbeFetch } from './compatibility.ts';
 import { transportFailure, type DshOutcome } from './envelope.ts';
+import type { DshImageAttachmentRef } from './remote.ts';
 import type { DshPendingApproval, DshPendingQuestion } from './mapping.ts';
 
 export type { DshContractFamily };
@@ -80,8 +81,12 @@ export interface DshPermissionCatalog {
 export interface DshSessionChannel {
   readonly family: DshContractFamily;
   history(request: { sessionId: string; maxMessages: number; beforeSeq?: number }): Promise<DshOutcome<DshHistoryPage>>;
-  /** rc.2 authorizes durable image readback against this session's own log. */
-  attachment?(sessionId: string, attachmentId: string, signal?: AbortSignal): Promise<DshOutcome<{ attachment: unknown; data: unknown }>>;
+  /**
+   * Durable image readback, authorized against this session's own log. Takes the
+   * reference the log recorded, because 0.2.2 asks for the whole reference where
+   * rc.2 asked for its id.
+   */
+  attachment?(sessionId: string, ref: DshImageAttachmentRef, signal?: AbortSignal): Promise<DshOutcome<{ attachment: unknown; data: unknown }>>;
   prompt(sessionId: string, input: PromptInput, options?: DshPromptOptions): Promise<void>;
   models(sessionId: string): Promise<DshSessionModels>;
   selectModel(sessionId: string, selection: DshModelSelection): Promise<DshModelSelection>;

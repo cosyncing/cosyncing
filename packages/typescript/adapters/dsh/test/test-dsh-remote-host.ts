@@ -1908,6 +1908,126 @@ for (const kind of ['approval', 'question'] as const) {
   h.link.stop();
 }
 
+// ── 0.2.2-rc.5: the two frames that changed, from a captured host ──────────
+//
+// `test/fixtures/dsh-0.2.2-rc.5.json` is a disposable 0.2.2-rc.5 host driven
+// through a rename, a model selection, `/permission read-only` and an image
+// prompt (local scripted provider, no model spend), plus the same run on a
+// 0.2.0-rc.2 host for the shapes each refuses of the other.
+
+const FIXTURE_022 = await Bun.file(new URL('./fixtures/dsh-0.2.2-rc.5.json', import.meta.url)).json() as {
+  sessionId: string;
+  control: Array<Record<string, unknown>>;
+  followSnapshot: Record<string, unknown>;
+  userImageEvent: { seq: number; data: { content: Array<{ type: string; attachment?: Record<string, unknown> }> } };
+  readback: { attachment: Record<string, unknown>; data: string };
+  unary: { attachmentIdShapeRefused: { envelope: { result: { error: { code: string; message: string } } } } };
+  rc2Comparison: { attachmentRefShapeRefused: { envelope: { result: { error: { code: string; message: string } } } } };
+};
+const SESSION_022: SessionInfo = { id: FIXTURE_022.sessionId, tool: 'dsh', title: 'fixture', status: 'idle', attachMode: 'live' };
+
+{
+  // Live projections arrive as `changes: [{key, val}]`, several keys under one
+  // seq. Every captured frame is replayed in order on the host-wide stream.
+  const h = harness();
+  h.host.followSnapshot = FIXTURE_022.followSnapshot;
+  h.host.controlBaseline = FIXTURE_022.control[0];
+  await h.link.verify();
+  const { connection, messages } = attach(h, SESSION_022);
+  await flush();
+  await connection.getHistory();
+  const before = messages.length;
+  const control = h.host.stream('session/control');
+  for (const frame of FIXTURE_022.control.slice(1)) h.host.live.item(control.streamId, frame);
+  await flush();
+  const updates = messages.slice(before).flatMap((m) => (m.type === 'metadata-update'
+    ? [{ key: m.key, value: m.value as Record<string, unknown> }] : []));
+  const sessionInfo = updates.filter((u) => u.key === 'sessionInfo').map((u) => u.value);
+  check('0.2.2-rc.5: a captured live rename reaches the client through changes[]',
+    sessionInfo.some((v) => v.title === 'Capture renamed title'), JSON.stringify(sessionInfo));
+  check('0.2.2-rc.5: a captured model selection reaches the client',
+    sessionInfo.some((v) => v.model === 'deepseek-pro'
+      && (v.currentModel as { providerID?: string } | undefined)?.providerID === 'deepseek-official'), JSON.stringify(sessionInfo));
+  check('0.2.2-rc.5: a captured permission preset change reaches the client',
+    sessionInfo.some((v) => v.currentMode === 'read-only'), JSON.stringify(sessionInfo));
+  check('0.2.2-rc.5: a key that shares its frame and seq with three others is applied (context usage)',
+    updates.some((u) => u.key === 'contextUsage' && u.value.used === 10 && u.value.max === 1_000_000),
+    JSON.stringify(updates.filter((u) => u.key === 'contextUsage')));
+  check('0.2.2-rc.5: no captured control frame is reported as unusable',
+    h.diagnostics.every((entry) => entry.code !== 'unusable-stream-item'), JSON.stringify(h.diagnostics));
+  await connection.close();
+  h.link.stop();
+}
+
+{
+  // Image readback. Each host refuses the other's request shape at the boundary
+  // with `gateway/input-invalid` (both refusals captured); the scripted host
+  // answers the way the captured host it imitates did.
+  const reads: Array<Record<string, unknown>> = [];
+  const h = harness();
+  h.host.holdStreams.add('session/follow');
+  const serve = (version: '0.2.2-rc.5' | '0.2.0-rc.2', readback: unknown) => {
+    h.host.unaryHandlers.set('session/attachment', (args) => {
+      const request = args.request as Record<string, unknown>;
+      reads.push(request);
+      if (version === '0.2.2-rc.5' && !('attachment' in request)) return { error: FIXTURE_022.unary.attachmentIdShapeRefused.envelope.result.error };
+      if (version === '0.2.0-rc.2' && !('attachmentId' in request)) return { error: FIXTURE_022.rc2Comparison.attachmentRefShapeRefused.envelope.result.error };
+      return { value: readback };
+    });
+  };
+  serve('0.2.2-rc.5', FIXTURE_022.readback);
+  await h.link.verify();
+  const { connection } = attach(h, SESSION_022);
+  await flush();
+  const event = FIXTURE_022.userImageEvent;
+  const durableRef = event.data.content.find((block) => block.type === 'image')?.attachment;
+  h.host.live.item(h.host.stream('session/follow').streamId, {
+    ...FIXTURE_022.followSnapshot, cursor: event.seq, records: [{ type: 'event', event }], hasMore: false,
+  });
+  await flush();
+  const preview = (rows: AgentMessage[]) => rows.find((m) => m.type === 'file-artifact');
+  const first = preview(await connection.getHistory());
+  check('0.2.2-rc.5: a captured durable image previews through the reference shape after the id shape is refused',
+    first?.type === 'file-artifact' && first.url === `data:image/png;base64,${FIXTURE_022.readback.data}`
+      && reads.length === 2 && reads[0]?.attachmentId === durableRef?.attachmentId && !('attachment' in reads[0]!)
+      && JSON.stringify(reads[1]?.attachment) === JSON.stringify(durableRef),
+    JSON.stringify(reads));
+  connection.onGenerationLost();
+  await connection.getHistory();
+  check('0.2.2-rc.5: the next read asks in the shape that worked, once',
+    reads.length === 3 && 'attachment' in reads[2]!, JSON.stringify(reads.slice(2)));
+  // The same link facing an rc.2 host (a downgrade under a running broker):
+  // the remembered shape is refused, and the rc.2 shape still reads back.
+  const rc2 = await Bun.file(new URL('./fixtures/dsh-0.2.0-rc.2-images.json', import.meta.url)).json() as {
+    readback: { attachment: Record<string, unknown>; data: string };
+  };
+  serve('0.2.0-rc.2', rc2.readback);
+  connection.onGenerationLost();
+  const back = preview(await connection.getHistory());
+  check('the same link still reads an rc.2 image by its id after the reference shape is refused',
+    back?.type === 'file-artifact' && back.url === `data:image/png;base64,${rc2.readback.data}`
+      && reads.length === 5 && 'attachment' in reads[3]! && reads[4]?.attachmentId === durableRef?.attachmentId,
+    JSON.stringify(reads.slice(3)));
+  await connection.close();
+  h.link.stop();
+}
+
+{
+  // 0.2.2 refuses a call whose Peer is already disposed before dispatching it
+  // (`gateway/peer-disposed`, code and message from the 0.2.2-rc.5 gateway
+  // source; not provoked in the capture). That is the existing "generation
+  // ended, nothing was sent" outcome, retryable, and not a business refusal.
+  const h = harness();
+  await h.link.verify();
+  h.host.unaryHandlers.set('session/rename', () => ({ error: { code: 'gateway/peer-disposed', message: 'the calling Peer has been disposed' } }));
+  const outcome = await h.link.call('session/rename', { request: { sessionId: SESSION_ID, title: 'x' } }, { generationLoss: 'non-idempotent-write' });
+  check('a disposed-Peer refusal is reported as an unsent, retryable call',
+    !outcome.ok && outcome.failure.kind === 'transport' && outcome.failure.reason === 'generation-lost'
+      && outcome.failure.retryable === true,
+    JSON.stringify(outcome));
+  h.link.stop();
+}
+
 {
   const fixture = await Bun.file(new URL('./fixtures/dsh-0.2.0-rc.2-assistant-stream.json', import.meta.url)).json() as {
     interruptedFollow: unknown[];
@@ -2267,8 +2387,8 @@ const commandPermissionCatalog = (await Bun.file(new URL('./fixtures/dsh-0.2.0-r
 }
 
 {
-  // The installed dsh changes under an attached session: the operator upgrades
-  // to the published 0.2.2-rc.5, whose host keeps the 0.2 routes and auth. The
+  // The installed dsh changes under an attached session: the operator installs
+  // the published 0.2.2-rc.4, whose host keeps the 0.2 routes and auth. The
   // qualified install's prompt goes through; after the change the next prompt is
   // refused with the reason and never reaches the host, and so is a new attach.
   const host = new ScriptedHost();
@@ -2288,18 +2408,18 @@ const commandPermissionCatalog = (await Bun.file(new URL('./fixtures/dsh-0.2.0-r
   await connection.sendPrompt({ text: 'sent while the qualified build is installed' }).catch((error) => { accepted = error; });
   check('a session attached on the qualified 0.2.0-rc.2 install prompts normally',
     accepted === undefined && prompts() === 1, String(accepted));
-  installed = '0.2.2-rc.5';
+  installed = '0.2.2-rc.4';
   let refused: unknown;
   await connection.sendPrompt({ text: 'must not reach the host' }).catch((error) => { refused = error; });
   check('after the install becomes an unqualified build the next prompt is refused with the reason, before any request',
-    refused instanceof Error && refused.message.includes('0.2.2-rc.5')
-      && refused.message.includes('0.1.0-rc.6, 0.2.0-rc.2') && prompts() === 1,
+    refused instanceof Error && refused.message.includes('0.2.2-rc.4')
+      && refused.message.includes('0.1.0-rc.6, 0.2.0-rc.2, 0.2.2-rc.5') && prompts() === 1,
     refused instanceof Error ? refused.message : String(refused));
   const rosterBefore = rosterReads();
   let reattach: unknown;
   await adapter.attach(SESSION_ID, 'live').catch((error) => { reattach = error; });
   check('a new attach is refused for the same reason without reading the host',
-    reattach instanceof Error && reattach.message.includes('0.2.2-rc.5') && rosterReads() === rosterBefore,
+    reattach instanceof Error && reattach.message.includes('0.2.2-rc.4') && rosterReads() === rosterBefore,
     reattach instanceof Error ? reattach.message : String(reattach));
   await connection.close(); link.stop();
 }

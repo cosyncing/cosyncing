@@ -322,6 +322,57 @@ const COOKIE: DshCookie = { name: 'dsh-auth-fixture', value: 'v1.stored-cookie',
   host.stop();
 }
 
+{
+  // The 0.2.2-rc.5 roster, captured from a disposable host after a restart: the
+  // cold row carries `formatStatus` and a `cached` hint, and the cold-safe
+  // projection read answers the tagged `{kind: 'sequenced', ...}` result that
+  // replaced rc.2's untagged one.
+  const fixture = await Bun.file(new URL('./fixtures/dsh-0.2.2-rc.5.json', import.meta.url)).json() as {
+    unary: {
+      sessionListCold: { envelope: { result: { value: { items: Array<Record<string, unknown>> } } } };
+      projectionsCold: { envelope: { result: { value: unknown } } };
+    };
+  };
+  const discover = async (list: unknown) => {
+    const host = await startHost();
+    const scope = dshCredentialScope(host.baseUrl, '/fixture/dsh-home');
+    const sockets = workspaceSocketFactory();
+    const adapter = new DshAdapter({
+      env: {},
+      baseUrl: host.baseUrl,
+      dshHome: '/fixture/dsh-home',
+      credentialStore: memoryStore({ [scope]: COOKIE }),
+      remoteSocketFactory: sockets.factory,
+      fetchImpl: probeAwareFetch(scriptedFetch(host.baseUrl, host, {
+        'session/list': () => list,
+        'session/projections': () => fixture.unary.projectionsCold.envelope.result.value,
+      })),
+    });
+    const sessions = await adapter.discoverSessions();
+    const reads = host.requests.filter((request) => request.path === '/api/session/projections').length;
+    host.stop();
+    return { sessions, reads };
+  };
+  const captured = await discover(fixture.unary.sessionListCold.envelope.result.value);
+  const row = captured.sessions[0];
+  check('0.2.2-rc.5: a captured cold roster row and its tagged projection read keep the live title, model and preset',
+    captured.sessions.length === 1 && captured.reads === 1 && row?.title === 'Capture renamed title'
+      && row.currentModel?.modelID === 'deepseek-pro' && row.currentModel.providerID === 'deepseek-official'
+      && row.currentMode === 'read-only' && row.control?.drive.state === 'driving',
+    JSON.stringify({ reads: captured.reads, row }));
+  // In the capture the cached hint already matched the log. Make the hint stale
+  // here (a test edit of the captured row, not a capture) so the result can only
+  // come from the tagged read.
+  const stale = structuredClone(fixture.unary.sessionListCold.envelope.result.value);
+  const hint = (stale.items[0]!.projections as { values: Record<string, unknown> }).values;
+  hint.title = 'stale cached title';
+  hint.permissions = { currentValue: 'workspace-write' };
+  const refreshed = (await discover(stale)).sessions[0];
+  check('0.2.2-rc.5: the tagged sequenced read replaces a stale cached hint',
+    refreshed?.title === 'Capture renamed title' && refreshed.currentMode === 'read-only',
+    JSON.stringify(refreshed));
+}
+
 // ── Managed launch: announcement to authenticated, with no user in the loop ─
 
 {

@@ -1,0 +1,1423 @@
+{
+  "provenance": {
+    "version": "0.2.2-rc.5",
+    "source": "disposable `dsh --profile web --patch <fixture> --no-open --port <p>` host in an isolated home, with a local scripted Messages provider and the repository PNG apps/client/web/icons/pwa-icon-192.png",
+    "capturedAt": "2026-11-24T08:09:50.079Z",
+    "modelBacked": false,
+    "providerSpending": 0,
+    "comparison": "0.2.0-rc.2 host captured the same way, same run sequence (rc2Comparison)",
+    "readbackNote": "readback.data is the answer to a ref-shaped read that carried one extra key; the plain ref-shaped read in the same run returned the identical attachment and 1816 data characters",
+    "scrubbed": [
+      "launch token and cookie value (placeholders)",
+      "disposable home path (/captured-home)",
+      "runtime-context, system and skill-catalog events (carry the installation path); only the user image event is kept"
+    ]
+  },
+  "auth": {
+    "exchange": {
+      "status": 303,
+      "location": "./",
+      "cacheControl": "no-store",
+      "setCookie": "dsh-auth-MuQFNbBUfbBOklf3Qvhvp039je_c-hT8vba43XDadis=<redacted-cookie-value>; Max-Age=2592000; Path=/; Expires=Thu, 24 Dec 2026 08:09:52 GMT; HttpOnly; SameSite=Strict",
+      "cookieName": "dsh-auth-MuQFNbBUfbBOklf3Qvhvp039je_c-hT8vba43XDadis"
+    },
+    "cookiePayloadFields": [
+      "authority",
+      "expiresAt",
+      "issuedAt",
+      "version"
+    ],
+    "cookieLifetimeMs": 2592000000,
+    "refusedToken": {
+      "status": 401,
+      "body": "dsh web authentication required; reopen the URL printed by dsh web.\n"
+    },
+    "remoteMuxUnauthenticated": {
+      "status": 401,
+      "body": "unauthorized"
+    }
+  },
+  "sessionId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+  "events": {
+    "ready": {
+      "type": "ready",
+      "clientId": "f43f61f2-d318-43e0-93dd-fe807357b928",
+      "host": {
+        "home": "/captured-home"
+      }
+    },
+    "emits": [
+      {
+        "type": "emit",
+        "event": "api-session/added",
+        "args": [
+          {
+            "sessionId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+            "updatedAt": 1795507793006,
+            "agentAvailable": false,
+            "formatStatus": "current",
+            "running": false,
+            "blank": true,
+            "cwd": "/captured-home/workspace",
+            "projections": {
+              "kind": "sequenced",
+              "asOfSeq": -1,
+              "values": {
+                "userQuestions": {
+                  "active": [],
+                  "settled": []
+                },
+                "tokenUsage": {
+                  "uncachedInputTokens": 0,
+                  "outputTokens": 0,
+                  "cacheReadTokens": 0,
+                  "cacheWriteTokens": 0
+                },
+                "title": null,
+                "agentPreset": "standard",
+                "goal": null,
+                "modelSelection": {
+                  "lastUsed": null,
+                  "next": null
+                },
+                "workingDirectory": "/captured-home/workspace",
+                "inbox": {
+                  "next-turn": [],
+                  "next-step": []
+                },
+                "permissions": {
+                  "currentValue": "workspace-write"
+                },
+                "subagentCatalog": [],
+                "subagentTiming": {
+                  "settledMs": 0
+                },
+                "subagent": null,
+                "agentTeam": {
+                  "enabled": false,
+                  "tasks": []
+                },
+                "plan": {
+                  "active": false,
+                  "pending": false
+                },
+                "conversationContinuation": null,
+                "sessionListMetadata": {
+                  "blank": true,
+                  "lastPromptAt": null
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "type": "emit",
+        "event": "api-session/added",
+        "args": [
+          {
+            "sessionId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+            "updatedAt": 1795507793006,
+            "agentAvailable": true,
+            "formatStatus": "current",
+            "running": false,
+            "blank": true,
+            "cwd": "/captured-home/workspace",
+            "projections": {
+              "kind": "sequenced",
+              "asOfSeq": 2,
+              "values": {
+                "userQuestions": {
+                  "active": [],
+                  "settled": []
+                },
+                "tokenUsage": {
+                  "uncachedInputTokens": 0,
+                  "outputTokens": 0,
+                  "cacheReadTokens": 0,
+                  "cacheWriteTokens": 0
+                },
+                "title": null,
+                "agentPreset": "standard",
+                "goal": null,
+                "modelSelection": {
+                  "lastUsed": null,
+                  "next": null
+                },
+                "workingDirectory": "/captured-home/workspace",
+                "inbox": {
+                  "next-turn": [],
+                  "next-step": []
+                },
+                "permissions": {
+                  "currentValue": "workspace-write"
+                },
+                "subagentCatalog": [],
+                "subagentTiming": {
+                  "settledMs": 0
+                },
+                "subagent": null,
+                "agentTeam": {
+                  "enabled": false,
+                  "tasks": []
+                },
+                "plan": {
+                  "active": false,
+                  "pending": false
+                },
+                "conversationContinuation": null,
+                "sessionListMetadata": {
+                  "blank": true,
+                  "lastPromptAt": null
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "type": "emit",
+        "event": "settings/document-updated",
+        "args": [
+          "agent-default-model",
+          1
+        ]
+      },
+      {
+        "type": "emit",
+        "event": "api-session/status",
+        "args": [
+          "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+          true
+        ]
+      },
+      {
+        "type": "emit",
+        "event": "api-session/activity",
+        "args": [
+          "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+          1795507794219
+        ]
+      },
+      {
+        "type": "emit",
+        "event": "api-session/status",
+        "args": [
+          "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+          false
+        ]
+      }
+    ]
+  },
+  "control": [
+    {
+      "type": "baseline",
+      "value": {
+        "projections": {}
+      }
+    },
+    {
+      "type": "projection",
+      "sessionId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+      "seq": 0,
+      "changes": [
+        {
+          "key": "permissions",
+          "val": {
+            "currentValue": "workspace-write"
+          }
+        }
+      ]
+    },
+    {
+      "type": "projection",
+      "sessionId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+      "seq": 1,
+      "changes": [
+        {
+          "key": "permissions",
+          "val": {
+            "currentValue": "workspace-write"
+          }
+        }
+      ]
+    },
+    {
+      "type": "projection",
+      "sessionId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+      "seq": 2,
+      "changes": [
+        {
+          "key": "permissions",
+          "val": {
+            "currentValue": "workspace-write"
+          }
+        }
+      ]
+    },
+    {
+      "type": "projection",
+      "sessionId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+      "seq": 3,
+      "changes": [
+        {
+          "key": "title",
+          "val": "Capture renamed title"
+        }
+      ]
+    },
+    {
+      "type": "projection",
+      "sessionId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+      "seq": 4,
+      "changes": [
+        {
+          "key": "modelSelection",
+          "val": {
+            "lastUsed": null,
+            "next": {
+              "provider": "deepseek-official",
+              "model": "deepseek-pro"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "type": "projection",
+      "sessionId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+      "seq": 6,
+      "changes": [
+        {
+          "key": "permissions",
+          "val": {
+            "currentValue": "workspace-write"
+          }
+        }
+      ]
+    },
+    {
+      "type": "projection",
+      "sessionId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+      "seq": 7,
+      "changes": [
+        {
+          "key": "permissions",
+          "val": {
+            "currentValue": "read-only"
+          }
+        }
+      ]
+    },
+    {
+      "type": "projection",
+      "sessionId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+      "seq": 9,
+      "changes": [
+        {
+          "key": "inbox",
+          "val": {
+            "next-turn": [
+              {
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Describe the fixture image."
+                  },
+                  {
+                    "type": "image",
+                    "attachment": {
+                      "attachmentId": "sha256:dd47c13a50f5bc28835ce486313c74c99cd11573188c1820587566ee7f96bfba",
+                      "mediaType": "image/png",
+                      "width": 192,
+                      "height": 192,
+                      "bytes": 1362
+                    }
+                  }
+                ],
+                "source": {
+                  "kind": "user",
+                  "rpcId": "capture-prompt-1"
+                },
+                "role": "user",
+                "id": "20f4851a-2eb1-4df7-ab7c-b8c3112241e6"
+              }
+            ],
+            "next-step": []
+          }
+        }
+      ]
+    },
+    {
+      "type": "projection",
+      "sessionId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+      "seq": 10,
+      "changes": [
+        {
+          "key": "turnOutline",
+          "val": [
+            {
+              "turn": 1,
+              "seq": 10,
+              "prompt": "",
+              "response": ""
+            }
+          ]
+        },
+        {
+          "key": "subagentTiming",
+          "val": {
+            "settledMs": 0
+          }
+        },
+        {
+          "key": "sessionListMetadata",
+          "val": {
+            "blank": false,
+            "lastPromptAt": null
+          }
+        }
+      ]
+    },
+    {
+      "type": "projection",
+      "sessionId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+      "seq": 11,
+      "changes": [
+        {
+          "key": "inbox",
+          "val": {
+            "next-turn": [],
+            "next-step": []
+          }
+        }
+      ]
+    },
+    {
+      "type": "projection",
+      "sessionId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+      "seq": 12,
+      "changes": [
+        {
+          "key": "sessionStats",
+          "val": {
+            "turns": 0,
+            "steps": 0,
+            "llmMs": 0,
+            "toolMs": 0,
+            "ttftMs": 0,
+            "ttftSteps": 0,
+            "decodeMs": 0,
+            "decodeTokens": 0
+          }
+        }
+      ]
+    },
+    {
+      "type": "projection",
+      "sessionId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+      "seq": 13,
+      "changes": [
+        {
+          "key": "contextPressure",
+          "val": {}
+        },
+        {
+          "key": "contextBreakdown",
+          "val": {
+            "systemTokens": 1486,
+            "toolsTokens": 0,
+            "messageTokens": 0
+          }
+        }
+      ]
+    },
+    {
+      "type": "projection",
+      "sessionId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+      "seq": 14,
+      "changes": [
+        {
+          "key": "turnOutline",
+          "val": [
+            {
+              "turn": 1,
+              "seq": 10,
+              "prompt": "Describe the fixture image.",
+              "response": ""
+            }
+          ]
+        },
+        {
+          "key": "contextPressure",
+          "val": {}
+        },
+        {
+          "key": "contextBreakdown",
+          "val": {
+            "systemTokens": 1486,
+            "toolsTokens": 0,
+            "messageTokens": 65
+          }
+        },
+        {
+          "key": "conversationContinuation",
+          "val": null
+        },
+        {
+          "key": "sessionListMetadata",
+          "val": {
+            "blank": false,
+            "lastPromptAt": 1795507794219
+          }
+        }
+      ]
+    },
+    {
+      "type": "projection",
+      "sessionId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+      "seq": 15,
+      "changes": [
+        {
+          "key": "contextPressure",
+          "val": {}
+        },
+        {
+          "key": "contextBreakdown",
+          "val": {
+            "systemTokens": 1486,
+            "toolsTokens": 0,
+            "messageTokens": 351
+          }
+        }
+      ]
+    },
+    {
+      "type": "projection",
+      "sessionId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+      "seq": 16,
+      "changes": [
+        {
+          "key": "contextPressure",
+          "val": {}
+        },
+        {
+          "key": "contextBreakdown",
+          "val": {
+            "systemTokens": 1486,
+            "toolsTokens": 0,
+            "messageTokens": 768
+          }
+        }
+      ]
+    },
+    {
+      "type": "projection",
+      "sessionId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+      "seq": 17,
+      "changes": [
+        {
+          "key": "contextPressure",
+          "val": {}
+        },
+        {
+          "key": "contextBreakdown",
+          "val": {
+            "systemTokens": 1486,
+            "toolsTokens": 0,
+            "messageTokens": 842
+          }
+        }
+      ]
+    },
+    {
+      "type": "projection",
+      "sessionId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+      "seq": 18,
+      "changes": [
+        {
+          "key": "modelSelection",
+          "val": {
+            "lastUsed": {
+              "provider": "deepseek-official",
+              "model": "deepseek-pro"
+            },
+            "next": {
+              "provider": "deepseek-official",
+              "model": "deepseek-pro"
+            }
+          }
+        },
+        {
+          "key": "contextBreakdown",
+          "val": {
+            "systemTokens": 1486,
+            "toolsTokens": 7659,
+            "messageTokens": 842
+          }
+        },
+        {
+          "key": "plan",
+          "val": {
+            "active": false,
+            "pending": false
+          }
+        }
+      ]
+    },
+    {
+      "type": "projection",
+      "sessionId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+      "seq": 19,
+      "changes": [
+        {
+          "key": "contextPressure",
+          "val": {
+            "contextWindow": 1000000
+          }
+        }
+      ]
+    },
+    {
+      "type": "projection",
+      "sessionId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+      "seq": 21,
+      "changes": [
+        {
+          "key": "sessionStats",
+          "val": {
+            "turns": 0,
+            "steps": 0,
+            "llmMs": 146,
+            "toolMs": 0,
+            "ttftMs": 50,
+            "ttftSteps": 1,
+            "decodeMs": 96,
+            "decodeTokens": 4
+          }
+        },
+        {
+          "key": "tokenUsage",
+          "val": {
+            "uncachedInputTokens": 10,
+            "outputTokens": 4,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0
+          }
+        },
+        {
+          "key": "contextPressure",
+          "val": {
+            "pressureTokens": 10,
+            "projectedTokens": 22,
+            "contextWindow": 1000000
+          }
+        },
+        {
+          "key": "contextBreakdown",
+          "val": {
+            "systemTokens": 1486,
+            "toolsTokens": 7659,
+            "messageTokens": 854
+          }
+        }
+      ]
+    },
+    {
+      "type": "projection",
+      "sessionId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+      "seq": 22,
+      "changes": [
+        {
+          "key": "sessionStats",
+          "val": {
+            "turns": 1,
+            "steps": 1,
+            "llmMs": 146,
+            "toolMs": 0,
+            "ttftMs": 50,
+            "ttftSteps": 1,
+            "decodeMs": 96,
+            "decodeTokens": 4
+          }
+        }
+      ]
+    },
+    {
+      "type": "projection",
+      "sessionId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+      "seq": 23,
+      "changes": [
+        {
+          "key": "turnOutline",
+          "val": [
+            {
+              "turn": 1,
+              "seq": 10,
+              "prompt": "Describe the fixture image.",
+              "response": "Fixture reply."
+            }
+          ]
+        },
+        {
+          "key": "subagentTiming",
+          "val": {
+            "settledMs": 0
+          }
+        }
+      ]
+    }
+  ],
+  "followSnapshot": {
+    "type": "snapshot",
+    "header": {
+      "version": 4,
+      "id": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+      "createdAt": 1795507793006,
+      "cwd": "/captured-home/workspace",
+      "isSeeded": false,
+      "agentPreset": "standard"
+    },
+    "projections": {
+      "asOfSeq": 2,
+      "values": {
+        "sessionStats": {
+          "turns": 0,
+          "steps": 0,
+          "llmMs": 0,
+          "toolMs": 0,
+          "ttftMs": 0,
+          "ttftSteps": 0,
+          "decodeMs": 0,
+          "decodeTokens": 0
+        },
+        "turnOutline": [],
+        "userQuestions": {
+          "active": [],
+          "settled": []
+        },
+        "tokenUsage": {
+          "uncachedInputTokens": 0,
+          "outputTokens": 0,
+          "cacheReadTokens": 0,
+          "cacheWriteTokens": 0
+        },
+        "contextPressure": {},
+        "title": null,
+        "agentPreset": "standard",
+        "goal": null,
+        "modelSelection": {
+          "lastUsed": null,
+          "next": null
+        },
+        "workingDirectory": "/captured-home/workspace",
+        "contextBreakdown": {
+          "systemTokens": 0,
+          "toolsTokens": 0,
+          "messageTokens": 0
+        },
+        "inbox": {
+          "next-turn": [],
+          "next-step": []
+        },
+        "permissions": {
+          "currentValue": "workspace-write"
+        },
+        "subagentCatalog": [],
+        "subagentTiming": {
+          "settledMs": 0
+        },
+        "subagent": null,
+        "agentTeam": {
+          "enabled": false,
+          "tasks": []
+        },
+        "todos": null,
+        "plan": {
+          "active": false,
+          "pending": false
+        },
+        "conversationContinuation": null,
+        "sessionListMetadata": {
+          "blank": true,
+          "lastPromptAt": null
+        },
+        "imageLimits": {
+          "maxImageBytes": 52428800,
+          "maxImagesPerMessage": 20,
+          "maxMessageImageBytes": 209715200,
+          "maxImagePixels": 64000000,
+          "maxImageDimension": 65535,
+          "mediaTypes": [
+            "image/png",
+            "image/jpeg",
+            "image/webp",
+            "image/gif"
+          ]
+        }
+      }
+    },
+    "cursor": 2,
+    "records": [
+      {
+        "type": "event",
+        "event": {
+          "type": "permission/preset",
+          "seq": 0,
+          "time": 1795507793022,
+          "data": {
+            "preset": "workspace-write"
+          }
+        }
+      },
+      {
+        "type": "event",
+        "event": {
+          "type": "sandbox/mode",
+          "seq": 1,
+          "time": 1795507793024,
+          "data": {
+            "mode": "workspace-write"
+          }
+        }
+      },
+      {
+        "type": "event",
+        "event": {
+          "type": "approval/policy",
+          "seq": 2,
+          "time": 1795507793025,
+          "data": {
+            "policy": "ask"
+          }
+        }
+      }
+    ],
+    "hasMore": false,
+    "assistantStream": {
+      "revision": 0
+    }
+  },
+  "userImageEvent": {
+    "type": "user/message",
+    "seq": 14,
+    "time": 1795507794219,
+    "data": {
+      "content": [
+        {
+          "type": "text",
+          "text": "Describe the fixture image."
+        },
+        {
+          "type": "image",
+          "attachment": {
+            "attachmentId": "sha256:dd47c13a50f5bc28835ce486313c74c99cd11573188c1820587566ee7f96bfba",
+            "mediaType": "image/png",
+            "width": 192,
+            "height": 192,
+            "bytes": 1362
+          }
+        }
+      ],
+      "source": {
+        "kind": "user",
+        "rpcId": "capture-prompt-1"
+      },
+      "role": "user",
+      "id": "20f4851a-2eb1-4df7-ab7c-b8c3112241e6"
+    },
+    "surfaceOp": "append"
+  },
+  "unary": {
+    "rename": {
+      "endpoint": "session/rename",
+      "args": {
+        "request": {
+          "sessionId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+          "title": "Capture renamed title"
+        }
+      },
+      "status": 200,
+      "envelope": {
+        "type": "server-response",
+        "rpcId": "t2-7",
+        "result": {
+          "ok": true,
+          "value": {
+            "title": "Capture renamed title",
+            "seq": 3
+          }
+        }
+      }
+    },
+    "selectModel": {
+      "endpoint": "session/selectModel",
+      "args": {
+        "request": {
+          "sessionId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+          "provider": "deepseek-official",
+          "model": "deepseek-pro"
+        }
+      },
+      "status": 200,
+      "envelope": {
+        "type": "server-response",
+        "rpcId": "t2-8",
+        "result": {
+          "ok": true,
+          "value": {
+            "selected": {
+              "provider": "deepseek-official",
+              "model": "deepseek-pro"
+            }
+          }
+        }
+      }
+    },
+    "permissionCommand": {
+      "endpoint": "commands/execute",
+      "args": {
+        "agentId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+        "line": "/permission read-only",
+        "submittedAttachments": []
+      },
+      "status": 200,
+      "envelope": {
+        "type": "server-response",
+        "rpcId": "t2-9",
+        "result": {
+          "ok": true,
+          "value": {
+            "commandId": "cmd-95609258-1",
+            "result": {
+              "kind": "success",
+              "text": "preset read-only"
+            }
+          }
+        }
+      }
+    },
+    "projectionsFresh": {
+      "endpoint": "session/projections",
+      "args": {
+        "request": {
+          "sessionId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf"
+        }
+      },
+      "status": 200,
+      "envelope": {
+        "type": "server-response",
+        "rpcId": "t2-5",
+        "result": {
+          "ok": true,
+          "value": {
+            "kind": "sequenced",
+            "asOfSeq": 2,
+            "values": {
+              "sessionStats": {
+                "turns": 0,
+                "steps": 0,
+                "llmMs": 0,
+                "toolMs": 0,
+                "ttftMs": 0,
+                "ttftSteps": 0,
+                "decodeMs": 0,
+                "decodeTokens": 0
+              },
+              "turnOutline": [],
+              "userQuestions": {
+                "active": [],
+                "settled": []
+              },
+              "tokenUsage": {
+                "uncachedInputTokens": 0,
+                "outputTokens": 0,
+                "cacheReadTokens": 0,
+                "cacheWriteTokens": 0
+              },
+              "contextPressure": {},
+              "title": null,
+              "agentPreset": "standard",
+              "goal": null,
+              "modelSelection": {
+                "lastUsed": null,
+                "next": null
+              },
+              "workingDirectory": "/captured-home/workspace",
+              "contextBreakdown": {
+                "systemTokens": 0,
+                "toolsTokens": 0,
+                "messageTokens": 0
+              },
+              "inbox": {
+                "next-turn": [],
+                "next-step": []
+              },
+              "permissions": {
+                "currentValue": "workspace-write"
+              },
+              "subagentCatalog": [],
+              "subagentTiming": {
+                "settledMs": 0
+              },
+              "subagent": null,
+              "agentTeam": {
+                "enabled": false,
+                "tasks": []
+              },
+              "todos": null,
+              "plan": {
+                "active": false,
+                "pending": false
+              },
+              "conversationContinuation": null,
+              "sessionListMetadata": {
+                "blank": true,
+                "lastPromptAt": null
+              },
+              "imageLimits": {
+                "maxImageBytes": 52428800,
+                "maxImagesPerMessage": 20,
+                "maxMessageImageBytes": 209715200,
+                "maxImagePixels": 64000000,
+                "maxImageDimension": 65535,
+                "mediaTypes": [
+                  "image/png",
+                  "image/jpeg",
+                  "image/webp",
+                  "image/gif"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "projectionsCold": {
+      "endpoint": "session/projections",
+      "args": {
+        "request": {
+          "sessionId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf"
+        }
+      },
+      "status": 200,
+      "envelope": {
+        "type": "server-response",
+        "rpcId": "t2-22",
+        "result": {
+          "ok": true,
+          "value": {
+            "kind": "sequenced",
+            "asOfSeq": 23,
+            "values": {
+              "sessionStats": {
+                "turns": 1,
+                "steps": 1,
+                "llmMs": 146,
+                "toolMs": 0,
+                "ttftMs": 50,
+                "ttftSteps": 1,
+                "decodeMs": 96,
+                "decodeTokens": 4
+              },
+              "turnOutline": [
+                {
+                  "turn": 1,
+                  "seq": 10,
+                  "prompt": "Describe the fixture image.",
+                  "response": "Fixture reply."
+                }
+              ],
+              "userQuestions": {
+                "active": [],
+                "settled": []
+              },
+              "tokenUsage": {
+                "uncachedInputTokens": 10,
+                "outputTokens": 4,
+                "cacheReadTokens": 0,
+                "cacheWriteTokens": 0
+              },
+              "contextPressure": {
+                "pressureTokens": 10,
+                "projectedTokens": 22,
+                "contextWindow": 1000000
+              },
+              "title": "Capture renamed title",
+              "agentPreset": "standard",
+              "goal": null,
+              "modelSelection": {
+                "lastUsed": {
+                  "provider": "deepseek-official",
+                  "model": "deepseek-pro"
+                },
+                "next": {
+                  "provider": "deepseek-official",
+                  "model": "deepseek-pro"
+                }
+              },
+              "workingDirectory": "/captured-home/workspace",
+              "contextBreakdown": {
+                "systemTokens": 1486,
+                "toolsTokens": 7659,
+                "messageTokens": 854
+              },
+              "inbox": {
+                "next-turn": [],
+                "next-step": []
+              },
+              "permissions": {
+                "currentValue": "read-only"
+              },
+              "subagentCatalog": [],
+              "subagentTiming": {
+                "settledMs": 0
+              },
+              "subagent": null,
+              "agentTeam": {
+                "enabled": false,
+                "tasks": []
+              },
+              "todos": null,
+              "plan": {
+                "active": false,
+                "pending": false
+              },
+              "conversationContinuation": null,
+              "sessionListMetadata": {
+                "blank": false,
+                "lastPromptAt": 1795507794219
+              },
+              "imageLimits": {
+                "maxImageBytes": 52428800,
+                "maxImagesPerMessage": 20,
+                "maxMessageImageBytes": 209715200,
+                "maxImagePixels": 64000000,
+                "maxImageDimension": 65535,
+                "mediaTypes": [
+                  "image/png",
+                  "image/jpeg",
+                  "image/webp",
+                  "image/gif"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "projectionsMissing": {
+      "endpoint": "session/projections",
+      "args": {
+        "request": {
+          "sessionId": "session-does-not-exist"
+        }
+      },
+      "status": 200,
+      "envelope": {
+        "type": "server-response",
+        "rpcId": "t2-20",
+        "result": {
+          "ok": true,
+          "value": null
+        }
+      }
+    },
+    "sessionListCold": {
+      "endpoint": "session/list",
+      "args": {
+        "_request": {}
+      },
+      "status": 200,
+      "envelope": {
+        "type": "server-response",
+        "rpcId": "t2-21",
+        "result": {
+          "ok": true,
+          "value": {
+            "items": [
+              {
+                "sessionId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+                "updatedAt": 1795507794219,
+                "agentAvailable": false,
+                "formatStatus": "current",
+                "running": false,
+                "blank": false,
+                "cwd": "/captured-home/workspace",
+                "projections": {
+                  "kind": "cached",
+                  "asOfSeq": 23,
+                  "values": {
+                    "userQuestions": {
+                      "active": [],
+                      "settled": []
+                    },
+                    "tokenUsage": {
+                      "uncachedInputTokens": 10,
+                      "outputTokens": 4,
+                      "cacheReadTokens": 0,
+                      "cacheWriteTokens": 0
+                    },
+                    "title": "Capture renamed title",
+                    "agentPreset": "standard",
+                    "goal": null,
+                    "modelSelection": {
+                      "lastUsed": {
+                        "provider": "deepseek-official",
+                        "model": "deepseek-pro"
+                      },
+                      "next": {
+                        "provider": "deepseek-official",
+                        "model": "deepseek-pro"
+                      }
+                    },
+                    "workingDirectory": "/captured-home/workspace",
+                    "inbox": {
+                      "next-turn": [],
+                      "next-step": []
+                    },
+                    "permissions": {
+                      "currentValue": "read-only"
+                    },
+                    "subagentCatalog": [],
+                    "subagentTiming": {
+                      "settledMs": 0
+                    },
+                    "subagent": null,
+                    "agentTeam": {
+                      "enabled": false,
+                      "tasks": []
+                    },
+                    "plan": {
+                      "active": false,
+                      "pending": false
+                    },
+                    "conversationContinuation": null,
+                    "sessionListMetadata": {
+                      "blank": false,
+                      "lastPromptAt": 1795507794219
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "attachmentIdShapeRefused": {
+      "endpoint": "session/attachment",
+      "args": {
+        "request": {
+          "sessionId": "session-a82707c3-bbd1-4741-ab9c-a172c7bc3bdf",
+          "attachmentId": "sha256:dd47c13a50f5bc28835ce486313c74c99cd11573188c1820587566ee7f96bfba"
+        }
+      },
+      "status": 200,
+      "envelope": {
+        "type": "server-response",
+        "rpcId": "t2-11",
+        "result": {
+          "ok": false,
+          "error": {
+            "code": "gateway/input-invalid",
+            "message": "typert gateway: session/attachment: wire field \"request\" failed boundary validation",
+            "details": {
+              "endpoint": "session/attachment",
+              "field": "request"
+            }
+          }
+        }
+      }
+    },
+    "eventResultUnknownClient": {
+      "endpoint": "$events/result",
+      "args": {
+        "clientId": "not-a-client",
+        "eventId": "x",
+        "outcome": {
+          "kind": "next"
+        }
+      },
+      "status": 200,
+      "envelope": {
+        "type": "server-response",
+        "rpcId": "t2-17",
+        "result": {
+          "ok": false,
+          "error": {
+            "code": "gateway/internal",
+            "message": "typert gateway: Remote event result identifies no active event stream",
+            "details": {}
+          }
+        }
+      }
+    }
+  },
+  "readback": {
+    "attachment": {
+      "attachmentId": "sha256:dd47c13a50f5bc28835ce486313c74c99cd11573188c1820587566ee7f96bfba",
+      "mediaType": "image/png",
+      "bytes": 1362,
+      "width": 192,
+      "height": 192
+    },
+    "data": "iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAAABmJLR0QA/wD/AP+gvaeTAAAFB0lEQVR4nO3dT2ibZQDH8SZLm7DOjLZpQG87dKO629hOWmsRusPKio79QQ8rbGxMEDqigmAhIHjbWG620TJ2kR28KfSk7OBkm1sVQSbCWnCiSUaoqWnaNHs9CDoma7L8kjzP877fzzkkv6TfJm/etCTUG090Ac0Kmx4AtxEQJAQECQFBQkCQEBAkBAQJAUFCQJAQECQEBAkBQUJAkBAQJAQECQFBQkCQEBAkBAQJAUFCQJAQECQEBAkBQUJAkBAQJAQECQFBQkCQEBAkBAQJAUFCQJAQECQEBAkBQUJAkBAQJAQECQFBQkCQEBAkBAQJAUFCQJAQECQEBAkBQUJAkBAQJAQECQFBEjE9oAWGh/ccP3Z09JWRaDTa+VsvFAqHDr3W+du1hNsB7T+wL5WaHnnpRYMbYrGYwVs3ztWAksnBdHpmcnLC9JCgczKgsbHRTObCwEC/6SFw8CD6zNlTV658Sj2WcOwZ6J13z5+fftv0CvzHpWegM2dPUY9tnAlobGx05oP3Ta/A49wIKJkczGQuhMNurA0UN34k6fQMR812ciCg/Qf2cb7HWg4ElEpNm56AJ7I9oOHhPWY/qcDWbA/o+LGjpidgK7afSBx5ufmnn83NzRs3b925vZjL59f+WmvhqkeV19p1zU6wPaBoTzN/oVGprM/OZbNz8/l8oeWT8CjbA2rC0r3lk1On79792fSQQPBbQEv3lg9PHsnl8qaHBIXtB9FPpVJZPzl1mno6yVcBzc5leeXqMP8EVK1Ws3PzplcEjn8CunHzFu+5Os8/AX2/+IPpCUHkn4D+yOVMTwgi/wRUq9VMTwgi/wQEIwgIEgKChIAgISBICAgSv30a74T44Vf7z73RyCWrv+XuT73X7j0KAjKhpzv8zI5GLhjeXmr3FhEvYZAQECQEBAkBQUJAkBAQJAQECQFBQkCQEBAkBAQJAUFCQJAQECQEBAkBQUJAkBAQJAQECQFBQkCQ2P5fGaXV0srKSiOX3KhstHsM/s/2gMbH+ZoVq/ESBgkBQUJAkBAQJAQECQFBQkAGhLptP3vSOAIyIJLwzzdQE5ABseeHTE9oGQLqtMhgf89eAkKzdp6YCIX987D75544Ibp7V/z1g6ZXtBIBdc62RF/yo5Sf3oJ1EVDHRHfveu7jD7ufTZoe0mK++m2wU2Swf+eJifiRg6GIDx9tH96lxu0YHwnHetp05aHe7ZGBvtgLQz17h5o+avY2qq1d1XKBDmjgrTe3JfpMr9hK+fod0xPq4BjIYp5X+vJr0yPqICB7lb9drC79anpFHQRkK88rZq+aHlEfAVlqdeHa+k+/mF5RHwHZqFYoFi5dNr2iIQRkHa9Wy6UzD1ds/56efxCQdR5cnF/77kfTKxpFQHYpzn725+cLplc8hUCfSLSKV6s9uDjvVj1dBGSJWqGYS2cceuX6FwGZ5nmrC9cKly67ctT8GAIyx/PK1xeLn1x14nzPkwQ6oOrv+YcmPu72Kuvlb26Xvviquny/87feWqHeeML0BjiMt/GQEBAkBAQJAUFCQJAQECQEBAkBQUJAkBAQJAQECQFBQkCQEBAkBAQJAUFCQJAQECQEBAkBQUJAkBAQJAQECQFBQkCQEBAkBAQJAUFCQJAQECQEBAkBQUJAkBAQJAQECQFBQkCQEBAkBAQJAUFCQJAQECQEBAkBQUJAkBAQJAQECQFBQkCQEBAkBAQJAUHyN3zj4xAtWmTmAAAAAElFTkSuQmCC"
+  },
+  "rc2Comparison": {
+    "version": "0.2.0-rc.2",
+    "attachmentRefShapeRefused": {
+      "endpoint": "session/attachment",
+      "args": {
+        "request": {
+          "sessionId": "session-4bd2015b-e06f-44c7-bbc3-5b6a8b6391c8",
+          "attachment": {
+            "attachmentId": "sha256:dd47c13a50f5bc28835ce486313c74c99cd11573188c1820587566ee7f96bfba",
+            "mediaType": "image/png",
+            "width": 192,
+            "height": 192,
+            "bytes": 1362
+          }
+        }
+      },
+      "status": 200,
+      "envelope": {
+        "type": "server-response",
+        "rpcId": "t2-12",
+        "result": {
+          "ok": false,
+          "error": {
+            "code": "gateway/input-invalid",
+            "message": "typert gateway: session/attachment: wire field \"request\" failed boundary validation",
+            "details": {
+              "endpoint": "session/attachment",
+              "field": "request"
+            }
+          }
+        }
+      }
+    },
+    "controlProjection": {
+      "type": "projection",
+      "sessionId": "session-4bd2015b-e06f-44c7-bbc3-5b6a8b6391c8",
+      "key": "title",
+      "value": "Capture renamed title",
+      "seq": 3
+    },
+    "projectionsCold": {
+      "endpoint": "session/projections",
+      "args": {
+        "request": {
+          "sessionId": "session-4bd2015b-e06f-44c7-bbc3-5b6a8b6391c8"
+        }
+      },
+      "status": 200,
+      "envelope": {
+        "type": "server-response",
+        "rpcId": "t2-22",
+        "result": {
+          "ok": true,
+          "value": {
+            "asOfSeq": 21,
+            "values": {
+              "title": "Capture renamed title",
+              "goal": null,
+              "tokenUsage": {
+                "uncachedInputTokens": 10,
+                "outputTokens": 4,
+                "cacheReadTokens": 0,
+                "cacheWriteTokens": 0
+              },
+              "contextPressure": {
+                "pressureTokens": 10,
+                "projectedTokens": 22,
+                "contextWindow": 1000000
+              },
+              "contextBreakdown": {
+                "systemTokens": 1481,
+                "toolsTokens": 5157,
+                "messageTokens": 217
+              },
+              "inbox": {
+                "next-turn": [],
+                "next-step": []
+              },
+              "sessionStats": {
+                "turns": 1,
+                "steps": 1,
+                "llmMs": 146,
+                "toolMs": 0,
+                "ttftMs": 47,
+                "ttftSteps": 1,
+                "decodeMs": 99,
+                "decodeTokens": 4
+              },
+              "turnOutline": [
+                {
+                  "turn": 1,
+                  "seq": 10,
+                  "prompt": "Describe the fixture image.",
+                  "response": "Fixture reply."
+                }
+              ],
+              "agentPreset": "standard",
+              "userQuestions": {
+                "active": [],
+                "settled": []
+              },
+              "subagentCatalog": [],
+              "subagentTiming": {
+                "settledMs": 0
+              },
+              "subagent": null,
+              "permissions": {
+                "currentValue": "read-only"
+              },
+              "todos": null,
+              "plan": {
+                "active": false,
+                "pending": false
+              },
+              "modelSelection": {
+                "lastUsed": {
+                  "provider": "deepseek-official",
+                  "model": "deepseek-pro",
+                  "reasoningEffort": "off"
+                },
+                "next": {
+                  "provider": "deepseek-official",
+                  "model": "deepseek-pro",
+                  "reasoningEffort": "off"
+                }
+              },
+              "sessionListMetadata": {
+                "blank": false,
+                "lastPromptAt": 1795507888339
+              },
+              "imageLimits": {
+                "maxImageBytes": 20971520,
+                "maxImagesPerMessage": 20,
+                "maxMessageImageBytes": 209715200,
+                "maxImagePixels": 64000000,
+                "maxImageDimension": 8192,
+                "mediaTypes": [
+                  "image/png",
+                  "image/jpeg",
+                  "image/webp",
+                  "image/gif"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "restartAnnouncementLeadMs": [
+      57,
+      102,
+      72,
+      94,
+      45
+    ]
+  }
+}

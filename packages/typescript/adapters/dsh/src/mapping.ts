@@ -126,9 +126,14 @@ export function dshImageCount(content: unknown): number {
   return Array.isArray(content) ? content.filter((raw) => record(raw)?.type === 'image').length : 0;
 }
 
-/** Durable references are identities, never broker-local paths or bearer URLs. */
+/**
+ * Durable references are identities, never broker-local paths or bearer URLs.
+ * `ref` is the log's own reference record, kept verbatim: 0.2.2 reads an image
+ * back by that whole reference, and rc.2 by its `attachmentId`.
+ */
 export function dshUserImageArtifacts(event: Pick<DshSessionEvent, 'type' | 'data'>, sessionId: string): Array<{
-  attachmentId: string; message: Extract<AgentMessage, { type: 'file-artifact' }>;
+  attachmentId: string; ref: Readonly<Record<string, unknown>> & { readonly attachmentId: string };
+  message: Extract<AgentMessage, { type: 'file-artifact' }>;
 }> {
   const data = record(event.data);
   if (event.type !== 'user/message' || record(data?.source)?.kind !== 'user' || !Array.isArray(data?.content)) return [];
@@ -139,7 +144,7 @@ export function dshUserImageArtifacts(event: Pick<DshSessionEvent, 'type' | 'dat
     const id = optionalString(ref?.attachmentId); const mediaType = optionalString(ref?.mediaType);
     if (block?.type !== 'image' || !id || !mediaType || !['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(mediaType)) return [];
     const path = `dsh-image:${sessionId}:${id}`;
-    return [{ attachmentId: id, message: { type: 'file-artifact' as const, path, artifactKey: path,
+    return [{ attachmentId: id, ref: { ...ref, attachmentId: id }, message: { type: 'file-artifact' as const, path, artifactKey: path,
       name: optionalString(ref?.name) ?? `image.${mediaType.split('/')[1]}`, mimeType: mediaType,
       ...(optionalNumber(ref?.bytes) !== undefined ? { size: optionalNumber(ref?.bytes)! } : {}),
       userMessageKey: dshMessageKey(sessionId, messageId),

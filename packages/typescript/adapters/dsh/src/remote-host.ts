@@ -67,7 +67,9 @@ import {
   DshRemoteArgs,
   DshRemoteClient,
   dshSessionAddress,
+  type DshAttachmentRequestShape,
   type DshEventOutcome,
+  type DshImageAttachmentRef,
   type DshRemoteEndpoint,
 } from './remote.ts';
 import type { DshHistoryPage, DshPermissionCatalog, DshPermissionOption, DshSessionChannel } from './protocol.ts';
@@ -138,7 +140,10 @@ export const DSH_INTERACTION_HANDOFF_MS = 500;
  *    answers the same way forever.
  *
  * `gateway/service-unavailable` and `gateway/uplink-overflow` are deliberately
- * absent: those are "not now", and "not now" is what backoff is for.
+ * absent: those are "not now", and "not now" is what backoff is for. So is
+ * 0.2.2's `gateway/peer-disposed`: it ends with the Peer, and the next carrier
+ * is a new Peer. Its `gateway/interactions-forbidden` is terminal: the Peer's
+ * permission to answer does not change because it asked again.
  */
 export const DSH_STREAM_TERMINAL_CODES: readonly string[] = Object.freeze([
   'carrier/closed',
@@ -146,10 +151,25 @@ export const DSH_STREAM_TERMINAL_CODES: readonly string[] = Object.freeze([
   'gateway/arguments-invalid',
   'gateway/definition-unavailable',
   'gateway/input-invalid',
+  'gateway/interactions-forbidden',
   'gateway/method-unavailable',
   'gateway/protocol',
   'gateway/signature-invalid',
   'gateway/unknown-endpoint',
+]);
+
+/**
+ * The refusals that mean "this host does not accept this request shape".
+ *
+ * Captured: rc.2 and 0.2.2-rc.5 each answer the other's `session/attachment`
+ * shape with `gateway/input-invalid` (wire field `request` failed boundary
+ * validation). `gateway/arguments-invalid` is the gateway's other shape refusal
+ * (named fields that do not match the descriptor). Both are raised before any
+ * business code runs, so asking again in the other shape reads nothing twice.
+ */
+const DSH_REQUEST_SHAPE_REFUSALS: readonly string[] = Object.freeze([
+  'gateway/input-invalid',
+  'gateway/arguments-invalid',
 ]);
 
 /**
@@ -375,8 +395,8 @@ export interface DshRemoteHostLinkOptions {
 export class DshRemoteSessionChannel implements DshSessionChannel {
   readonly family = 'remote-0.2' as const;
 
-  attachment(sessionId: string, attachmentId: string, signal?: AbortSignal): Promise<DshOutcome<{ attachment: unknown; data: unknown }>> {
-    return this.link.call('session/attachment', DshRemoteArgs.attachment(sessionId, attachmentId), signal ? { signal } : {});
+  attachment(sessionId: string, ref: DshImageAttachmentRef, signal?: AbortSignal): Promise<DshOutcome<{ attachment: unknown; data: unknown }>> {
+    return this.link.readAttachment(sessionId, ref, signal);
   }
 
   constructor(
@@ -651,6 +671,14 @@ export class DshRemoteHostLink {
   private readonly workspaceRows = new Map<string, Record<string, unknown>>();
   private archivedSessions = new Set<string>();
   /**
+   * The `session/attachment` shape the host last accepted. Starts with rc.2's,
+   * so an rc.2 host is asked exactly what it was asked before 0.2.2 was
+   * qualified; a 0.2.2 host costs one refused read
+   * and is then asked in its own shape. Not reset per carrier: a host upgraded
+   * under a running broker is corrected by the same fallback.
+   */
+  private attachmentShape: DshAttachmentRequestShape = 'attachment-id';
+  /**
    * The credential the CURRENT carrier shook hands with.
    *
    * Compared against {@link DshAuthSession.credentialRevision} at every point
@@ -842,7 +870,48 @@ export class DshRemoteHostLink {
       this.auth.reportCredentialRefused(outcome.failure.reason === 'forbidden' ? 'host-or-origin-refused' : 'credential-refused');
       this.note({ code: 'auth-refused', detail: outcome.failure.reason });
     }
+    if (!outcome.ok && outcome.failure.kind === 'rpc' && outcome.failure.code === 'gateway/peer-disposed') {
+      // 0.2.2 checks the calling Peer before it dispatches anything, so this
+      // refusal is proof the call did NOT run: the Peer it spoke for has ended.
+      // That is the existing "generation ended, nothing was sent" outcome, and a
+      // write may be re-issued once the link is ready again.
+      return transportFailure('generation-lost', {
+        retryable: true,
+        detail: 'the DeepSeek Harness host had already closed the connection this call belonged to, so it was not run',
+      });
+    }
     return outcome;
+  }
+
+  /**
+   * Read one durable image back, in whichever request shape this host serves.
+   *
+   * The host publishes no version, and rc.2 and 0.2.2 refuse each other's
+   * `session/attachment` shape at the boundary (see
+   * {@link DSH_REQUEST_SHAPE_REFUSALS}), so the read tries the shape that
+   * last worked and, on a shape refusal only, the other one once. Any other
+   * failure is the answer: a missing image or a lost generation is not a reason
+   * to ask twice.
+   */
+  async readAttachment(
+    sessionId: string,
+    ref: DshImageAttachmentRef,
+    signal?: AbortSignal,
+  ): Promise<DshOutcome<{ attachment: unknown; data: unknown }>> {
+    const first = this.attachmentShape;
+    const order: DshAttachmentRequestShape[] = first === 'attachment-id'
+      ? ['attachment-id', 'attachment-ref'] : ['attachment-ref', 'attachment-id'];
+    let outcome: DshOutcome<{ attachment: unknown; data: unknown }> | undefined;
+    for (const shape of order) {
+      outcome = await this.call<{ attachment: unknown; data: unknown }>(
+        'session/attachment', DshRemoteArgs.attachment(sessionId, ref, shape), signal ? { signal } : {});
+      if (outcome.ok) {
+        this.attachmentShape = shape;
+        return outcome;
+      }
+      if (outcome.failure.kind !== 'rpc' || !DSH_REQUEST_SHAPE_REFUSALS.includes(outcome.failure.code)) return outcome;
+    }
+    return outcome!;
   }
 
   /** Prove the host and this build agree, right now, before anything is written. */
@@ -1627,15 +1696,34 @@ export class DshRemoteHostLink {
     }
     if (item.type === 'projection') {
       const sessionId = optionalString(item.sessionId);
-      const key = optionalString(item.key);
       const seq = optionalNumber(item.seq);
-      if (!sessionId || !key || seq === undefined) return;
-      this.sessions.get(sessionId)?.connection.handleMuxFrame(bridgeFrame('session/projection', `control-${sessionId}-${key}`, {
-        sessionId,
-        key,
-        value: item.value,
-        seq,
-      }));
+      if (!sessionId || seq === undefined) return;
+      const runtime = this.sessions.get(sessionId);
+      if (!runtime) return;
+      // Two captured spellings of one update. rc.2 sends one `{key, value}` per
+      // frame; 0.2.2 sends `changes: [{key, val}]`, several keys under one seq
+      // (title, model, permissions and context all arrive this way). Each change
+      // becomes its own per-key update, so the store's per-key seq rule applies
+      // to both exactly as before.
+      const changes: Array<{ key: string; value: unknown }> = [];
+      if (Array.isArray(item.changes)) {
+        for (const raw of item.changes) {
+          const change = record(raw);
+          const key = optionalString(change?.key);
+          if (change && key) changes.push({ key, value: change.val });
+        }
+      } else {
+        const key = optionalString(item.key);
+        if (key) changes.push({ key, value: item.value });
+      }
+      for (const change of changes) {
+        runtime.connection.handleMuxFrame(bridgeFrame('session/projection', `control-${sessionId}-${change.key}`, {
+          sessionId,
+          key: change.key,
+          value: change.value,
+          seq,
+        }));
+      }
       return;
     }
     this.note({ code: 'unusable-stream-item', detail: `unknown control item "${String(item.type)}"` });

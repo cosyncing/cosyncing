@@ -18,7 +18,8 @@
  *     diagnosis, not a licence to try. The family rule was tried and broke:
  *     0.2.2 kept the 0.2 routes and auth while changing live control frames and
  *     the image readback request, so a family match admitted a host that then
- *     silently lost live updates.
+ *     silently lost live updates. 0.2.2-rc.5 is listed because it was captured
+ *     and ported, not because it is a 0.2 build.
  *  2. NO MUTATING PROBE. Family selection reads only. A route that answers is
  *     enough; nothing here opens a session, prompts, or selects a model, and an
  *     authentication refusal never becomes a reason to try the older contract.
@@ -33,15 +34,28 @@ export type DshContractFamily = typeof DSH_CONTRACT_FAMILIES[number];
 
 /**
  * Versions this build was actually captured against. Each row is evidence, not
- * a range: 0.1.0-rc.6 produced `test/fixtures/dsh-0.1.0-rc.6.json` and
- * 0.2.0-rc.2 produced `test/fixtures/dsh-0.2.0-rc.2.json`.
+ * a range: 0.1.0-rc.6 produced `test/fixtures/dsh-0.1.0-rc.6.json`,
+ * 0.2.0-rc.2 produced `test/fixtures/dsh-0.2.0-rc.2.json`, and 0.2.2-rc.5
+ * produced `test/fixtures/dsh-0.2.2-rc.5.json`.
+ *
+ * The two 0.2 builds share routes, sign-in and stream framing, and the host
+ * publishes no version on the wire, so the adapter speaks both by reading each
+ * shape that differs: live `session/control` projections arrive as one
+ * `{key,value}` per frame on rc.2 and as a `changes[]` list on 0.2.2, and
+ * `session/attachment` takes `attachmentId` on rc.2 and the durable
+ * `attachment` reference on 0.2.2 (see `DshRemoteHostLink.readAttachment`).
  */
 export const DSH_QUALIFIED_VERSIONS: Readonly<Record<DshContractFamily, readonly string[]>> = Object.freeze({
   'legacy-0.1': Object.freeze(['0.1.0-rc.6']),
-  'remote-0.2': Object.freeze(['0.2.0-rc.2']),
+  'remote-0.2': Object.freeze(['0.2.0-rc.2', '0.2.2-rc.5']),
 });
 
-/** The version this build's primary (current) fixtures and mappings were captured against. */
+/**
+ * The version the install advice pins, and the build the primary fixtures and
+ * mappings were first captured against. 0.2.2-rc.5 is qualified too, but its
+ * package declares `engines.node >=24.9.0` where rc.2 declares none, so moving
+ * the pinned install to it is a separate decision from qualifying it.
+ */
 export const DSH_CURRENT_VERSION = '0.2.0-rc.2';
 
 /**

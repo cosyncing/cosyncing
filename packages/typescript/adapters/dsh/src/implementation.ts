@@ -1320,7 +1320,12 @@ export class DshAdapter implements AgentBackend {
         generationLoss: 'host-scoped', ...(options?.signal ? { signal: options.signal } : {}),
       });
       if (!outcome.ok || !outcome.value || typeof outcome.value !== 'object') return;
-      const block = outcome.value as { asOfSeq?: unknown; values?: unknown };
+      const block = outcome.value as { kind?: unknown; asOfSeq?: unknown; values?: unknown };
+      // rc.2 answers an untagged `{asOfSeq, values}`; 0.2.2 tags it `sequenced`,
+      // or answers `migration-required` with cache hints and no seq for a stored
+      // session in an older format. Only an exact sequenced read replaces the
+      // list hint; a migration answer leaves the roster's own cached hint alone.
+      if (block.kind !== undefined && block.kind !== 'sequenced') return;
       if (!Number.isSafeInteger(block.asOfSeq) || Number(block.asOfSeq) < -1
           || !block.values || typeof block.values !== 'object' || Array.isArray(block.values)) return;
       const held = row.projections as { asOfSeq?: unknown } | undefined;

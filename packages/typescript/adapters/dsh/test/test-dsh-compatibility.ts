@@ -79,15 +79,18 @@ function check(name: string, ok: boolean, detail = ''): void {
     const verdict = classifyDshVersion(version);
     return verdict.status === 'qualified' ? `${verdict.family}` : verdict.status;
   };
-  check('both captured versions are qualified against their own family',
-    qualified('0.1.0-rc.6') === 'legacy-0.1' && qualified('0.2.0-rc.2') === 'remote-0.2',
-    [qualified('0.1.0-rc.6'), qualified('0.2.0-rc.2')].join(' / '));
+  check('every captured version is qualified against its own family',
+    qualified('0.1.0-rc.6') === 'legacy-0.1' && qualified('0.2.0-rc.2') === 'remote-0.2'
+      && qualified('0.2.2-rc.5') === 'remote-0.2',
+    [qualified('0.1.0-rc.6'), qualified('0.2.0-rc.2'), qualified('0.2.2-rc.5')].join(' / '));
 
   // Published builds that share a qualified build's minor. Each used to be
   // admitted as "the same family"; 0.2.2 kept the 0.2 routes and auth and still
   // changed the live control frames and the image readback request, so a family
-  // match is not evidence of anything. 0.1 gets the same rule as 0.2.
-  const unlisted = ['0.2.0-rc.1', '0.2.1-rc.5', '0.2.2-rc.5', '0.2.3-alpha.2', '0.1.0-rc.7', '0.1.7-rc.2'];
+  // match is not evidence of anything. 0.1 gets the same rule as 0.2. 0.2.2-rc.4
+  // is the build before the captured 0.2.2-rc.5: qualifying one rc is not a
+  // licence for its neighbours.
+  const unlisted = ['0.2.0-rc.1', '0.2.1-rc.5', '0.2.2-rc.4', '0.2.3-alpha.2', '0.1.0-rc.7', '0.1.7-rc.2'];
   const verdicts = unlisted.map((version) => [version, classifyDshVersion(version).status] as const);
   check('a published 0.1 or 0.2 build that is not on the qualified list is unsupported, not recognised as its family',
     verdicts.every(([, status]) => status === 'unsupported')
@@ -135,7 +138,7 @@ function check(name: string, ok: boolean, detail = ''): void {
   // all three and still lost live updates and image readback once running. The
   // refusal names the version and the qualified list, so the log line says what
   // to install rather than "host did not become ready".
-  for (const version of ['0.2.1-rc.5', '0.2.2-rc.5', '0.2.3-alpha.2']) {
+  for (const version of ['0.2.1-rc.5', '0.2.2-rc.4', '0.2.3-alpha.2']) {
     const refused = decideManagedLaunch(version, 3080);
     check(`published but unqualified ${version} is refused before the spawn, with the qualified versions named`,
       refused.allowed === false && refused.code === 'version-unsupported'
@@ -149,11 +152,18 @@ function check(name: string, ok: boolean, detail = ''): void {
   check('an unlisted 0.1 build is refused for its version, not only for its missing browser flag',
     laterLegacy.allowed === false && laterLegacy.code === 'version-unsupported',
     laterLegacy.allowed ? 'allowed' : `${laterLegacy.code}: ${laterLegacy.detail}`);
-  check('exactly one 0.2 build carries the qualification this build was verified against',
-    DSH_QUALIFIED_VERSIONS['remote-0.2'].join(',') === '0.2.0-rc.2'
+  check('exactly the two captured 0.2 builds carry the qualification this build was verified against',
+    DSH_QUALIFIED_VERSIONS['remote-0.2'].join(',') === '0.2.0-rc.2,0.2.2-rc.5'
       && decideManagedLaunch('0.2.0-rc.2', 3080).allowed === true
       && classifyDshVersion('0.2.0-rc.2').status === 'qualified',
     DSH_QUALIFIED_VERSIONS['remote-0.2'].join(','));
+  // The 0.2.2-rc.5 capture started its host with `--profile web ... --no-open
+  // --port`, which its CLI documents `dsh web` as abbreviating.
+  const ported = decideManagedLaunch('0.2.2-rc.5', 17_831);
+  check('the captured 0.2.2-rc.5 launches with --no-open on the configured port',
+    ported.allowed === true && ported.plan.browserSuppressed
+      && ported.plan.args.join(' ') === 'web --port 17831 --no-open',
+    ported.allowed ? ported.plan.args.join(' ') : ported.detail);
 
   const unsupported = decideManagedLaunch('0.3.1', 3080);
   check('a known-unsupported version is refused rather than launched and timed out',
@@ -297,7 +307,7 @@ function check(name: string, ok: boolean, detail = ''): void {
   const unsupported = await new DshAdapter({
     baseUrl: 'http://127.0.0.1:3080', homeDir: '/fixture/home', env: {},
     resolveExecutable: () => '/usr/local/bin/dsh',
-    readExecutableVersion: () => '0.2.2-rc.5',
+    readExecutableVersion: () => '0.2.2-rc.4',
   }).describeManagedHost();
   check('an unqualified executable is not started, and the host is still described',
     unsupported?.launch === null && unsupported?.serving?.port === 3080
@@ -385,15 +395,17 @@ function check(name: string, ok: boolean, detail = ''): void {
     return error instanceof Error ? error.message : String(error);
   };
 
-  const qualified = scripted('0.2.0-rc.2');
-  const qualifiedAvailable = await qualified.adapter.isAvailable();
-  check('the qualified 0.2.0-rc.2 install still reaches the host and is available',
-    qualifiedAvailable === true && qualified.sent.includes('POST /api/session/list')
-      && await qualified.adapter.canCreateSession() === true,
-    qualified.sent.join(' '));
-  const qualifiedPrepared = await thrown(() => qualified.adapter.prepareCreateSession());
-  check('the qualified 0.2.0-rc.2 install passes Create\'s readiness boundary',
-    qualifiedPrepared === undefined, String(qualifiedPrepared));
+  for (const version of ['0.2.0-rc.2', '0.2.2-rc.5']) {
+    const qualified = scripted(version);
+    const qualifiedAvailable = await qualified.adapter.isAvailable();
+    check(`the qualified ${version} install reaches the host and is available`,
+      qualifiedAvailable === true && qualified.sent.includes('POST /api/session/list')
+        && await qualified.adapter.canCreateSession() === true,
+      qualified.sent.join(' '));
+    const qualifiedPrepared = await thrown(() => qualified.adapter.prepareCreateSession());
+    check(`the qualified ${version} install passes Create\'s readiness boundary`,
+      qualifiedPrepared === undefined, String(qualifiedPrepared));
+  }
 
   for (const version of ['0.2.1-rc.5', '0.2.3-alpha.2']) {
     const { adapter, sent } = scripted(version);
@@ -452,7 +464,7 @@ function check(name: string, ok: boolean, detail = ''): void {
 
   // The installed binary describes this machine only. A host on another machine
   // is not refused on its evidence: the contract probe decides, as before.
-  const elsewhere = scripted('0.2.2-rc.5', 'http://dsh-host.example:3080');
+  const elsewhere = scripted('0.2.2-rc.4', 'http://dsh-host.example:3080');
   await elsewhere.adapter.isAvailable();
   check('an unqualified local install does not refuse a host configured on another machine',
     elsewhere.sent.includes('GET /api/remote.mux'), elsewhere.sent.join(' '));
