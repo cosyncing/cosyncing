@@ -57,11 +57,19 @@ service reconfiguration instead of leaving omp without its bridge.
 - On omp 19.1.0, extension HTML form dialogs appear as question cards. Radio
   groups and single selects become single-choice questions, checkbox groups
   and multi-selects become multiple-choice questions, and text and number
-  inputs become typed answers. A form that omp withdraws (for example when its
-  timeout expires) closes its card; omp then submits the form's defaults.
-- On omp 19.1.0, a turn that hands work to the background stays running with
-  "Waiting for background work…" until the background result's turn ends or
-  omp reports the session settled.
+  inputs become typed answers. An answer the form's own rules would refuse
+  (`required`, `pattern`, a length or number range, an email or URL field) is
+  not sent and the card stays open. A form that omp withdraws (for example
+  when its timeout expires) closes its card; omp then submits the form's
+  defaults.
+- In sessions driven from the app on omp 19.1.0, a turn that hands work to
+  the background stays running with "Waiting for background work…" until the
+  background result's turn ends or omp reports the session settled. Stop
+  ends that wait at once.
+- In a session started in the terminal (live bridge), a turn that hands work
+  to the background also stays running, without that detail. If the
+  background work ends without a new turn, the session keeps showing running
+  until its next turn.
 - Fork is available on omp 19.1.0: forking a session copies the whole session,
   and forking at a message keeps that message in the copy.
 
@@ -73,6 +81,10 @@ service reconfiguration instead of leaving omp without its bridge.
   `--mode rpc`, where the tool is unavailable. The bridge's `ask_user` tool and
   extension form dialogs still reach the app.
 - The v1 adapter deliberately omits native subagent events.
+- A session written by a newer omp than the one cosyncing runs stays
+  readable, but cosyncing does not resume or rename it natively: an older omp
+  could continue it on the wrong branch. Continue it in a terminal with the
+  omp that wrote it, or update the omp cosyncing uses.
 - The terminal/bridge and installed browser physical passes are complete for
   omp 17.4.2; omp 19.1.0 is measured from RPC and bridge captures. The
   integration remains experimental because omp's upstream RPC and store
