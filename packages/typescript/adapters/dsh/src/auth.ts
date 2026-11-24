@@ -552,6 +552,9 @@ export class DshAuthSession {
     this.generation += 1;
     this.ownership += 1;
     this.inFlight = undefined;
+    // A refusal seen after a release is about the host now at the address,
+    // whose launch token comes next, so adopting that token must not lift it.
+    this.launchTokenReleased = false;
     if (reason === 'credential-refused') {
       const cookie = this.cookie;
       this.enrollmentWithdrawn = true;
@@ -612,10 +615,11 @@ export class DshAuthSession {
    *
    * A Host/Origin refusal is a statement about the ADDRESS, and the address is
    * fixed for the life of this session, so firing the same request again is a
-   * loop with no premise behind it. Every other block is a statement about a
-   * credential or about being able to read it, and both are re-observable —
-   * which is precisely how a repaired enrollment recovers a blocked session
-   * without anyone restarting the broker.
+   * loop with no premise behind it. A new launch is a new fact, though: its
+   * token lifts the block in {@link adoptLaunchToken}. Every other block is a
+   * statement about a credential or about being able to read it, and both are
+   * re-observable — which is precisely how a repaired enrollment recovers a
+   * blocked session without anyone restarting the broker.
    */
   private refusalStands(): boolean {
     return this.stateValue === 'blocked' && this.reasonValue === 'host-or-origin-refused';
