@@ -39,6 +39,32 @@ declinable setup question. Claude's own commands record the install, in two
 settings keys and in Claude's plugin records (`plugins/known_marketplaces.json`
 and `plugins/installed_plugins.json`), and setup installs no legacy hook.
 
+## Models, effort, and the context meter
+
+The model picker offers Claude's `opus`, `sonnet`, `haiku`, and `fable`
+aliases with the effort levels Claude Code 2.1.330 lists for them: low through
+max, plus ultracode, with medium preselected. An older Claude Code, where an
+alias still named a 4.x model, is shown the same list. When a session runs a
+specific older model, cosyncing drops an effort that model does not accept:
+Sonnet 4.6 and Opus 4.6 have no extra high or ultracode, and Haiku 4.5 has no
+effort setting.
+
+In Take over, on Claude Code 2.1.312 or newer, the composer's context meter
+divides by the window Claude Code reports for the session. That figure follows
+a `[1m]` model name, `CLAUDE_CODE_DISABLE_1M_CONTEXT`, and a configured
+compaction window. In Observe mode, in true sync, and on an older Claude Code,
+the meter uses this order instead:
+
+1. A `[1m]` model name, a model Claude runs at 1M by default, or a reading
+   already over 200k: 1M.
+2. A model Claude Code lists at 200k: 200k.
+3. A model Claude Code does not list: 1M when the transcript was written by
+   Claude Code 2.1.323 or newer, which assumes 1M for such a model, and 200k
+   before that.
+
+A session cosyncing only reads cannot see `CLAUDE_CODE_DISABLE_1M_CONTEXT`, so
+its meter can divide by 1M while Claude compacts at 200k.
+
 Direct agent-to-user file delivery is not currently available from a local
 Claude CLI/Drive session because that mode does not expose the native
 `SendUserFile` tool. cosyncing can render a `SendUserFile` record when one is
