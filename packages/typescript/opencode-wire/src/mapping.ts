@@ -8,6 +8,8 @@ import type {
   ToolSemantic,
 } from '@cosyncing/adapter-api';
 import {
+  CONTEXT_INJECTION_EVENT,
+  boundContextBody,
   boundToolSemantic,
   boundedStream,
   commandSemantic,
@@ -285,4 +287,24 @@ export function mapOpenCodePart(
       truncated: md.truncated || undefined, durationMs: elapsedMs(part),
     },
   ];
+}
+
+/**
+ * A user row the server wrote by itself to report back to the session — Kilo's background-task
+ * completion and scheduled wakeup — rather than a prompt. Shown as context, never as a user message.
+ */
+export interface OpenCodeServerReport {
+  /** Names the origin for the reader, e.g. "Kilo background task". */
+  source: string;
+  body: string;
+}
+
+/** The one presentation of a {@link OpenCodeServerReport}, identical in live frames and history. */
+export function openCodeServerReportEvent(report: OpenCodeServerReport): AgentMessage {
+  const bounded = boundContextBody(report.body);
+  return {
+    type: 'event',
+    name: CONTEXT_INJECTION_EVENT,
+    payload: { source: report.source, body: bounded.body, ...(bounded.truncated ? { truncated: true } : {}) },
+  };
 }

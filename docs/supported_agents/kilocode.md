@@ -44,6 +44,13 @@ records and supervises only the process it owns. A user-managed server on port
   question that was already waiting when the app attached or reconnected. An
   answer or a dismissal sent from the app reaches the waiting Kilo turn, and the
   turn continues. Measured against Kilo Code 7.5.16.
+- When a background subagent finishes, or a scheduled wakeup fires (Kilo Code
+  7.7 and newer), Kilo posts a report to the session and starts a turn by
+  itself. That report shows as a context block, not as a message from you, and
+  the turn keeps Drive. A prompt typed in another Kilo client still ends Drive.
+  Measured against Kilo Code 7.5.16 and 7.8.32.
+- While Kilo cannot reach the model provider and waits to retry, the session
+  shows as working, not idle.
 - Native child rows are Observe-only and require a live-server-qualified
   `parent_id` relationship. The installed physical capture confirmed native
   parent/child identity while keeping the child free of writer controls.
@@ -53,6 +60,9 @@ records and supervises only the process it owns. A user-managed server on port
 - No terminal handoff, permission-mode vocabulary, agent switch, files,
   artifacts, fork, clone, export, or trustworthy context-window denominator has
   been measured.
+- A Kilo session goal (7.6 and newer) runs its later turns by itself, and Kilo
+  marks those turns in no way that tells them apart from text another client
+  could send. The first such turn ends Drive of that session; Observe continues.
 - Kilo v2 (the `kilo2` binary, released as `0.0.0-v2-…`) is a separate product
   and is not supported yet. Its sessions are not shown, Create and Drive stay
   off while `kilo` is Kilo v2, and `cosy doctor` says so.

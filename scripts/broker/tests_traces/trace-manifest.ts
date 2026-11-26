@@ -542,6 +542,17 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
     ],
   },
   {
+    file: 'packages/typescript/adapters/kilocode/test/test-kilocode-synthetic-rows.ts',
+    title: 'Kilo own report rows (background task, scheduled wakeup) and 7.8 status suite',
+    nativeVersion: '7.8.32',
+    coverage: [
+      { fn: 'F04', level: 'L0', agents: ['kilo'], note: 'captured report rows show as one context row, identical live, over HTTP history and from kilo.db' },
+      { fn: 'F11', level: 'L0', agents: ['kilo'], note: 'a background subagent completion and a scheduled wakeup start a Kilo turn without ending Drive (7.5.16 and 7.8.32 captures)' },
+      { fn: 'F15', level: 'L0', agents: ['kilo'], note: 'offline (provider unreachable, retrying) reads as working; scheduled is recorded as idle' },
+      { fn: 'F16', level: 'L0', agents: ['kilo'], note: 'a typed part, a goal loop row, a part-less row and an unverified mutation still fail closed' },
+    ],
+  },
+  {
     file: 'packages/typescript/adapters/kilocode/test/test-kilocode-diagnostics.ts',
     title: 'Kilo effect-free floored-version store and managed-port diagnosis suite',
     nativeVersion: '7.4.23',

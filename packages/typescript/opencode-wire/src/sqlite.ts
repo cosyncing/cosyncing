@@ -1,6 +1,8 @@
 import type { AgentMessage, SessionInfo } from '@cosyncing/adapter-api';
 import type { Database } from 'bun:sqlite';
-import { mapOpenCodePart, openCodePartTime, parseOpenCodeJsonObject } from './mapping.ts';
+import {
+  mapOpenCodePart, openCodePartTime, openCodeServerReportEvent, parseOpenCodeJsonObject, type OpenCodeServerReport,
+} from './mapping.ts';
 
 export interface OpenCodeSqliteSession {
   id: string;
@@ -27,6 +29,11 @@ export interface OpenCodeSqliteOptions {
   maxRawRecordBytes?: number;
   maxRawHistoryBytes?: number;
   maxIdentityBytes?: number;
+  /**
+   * A user row whose parts are the server's own report (see `OpenCodeLiveDialect.serverReport`) is
+   * projected as that context row, never as a user-message, as the live connection shows it.
+   */
+  serverReport?: (parts: readonly unknown[]) => OpenCodeServerReport | undefined;
 }
 
 function jsonRecord(value: unknown): Record<string, any> | undefined {
@@ -238,7 +245,8 @@ export function readOpenCodeSqliteHistory(
   sessionId: string,
   options: Pick<OpenCodeSqliteOptions,
     'productId' | 'mapPart' | 'maxMessageBytes' | 'maxHistoryBytes' | 'maxRawRecordBytes' | 'maxRawHistoryBytes'
-    | 'maxIdentityBytes' | 'strictStorageTypes' | 'validMessageRoles' | 'validateMessage' | 'validatePart'> = {},
+    | 'maxIdentityBytes' | 'strictStorageTypes' | 'validMessageRoles' | 'validateMessage' | 'validatePart'
+    | 'serverReport'> = {},
 ): OpenCodeSqliteHistoryRows | undefined {
   const productId = options.productId ?? 'opencode';
   const mapPart = options.mapPart ?? ((part: unknown) => mapOpenCodePart(part, { historical: true, productId }));
@@ -354,6 +362,11 @@ export function readOpenCodeSqliteHistory(
       durableUserKeys.add(message.id);
       for (const part of parts) {
         if (part?.type === 'text' && part.id !== undefined) userTextParts.set(String(part.id), String(part.text ?? ''));
+      }
+      const report = parts.length ? options.serverReport?.(parts) : undefined;
+      if (report) {
+        if (!append(openCodeServerReportEvent(report))) return undefined;
+        continue;
       }
       const text = parts.filter((part) => part?.type === 'text')
         .map((part) => cleanUserText(String(part.text ?? ''))).filter((part) => part.length > 0).join('\n');

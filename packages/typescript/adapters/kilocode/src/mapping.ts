@@ -1,5 +1,5 @@
 import type { AgentMessage } from '@cosyncing/adapter-api';
-import { mapOpenCodePart } from '@cosyncing/opencode-wire';
+import { mapOpenCodePart, type OpenCodeServerReport } from '@cosyncing/opencode-wire';
 
 /** Kilo 7.4.23 persists the OpenCode-lineage part vocabulary unchanged. */
 export interface KiloMapTrace { op: 'unknown-part'; detail: string }
@@ -87,4 +87,29 @@ export function mapKiloPart(
       body: `type=${type} keys=${Object.keys(record).sort().join(',')}`,
     },
   }];
+}
+
+/**
+ * Kilo's own report rows: a background task's completion (7.4+) and a scheduled wakeup (7.7+). Kilo
+ * posts each to the session as a user message whose text part carries `synthetic: true` and
+ * `metadata.background: true`; a wakeup adds `metadata.wakeup: true` (captured on 7.5.16 and 7.8.32,
+ * 2026-11-26, live and in kilo.db). The message itself carries no mark.
+ *
+ * Strict on purpose: EVERY part must be such a text part. A goal loop's turn (synthetic, no metadata),
+ * a prompt with a typed part, a file part, or synthetic text a client can inject is not Kilo's report,
+ * so a real second writer still ends Drive.
+ */
+export function kiloServerReport(parts: readonly unknown[]): OpenCodeServerReport | undefined {
+  if (parts.length === 0) return undefined;
+  let wakeup = false;
+  const bodies: string[] = [];
+  for (const part of parts) {
+    const value = record(part);
+    const metadata = record(value?.metadata);
+    if (!value || !metadata || value.type !== 'text' || value.synthetic !== true || typeof value.text !== 'string'
+      || metadata.background !== true) return undefined;
+    if (metadata.wakeup === true) wakeup = true;
+    bodies.push(value.text);
+  }
+  return { source: wakeup ? 'Kilo scheduled wakeup' : 'Kilo background task', body: bodies.join('\n') };
 }

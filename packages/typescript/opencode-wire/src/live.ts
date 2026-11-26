@@ -13,11 +13,17 @@ import type {
   Unsubscribe,
 } from '@cosyncing/adapter-api';
 import { ControlRefusedError } from '@cosyncing/adapter-api';
-import { mapOpenCodePart } from './mapping.ts';
+import { mapOpenCodePart, openCodeServerReportEvent, type OpenCodeServerReport } from './mapping.ts';
 
 const MAX_SSE_BUFFER_BYTES = 1024 * 1024;
 const MAX_LOCAL_PROMPT_CLAIMS = 128;
 const MAX_LIVE_USER_IDENTITIES = 256;
+/**
+ * How long an unclaimed user row may go without showing a part before it counts as another writer's.
+ * The server publishes a row's envelope first and its parts right after (measured on Kilo 7.5.16 and
+ * 7.8.32: the same millisecond); a row that shows none proves nothing in its favour.
+ */
+const UNVERIFIED_USER_ROW_MS = 2_000;
 const PROMPT_REQUEST_TIMEOUT_MS = 30_000;
 const MUTATION_REQUEST_TIMEOUT_MS = 8_000;
 const OC_ID_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
@@ -61,6 +67,12 @@ export interface OpenCodeLiveDialect {
   productId: string;
   displayName: string;
   permissions?: OpenCodeLivePermissionDialect;
+  /**
+   * Whether these parts of a user row (all of them, or one as it arrives) are the server's own report.
+   * Must be strict: whatever a real client can write has to be refused, or another writer's prompt would
+   * pass as the server's. Absent, every user row this connection did not send is another writer's.
+   */
+  serverReport?(parts: readonly unknown[]): OpenCodeServerReport | undefined;
 }
 
 /**
@@ -73,6 +85,12 @@ export type OpenCodeLiveUnavailableCause = 'disconnected';
 
 export interface OpenCodeLiveOwnershipHooks {
   beforeMutation(action: 'prompt' | 'permission' | 'cancel'): Promise<void>;
+  /**
+   * The user row was already proved this writer's history (the snapshot it attached on, or a later
+   * settle). The server announces a turn's user row again after the turn, so an announcement of a
+   * proved row is not a new prompt.
+   */
+  knownUserRow?(nativeId: string): boolean;
   promptClaimed(nativeId: string, clientKey?: string): void;
   promptRejected(nativeId: string): void;
   reconcileHistory(nativeUserIds: readonly string[]): void;
@@ -274,6 +292,15 @@ export class OpenCodeLiveConnection implements SessionConnection {
   /** A part can precede its message.updated envelope on the SSE stream. */
   private readonly pendingLiveUserParts = new Map<string, PendingLiveUserPart>();
   private readonly emittedLiveUserParts = new Set<string>();
+  /**
+   * Unclaimed user rows announced but not yet proved the server's own report (see
+   * {@link OpenCodeLiveDialect.serverReport}): each waits for its parts, and its timer revokes Drive
+   * if none comes. Mutations are refused while any waits.
+   */
+  private readonly unverifiedUserRows = new Map<string, ReturnType<typeof setTimeout>>();
+  /** User rows proved the server's own report: announced again, they are not new prompts. */
+  private readonly serverReportRows = new Set<string>();
+  private readonly emittedReportParts = new Set<string>();
   /** Assistant messages whose native error row was already shown. */
   private readonly failedMessages = new Set<string>();
   /**
@@ -356,8 +383,16 @@ export class OpenCodeLiveConnection implements SessionConnection {
         this.flushPendingLiveUserParts(id);
       }
       if (info.role === 'user') {
+        const parts = Array.isArray(row?.parts) ? row.parts : [];
+        const report = parts.length ? this.options.dialect.serverReport?.(parts) : undefined;
+        if (report) {
+          // The server's own report is not a prompt: no user-message, and not a user prompt to prove.
+          if (id) this.rememberServerReportRow(id);
+          out.push(openCodeServerReportEvent(report));
+          continue;
+        }
         if (id) nativeUserIds.push(id);
-        const text = textOf(Array.isArray(row?.parts) ? row.parts : []);
+        const text = textOf(parts);
         if (text.trim()) {
           const clientKey = id ? this.currentLocalPromptClaim(id)?.clientKey : undefined;
           out.push({
@@ -727,10 +762,20 @@ export class OpenCodeLiveConnection implements SessionConnection {
       if (this.options.ownership
         && info?.role === 'user'
         && (!id || !this.currentLocalPromptClaim(id))) {
-        this.markUnavailable(
-          `${this.options.dialect.displayName} detected a native user prompt from another writer; Drive was disabled.`,
-        );
-        return;
+        // The same row announced again (the server does so after each turn) is not a new prompt.
+        if (id && (this.serverReportRows.has(id) || this.unverifiedUserRows.has(id))) return;
+        if (!id || !this.options.ownership.knownUserRow?.(id)) {
+          if (!id || !this.options.dialect.serverReport) {
+            this.markUnavailable(
+              `${this.options.dialect.displayName} detected a native user prompt from another writer; Drive was disabled.`,
+            );
+            return;
+          }
+          // The envelope arrives before its parts, and only the parts can show the server's own report.
+          this.holdUnverifiedUserRow(id);
+          this.roles.set(id, 'user');
+          return;
+        }
       }
       if (id) this.roles.set(id, String(info.role ?? ''));
       if (id && info?.role === 'user') {
@@ -740,6 +785,10 @@ export class OpenCodeLiveConnection implements SessionConnection {
       }
       if (info?.role === 'user') this.unmatchedFailure = undefined;
       const summary = summaryOf(info, this.options.dialect.productId);
+      // A turn answering the server's own report has no user message to point at, as in stored history.
+      if (summary?.type === 'run-summary' && summary.userMessageKey && this.serverReportRows.has(summary.userMessageKey)) {
+        delete summary.userMessageKey;
+      }
       if (summary) this.emit(summary);
       const tokens = tokensOf(info);
       if (tokens) this.emit(tokens);
@@ -762,7 +811,38 @@ export class OpenCodeLiveConnection implements SessionConnection {
       if (part.id && part.type) this.partTypes.set(String(part.id), String(part.type));
       const nativeId = String(part.messageID ?? '');
       const claim = this.currentLocalPromptClaim(nativeId);
-      const role = this.roles.get(nativeId) ?? (claim ? 'user' : undefined);
+      let role = this.roles.get(nativeId) ?? (claim ? 'user' : undefined);
+      if (role === undefined && !claim && this.options.ownership && nativeId
+        && this.options.dialect.serverReport?.([part])) {
+        // A part can precede its envelope. Only a user row carries the server's report mark.
+        this.roles.set(nativeId, 'user');
+        this.holdUnverifiedUserRow(nativeId);
+        role = 'user';
+      }
+      if (role === 'user' && !claim && this.options.ownership) {
+        if (this.unverifiedUserRows.has(nativeId) || this.serverReportRows.has(nativeId)) {
+          // Every part of the server's own report must be one; anything else is another writer's.
+          const report = this.options.dialect.serverReport?.([part]);
+          if (!report) {
+            this.markUnavailable(
+              `${this.options.dialect.displayName} detected a native user prompt from another writer; Drive was disabled.`,
+            );
+            return;
+          }
+          this.acceptServerReportRow(nativeId);
+          const partId = String(part.id ?? `${nativeId}:report`);
+          if (report.body.trim() && !this.emittedReportParts.has(partId)) {
+            this.emittedReportParts.add(partId);
+            while (this.emittedReportParts.size > MAX_LIVE_USER_IDENTITIES) {
+              this.emittedReportParts.delete(this.emittedReportParts.values().next().value!);
+            }
+            this.emit(openCodeServerReportEvent(report));
+          }
+          return;
+        }
+        // A part of a row this writer already proved is history, not a new prompt.
+        if (this.options.ownership.knownUserRow?.(nativeId)) return;
+      }
       if (role === 'user' && part.type === 'text' && typeof part.text === 'string' && part.text.trim()) {
         if (!claim && this.options.ownership) {
           this.markUnavailable(
@@ -799,7 +879,8 @@ export class OpenCodeLiveConnection implements SessionConnection {
     }
     if (event?.type === 'session.status') {
       const status = String(properties.status?.type ?? properties.status ?? '').toLowerCase();
-      this.info.status = /busy|retry|running/u.test(status) ? 'working' : 'idle';
+      // `offline`: the model provider is unreachable and the server waits to retry; the turn is still open.
+      this.info.status = /busy|retry|running|offline/u.test(status) ? 'working' : 'idle';
       this.emit({ type: 'metadata-update', key: 'sessionInfo', value: { status: this.info.status } });
       return;
     }
@@ -1024,6 +1105,38 @@ export class OpenCodeLiveConnection implements SessionConnection {
     this.nativeUserCreatedAt.clear();
     this.pendingLiveUserParts.clear();
     this.emittedLiveUserParts.clear();
+    for (const timer of this.unverifiedUserRows.values()) clearTimeout(timer);
+    this.unverifiedUserRows.clear();
+    this.emittedReportParts.clear();
+  }
+
+  /** An unclaimed user row waits for its parts; one that shows none in time is another writer's. */
+  private holdUnverifiedUserRow(nativeId: string): void {
+    if (this.unverifiedUserRows.has(nativeId) || this.serverReportRows.has(nativeId)) return;
+    const timer = setTimeout(() => {
+      if (!this.unverifiedUserRows.has(nativeId)) return;
+      this.unverifiedUserRows.delete(nativeId);
+      this.markUnavailable(
+        `${this.options.dialect.displayName} detected a native user prompt from another writer; Drive was disabled.`,
+      );
+    }, UNVERIFIED_USER_ROW_MS);
+    timer.unref?.();
+    this.unverifiedUserRows.set(nativeId, timer);
+  }
+
+  private acceptServerReportRow(nativeId: string): void {
+    const timer = this.unverifiedUserRows.get(nativeId);
+    if (timer) clearTimeout(timer);
+    this.unverifiedUserRows.delete(nativeId);
+    this.rememberServerReportRow(nativeId);
+  }
+
+  private rememberServerReportRow(nativeId: string): void {
+    this.serverReportRows.delete(nativeId);
+    this.serverReportRows.add(nativeId);
+    while (this.serverReportRows.size > MAX_LIVE_USER_IDENTITIES) {
+      this.serverReportRows.delete(this.serverReportRows.values().next().value!);
+    }
   }
 
   private noteNativeModel(
@@ -1058,6 +1171,12 @@ export class OpenCodeLiveConnection implements SessionConnection {
   }
 
   private async checkOwnershipBeforeMutation(action: 'prompt' | 'permission' | 'cancel'): Promise<void> {
+    if (this.unverifiedUserRows.size) {
+      // Refused, not demoted: the row's parts are due within moments and may prove it the server's own.
+      throw new OpenCodeLiveOwnershipUnprovenError(
+        `${this.options.dialect.displayName} is still checking a new user row in this session; try again.`,
+      );
+    }
     try {
       await this.options.ownership?.beforeMutation(action);
     } catch (error) {

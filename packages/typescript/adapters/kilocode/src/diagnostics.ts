@@ -31,7 +31,7 @@ export const KILO_MINIMUM_VERSION: AgentMinimumVersion = Object.freeze({
   version: KILO_MINIMUM_SUPPORTED_VERSION,
   requiredFeature: 'bounded SQLite Observe plus authenticated managed HTTP/SSE Create and Drive',
   evidenceUrl: 'https://kilocode.ai/docs/',
-  evidenceNote: `Physically measured: ${KILO_MEASURED_VERSIONS.join(', ')}. SQLite, CLI, serve, Basic-auth health, Create, Drive, permission, model, and lineage evidence was recorded against Kilo Code 7.4.23 on 2026-08-23/30/31. Newer builds are supported without being enumerated: the SQLite schema, server health and credential checks each fail closed on their own. Builds below ${KILO_MINIMUM_SUPPORTED_VERSION} remain Observe-only.`,
+  evidenceNote: `Physically measured: ${KILO_MEASURED_VERSIONS.join(', ')}. SQLite, CLI, serve, Basic-auth health, Create, Drive, permission, model, and lineage evidence was recorded against Kilo Code 7.4.23 on 2026-08-23/30/31; question, background-task and wakeup report, and status evidence against 7.5.16 and 7.8.32 on 2026-11-23/26. Newer builds are supported without being enumerated: the SQLite schema, server health and credential checks each fail closed on their own. Builds below ${KILO_MINIMUM_SUPPORTED_VERSION} remain Observe-only.`,
 });
 
 function storageCheck(context: SetupDiagnosisContext, binaryPresent: boolean): SetupCheck {
