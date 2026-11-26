@@ -30,8 +30,10 @@ interface Capture {
   stored: { message: StoredRow[]; part: StoredRow[] };
 }
 const fixture = JSON.parse(readFileSync(join(import.meta.dir, 'fixtures', 'kilo-synthetic-rows.json'), 'utf8'));
-const v8 = fixture['v7.8.32'] as Record<string, Capture> & { offline: any[]; scheduledStatusRead: Record<string, any> };
-const v5 = fixture['v7.5.16'] as Record<string, Capture>;
+interface V7832 { background: Capture; wakeup: Capture; goal: Capture; turns: Capture; offline: any[]; scheduledStatusRead: Record<string, any> }
+interface V7516 { background: Capture; turns: Capture }
+const v8 = fixture['v7.8.32'] as V7832;
+const v5 = fixture['v7.5.16'] as V7516;
 
 const userRows = (capture: Capture) => capture.stored.message.filter((row) => row.data.role === 'user');
 const partsOf = (capture: Capture, messageId: string) => capture.stored.part
@@ -109,9 +111,10 @@ async function storedHistory(capture: Capture): Promise<AgentMessage[]> {
     rmSync(root, { recursive: true, force: true });
   }
 }
-const contextRows = (messages: AgentMessage[]) => messages.filter((message) =>
+type ContextRow = Extract<AgentMessage, { type: 'event' }>;
+const contextRows = (messages: AgentMessage[]): ContextRow[] => messages.filter((message): message is ContextRow =>
   message.type === 'event' && message.name === CONTEXT_INJECTION_EVENT
-  && (message.payload as { source?: string }).source?.startsWith('Kilo '));
+  && !!(message.payload as { source?: string } | undefined)?.source?.startsWith('Kilo '));
 const userKeys = (messages: AgentMessage[]) => messages.flatMap((message) =>
   message.type === 'user-message' && message.key ? [message.key] : []);
 
