@@ -17,6 +17,8 @@
  * change the fake's version/presence, so they run last, in that order.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { runCli } from '../../harness/cli.ts';
 import { BROKER_CONTRACT_REVISION } from '../../../packages/typescript/protocol/src/index.ts';
 import {
@@ -27,6 +29,7 @@ import {
   scaled,
   type SessionStream,
   SOON_MS,
+  REPO_ROOT,
   startBroker,
 } from '../../harness/index.ts';
 import {
@@ -87,11 +90,11 @@ function lastSessionFrame(stream: SessionStream): Frame | undefined {
   return stream.frames.findLast((frame) => frame.kind === 'session');
 }
 
-export function conformanceSuite(kit: ConformanceKit): void {
+export function conformanceSuite(kit: ConformanceKit, suiteName = kit.profile.displayName): void {
   const { profile } = kit;
   const agent = profile.agent;
 
-  describe(`${profile.displayName} adapter conformance`, () => {
+  describe(`${suiteName} adapter conformance`, () => {
     let broker: Broker;
     let fake: FakeController;
     let client: BrokerClient;
@@ -1033,7 +1036,9 @@ export function conformanceSuite(kit: ConformanceKit): void {
         if (asserts(entry, 'roster')) expect(rows.some((row) => row.tool === agent && row.id === hostile)).toBe(false);
         expect(rows.some((row) => row.id === survivor.id)).toBe(true);
         if (!asserts(entry, 'attach')) return;
-        const attach = await client.attach(agent, hostile).then(
+        const diagnostic = join(REPO_ROOT, 'output', 'check', 'diagnostics', `ws-upgrade-${process.pid}.json`);
+        const hadDiagnostic = existsSync(diagnostic);
+        const attach = await client.attach(agent, hostile, { expectRefusal: true }).then(
           async (stream) => {
             const outcome = await stream.waitForFrame((frame) => frame.kind === 'history' || frame.kind === 'error')
               .catch(() => undefined);
@@ -1042,6 +1047,7 @@ export function conformanceSuite(kit: ConformanceKit): void {
           },
           () => 'refused',
         );
+        expect(existsSync(diagnostic), 'expected refusal writes no upgrade diagnostic').toBe(hadDiagnostic);
         // An id the roster withholds is not attachable either, and the refusal is prompt: an error frame,
         // or a socket refused outright. No answer at all is a hang.
         if (assertsFixed('C21')) expect(['error', 'refused']).toContain(String(attach));
@@ -1280,8 +1286,8 @@ export function conformanceSuite(kit: ConformanceKit): void {
       prompt,
       prompted,
       childStarts,
-      async restart() {
-        await broker.restart();
+      async restart(options) {
+        await broker.restart(options);
         client = broker.client();
         await kit.ready?.({ broker, client, fake });
       },

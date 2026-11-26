@@ -13,6 +13,13 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Added
 
+- OpenCode 2.2.0 and newer 2.x: sessions run by the user's shared OpenCode
+  service are listed, live and drivable from the app, with approvals and forms,
+  native commands, files, undo and redo, compaction and transcript export.
+  cosyncing joins the existing service and never starts, stops or migrates it.
+  Turns that OpenCode 2.3 starts by itself, when a background subagent or a shell
+  command that outlasted its timeout finishes, show their answer and summary like
+  any other turn. OpenCode 1 remains supported.
 - Kilo Code questions from Kilo's question tool appear as question cards,
   including one already waiting when you open the session. Answering or
   dismissing from the app continues the Kilo turn. Before, the turn waited with no
@@ -32,6 +39,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Changed
 
+- The broker accepts up to eight inline images per prompt, each up to 1 MiB, for
+  API clients. The first-party app uses staged attachments and never sends inline
+  images.
 - Reasonix: 2.61.0, the final release, is supported alongside 1.25.2. Drive,
   Create and Resume work on exactly these two versions; every other version opens
   sessions in Observe mode only, and `cosy doctor` recommends
@@ -92,13 +102,14 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   the session list with their transcripts. Before, they were missing.
 - OpenCode 2 is recognized from its `opencode v2.x.y` version banner. Before, the
   broker read it as an unknown version and kept its OpenCode 1 behavior, so it
-  could start its managed OpenCode server with the OpenCode 2 binary. Now OpenCode
-  shows as unavailable, the broker's idle OpenCode 1 server is retired, and
-  existing OpenCode 1 sessions stay read-only until OpenCode 2 is supported.
+  could start its managed OpenCode server with the OpenCode 2 binary. Now the
+  broker's idle OpenCode 1 server is retired and the OpenCode 2 service is used
+  instead.
 - With OpenCode 1.19.1 or newer, which discontinued session sharing, `/share` and
   `/unshare` are no longer offered and are refused before they reach OpenCode.
-- When OpenCode is not installed, `cosy doctor` names the installs that stay on
-  OpenCode 1 (`curl -fsSL https://opencode.ai/install | bash` or
+- When OpenCode is not installed, `cosy doctor` names both the OpenCode 2 install
+  (`npm install --global @opencode/cli`) and the installs that stay on OpenCode 1
+  (`curl -fsSL https://opencode.ai/install | bash` or
   `npm install --global opencode-ai`), because the opencode.ai website and
   Homebrew now install OpenCode 2.
 - Codex: after the computer slept or its clock changed, cosyncing could no longer

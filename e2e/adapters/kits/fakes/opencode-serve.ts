@@ -88,6 +88,8 @@ export class FakeOpenCodeServe {
     return this.#port;
   }
 
+  apiProxy?: string;
+
   get url(): string {
     return `http://127.0.0.1:${this.#port}`;
   }
@@ -514,6 +516,8 @@ export class FakeOpenCodeServe {
       }), { headers: { 'content-type': 'text/event-stream' } });
     }
     if (path === '/global/health') return Response.json({ healthy: true, version: this.#version });
+    if (path.startsWith('/api/') && this.apiProxy) return fetch(this.apiProxy + new URL(request.url).pathname + new URL(request.url).search, { method: request.method, headers: request.headers, body: request.method === 'GET' ? undefined : JSON.stringify(body), redirect: 'manual' });
+    if (path === '/api/info') return new Response('<!doctype html><title>OpenCode</title>');
     if (path === '/project') {
       const directories = new Set([...this.sessions.values()].map((session) => String(session.info.directory)));
       for (const raw of this.#raw) directories.add(raw.directory);

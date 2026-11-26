@@ -135,7 +135,7 @@ export class Broker {
 
   /** A protocol client. Owner by default (with the token when there is one). */
   client(auth: ClientAuth = this.token ? { kind: 'owner', token: this.token } : { kind: 'none' }): BrokerClient {
-    return new BrokerClient(this.url, this.wsUrl, auth);
+    return new BrokerClient(this.url, this.wsUrl, auth, () => this.pid);
   }
 
   async start(): Promise<void> {
@@ -221,9 +221,12 @@ export class Broker {
   }
 
   /** Stop and start again on the same state and the same port. */
-  async restart(options: { crash?: boolean } = {}): Promise<void> {
+  async restart(options: { crash?: boolean; env?: NodeJS.ProcessEnv } = {}): Promise<void> {
     if (options.crash) await this.crash();
     else await this.stop({ keepState: true });
+    for (const [key, value] of Object.entries(options.env ?? {})) {
+      if (value === undefined) delete this.#env[key]; else this.#env[key] = value;
+    }
     await this.start();
   }
 

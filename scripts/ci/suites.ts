@@ -92,12 +92,29 @@ function bunTestTask(file: string, id: string, concurrency?: number): Task {
 
 /** Feature e2e suites: `e2e/<suite>/**\/*.test.ts`. */
 function e2eTasks(suite: SuiteId): Task[] {
-  return findTestFiles(`e2e/${suite}`).map((file) =>
+  return findTestFiles(`e2e/${suite}`).flatMap((file) => {
+    const id = file.slice(`e2e/${suite}/`.length).replace(/\.test\.ts$/, '');
+    // Generations share a file; service/doctor scenarios exceeded a minute with live flows.
+    if (suite === 'adapters' && id === 'conformance/opencode') {
+      const serviceCases = [
+        'the shared service stays usable', 'registration binds', 'registration discovery',
+        'an explicit URL', 'doctor checks', 'startup and failed', 'stream retries',
+      ].join('|');
+      const profiles = [
+        ['v1', '^OpenCode adapter conformance'],
+        ['v2-live', `^OpenCode V2 adapter conformance(?!.*extra: (${serviceCases}))`],
+        ['v2-service', `^OpenCode V2 adapter conformance.*extra: (${serviceCases})`],
+      ];
+      return profiles.map(([profile, pattern]) => ({
+        ...bunTestTask(file, `${id}-${profile}`),
+        run: [...bunTestTask(file, id).run, '--test-name-pattern', pattern!],
+      }));
+    }
     // Browser scenarios each own real renderers and brokers. Bound their inner
     // fanout as well as the runner's file pool; eight pages per file made the
     // two longest artifact scenarios exhaust their unchanged 120-second bound.
-    bunTestTask(file, file.slice(`e2e/${suite}/`.length).replace(/\.test\.ts$/, ''), suite === 'web' ? 2 : undefined)
-  );
+    return [bunTestTask(file, id, suite === 'web' ? 2 : undefined)];
+  });
 }
 
 /**

@@ -874,10 +874,10 @@ try {
       plainChecks.length === 0, JSON.stringify(plainChecks));
   }
 
-  for (const [version, code] of [['2.1.4', 'generation-2-unsupported'], ['3.0.0', 'generation-unknown']] as const) {
+  for (const [version, code, status] of [['2.1.4', 'version-below-minimum', 'warn'], ['2.2.0', 'version-supported', 'pass'], ['3.0.0', 'generation-unknown', 'warn']] as const) {
     const diagnosis = await diagnoseOpenCodeSetup(makeFixtureContext(testRoot, 'opencode', version));
     const detected = checkById(diagnosis, 'opencode.version');
-    check(`OpenCode ${version} is detected as unsupported`, detected.status === 'warn' && detected.detailCode === code);
+    check(`OpenCode ${version} has its generation-aware version verdict`, detected.status === status && detected.detailCode === code);
     check(`OpenCode ${version} does not warn about missing V1 storage`, checkById(diagnosis, 'opencode.storage').status === 'skip');
     check(`OpenCode ${version} is ineligible for managed serve`, checkById(diagnosis, 'opencode.managed-serve-eligibility').status === 'skip');
     check(`OpenCode ${version} has no managed-server setup remediation`, !checkById(diagnosis, 'opencode.server').remediation);
@@ -886,6 +886,37 @@ try {
       probeTcp: async () => 'open',
     });
     check(`OpenCode ${version} has no managed-server repair remediation on an occupied port`, !checkById(occupied, 'opencode.server').remediation);
+  }
+
+  {
+    // OpenCode 2 below its own floor: the binary check measured the CLI against the OpenCode 1 floor,
+    // so the V2 verdict must carry the V2 floor and a way out.
+    const below = checkById(await diagnoseOpenCodeSetup(makeFixtureContext(testRoot, 'opencode', '2.1.4')), 'opencode.version');
+    check('OpenCode 2 below 2.2.0 reports the OpenCode 2 floor and the upgrade command',
+      below.remediation?.kind === 'command' && below.remediation.command === 'opencode upgrade'
+        && below.evidence?.installedVersion === '2.1.4' && below.evidence?.minimumVersion === '2.2.0',
+      JSON.stringify(below));
+    // A current CLI whose registered, running service is still older only needs that service restarted.
+    // The registration's owner and mode check reads this host's real file modes, which a Windows host
+    // reports as writable by everyone, so there the fixture is judged as the Windows platform it runs on.
+    const fixture = {
+      ...makeFixtureContext(join(testRoot, 'opencode-v2-stale-service'), 'opencode', '2.3.2'),
+      ...(process.platform === 'win32' ? { platform: 'win32' } : {}),
+    };
+    const state = join(fixture.homeDir, '.local', 'state', 'opencode');
+    mkdirSync(state, { recursive: true });
+    writeFileSync(join(state, 'service.json'), JSON.stringify({ url: 'http://127.0.0.1:47999', pid: 4242, version: '2.1.4', password: 'fixture-password' }), { mode: 0o600 });
+    const stale = checkById(await diagnoseOpenCodeSetup({
+      ...fixture,
+      fetchJson: async (url) => url.endsWith('/api/info')
+        ? { status: 'ok', statusCode: 200, json: { version: '2.1.4', pid: 4242, urls: {}, paths: {}, capabilities: {} } }
+        : { status: 'unreachable' },
+    }), 'opencode.version');
+    check('A current OpenCode 2 CLI with an older running service is told to restart that service',
+      stale.detailCode === 'version-below-minimum' && stale.remediation?.kind === 'command'
+        && stale.remediation.command === 'opencode service restart'
+        && stale.evidence?.installedVersion === '2.1.4' && stale.evidence?.cliVersion === '2.3.2',
+      JSON.stringify(stale));
   }
 
   const opencodeConflict = await diagnoseOpenCodeSetup(fakeContext({

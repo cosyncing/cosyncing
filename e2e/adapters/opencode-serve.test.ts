@@ -90,7 +90,17 @@ posix('the serve the broker launches and owns', () => {
   });
 
   test('the broker launches one serve on the configured port, and its sessions are live and drivable', async () => {
-    await eventually(() => opencode.serves().length === 1, { what: 'the managed serve to start' });
+    try {
+      await eventually(() => opencode.serves().length === 1, { what: 'the managed serve to start' });
+    } catch (error) {
+      const directory = join('output', 'check', 'diagnostics');
+      mkdirSync(directory, { recursive: true });
+      const output = broker.output().replaceAll(broker.token ?? '\0', '[credential]');
+      const diagnostic = { brokerPid: broker.pid, brokerPort: broker.port, servePort: port, ledger: opencode.ledger(), output };
+      writeFileSync(join(directory, `opencode-serve-start-${process.pid}.json`), JSON.stringify(diagnostic, null, 2), { mode: 0o600 });
+      console.error('[e2e] managed OpenCode startup diagnostic:', diagnostic);
+      throw error;
+    }
     const cli = opencode.ledger().filter((entry) => entry.kind === 'cli' && entry.argv?.[0] === 'serve');
     expect(cli.at(-1)!.argv).toEqual(['serve', '--hostname', '127.0.0.1', '--port', String(port)]);
     // Neither the long-lived serve nor any version probe may let OpenCode update itself in place.

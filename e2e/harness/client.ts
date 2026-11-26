@@ -13,7 +13,44 @@ import {
   CLIENT_MINIMUM_BROKER_CONTRACT_REVISION,
   PRODUCT_IDENTITY,
 } from '../../packages/typescript/protocol/src/index.ts';
-import { eventually, type WaitOptions } from './wait.ts';
+import { mkdirSync, readdirSync, readFileSync, readlinkSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { probeWebSocketUpgrade } from './websocket-wire.ts';
+import { eventually, scaled, type WaitOptions } from './wait.ts';
+
+let upgradeFailureRecorded = false;
+
+function listenerSnapshot(port: number) {
+  const bindings: { family: string; address: string; inode: string }[] = [];
+  const owners: { pid: number; inodes: string[] }[] = [];
+  if (process.platform !== 'linux') return { platform: process.platform, unsupported: true, bindings, owners };
+  for (const family of ['tcp', 'tcp6']) {
+    try {
+      for (const line of readFileSync(`/proc/net/${family}`, 'utf8').split('\n').slice(1)) {
+        const columns = line.trim().split(/\s+/);
+        if (columns[3] === '0A' && Number.parseInt(columns[1]!.split(':').at(-1)!, 16) === port && columns[9]) bindings.push({ family, address: columns[1]!, inode: columns[9] });
+      }
+    } catch { /* A kernel may expose only one address family. */ }
+  }
+  const inodes = new Set(bindings.map((binding) => binding.inode));
+  const deadline = Date.now() + scaled(2000);
+  let incomplete = false;
+  for (const pid of readdirSync('/proc').filter((entry) => /^\d+$/.test(entry))) {
+    if (Date.now() >= deadline) { incomplete = true; break; }
+    try {
+      const matched = new Set<string>();
+      for (const fd of readdirSync(`/proc/${pid}/fd`)) {
+        if (Date.now() >= deadline) { incomplete = true; break; }
+        try {
+          const inode = /^socket:\[(\d+)\]$/.exec(readlinkSync(`/proc/${pid}/fd/${fd}`))?.[1];
+          if (inode && inodes.has(inode)) matched.add(inode);
+        } catch { /* A descriptor closed or belongs to another uid. */ }
+      }
+      if (matched.size) owners.push({ pid: Number(pid), inodes: [...matched] });
+    } catch { /* The process exited or its descriptor table is private. */ }
+  }
+  return { platform: process.platform, bindings, owners, incomplete };
+}
 
 export type ClientAuth =
   | { kind: 'none' }
@@ -32,6 +69,8 @@ export interface Response<T = any> {
 export type Frame = { kind: string; [key: string]: any };
 
 export interface AttachOptions {
+  /** An intentional refusal neither diagnoses nor consumes the failure-only guard. */
+  expectRefusal?: boolean;
   mode?: string;
   reason?: string;
   readOnly?: boolean;
@@ -50,7 +89,7 @@ export class BrokerClient {
   readonly auth: ClientAuth;
   readonly #streams = new Set<SessionStream>();
 
-  constructor(url: string, wsUrl: string, auth: ClientAuth) {
+  constructor(url: string, wsUrl: string, auth: ClientAuth, private readonly brokerPid?: () => number | undefined) {
     this.url = url;
     this.wsUrl = wsUrl;
     this.auth = auth;
@@ -58,7 +97,7 @@ export class BrokerClient {
 
   /** The same broker, another identity. */
   as(auth: ClientAuth): BrokerClient {
-    return new BrokerClient(this.url, this.wsUrl, auth);
+    return new BrokerClient(this.url, this.wsUrl, auth, this.brokerPid);
   }
 
   credentialHeaders(): Record<string, string> {
@@ -134,6 +173,7 @@ export class BrokerClient {
 
   /** Open a session stream. Resolves once the socket is open. */
   async attach(tool: string, sessionId: string, options: AttachOptions = {}): Promise<SessionStream> {
+    const expectedBrokerPid = this.brokerPid?.();
     const params: Record<string, string> = {};
     if (options.mode) params.mode = options.mode;
     if (options.readOnly) params.readOnly = '1';
@@ -163,8 +203,57 @@ export class BrokerClient {
     const stream = new SessionStream(`${this.wsUrl}${path}?${query}`, tool, sessionId);
     this.#streams.add(stream);
     stream.closed.finally(() => this.#streams.delete(stream));
-    await stream.opened;
+    try { await stream.opened; }
+    catch (error) {
+      if (!options.expectRefusal && !upgradeFailureRecorded && error instanceof Error && error.message.includes('Expected 101')) {
+        upgradeFailureRecorded = true;
+        try { await this.diagnoseUpgrade(path, tool, sessionId, params, query, expectedBrokerPid); }
+        catch { console.error('[e2e] WebSocket upgrade diagnostic could not be recorded.'); }
+      }
+      throw error;
+    }
     return stream;
+  }
+
+  private async diagnoseUpgrade(path: string, tool: string, sessionId: string, params: Record<string, string>, originalQuery: string, expectedBrokerPid?: number): Promise<void> {
+    const endpoint = new URL(this.wsUrl);
+    const port = Number(endpoint.port) || (endpoint.protocol === 'wss:' ? 443 : 80);
+    const secrets = [new URLSearchParams(originalQuery).get('wsAuthTicket'),
+      this.auth.kind === 'owner' ? this.auth.token : this.auth.kind === 'peer' ? this.auth.peerToken : undefined].filter((value): value is string => !!value);
+    const diagnostic: Record<string, unknown> = { signature: 'Expected 101', capturedAt: new Date().toISOString(), clientPid: process.pid, broker: { pid: expectedBrokerPid ?? null, currentPid: this.brokerPid?.() ?? null, port }, requestedPath: path, normalizedPath: new URL(this.wsUrl + path).pathname };
+    try {
+      diagnostic.listeners = listenerSnapshot(port);
+      let query = new URLSearchParams(params);
+      if (this.auth.kind !== 'none') {
+        const response = await fetch(`${this.url}/api/ws-auth-tickets`, { method: 'POST', headers: { ...this.credentialHeaders(), 'content-type': 'application/json' }, body: JSON.stringify({ tool, sessionId, params }), signal: AbortSignal.timeout(scaled(3000)) });
+        diagnostic.ticketStatus = response.status;
+        if (response.status !== 201) { await response.body?.cancel(); throw new Error('Fresh diagnostic ticket unavailable'); }
+        const reader = response.body?.getReader();
+        let body = '';
+        try {
+          for (;;) {
+            const chunk = await reader?.read();
+            if (!chunk || chunk.done) break;
+            if (body.length + chunk.value.length > 4096) throw new Error('Fresh diagnostic ticket response too large');
+            body += new TextDecoder().decode(chunk.value);
+          }
+        } finally { await reader?.cancel().catch(() => {}); reader?.releaseLock(); }
+        let ticket: { wsAuthTicket?: string };
+        try { ticket = JSON.parse(body); } catch { throw new Error('Fresh diagnostic ticket unavailable'); }
+        if (!ticket || typeof ticket.wsAuthTicket !== 'string') throw new Error('Fresh diagnostic ticket unavailable');
+        secrets.push(ticket.wsAuthTicket);
+        query = new URLSearchParams({ wsAuthTicket: ticket.wsAuthTicket });
+      }
+      diagnostic.upgrade = await probeWebSocketUpgrade(new URL(`${this.wsUrl}${path}?${query}`));
+    } catch (error) { diagnostic.error = error instanceof Error ? error.message : String(error); }
+    const text = JSON.stringify(diagnostic, (_key, value) => typeof value === 'string' ? secrets.reduce((text, secret) => text.replaceAll(secret, '[credential]'), value) : value, 2);
+    const directory = join(import.meta.dir, '..', '..', 'output', 'check', 'diagnostics');
+    try {
+      mkdirSync(directory, { recursive: true });
+      const file = join(directory, `ws-upgrade-${process.pid}.json`);
+      writeFileSync(file, text + '\n', { mode: 0o600 });
+      console.error(`[e2e] WebSocket upgrade diagnostic: ${file}\n${text}`);
+    } catch { console.error(`[e2e] WebSocket upgrade diagnostic:\n${text}`); }
   }
 
   /** Close every stream this client opened. */

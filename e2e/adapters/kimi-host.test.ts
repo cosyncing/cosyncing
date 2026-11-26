@@ -353,19 +353,26 @@ describe('the WebSocket protocol', () => {
 
   test('a resync_required adopts the server watermark, once, and another session\'s gap is ignored', async () => {
     const { id, stream } = await createdDrive('resync');
+    const unrelated = fake.seedSession({ title: 'independent handshake during resync' });
+    await client.waitForSession((row) => row.id === unrelated.id);
     const session = fake.host.sessions.get(id)!;
     session.seq = 41;
     const mark = fake.ledger.mark();
+    // A different session may subscribe while this incident is measured.
+    const other = await client.attach('kimi', unrelated.id);
+    await other.waitForKind('history');
+    await eventually(() => fake.ledger.wsFrames(mark).some((frame) => frame.type === 'subscribe' && frame.payload?.session_ids?.includes(unrelated.id)), { what: 'the independent handshake' });
+    const resubscribes = () => fake.ledger.wsFrames(mark).filter((frame) => frame.type === 'subscribe' && frame.payload?.session_ids?.includes(id));
     // Another session's gap must not move this cursor.
     fake.host.emitRaw(JSON.stringify({ type: 'resync_required', payload: { session_id: 'session_someone_else', current_seq: 999_999, epoch: 'other' } }));
     fake.host.emitResync(id);
-    await eventually(() => fake.ledger.wsFrames(mark).some((frame) => frame.type === 'subscribe'), { what: 'the resubscribe' });
-    const resubscribes = fake.ledger.wsFrames(mark).filter((frame) => frame.type === 'subscribe');
-    expect(resubscribes.length).toBe(1);
-    expect(resubscribes[0]!.payload.cursors[id]).toEqual({ seq: 41, epoch: fake.host.epoch });
+    await eventually(() => resubscribes().length > 0, { what: 'the resubscribe' });
+    expect(resubscribes()).toHaveLength(1);
+    expect(resubscribes()[0]!.payload.cursors[id]).toEqual({ seq: 41, epoch: fake.host.epoch });
     // A sentinel turn after the resync proves there was no loop behind it.
     await settle('after resync', () => stream.sendAndAwait({ kind: 'prompt', text: 'after resync' }));
-    expect(fake.ledger.wsFrames(mark).filter((frame) => frame.type === 'subscribe').length).toBe(1);
+    expect(resubscribes()).toHaveLength(1);
+    other.close();
     stream.close();
   });
 
