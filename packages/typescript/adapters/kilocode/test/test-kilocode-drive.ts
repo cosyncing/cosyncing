@@ -1448,11 +1448,20 @@ try {
   const foreignWriterMessages: AgentMessage[] = [];
   foreignWriterConnection.subscribe((message) => foreignWriterMessages.push(message));
   await flush();
+  // Kilo publishes a prompt's envelope, then its typed part; the part is what proves another writer (an
+  // envelope alone may still be Kilo's own report, see test-kilocode-synthetic-rows.ts).
   emit({
     type: 'message.updated',
     properties: {
       sessionID: created.id,
       info: { id: 'msg_foreign_writer', sessionID: created.id, role: 'user', time: { created: 8 } },
+    },
+  });
+  emit({
+    type: 'message.part.updated',
+    properties: {
+      sessionID: created.id,
+      part: { id: 'prt_foreign_writer', messageID: 'msg_foreign_writer', sessionID: created.id, type: 'text', text: 'typed in another client' },
     },
   });
   await flush();

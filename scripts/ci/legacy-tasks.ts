@@ -126,6 +126,7 @@ export const legacyTasks: Record<LegacyJob, Task[]> = {
     { id: "kilocode-observe", run: ["bun", "run", "packages/typescript/adapters/kilocode/test/test-kilocode-observe.ts"], estimateMs: 1300 },
     { id: "kilocode-registration-gate", run: ["bun", "run", "packages/typescript/broker/test/kilocode/test-kilocode-registration-gate.ts"], estimateMs: 421 },
     { id: "kilocode-store", run: ["bun", "run", "packages/typescript/adapters/kilocode/test/test-kilocode-store.ts"], estimateMs: 1500 },
+    { id: "kilocode-synthetic-rows", run: ["bun", "run", "packages/typescript/adapters/kilocode/test/test-kilocode-synthetic-rows.ts"], estimateMs: 2500 },
     { id: "kimi-attach-priming", run: ["bun", "run", "packages/typescript/broker/test/kimi/test-kimi-attach-priming.ts"], estimateMs: 256 },
     { id: "kimi-cross-client-join", run: ["bun", "run", "packages/typescript/broker/test/broker/test-kimi-cross-client-join.ts"], estimateMs: 83 },
     { id: "kimi-diagnostics", run: ["bun", "run", "packages/typescript/adapters/kimi/test/test-kimi-diagnostics.ts"], estimateMs: 55 },

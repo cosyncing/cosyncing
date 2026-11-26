@@ -47,6 +47,7 @@ import {
   type OpenCodeLiveRequestContext,
 } from '@cosyncing/opencode-wire';
 import { diagnoseKiloSetup } from './diagnostics.ts';
+import { kiloServerReport } from './mapping.ts';
 import { KiloObserveConnection, type KiloObserveOptions } from './observe.ts';
 import {
   discoverKiloStore,
@@ -179,6 +180,11 @@ class KiloDriveOwnership implements OpenCodeLiveOwnershipHooks {
   }
 
   async beforeMutation(): Promise<void> { await this.reconcileDisk(false); }
+
+  /** A user row this Drive claimed, or found in a snapshot it proved: announced again, it is not new. */
+  knownUserRow(nativeId: string): boolean {
+    return this.claimedUserIds.has(nativeId) || this.knownUserIds.has(nativeId) || this.knownRowIds.has(nativeId);
+  }
 
   promptClaimed(nativeId: string): void {
     this.claimedUserIds.add(nativeId);
@@ -841,7 +847,12 @@ class KiloLiveConnection extends OpenCodeLiveConnection {
   constructor(options: Omit<OpenCodeLiveConnectionOptions, 'dialect'>, questions = new KiloQuestionLedger()) {
     super({
       ...options,
-      dialect: { productId: 'kilo', displayName: KILO_DISPLAY_NAME, permissions: kiloRequestDialect(questions, options.trace) },
+      dialect: {
+        productId: 'kilo',
+        displayName: KILO_DISPLAY_NAME,
+        permissions: kiloRequestDialect(questions, options.trace),
+        serverReport: kiloServerReport,
+      },
     });
     this.questions = questions;
     this.writer = options.ownership;

@@ -148,6 +148,13 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   unrecorded Pi bridge that matches the current version, as it already did for omp.
 - Kilo Code: if Kilo v2 (`kilo2`) is installed, `cosy doctor` and New Session say
   Kilo v2 is not supported yet instead of reporting an old or missing Kilo.
+- Kilo Code: a background subagent that finishes, or a scheduled wakeup that
+  fires, no longer ends the app's Drive of the session. Kilo posts these reports
+  as a message and starts a turn by itself, and cosyncing read that message as a
+  prompt from another client. They now show as a context block. A prompt typed
+  in another Kilo client still ends Drive. The same check no longer ends Drive
+  when Kilo repeats the turn's own prompt just after the turn, which could happen
+  to a Drive that attached in that moment.
 - Antigravity sessions show their model again after agy renames the model saved in
   its settings. When agy cannot list its models, for example after its saved
   sign-in expires, the broker retries less and less often instead of every few

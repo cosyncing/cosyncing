@@ -29,7 +29,7 @@ import {
   readOpenCodeSqliteSessions,
   type OpenCodeSqliteSession,
 } from '@cosyncing/opencode-wire';
-import { mapKiloPart, validateKiloMessage, validateKiloPart } from './mapping.ts';
+import { kiloServerReport, mapKiloPart, validateKiloMessage, validateKiloPart } from './mapping.ts';
 
 // Re-exported, not re-declared. Two independent literals for the pinned version
 // meant `index.ts` re-exported the copy the runtime gate does NOT consult, so a
@@ -875,6 +875,7 @@ export async function readKiloHistory(
       validMessageRoles: ['user', 'assistant'],
       validateMessage: validateKiloMessage,
       validatePart: validateKiloPart,
+      serverReport: kiloServerReport,
     });
     if (!history) {
       options.trace?.({ op: 'discovery-bound', path: session.databasePath, detail: 'Kilo raw or canonical history exceeds its decode bound' });
