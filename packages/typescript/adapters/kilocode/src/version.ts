@@ -15,6 +15,9 @@ import { statSync } from 'node:fs';
  */
 export const KILO_MEASURED_VERSIONS: readonly string[] = Object.freeze([
   '7.4.23',
+  // 2026-11: questions (T1), background-task and wakeup report rows, `offline`/`scheduled` statuses.
+  '7.5.16',
+  '7.8.32',
 ]);
 
 const KILO_MEASURED_VERSION_SET = new Set(KILO_MEASURED_VERSIONS);

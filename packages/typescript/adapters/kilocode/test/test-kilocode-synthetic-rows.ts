@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// Kilo's own report rows (KL-2), against frames and kilo.db rows captured
+// Kilo's own report rows (KL-2) and the 7.8 statuses (KL-3), against frames and kilo.db rows captured
 // live from Kilo 7.5.16 and 7.8.32 (fixtures/kilo-synthetic-rows.json; how they were captured is in
 // its `provenance`). The frames are replayed verbatim; only test-made variants say so where built.
 import { strict as assert } from 'node:assert';
@@ -324,6 +324,23 @@ for (const [label, capture, source] of [
   check('7.5.16: the same re-announcement keeps Drive', v5Live.unavailable.length === 0);
   await v5Live.connection.close();
 }
+
+{
+  const capture = v8.background;
+  const live = await attach(capture, []);
+  for (const frame of v8.offline) live.emit({ ...frame, payload: { ...frame.payload, properties: { ...frame.payload.properties, sessionID: capture.sessionID } } });
+  await until('the offline status', () => live.messages.some((message) => message.type === 'metadata-update'
+    && (message.value as any)?.status === 'working'));
+  const statuses = live.messages.flatMap((message) => message.type === 'metadata-update' && (message.value as any)?.status
+    ? [(message.value as any).status] : []);
+  check('7.8.32: `offline` (model provider unreachable, Kilo retrying) reads as working, never idle',
+    v8.offline.some((frame) => frame.payload.properties.status?.type === 'offline')
+      && statuses.length > 0 && statuses.every((status) => status === 'working'), JSON.stringify(statuses));
+  await live.connection.close();
+}
+
+check('7.8.32: a pending wakeup is listed as `scheduled` only on the status read (it maps to idle)',
+  Object.values(v8.scheduledStatusRead).some((status: any) => status.type === 'scheduled'));
 
 console.log(`\n${passed} passed`);
 process.exit(0);

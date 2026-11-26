@@ -155,6 +155,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   in another Kilo client still ends Drive. The same check no longer ends Drive
   when Kilo repeats the turn's own prompt just after the turn, which could happen
   to a Drive that attached in that moment.
+- Kilo Code: while Kilo cannot reach the model provider and waits to retry, the
+  session shows as working instead of idle.
 - Antigravity sessions show their model again after agy renames the model saved in
   its settings. When agy cannot list its models, for example after its saved
   sign-in expires, the broker retries less and less often instead of every few

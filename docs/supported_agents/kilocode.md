@@ -49,6 +49,8 @@ records and supervises only the process it owns. A user-managed server on port
   itself. That report shows as a context block, not as a message from you, and
   the turn keeps Drive. A prompt typed in another Kilo client still ends Drive.
   Measured against Kilo Code 7.5.16 and 7.8.32.
+- While Kilo cannot reach the model provider and waits to retry, the session
+  shows as working, not idle.
 - Native child rows are Observe-only and require a live-server-qualified
   `parent_id` relationship. The installed physical capture confirmed native
   parent/child identity while keeping the child free of writer controls.

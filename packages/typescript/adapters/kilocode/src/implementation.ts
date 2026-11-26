@@ -1745,7 +1745,9 @@ export class KiloAdapter implements AgentBackend {
       tool: this.id,
       title: String(raw.title ?? ''),
       ...(typeof raw.directory === 'string' ? { cwd: raw.directory } : {}),
-      status: /busy|retry|running/u.test(String(raw.status?.type ?? raw.status ?? '').toLowerCase())
+      // `offline`: the model provider is unreachable and Kilo waits to retry; the turn is still open.
+      // `scheduled` (7.8): a wakeup is pending and no turn runs, so it stays idle.
+      status: /busy|retry|running|offline/u.test(String(raw.status?.type ?? raw.status ?? '').toLowerCase())
         ? 'working'
         : 'idle',
       attachMode: 'live',
@@ -1838,8 +1840,10 @@ export class KiloAdapter implements AgentBackend {
       : undefined;
     if (!snapshot) return undefined;
     const type = snapshot[context.sessionId]?.type;
-    if (type === 'busy' || type === 'retry') return 'working';
-    if (type === undefined || type === 'idle') return 'idle';
+    // `offline` (model provider unreachable, Kilo retrying) is a turn still open; `scheduled` (7.8, a
+    // wakeup pending) runs nothing until it fires.
+    if (type === 'busy' || type === 'retry' || type === 'offline') return 'working';
+    if (type === undefined || type === 'idle' || type === 'scheduled') return 'idle';
     return undefined;
   }
 

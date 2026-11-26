@@ -879,7 +879,8 @@ export class OpenCodeLiveConnection implements SessionConnection {
     }
     if (event?.type === 'session.status') {
       const status = String(properties.status?.type ?? properties.status ?? '').toLowerCase();
-      this.info.status = /busy|retry|running/u.test(status) ? 'working' : 'idle';
+      // `offline`: the model provider is unreachable and the server waits to retry; the turn is still open.
+      this.info.status = /busy|retry|running|offline/u.test(status) ? 'working' : 'idle';
       this.emit({ type: 'metadata-update', key: 'sessionInfo', value: { status: this.info.status } });
       return;
     }
