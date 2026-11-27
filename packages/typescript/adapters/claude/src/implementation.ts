@@ -578,6 +578,9 @@ function transcriptNativeBridgeId(path: string): string | undefined {
     }
     let nativeId: string | undefined;
     for (const segment of segments) {
+      // Only a `bridge-session` record names the identity, and its bytes say so. Parsing every
+      // other line of 512 KiB per transcript was most of this read's cost on a cold sweep.
+      if (!segment.includes('bridge-session')) continue;
       const line = parseLineOrNull(segment);
       if (line?.type !== 'bridge-session') continue;
       nativeId = claudeNativeBridgeId(line.bridgeSessionId) ?? nativeId;
@@ -8646,6 +8649,9 @@ export interface ClaudeTurnAuthorityScanOptions {
   /** Internal bounds for the forward title backlog, sharing the range parser. */
   end?: number;
   allowAppend?: boolean;
+  /** The forward title backlog reads only title facts from this pass, so a record that cannot
+   *  change them is skipped unparsed; see {@link claudeRecordMayCarryTitle}. */
+  titleFactsOnly?: boolean;
 }
 
 /** Exact latest-turn evidence retained across incremental transcript growth.
@@ -8749,7 +8755,7 @@ async function scanClaudeTranscriptTurnAuthorityResult(
   if (entry.titleProcessedSize < entry.titleInitialEnd && bytesLeft > 0 && timeLeft > 0) {
     const advanced = await scanClaudeAuthorityRange(path, st, {
       ...entry, processedSize: entry.titleProcessedSize, tail: entry.titleTail,
-    }, { ...options, end: entry.titleInitialEnd, allowAppend: true,
+    }, { ...options, end: entry.titleInitialEnd, allowAppend: true, titleFactsOnly: true,
       maxSourceBytes: bytesLeft, maxElapsedMs: timeLeft });
     options.signal?.throwIfAborted();
     scannedBytes += advanced.scannedBytes;
@@ -9065,6 +9071,12 @@ async function scanClaudeAuthorityRange(
     let boundedReason: ClaudeTurnAuthorityFallbackReason | undefined;
 
     const scanEnd = Math.min(st.size, options.end ?? st.size);
+    // One read buffer for the whole pass. Every fragment below is copied out of it (the projection
+    // keeps strings, never the bytes) before the next read reuses it. A fresh zero-filled buffer per
+    // chunk cost about a sixth of a cold all-history Claude leg in allocation alone. The title-only
+    // pass reads larger chunks so that most records fall wholly inside one and can be skipped.
+    const chunkBytes = options.titleFactsOnly ? CLAUDE_TITLE_BACKLOG_CHUNK_BYTES : CLAUDE_TURN_AUTHORITY_CHUNK_BYTES;
+    const readBuffer = Buffer.allocUnsafe(Math.max(1, Math.min(chunkBytes, scanEnd - pos)));
     while (pos < scanEnd) {
       options.signal?.throwIfAborted();
       if (scannedBytes >= maxSourceBytes) {
@@ -9076,23 +9088,31 @@ async function scanClaudeAuthorityRange(
         break;
       }
       const len = Math.min(
-        CLAUDE_TURN_AUTHORITY_CHUNK_BYTES,
+        readBuffer.length,
         scanEnd - pos,
         maxSourceBytes - scannedBytes,
       );
-      const chunk = Buffer.alloc(len);
+      const chunk = readBuffer.subarray(0, len);
       if (readSync(fd, chunk, 0, len, pos) !== len) {
         boundedReason = 'source-changed';
         break;
       }
       scannedBytes += len;
+      const titleMarkers = options.titleFactsOnly ? claudeTitleMarkerOffsets(chunk) : undefined;
       let segmentStart = 0;
       for (let newline = chunk.indexOf(0x0a); newline >= 0; newline = chunk.indexOf(0x0a, newline + 1)) {
         const fragment = chunk.subarray(segmentStart, newline);
         if (skippingOversized) {
           skippingOversized = false;
+        } else if (
+          titleMarkers
+          && projection.bytes === 0
+          && !claudeRecordMayCarryTitle(titleMarkers, segmentStart, newline, recordStart, titleFacts)
+        ) {
+          // Wholly inside this chunk and provably no title fact: nothing to parse. The authority
+          // candidates this skips are not read from a title-only pass.
         } else {
-          projection.append(fragment);
+          await appendClaudeProjectionInSlices(projection, fragment);
           const projected = projection.finish();
           if (projected.kind === 'opaque') {
             titleOpaque = true;
@@ -9117,7 +9137,7 @@ async function scanClaudeAuthorityRange(
       }
       const trailing = chunk.subarray(segmentStart);
       if (!skippingOversized && trailing.length > 0) {
-        projection.append(trailing);
+        await appendClaudeProjectionInSlices(projection, trailing);
       }
       pos += len;
       await yieldToEventLoop();
@@ -9217,6 +9237,50 @@ async function scanClaudeAuthorityRange(
   } finally {
     if (fd !== undefined) try { closeSync(fd); } catch { /* ignore */ }
   }
+}
+
+/** The tail both title record types share as a JSON string, `"custom-title"` and `"ai-title"`
+ *  (see {@link observeClaudeTitles}). One marker keeps the search to one pass over the bytes. */
+const CLAUDE_TITLE_RECORD_MARKER = Buffer.from('-title"');
+/** Read size of the title-only pass; the authority passes keep their 128 KiB yield granularity. */
+const CLAUDE_TITLE_BACKLOG_CHUNK_BYTES = 1024 * 1024;
+
+/** Feed a record's bytes to its projection no more than one authority chunk at a time, yielding
+ *  between slices, so the larger title-pass reads never lengthen one synchronous stretch. */
+async function appendClaudeProjectionInSlices(projection: TitleRecordProjection, bytes: Buffer): Promise<void> {
+  for (let start = 0; start < bytes.length; start += CLAUDE_TURN_AUTHORITY_CHUNK_BYTES) {
+    if (start > 0) await yieldToEventLoop();
+    projection.append(bytes.subarray(start, start + CLAUDE_TURN_AUTHORITY_CHUNK_BYTES));
+  }
+}
+
+/** Byte offsets in `chunk` where a title record type name may occur, usually none. */
+function claudeTitleMarkerOffsets(chunk: Buffer): number[] {
+  const offsets: number[] = [];
+  for (let at = chunk.indexOf(CLAUDE_TITLE_RECORD_MARKER); at >= 0; at = chunk.indexOf(CLAUDE_TITLE_RECORD_MARKER, at + 1)) {
+    offsets.push(at);
+  }
+  return offsets;
+}
+
+/**
+ * Whether one record, wholly inside the chunk at `[from, to)`, could change the title facts.
+ *
+ * A custom or AI title is a record whose `type` names it, so its bytes contain that name (Claude
+ * writes plain JSON; the reverse authority scan already relies on the same text, see
+ * {@link claudeRecordTurnState}). The first prompt is the EARLIEST qualifying user record, so once
+ * one is known at or before this offset no later record can replace it. Anything else is left to
+ * the full projection, including every record that spans a chunk boundary.
+ */
+function claudeRecordMayCarryTitle(
+  markers: readonly number[],
+  from: number,
+  to: number,
+  recordStart: number,
+  facts: ClaudeTitleFacts,
+): boolean {
+  if (facts.firstPromptOffset === undefined || recordStart < facts.firstPromptOffset) return true;
+  return markers.some((at) => at >= from && at < to);
 }
 
 function claudeRecordTurnAuthority(
@@ -9811,14 +9875,15 @@ function computeLatestModel(path: string): string | undefined {
   const st = statSafe(path);
   if (!st) return undefined;
   for (const win of [256 * 1024, 4 * 1024 * 1024]) {
-    let model: string | undefined;
-    for (const seg of readTailLines(path, win)) {
-      const o = parseLineOrNull(seg);
+    // Newest first, so the first real model found IS the most recent and the lines before it are
+    // never parsed.
+    const segs = readTailLines(path, win);
+    for (let index = segs.length - 1; index >= 0; index -= 1) {
+      const o = parseLineOrNull(segs[index]!);
       if (!o || o.type !== 'assistant') continue;
       const md = o.message?.model;
-      if (typeof md === 'string' && md && md !== '<synthetic>') model = md; // keep last → most recent
+      if (typeof md === 'string' && md && md !== '<synthetic>') return md;
     }
-    if (model) return model;
     if (win >= st.size) break; // already read the whole file; a bigger window cannot help
   }
   return undefined;
@@ -10045,7 +10110,9 @@ function readBytesFrom(path: string, offset: number, length: number): Buffer {
   let fd: number | undefined;
   try {
     fd = openRegularFileSync(path);
-    const buf = Buffer.alloc(Math.max(0, length));
+    // Unfilled: only the `n` bytes the read wrote are ever returned. Zero-filling the 128-512 KiB
+    // head and tail windows was a measurable share of a cold roster sweep.
+    const buf = Buffer.allocUnsafe(Math.max(0, length));
     const n = readSync(fd, buf, 0, Math.max(0, length), offset);
     return buf.subarray(0, n);
   } finally {
