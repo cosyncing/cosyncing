@@ -31,6 +31,7 @@ import type { AgentMessage, SessionInfo } from '@cosyncing/adapter-api';
 import {
   AGY_CANCELED_STATUS,
   AGY_MAX_STEP_TEXT_BYTES,
+  AGY_PROVIDER_ID,
   AGY_STEP_TRUNCATION_NOTE,
   AgyAdapter,
   AgyDriveConnection,
@@ -50,6 +51,8 @@ const MODES_1_5_16 = await Bun.file(new URL('./fixtures/agy-1.5.16-modes.json', 
   stderr: { modeDefaultRefused: string; modeAutoUnavailable: string };
   signedIn: {
     versionStdout: Record<'1.5.16' | '1.5.18', string>;
+    /** `agy models` stdout, `id<TAB>name` per line. */
+    modelsStdout: string;
     launches: Record<'settingsAuto', { args: string[]; stderr: string }>;
     /** One `init` line, verbatim but for `<conversation>` and `<workspace>`. */
     init: string;
@@ -556,17 +559,20 @@ function newDrive(
 {
   // agy 1.5.16 and 1.5.18 send `init` WITHOUT `model` when no `--model` was passed
   // (MEASURED signed in, 2026-11-27; this is one captured line, scrubbed). `model`
-  // is where the Drive re-derives the row's model from the live child, so now
-  // nothing is published from `init`: the row keeps the model it had, none is
-  // invented, and the event is still read (its `permission_mode` is traced).
+  // is where the Drive re-derived the row's model from the live child. A child
+  // launched with `--model` (a model switch from the app) shows that model, with
+  // the catalog's label; one launched without it publishes none, and the row keeps
+  // the model it had. The fake serves the captured `agy models` list.
   const captured = JSON.parse(MODES_1_5_16.signedIn.init) as Record<string, unknown> & { init: Record<string, unknown> };
   const h = newDrive({
     init: captured,
     defaultTurn: [RESULT_OK],
     version: MODES_1_5_16.signedIn.versionStdout['1.5.16'].trim(),
+    models: MODES_1_5_16.signedIn.modelsStdout.split('\n').filter((line) => line.trim()),
   });
   try {
     await h.connection.getHistory();
+    await h.connection.listModels();
     const before = JSON.stringify(h.connection.info.currentModel ?? null);
     await h.connection.sendPrompt({ text: 'go' });
     check('the 1.5.16 init is read: its permission_mode is traced, not taken as the mode',
@@ -576,11 +582,29 @@ function newDrive(
     check('the captured init carries no model, at either level',
       !('model' in captured) && !('model' in captured.init) && captured.init.permission_mode === 'request-review',
       Object.keys(captured.init).join(','));
-    check('…so the row keeps the model it had and the drive publishes none from init',
-      JSON.stringify(h.connection.info.currentModel ?? null) === before
+    check('launched without --model, the row keeps the model it had and the drive publishes none from init',
+      !(h.fake.argv() ?? []).includes('--model')
+        && JSON.stringify(h.connection.info.currentModel ?? null) === before
         && !h.messages.some((m) => m.type === 'metadata-update'
           && JSON.stringify((m as { value: unknown }).value).includes('currentModel')),
       `${before} -> ${JSON.stringify(h.connection.info.currentModel ?? null)}`);
+
+    // A model switch from the app: the turn ends, the next prompt names another model.
+    await waitFor(() => h.statuses().includes('idle'));
+    await h.connection.sendPrompt({
+      text: 'switch model',
+      model: { providerID: AGY_PROVIDER_ID, modelID: 'gemini-3.8-flash-high' },
+    });
+    check('the switch relaunches the child with --model',
+      await waitFor(() => h.fake.launches() === 2
+        && (h.fake.argv() ?? []).join(' ').includes('--model gemini-3.8-flash-high')),
+      (h.fake.argv() ?? []).join(' '));
+    check('after the model-less init, the row shows the launched model with the catalog\'s label',
+      await waitFor(() => h.connection.info.currentModel?.modelID === 'gemini-3.8-flash-high')
+        && h.connection.info.currentModel?.label === 'Gemini 3.8 Flash (High)'
+        && h.messages.some((m) => m.type === 'metadata-update'
+          && JSON.stringify((m as { value: unknown }).value).includes('"modelID":"gemini-3.8-flash-high"')),
+      JSON.stringify(h.connection.info.currentModel));
   } finally {
     h.cleanup();
   }

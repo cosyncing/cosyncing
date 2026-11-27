@@ -942,7 +942,12 @@ export class AgyDriveConnection extends AgyObserveConnection {
    *
    * The MODEL is re-derived here rather than trusted from whatever the attach
    * decided: a value a create returned and nothing re-reads is not state
-   * (reflection §5, dsh P9a).
+   * (reflection §5, dsh P9a). agy 1.5.16 and 1.5.18 send `init` without `model`
+   * when no `--model` is passed (MEASURED 2026-11-27, signed in; no run passed
+   * one). A child this connection launched with `--model` was told its model, so
+   * the launched id is published in its place — otherwise a model switch from
+   * the app never reached the row. `init.model` still wins when present; a child launched
+   * without `--model` publishes nothing, and the row keeps the model it had.
    *
    * `permission_mode` is deliberately NOT published. MEASURED 2026-08-25 across
    * all three launches — `--mode=plan`, `--mode=accept-edits`, and no flag — it
@@ -955,7 +960,7 @@ export class AgyDriveConnection extends AgyObserveConnection {
    */
   private handleInit(event: Record<string, unknown>): void {
     const patch: Partial<SessionInfo> = {};
-    const model = typeof event.model === 'string' ? event.model : undefined;
+    const model = typeof event.model === 'string' ? event.model : this.launchModel;
     if (model) {
       this.launchModel = model;
       // The label rides along when the catalog knows the id — the client never
