@@ -203,13 +203,13 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - Claude Code: a transcript record type cosyncing does not know raises its
   attention event again for sessions attached from stored history. The record
   types Claude Code 2.1.330 writes are recognized and skipped.
-- Antigravity: a session driven from the app now always runs in the mode the app
-  shows. agy 1.5.7 and later start in Auto when no mode is named, and agy 1.5.16
-  no longer accepts `--mode default`, so a session with no mode chosen, or with
-  Default chosen, could run in Auto. cosyncing now names the mode on every launch,
-  using agy's session-only settings for Default and Auto on agy 1.5.7 and later.
-  On agy 1.5.16 and later, which no longer reports the model when a turn starts,
-  a session shows the model you switched to.
+- Antigravity: a session driven from the app with no mode chosen, or with Default
+  chosen, now runs in Default instead of Auto. agy 1.5.7 and later start in Auto
+  when no mode is named, and agy 1.5.16 no longer accepts `--mode default`.
+  cosyncing now names the mode on every launch, using agy's session-only settings
+  for Default and Auto on agy 1.5.7 and later. On agy 1.5.16 and later, which no
+  longer reports the model when a turn starts, a session shows the model you
+  switched to.
 
 ## 0.8.5 — 2026-10-26
 
