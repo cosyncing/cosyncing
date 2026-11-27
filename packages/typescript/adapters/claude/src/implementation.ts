@@ -4346,13 +4346,14 @@ export class ClaudeResumeConnection implements SessionConnection {
   }
 
   /**
-   * Ask the child for the window it measures this session against, and let the meter use it (CL-2).
+   * Ask the child for the window it measures this session against and its own count of the context, and
+   * let the meter use both (CL-2).
    *
    * `get_context_usage` with `detail: "summary"` answers from the last response and local estimates, with
    * no token-count request, and is answered while a turn runs (measured on 2.1.330). Asked when `init`
    * names the model, after each turn's `result`, and after an accepted model switch; requests coalesce to
    * one in flight. A child older than {@link CLAUDE_CONTEXT_USAGE_MIN_VERSION}, or one that refuses or does
-   * not answer, leaves the meter on the registry rules. Nothing waits on it.
+   * not answer, leaves the meter on the registry rules and the `result` reading. Nothing waits on it.
    */
   private readContextWindow(): void {
     if (!this.proc || !claudeVersionAtLeast(this.contextWindow.cliVersion, CLAUDE_CONTEXT_USAGE_MIN_VERSION)) return;
@@ -4570,11 +4571,15 @@ export class ClaudeResumeConnection implements SessionConnection {
             numOrUndef(u.cache_read_input_tokens),
             numOrUndef(u.cache_creation_input_tokens),
           ];
-          if (resident.some((value) => value !== undefined)) {
-            const used = resident.reduce<number>(
-              (sum, value) => sum + Math.max(0, value ?? 0),
-              0,
-            );
+          const used = resident.reduce<number>(
+            (sum, value) => sum + Math.max(0, value ?? 0),
+            0,
+          );
+          // An interrupted turn's `result`, and one that failed before any model call, counts every
+          // token as 0 (measured on 2.1.330): it measured nothing, so the last reading stays until
+          // the answer asked for below restates it. A reading is never 0; the system prompt alone
+          // is thousands of tokens.
+          if (used > 0) {
             const context = claudeContextUsageMessage(
               this.contextWindow,
               this.contextWindow.lastModel,
@@ -4583,6 +4588,8 @@ export class ClaudeResumeConnection implements SessionConnection {
             if (context) this.emit(context);
           }
         }
+        // Claude's own count of the context replaces the reading above when it answers
+        // ({@link learnClaudeContextWindow}): `result.usage` sums every model call of the turn.
         this.readContextWindow();
         if (o.is_error && !interrupted && typeof o.result === 'string' && o.result) this.emit({ type: 'error', message: oneLine(o.result) });
         // Turn over → the NEXT assistant event without a message_start is a local-command reply, not a
@@ -5457,23 +5464,30 @@ function claudeTokenCount(value: unknown): number | undefined {
 }
 
 /**
- * Learn the window from Claude Code's answer to `get_context_usage`, and restate the meter when it moved.
+ * Learn the window and the reading from Claude Code's answer to `get_context_usage`, and restate the
+ * meter when either moved.
  *
  * The answer names the model it measured (`model`, with any `[1m]` spelling) and the window it measured
  * against (`rawMaxTokens`, equal to `maxTokens`): the model's own window, or a smaller compaction window
  * when one is configured (`autocompactSource`), which is also what Claude's `/context` divides by. A
- * Drive child's meter divides by that figure from then on. The reading itself is not taken from here:
- * the turn's `result` remains the meter's `used`.
+ * Drive child's meter divides by that figure from then on.
+ *
+ * When the answer is for the model of the current reading, its `totalTokens` (the count `/context`
+ * shows: `percentage` is `totalTokens / maxTokens`) becomes the reading. The turn's `result` cannot be:
+ * its `usage` sums every model call of the turn (measured on 2.1.330: a three-call turn's `result`
+ * counted 65,739 where the answer that followed counted 23,374), so it is only the reading until this
+ * answer lands, and the reading of a child that is never asked.
  */
 export function learnClaudeContextWindow(state: ClaudeContextWindowState, response: unknown): AgentMessage | undefined {
-  const r = response as { model?: unknown; rawMaxTokens?: unknown; maxTokens?: unknown } | null | undefined;
+  const r = response as { model?: unknown; rawMaxTokens?: unknown; maxTokens?: unknown; totalTokens?: unknown } | null | undefined;
   if (!r || typeof r !== 'object') return undefined;
   const window = claudeTokenCount(r.rawMaxTokens) ?? claudeTokenCount(r.maxTokens);
   if (!window || typeof r.model !== 'string' || !r.model) return undefined;
   const model = claudeContextModel(r.model) ?? r.model;
   state.reportedWindows = { ...state.reportedWindows, [model]: window };
   if (state.lastModel !== model || state.lastUsed === undefined) return undefined;
-  return claudeContextUsageMessage(state, model, state.lastUsed, true);
+  const total = claudeTokenCount(r.totalTokens);
+  return claudeContextUsageMessage(state, model, total ? total : state.lastUsed, true);
 }
 
 /** Update the durable 1M model evidence. cost-state is cumulative session data:

@@ -50,10 +50,13 @@ Sonnet 4.6 and Opus 4.6 have no extra high or ultracode, and Haiku 4.5 has no
 effort setting.
 
 In Take over, on Claude Code 2.1.312 or newer, the composer's context meter
-divides by the window Claude Code reports for the session. That figure follows
-a `[1m]` model name, `CLAUDE_CODE_DISABLE_1M_CONTEXT`, and a configured
-compaction window. In Observe mode, in true sync, and on an older Claude Code,
-the meter uses this order instead:
+shows Claude Code's own count of the context after each turn, the figure
+`/context` shows, and divides by the window Claude Code reports for the
+session. That window follows a `[1m]` model name,
+`CLAUDE_CODE_DISABLE_1M_CONTEXT`, and a configured compaction window. A
+stopped turn keeps the previous reading until Claude Code counts again. In
+Observe mode, in true sync, and on an older Claude Code, the meter uses this
+order for the window instead:
 
 1. A `[1m]` model name, a model Claude runs at 1M by default, or a reading
    already over 200k: 1M.

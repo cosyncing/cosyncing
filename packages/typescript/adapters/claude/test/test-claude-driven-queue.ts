@@ -681,6 +681,23 @@ async function main(): Promise<void> {
       unknown: { totalTokens: 14368, maxTokens: 1000000, rawMaxTokens: 1000000, autocompactSource: 'unknown-model', percentage: 1, model: 'claude-zeta-9-9', autoCompactThreshold: 967000, isAutoCompactEnabled: true, apiUsage: null },
       unknownNo1m: { totalTokens: 14369, maxTokens: 200000, rawMaxTokens: 200000, autocompactSource: 'unknown-model', percentage: 7, model: 'claude-zeta-9-9', autoCompactThreshold: 167000, isAutoCompactEnabled: true, apiUsage: null },
       opusNo1m: { totalTokens: 14455, maxTokens: 200000, rawMaxTokens: 200000, autocompactSource: 'model-default', percentage: 7, model: 'claude-opus-5-5', autoCompactThreshold: 167000, isAutoCompactEnabled: true, apiUsage: null },
+      // Signed in (2026-11-27, model haiku): S1's answers before its first turn and after a turn of three
+      // model calls, and S2's answer after a Stop. `totalTokens` is the count `/context` shows.
+      s1Before: { totalTokens: 15223, maxTokens: 1000000, rawMaxTokens: 1000000, autocompactSource: 'model-default', percentage: 2, model: 'claude-haiku-5-5', autoCompactThreshold: 967000, isAutoCompactEnabled: true, apiUsage: null },
+      s1After: { totalTokens: 23374, maxTokens: 1000000, rawMaxTokens: 1000000, autocompactSource: 'model-default', percentage: 2, model: 'claude-haiku-5-5', autoCompactThreshold: 967000, isAutoCompactEnabled: true, apiUsage: { input_tokens: 2, output_tokens: 5, cache_creation_input_tokens: 780, cache_read_input_tokens: 22592 } },
+      s2AfterStop: { totalTokens: 24135, maxTokens: 1000000, rawMaxTokens: 1000000, autocompactSource: 'model-default', percentage: 2, model: 'claude-haiku-5-5', autoCompactThreshold: 967000, isAutoCompactEnabled: true, apiUsage: { input_tokens: 2, output_tokens: 5, cache_creation_input_tokens: 3194, cache_read_input_tokens: 20898 } },
+    };
+    // S1's `result` for that three-call turn: `usage` is the sum of the three calls (resident 65,739).
+    const s1Result = { type: 'result', subtype: 'success', is_error: false, num_turns: 3, stop_reason: 'end_turn', terminal_reason: 'completed', total_cost_usd: 0.0026286300000000003, usage: { input_tokens: 6, cache_creation_input_tokens: 9980, cache_read_input_tokens: 55753, output_tokens: 149, iterations: [] } };
+    // S2's `result` for the turn its Stop interrupted: every count is 0.
+    const s2Interrupted = { type: 'result', subtype: 'error_during_execution', is_error: true, num_turns: 2, stop_reason: null, terminal_reason: 'aborted_streaming', total_cost_usd: 0.0031776750000000005, usage: { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 0, iterations: [] } };
+    /** Answers each `get_context_usage` with the next captured answer; later ones stay unanswered. */
+    const answerInOrder = (h: Harness, answers: object[]) => {
+      h.answerControl = (request) => {
+        if (request.subtype !== 'get_context_usage') return undefined;
+        const next = answers.shift();
+        return next ? { subtype: 'success', response: next } : undefined;
+      };
     };
     const result = (used: number) => ({
       type: 'result',
@@ -710,8 +727,9 @@ async function main(): Promise<void> {
       await h.conn.close();
     }
 
-    // An answer that lands after the turn's reading restates the meter once; the registry rule was on screen
-    // until then.
+    // An answer that lands after the turn's reading restates the meter once, with Claude Code's own count
+    // (`totalTokens`) against the window it reported; the result's reading and the registry rule were on
+    // screen until then.
     {
       const h = newConn();
       await h.history();
@@ -724,8 +742,8 @@ async function main(): Promise<void> {
         (h.conn as any).handleEvent({ type: 'control_response', response: { subtype: 'success', request_id: line.request_id, response: captured.opusNo1m } });
       }
       await settled();
-      check('CL-2 Drive: a late answer restates the reading against the reported window, once',
-        pending.length === 1 && JSON.stringify(meters(h)) === JSON.stringify([{ used: 150_000, max: 1_000_000 }, { used: 150_000, max: 200_000 }]),
+      check('CL-2 Drive: a late answer restates the reading once, with Claude Code\'s own count against the reported window',
+        pending.length === 1 && JSON.stringify(meters(h)) === JSON.stringify([{ used: 150_000, max: 1_000_000 }, { used: 14_455, max: 200_000 }]),
         JSON.stringify({ meters: meters(h), pending: pending.length }));
       await h.conn.close();
     }
@@ -741,6 +759,72 @@ async function main(): Promise<void> {
       await settled();
       check('CL-2 Drive: a child below 2.1.312 is not asked, and an unknown id on it reads 200k (CL-3)',
         asked(h).length === 0 && JSON.stringify(meters(h)) === JSON.stringify([{ used: 150_000, max: 200_000 }]),
+        JSON.stringify({ meters: meters(h), asked: asked(h).length }));
+      await h.conn.close();
+    }
+
+    // A turn of several model calls: its `result` sums them, so it is the reading only until Claude's own
+    // count, asked for after every `result`, answers.
+    {
+      const h = newConn();
+      await h.history();
+      const answers: object[] = [captured.s1Before, captured.s1After];
+      answerInOrder(h, answers);
+      await h.conn.sendPrompt({ text: 'three calls' });
+      (h.conn as any).ingestInit({ model: 'claude-haiku-5-5', permissionMode: 'default', slash_commands: [], claude_code_version: '2.1.330' });
+      await settled();
+      const beforeTurn = meters(h);
+      h.msgs.length = 0;
+      (h.conn as any).handleEvent(s1Result);
+      await settled();
+      check('CL-2 Drive: after a turn of several model calls the meter ends at Claude Code\'s own count, not the summed result usage',
+        beforeTurn.length === 0 && answers.length === 0
+          && JSON.stringify(meters(h)) === JSON.stringify([{ used: 65_739, max: 1_000_000 }, { used: 23_374, max: 1_000_000 }]),
+        JSON.stringify({ beforeTurn, meters: meters(h), unanswered: answers.length }));
+      await h.conn.close();
+    }
+
+    // A Stop: the interrupted turn's `result` counts nothing, so the meter keeps its reading until the
+    // answer asked for after it restates the reading with Claude's count.
+    {
+      const h = newConn();
+      await h.history();
+      const answers: object[] = [captured.s1Before, captured.s1After, captured.s2AfterStop];
+      answerInOrder(h, answers);
+      await h.conn.sendPrompt({ text: 'a turn that finishes' });
+      (h.conn as any).ingestInit({ model: 'claude-haiku-5-5', permissionMode: 'default', slash_commands: [], claude_code_version: '2.1.330' });
+      await settled();
+      (h.conn as any).handleEvent(s1Result);
+      await settled();
+      await h.conn.sendPrompt({ text: 'a turn to stop' });
+      await h.conn.runCommand('stop');
+      h.msgs.length = 0;
+      (h.conn as any).handleEvent(s2Interrupted);
+      const atStop = meters(h);
+      await settled();
+      check('CL-2 Drive: a Stop\'s all-zero result never shows used 0, and Claude Code\'s next count restates the reading',
+        h.stdin.some((line: any) => line.type === 'control_request' && line.request?.subtype === 'interrupt')
+          && atStop.length === 0 && answers.length === 0
+          && JSON.stringify(meters(h)) === JSON.stringify([{ used: 24_135, max: 1_000_000 }]),
+        JSON.stringify({ atStop, meters: meters(h), unanswered: answers.length }));
+      await h.conn.close();
+    }
+
+    // A child below 2.1.312 is never asked, so the `result` stays its reading; a Stop's all-zero result
+    // still shows nothing.
+    {
+      const h = newConn();
+      await h.history();
+      await h.conn.sendPrompt({ text: 'old child, three calls' });
+      (h.conn as any).ingestInit({ model: 'claude-haiku-5-5', permissionMode: 'default', slash_commands: [], claude_code_version: '2.1.311' });
+      h.msgs.length = 0;
+      (h.conn as any).handleEvent(s1Result);
+      await h.conn.sendPrompt({ text: 'old child, a turn to stop' });
+      await h.conn.runCommand('stop');
+      (h.conn as any).handleEvent(s2Interrupted);
+      await settled();
+      check('CL-2 Drive: a child below 2.1.312 keeps the result\'s reading, and its Stop shows no used 0',
+        asked(h).length === 0 && JSON.stringify(meters(h)) === JSON.stringify([{ used: 65_739, max: 1_000_000 }]),
         JSON.stringify({ meters: meters(h), asked: asked(h).length }));
       await h.conn.close();
     }
