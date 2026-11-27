@@ -94,7 +94,10 @@
  *   runs in Auto wherever agy offers it, and `--mode default` is refused ("valid:
  *   accept-edits, auto, plan"). So every Drive launch names its mode, encoded per
  *   agy version (`agyModeLaunchArgs`): Default is pinned with
- *   `--settings '{"agentMode":""}'`, other modes add `--mode`.
+ *   `--settings '{"agentMode":""}'`, accept-edits and plan add `--mode`, and Auto
+ *   is `--settings '{"agentMode":"auto"}'` alone, because print mode refuses
+ *   `--mode auto` before it restores the sign-in (MEASURED 2026-11-27, 1.5.16
+ *   and 1.5.18).
  *   That is why `init.permission_mode` reports `"request-review"` under
  *   `--mode=plan`, `--mode=accept-edits` AND no `--mode` — it answers the OTHER
  *   axis. So `init` can NEVER be the source of `currentMode` (the earlier answer

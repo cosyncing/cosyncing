@@ -11,9 +11,10 @@
  *   agy --conversation <id> --output-format=stream-json --input-format=stream-json
  *       [--model <id>] <mode>
  *
- * `<mode>` is never empty (AG-4, MEASURED 1.5.16): from 1.5.7 it is
- * `--settings {"agentMode":""}` plus `--mode <m>` for any mode but Default;
- * before 1.5.7 it is `--mode <m>`. See `agyModeLaunchArgs` in `store.ts`. The
+ * `<mode>` is never empty (AG-4, MEASURED 1.5.16 and 1.5.18): from 1.5.7 it is
+ * `--settings {"agentMode":"auto"}` for Auto, else `--settings {"agentMode":""}`
+ * plus `--mode <m>` for accept-edits and plan; before 1.5.7 it is `--mode <m>`.
+ * See `agyModeLaunchArgs` in `store.ts`. The
  * stream-json child is agy's print mode (`printmode.go` in its log).
  *
  * `--print` is NEVER passed. On ≤1.1.17 `--print` takes the prompt as its VALUE,
@@ -791,9 +792,13 @@ export class AgyDriveConnection extends AgyObserveConnection {
   /**
    * agy said it did not apply the mode it was launched with (AG-4, MEASURED 1.5.16).
    *
-   * `--mode auto` where agy offers no Auto (an enterprise account, no terminal
-   * sandbox, a rollout not reached) warns "continuing in the default mode", and
-   * that default is whatever agy starts in on its own — a saved `agentMode`
+   * Both warnings are about a `--mode` value. `--mode auto` where agy offers no
+   * Auto warns "continuing in the default mode" — reachable on 1.3.5–1.5.6 only:
+   * from 1.5.7 Auto rides session settings and passes no `--mode`, and with the
+   * Auto rollout flag off (signed out, MEASURED on 1.5.16 and 1.5.18) agy printed
+   * no mode warning for it — so where agy does not apply it the row can say Auto
+   * while the child runs without it, and no notice is possible. The fallback
+   * after a warning is whatever agy starts in on its own — a saved `agentMode`
    * included (MEASURED: a saved `accept-edits` stayed in force). A launch that
    * pinned Default underneath therefore falls back to Default, and the row says
    * so; any other fallback is a mode the app cannot see, and the row says nothing

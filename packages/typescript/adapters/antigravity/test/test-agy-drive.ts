@@ -44,10 +44,16 @@ import {
 } from '../src/index.ts';
 import { buildAgyFixtureTree, FIXTURE, jsonl, writeFakeAgyBinary, type AgyFakeScript } from './fixtures/tree.ts';
 
-/** Verbatim agy 1.5.16 output on modes (AG-4) — see `_provenance` in the file. */
+/** Verbatim agy 1.5.16/1.5.18 output on modes (AG-4) — see `_provenance` in the file. */
 const MODES_1_5_16 = await Bun.file(new URL('./fixtures/agy-1.5.16-modes.json', import.meta.url)).json() as {
   versionStdout: string;
   stderr: { modeDefaultRefused: string; modeAutoUnavailable: string };
+  signedIn: {
+    versionStdout: Record<'1.5.16' | '1.5.18', string>;
+    launches: Record<'settingsAuto', { args: string[]; stderr: string }>;
+    /** One `init` line, verbatim but for `<conversation>` and `<workspace>`. */
+    init: string;
+  };
 };
 
 const results: Array<{ name: string; ok: boolean }> = [];
@@ -580,10 +586,12 @@ function newDrive(
 // Since agy 1.5.7 a launch that names no mode runs in Auto wherever agy offers
 // it (changelog and docs), and on 1.5.16 `--mode default` is refused (MEASURED
 // 2026-11-24). So the first child of a session nobody chose a mode for must still be
-// launched in Default, pinned with session settings; Auto is a choice, and agy's
-// own "not available" answer moves the row back to Default and says so. The fake
-// prints the version and the stderr lines agy 1.5.16 printed, verbatim
-// (`fixtures/agy-1.5.16-modes.json`).
+// launched in Default, pinned with session settings; Auto is a choice, launched
+// with its own session setting, because print mode refuses `--mode auto` before
+// it restores the sign-in (MEASURED signed in, 2026-11-27, 1.5.16 and 1.5.18).
+// Before 1.5.7 Auto is `--mode auto`, and agy's "not available" answer to it
+// clears the row and says so. The fake prints the version and the stderr lines
+// agy printed, verbatim (`fixtures/agy-1.5.16-modes.json`).
 /** The notices a harness's connection emitted, oldest first. */
 const notices = (h: Harness): string[] =>
   h.messages.filter((m) => m.type === 'notice').map((m) => (m as { message: string }).message);
@@ -609,12 +617,48 @@ const notices = (h: Harness): string[] =>
     h.cleanup();
   }
 }
-{
-  // agy answers `--mode auto` with its own "not available" warning on stderr.
+for (const version of ['1.5.16', '1.5.18'] as const) {
+  // Auto from 1.5.7 is the session setting the signed-in capture saw reach Auto,
+  // with nothing on stderr; no `--mode` rides along, so agy has no `--mode` to refuse.
+  const captured = MODES_1_5_16.signedIn.launches.settingsAuto;
   const h = newDrive({
     init: INIT_EVENT,
     defaultTurn: [RESULT_OK],
-    version: MODES_1_5_16.versionStdout.trim(),
+    version: MODES_1_5_16.signedIn.versionStdout[version].trim(),
+    ...(captured.stderr ? { stderr: captured.stderr } : {}),
+  });
+  try {
+    await h.connection.getHistory();
+    await h.connection.sendPrompt({ text: 'go auto', permissionMode: 'auto' });
+    await waitFor(() => h.fake.launches() === 1 && (h.fake.argv() ?? []).length > 0);
+    const argv = h.fake.argv() ?? [];
+    check(`${version}: Auto launches with the captured \`--settings {"agentMode":"auto"}\` and no --mode`,
+      argv.join(' ').endsWith(captured.args.join(' ')) && !argv.includes('--mode')
+        && argv.filter((arg) => arg === '--settings').length === 1,
+      argv.join(' '));
+    check(`${version}: the row names Auto, the mode the child was launched in`,
+      h.connection.info.currentMode === 'auto'
+        && h.messages.some((m) => m.type === 'metadata-update'
+          && JSON.stringify((m as { value: unknown }).value) === '{"currentMode":"auto"}'),
+      String(h.connection.info.currentMode));
+    await h.connection.sendPrompt({ text: 'still auto' });
+    check(`${version}: no mode notice and no mode warning on this route`,
+      !notices(h).some((message) => /\bmode\b/i.test(message))
+        && !h.traces.some((trace) => trace.op === 'drive-mode-warning')
+        && h.connection.info.currentMode === 'auto' && h.fake.launches() === 1,
+      `${notices(h).join(' | ')}; ${h.traces.map((trace) => trace.op).join(',')}`);
+  } finally {
+    h.cleanup();
+  }
+}
+{
+  // Before 1.5.7 Auto is `--mode auto`. agy's "not available" answer to it (the
+  // line captured on 1.5.16) leaves the child in agy's own startup mode, which
+  // nothing pinned, so the row is cleared rather than left on Auto, and the user is told.
+  const h = newDrive({
+    init: INIT_EVENT,
+    defaultTurn: [RESULT_OK],
+    version: '1.5.6',
     stderr: MODES_1_5_16.stderr.modeAutoUnavailable,
   });
   try {
@@ -622,19 +666,19 @@ const notices = (h: Harness): string[] =>
     await h.connection.sendPrompt({ text: 'go auto', permissionMode: 'auto' });
     await waitFor(() => h.fake.launches() === 1 && (h.fake.argv() ?? []).length > 0);
     const argv = h.fake.argv() ?? [];
-    check('Auto rides --mode over the Default pin',
+    check('before 1.5.7 Auto rides `--mode auto`, with no --settings flag',
       argv.slice(argv.indexOf('--mode'), argv.indexOf('--mode') + 2).join(' ') === '--mode auto'
-        && argv.includes('--settings'),
+        && !argv.includes('--settings'),
       argv.join(' '));
     check('the row first names the mode the child was launched in',
       h.messages.some((m) => m.type === 'metadata-update'
         && JSON.stringify((m as { value: unknown }).value) === '{"currentMode":"auto"}'),
       h.messages.filter((m) => m.type === 'metadata-update').map((m) => JSON.stringify(m)).join(' | '));
-    check('agy\'s "not available" warning moves the row to Default, which the pin makes true',
-      await waitFor(() => h.connection.info.currentMode === 'default'),
+    check('agy\'s "not available" warning clears the row: nothing pinned Default underneath',
+      await waitFor(() => h.connection.info.currentMode === undefined),
       String(h.connection.info.currentMode));
-    check('the user is told the turn runs in Default, not Auto',
-      notices(h).some((message) => /Auto mode is not available.*runs in Default/.test(message)),
+    check('the user is told Auto is not available and the session runs in agy\'s own mode',
+      notices(h).some((message) => /Auto mode is not available.*the mode Antigravity starts in on its own/.test(message)),
       notices(h).join(' | '));
     check('the warning is traced', h.traces.some((trace) => trace.op === 'drive-mode-warning'),
       h.traces.map((trace) => trace.op).join(','));
