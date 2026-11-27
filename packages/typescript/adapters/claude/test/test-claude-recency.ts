@@ -201,6 +201,46 @@ if (process.platform !== 'win32' && process.getuid?.() !== 0) {
   check('a readable replacement recovers its own title', recovered?.title === 'Replacement prompt' && !recovered.titlePending, JSON.stringify(recovered));
 }
 
+// The cold title backlog skips records that cannot change the title. Two transcripts put the title
+// exactly where a wrong skip would lose it: a custom title deep in a long backlog, behind a decoy
+// record that only mentions "ai-title"; and a first prompt only the backlog can see (the head is one
+// oversized record) while a LATER prompt is the transcript's last line.
+const backlogFiller = (tag: string, count: number): string[] => Array.from({ length: count }, (_, index) =>
+  JSON.stringify({ type: 'assistant', uuid: `${tag}-${index}`, cwd, timestamp: '2026-07-01T11:00:00.000Z',
+    message: { model: 'claude-backlog', role: 'assistant', content: [{ type: 'text', text: 'y'.repeat(6 * 1024) }], stop_reason: 'tool_use' } }));
+const midTitleTranscript = join(wrapperProjectDir, '99999999-1111-4222-8333-999999999991.jsonl');
+writeFileSync(midTitleTranscript, [
+  JSON.stringify({ type: 'user', uuid: 'mid-user', cwd, timestamp: '2026-07-01T11:00:00.000Z', message: { content: 'Head prompt' } }),
+  ...backlogFiller('mid-a', 600),
+  JSON.stringify({ type: 'custom-title', customTitle: 'Mid backlog title', sessionId: '99999999-1111-4222-8333-999999999991' }),
+  ...backlogFiller('mid-b', 600),
+  // `"page-title"` puts the title marker's bytes in an ordinary record, so it is parsed, not skipped.
+  JSON.stringify({ type: 'user', uuid: 'mid-decoy', cwd, timestamp: '2026-07-01T11:00:00.000Z',
+    message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'grep hit: {"type":"ai-title","aiTitle":"Decoy"}' }] },
+    toolUseResult: { 'page-title': 'ai-title' } }),
+  JSON.stringify({ type: 'assistant', uuid: 'mid-end', cwd, timestamp: '2026-07-01T11:00:00.000Z',
+    message: { model: 'claude-backlog', role: 'assistant', content: [{ type: 'text', text: 'done' }], stop_reason: 'end_turn' } }),
+].join('\n') + '\n');
+const earlyPromptTranscript = join(wrapperProjectDir, '99999999-1111-4222-8333-999999999992.jsonl');
+writeFileSync(earlyPromptTranscript, [
+  JSON.stringify({ type: 'progress', data: 'x'.repeat(200 * 1024) }),
+  JSON.stringify({ type: 'user', uuid: 'early-user', cwd, timestamp: '2026-07-01T11:00:00.000Z', message: { content: 'Early real prompt' } }),
+  ...backlogFiller('early', 600),
+  JSON.stringify({ type: 'user', uuid: 'later-user', cwd, timestamp: '2026-07-01T11:00:00.000Z', message: { content: 'Later prompt' } }),
+].join('\n') + '\n');
+const backlogIds = [midTitleTranscript, earlyPromptTranscript].map((path) => Buffer.from(path).toString('base64url'));
+// Each sweep advances a pending backlog within its own bounds; a handful always settles these few MiB.
+let backlogRows: any[] = [];
+for (let sweep = 0; sweep < 20; sweep += 1) {
+  const swept = await adapter.discoverSessions();
+  backlogRows = backlogIds.map((id) => swept.find((row) => row.id === id));
+  if (backlogRows.every((row) => row && !row.titlePending)) break;
+}
+check('a custom title deep in the cold title backlog is found, and a record that only mentions one is not a title',
+  backlogRows[0]?.title === 'Mid backlog title' && !backlogRows[0]?.titlePending, JSON.stringify(backlogRows[0]));
+check('a first prompt only the backlog can see outranks a later prompt at the tail',
+  backlogRows[1]?.title === 'Early real prompt' && !backlogRows[1]?.titlePending, JSON.stringify(backlogRows[1]));
+
 const cancelTranscript = join(wrapperProjectDir, 'ffffffff-ffff-4fff-8fff-ffffffffffff.jsonl');
 writeFileSync(cancelTranscript, JSON.stringify({ type: 'user', uuid: 'cancel-user', cwd, message: { content: 'Cancel this scan' } }) + '\n');
 const padding = JSON.stringify({ type: 'progress', data: 'x'.repeat(256 * 1024) }) + '\n';

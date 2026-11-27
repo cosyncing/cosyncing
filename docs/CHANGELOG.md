@@ -86,6 +86,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   accept.
 - Antigravity is verified against agy 1.5.16 and 1.5.18. The mode picker offers
   Auto on agy versions that have it.
+- The first all-history session list after a broker start is about twice as fast
+  for large Claude Code histories: transcript records that cannot change a session
+  title are no longer parsed.
 
 ### Fixed
 
