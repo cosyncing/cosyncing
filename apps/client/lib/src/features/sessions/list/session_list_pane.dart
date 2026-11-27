@@ -588,7 +588,7 @@ class _SessionListPaneState extends ConsumerState<SessionListPane> {
           // post-frame callback with no `attached` guard; a scrolling viewport
           // that collects the placeholder first leaves it on a detached render
           // object and it throws — flutter/flutter#122680, fixed by #186840,
-          // absent from the 3.44.3 branch we pin. No exception was captured
+          // absent from the 3.44 branch we pin. No exception was captured
           // and there is no deterministic repro, so nothing is proven: the
           // release `RenderErrorBox` seen over this list is consistent with
           // that failure, and removing `SelectionArea` removes the mechanism.
