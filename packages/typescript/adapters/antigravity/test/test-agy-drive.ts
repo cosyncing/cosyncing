@@ -553,6 +553,39 @@ function newDrive(
   }
 }
 
+{
+  // agy 1.5.16 and 1.5.18 send `init` WITHOUT `model` when no `--model` was passed
+  // (MEASURED signed in, 2026-11-27; this is one captured line, scrubbed). `model`
+  // is where the Drive re-derives the row's model from the live child, so now
+  // nothing is published from `init`: the row keeps the model it had, none is
+  // invented, and the event is still read (its `permission_mode` is traced).
+  const captured = JSON.parse(MODES_1_5_16.signedIn.init) as Record<string, unknown> & { init: Record<string, unknown> };
+  const h = newDrive({
+    init: captured,
+    defaultTurn: [RESULT_OK],
+    version: MODES_1_5_16.signedIn.versionStdout['1.5.16'].trim(),
+  });
+  try {
+    await h.connection.getHistory();
+    const before = JSON.stringify(h.connection.info.currentModel ?? null);
+    await h.connection.sendPrompt({ text: 'go' });
+    check('the 1.5.16 init is read: its permission_mode is traced, not taken as the mode',
+      await waitFor(() => h.traces.some((trace) => trace.op === 'drive-init-permission-mode-ignored'))
+        && h.connection.info.currentMode === 'default',
+      h.traces.map((trace) => trace.op).join(','));
+    check('the captured init carries no model, at either level',
+      !('model' in captured) && !('model' in captured.init) && captured.init.permission_mode === 'request-review',
+      Object.keys(captured.init).join(','));
+    check('…so the row keeps the model it had and the drive publishes none from init',
+      JSON.stringify(h.connection.info.currentModel ?? null) === before
+        && !h.messages.some((m) => m.type === 'metadata-update'
+          && JSON.stringify((m as { value: unknown }).value).includes('currentModel')),
+      `${before} -> ${JSON.stringify(h.connection.info.currentModel ?? null)}`);
+  } finally {
+    h.cleanup();
+  }
+}
+
 // ── 11b. A mode agy would not apply never becomes `currentMode` ─────────────
 //
 // agy does not apply a `--mode` it does not recognize: it warns and runs in its
