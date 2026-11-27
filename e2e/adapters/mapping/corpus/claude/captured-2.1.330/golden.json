@@ -1,0 +1,46 @@
+{
+  "history": [
+    {"type":"user-message","text":"Use the Bash tool to run `echo one`. Then use the Bash tool again to run `echo two`. Then reply with the single word DONE.","key":"queued:2026-11-27T06:54:18.781Z:122","queued":true,"sentAt":1795762458781},
+    {"type":"run-summary","key":"54ac4a6e-ce4b-4285-a9f7-7e5d4bac8dba:run:queued:2026-11-27T06:54:18.781Z:122","turnId":"queued:2026-11-27T06:54:18.781Z:122","userMessageKey":"queued:2026-11-27T06:54:18.781Z:122","status":"running","startedAt":1795762458781,"source":"claude-transcript"},
+    {"type":"user-message","text":"Use the Bash tool to run `echo one`. Then use the Bash tool again to run `echo two`. Then reply with the single word DONE.","key":"queued:2026-11-27T06:54:18.781Z:122","turnId":"198455b4-6e8d-46ec-8ef2-af6976e5863b","sentAt":1795762459762},
+    {"type":"run-summary","key":"54ac4a6e-ce4b-4285-a9f7-7e5d4bac8dba:run:queued:2026-11-27T06:54:18.781Z:122","turnId":"queued:2026-11-27T06:54:18.781Z:122","userMessageKey":"queued:2026-11-27T06:54:18.781Z:122","status":"cancelled","startedAt":1795762458781,"source":"claude-transcript"},
+    {"type":"run-summary","key":"54ac4a6e-ce4b-4285-a9f7-7e5d4bac8dba:run:198455b4-6e8d-46ec-8ef2-af6976e5863b","turnId":"198455b4-6e8d-46ec-8ef2-af6976e5863b","userMessageKey":"queued:2026-11-27T06:54:18.781Z:122","status":"running","startedAt":1795762459762,"source":"claude-transcript"}
+  ],
+  "live": [
+    {"type":"metadata-update","key":"sessionInfo","value":{"model":"claude-haiku-5-5","currentModel":{"providerID":"anthropic","modelID":"claude-haiku-5-5","label":"Haiku 5.5"}}},
+    {"type":"tool-call","callId":"toolu_012zJiPTMfjPZzCGZU3QfH6W","toolName":"Bash","toolClass":"execute","args":{"command":"echo one","description":"Print one"},"semantic":{"kind":"command","command":"echo one","state":"running"}},
+    {"type":"token-count","input":2,"output":72,"cacheRead":13392,"cacheWrite":6377},
+    {"type":"metadata-update","key":"contextUsage","value":{"used":19771,"max":1000000}},
+    {"type":"tool-result","callId":"toolu_012zJiPTMfjPZzCGZU3QfH6W","toolName":"Bash","toolClass":"execute","semantic":{"kind":"command","command":"echo one","state":"completed","stdout":{"text":"one","totalBytes":3}},"isError":false,"result":"one"},
+    {"type":"tool-call","callId":"toolu_01PKo7qvxFtAiBM8Cp6m3ssy","toolName":"Bash","toolClass":"execute","args":{"command":"echo two","description":"Print two"},"semantic":{"kind":"command","command":"echo two","state":"running"}},
+    {"type":"token-count","input":2,"output":72,"cacheRead":19769,"cacheWrite":2823},
+    {"type":"metadata-update","key":"contextUsage","value":{"used":22594,"max":1000000}},
+    {"type":"tool-result","callId":"toolu_01PKo7qvxFtAiBM8Cp6m3ssy","toolName":"Bash","toolClass":"execute","semantic":{"kind":"command","command":"echo two","state":"completed","stdout":{"text":"two","totalBytes":3}},"isError":false,"result":"two"},
+    {"type":"model-output","text":"DONE","final":true,"key":"claude:msg_011ChSzeuBrP6bsEK9Azk3PM:0:t"},
+    {"type":"token-count","input":2,"output":5,"cacheRead":22592,"cacheWrite":780},
+    {"type":"metadata-update","key":"contextUsage","value":{"used":23374,"max":1000000}},
+    {"type":"status","status":"idle"},
+    {"type":"run-summary","key":"54ac4a6e-ce4b-4285-a9f7-7e5d4bac8dba:run:198455b4-6e8d-46ec-8ef2-af6976e5863b","turnId":"198455b4-6e8d-46ec-8ef2-af6976e5863b","userMessageKey":"queued:2026-11-27T06:54:18.781Z:122","assistantMessageKey":"claude:msg_011ChSzeuBrP6bsEK9Azk3PM:0:t","status":"done","startedAt":1795762459762,"completedAt":1795762463308,"totalRuntimeMs":3546,"tokens":{"input":6,"output":149,"cacheRead":55753,"cacheWrite":9980},"source":"claude-transcript"},
+    {"type":"metadata-update","key":"runtimeTotals","value":{"totalRuntimeMs":3546,"turnCount":1,"updatedAt":1795762463308,"source":"claude-transcript"}}
+  ],
+  "replay": [
+    {"type":"user-message","text":"Use the Bash tool to run `echo one`. Then use the Bash tool again to run `echo two`. Then reply with the single word DONE.","key":"queued:2026-11-27T06:54:18.781Z:122","queued":true,"sentAt":1795762458781},
+    {"type":"run-summary","key":"54ac4a6e-ce4b-4285-a9f7-7e5d4bac8dba:run:queued:2026-11-27T06:54:18.781Z:122","turnId":"queued:2026-11-27T06:54:18.781Z:122","userMessageKey":"queued:2026-11-27T06:54:18.781Z:122","status":"running","startedAt":1795762458781,"source":"claude-transcript"},
+    {"type":"user-message","text":"Use the Bash tool to run `echo one`. Then use the Bash tool again to run `echo two`. Then reply with the single word DONE.","key":"queued:2026-11-27T06:54:18.781Z:122","turnId":"198455b4-6e8d-46ec-8ef2-af6976e5863b","sentAt":1795762459762},
+    {"type":"run-summary","key":"54ac4a6e-ce4b-4285-a9f7-7e5d4bac8dba:run:queued:2026-11-27T06:54:18.781Z:122","turnId":"queued:2026-11-27T06:54:18.781Z:122","userMessageKey":"queued:2026-11-27T06:54:18.781Z:122","status":"cancelled","startedAt":1795762458781,"source":"claude-transcript"},
+    {"type":"run-summary","key":"54ac4a6e-ce4b-4285-a9f7-7e5d4bac8dba:run:198455b4-6e8d-46ec-8ef2-af6976e5863b","turnId":"198455b4-6e8d-46ec-8ef2-af6976e5863b","userMessageKey":"queued:2026-11-27T06:54:18.781Z:122","status":"running","startedAt":1795762459762,"source":"claude-transcript"},
+    {"type":"tool-call","callId":"toolu_012zJiPTMfjPZzCGZU3QfH6W","toolName":"Bash","toolClass":"execute","args":{"command":"echo one","description":"Print one"},"semantic":{"kind":"command","command":"echo one","state":"running"}},
+    {"type":"token-count","input":2,"output":72,"cacheRead":13392,"cacheWrite":6377},
+    {"type":"metadata-update","key":"contextUsage","value":{"used":19771,"max":1000000}},
+    {"type":"tool-result","callId":"toolu_012zJiPTMfjPZzCGZU3QfH6W","toolName":"Bash","toolClass":"execute","semantic":{"kind":"command","command":"echo one","state":"completed","stdout":{"text":"one","totalBytes":3}},"isError":false,"result":"one"},
+    {"type":"tool-call","callId":"toolu_01PKo7qvxFtAiBM8Cp6m3ssy","toolName":"Bash","toolClass":"execute","args":{"command":"echo two","description":"Print two"},"semantic":{"kind":"command","command":"echo two","state":"running"}},
+    {"type":"token-count","input":2,"output":72,"cacheRead":19769,"cacheWrite":2823},
+    {"type":"metadata-update","key":"contextUsage","value":{"used":22594,"max":1000000}},
+    {"type":"tool-result","callId":"toolu_01PKo7qvxFtAiBM8Cp6m3ssy","toolName":"Bash","toolClass":"execute","semantic":{"kind":"command","command":"echo two","state":"completed","stdout":{"text":"two","totalBytes":3}},"isError":false,"result":"two"},
+    {"type":"model-output","text":"DONE","final":true,"key":"claude:msg_011ChSzeuBrP6bsEK9Azk3PM:0:t"},
+    {"type":"token-count","input":2,"output":5,"cacheRead":22592,"cacheWrite":780},
+    {"type":"metadata-update","key":"contextUsage","value":{"used":23374,"max":1000000}},
+    {"type":"run-summary","key":"54ac4a6e-ce4b-4285-a9f7-7e5d4bac8dba:run:198455b4-6e8d-46ec-8ef2-af6976e5863b","turnId":"198455b4-6e8d-46ec-8ef2-af6976e5863b","userMessageKey":"queued:2026-11-27T06:54:18.781Z:122","assistantMessageKey":"claude:msg_011ChSzeuBrP6bsEK9Azk3PM:0:t","status":"done","startedAt":1795762459762,"completedAt":1795762463308,"totalRuntimeMs":3546,"tokens":{"input":6,"output":149,"cacheRead":55753,"cacheWrite":9980},"source":"claude-transcript"},
+    {"type":"metadata-update","key":"runtimeTotals","value":{"totalRuntimeMs":3546,"turnCount":1,"updatedAt":1795762463308,"source":"claude-transcript"}}
+  ]
+}
