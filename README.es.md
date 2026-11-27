@@ -258,7 +258,7 @@ Informa de las vulnerabilidades por el canal privado de GitHub, según [SECURITY
 
 ## Desarrollo
 
-El repositorio fija Flutter 3.44.3 en `.fvmrc` y Bun 1.4.3 en `package.json`. Ejecuta los comandos
+El repositorio fija Flutter 3.44.9 en `.fvmrc` y Bun 1.4.5 en `package.json`. Ejecuta los comandos
 desde la raíz del repositorio.
 
 ```bash

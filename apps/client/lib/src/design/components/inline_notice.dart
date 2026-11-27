@@ -24,7 +24,7 @@ import 'package:flutter/material.dart';
 /// [SelectionArea]: on the web a selection region registers a platform view
 /// whose placeholder reads `localToGlobal` from an unguarded post-frame
 /// callback, and this repo has already traced a release-mode `RenderErrorBox`
-/// over a scrolling list to exactly that mechanism on the 3.44.3 branch it pins
+/// over a scrolling list to exactly that mechanism on the 3.44 branch it pins
 /// (see `session_list_pane.dart`). A leaf that selects its own text needs none
 /// of that machinery, and no notice in the app sits inside a selection region
 /// it would otherwise have joined.

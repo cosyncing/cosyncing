@@ -70,7 +70,7 @@ class CachedRosterPane extends ConsumerWidget {
           // No selection region, matching the authoritative pane: this is a
           // navigation roster, and on web a `SelectionArea` carries a platform
           // view whose placeholder can throw when a scrolling viewport
-          // collects it (flutter/flutter#122680, unfixed in our pinned 3.44.3).
+          // collects it (flutter/flutter#122680, unfixed in our pinned 3.44.9).
           child: ListView(
             key: const Key('cached-roster-list'),
             padding: const EdgeInsets.symmetric(vertical: 4),

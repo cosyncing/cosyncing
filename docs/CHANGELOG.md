@@ -11,6 +11,13 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Changed
+
+- Development and CI use Flutter 3.44.9, the latest 3.44 stable patch, and CI
+  test jobs run on Bun 1.4.5. The broker's minimum Bun and the Bun runtime the
+  installers place stay at 1.4.3, and releases are still built and verified on
+  it.
+
 ## 0.9.0 — 2026-11-27
 
 ### Added

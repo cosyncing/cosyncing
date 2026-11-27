@@ -14,10 +14,11 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # Keep the tested runtime aligned with the installer pins and package floor.
-  # Bun 1.3.14 eagerly buffers streamed HTTP bodies for stalled receivers.
-  BUN_VERSION: 1.4.3
-  FLUTTER_VERSION: 3.44.3
+  # The test jobs run a newer Bun than the 1.4.3 installer pin and package
+  # floor. The release workflows and the Broker Release Gate stay on that
+  # pinned runtime, so releases are still built and verified on it.
+  BUN_VERSION: 1.4.5
+  FLUTTER_VERSION: 3.44.9
   NODE_VERSION: 22.14.0
 
 jobs:
