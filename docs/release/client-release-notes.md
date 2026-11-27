@@ -5,43 +5,38 @@ then use `cosy pair` to authorize the client.
 
 ## Update your client with this release
 
-0.8.5 adds navigation through earlier user prompts and improves session names,
-reconnection, quota cards and server updates. Update your Android or desktop app
-for the client changes and update the Server with `cosy update` for the broker
-fixes. The web client ships with the Server and always matches it.
+0.9.0 is a Server release. It adds support for OpenCode 2, Kimi Code 2.7 and
+omp 19.1.0, and brings cosyncing up to date with the current versions of the
+other supported agents. The Android and desktop apps have no changes of their
+own; update the Server with `cosy update`. The web client ships with the Server
+and always matches it.
 
 The broker contract revision stays at 35, the minimum accepted client revision
-stays at 17, and Bun stays at 1.4.3. A 0.8.3 client can still drive a 0.8.5
-Server; updating the app adds the new navigation and interface improvements.
-Standalone desktop apps offer **Download**. For desktops placed by the
-all-in-one installer, quit the app before updating it with `cosy update`.
+stays at 17, and Bun stays at 1.4.3. A 0.8.5 client drives a 0.9.0 Server
+unchanged. Standalone desktop apps offer **Download**. For desktops placed by
+the all-in-one installer, quit the app before updating it with `cosy update`.
 
-## What's changed in 0.8.5
+## What's changed in 0.9.0
 
-- Transcript arrows step through earlier user prompts, including messages
-  outside the loaded history. Searches can be canceled or continued, and the
-  down arrow returns to live updates without disturbing your draft or focus.
-- Session names stay consistent across lists, tabs, detail views and native
-  terminals. Renames survive refreshes and restarts, and unnamed conversations
-  keep their localized label until a title is available.
-- Network changes reconnect sessions and roster updates more reliably. Home
-  retains recent quota readings during refresh, and quota cards use independent
-  columns with consistent themed surfaces.
-- The session menu has a single-click **Hide tool calls** checkbox on narrow
-  and wide screens.
-- Pi and OMP bridges recover large histories and tool results while retaining
-  the running turn. Updated terminals prevent app actions from starting a second
-  writer on the same session. Restart or `/reload` open Pi/OMP terminals after
-  updating the Server to load the new bridge extension.
-- Background tasks in app-driven Claude Code sessions keep running through
-  client disconnects, Stop and settings changes. A setting that requires a
-  restart is refused while background tasks run.
-- Installer-owned Windows servers can apply updates from **Settings → Updates**
-  while preserving a running desktop app. Older servers need one terminal
-  upgrade to acquire this support. Windows and Linux report update failures
-  and completed rollbacks promptly.
+- OpenCode 2.2.0 and newer: sessions run by your shared OpenCode service are
+  listed, live and drivable, with approvals, forms, commands, files, undo and
+  redo. OpenCode 1 remains supported.
+- Kimi Code 2.7 and newer work over the Kimi Agent Protocol, alongside the 0.x
+  versions. omp 19.1.0 is supported alongside 17.4.2, with forms as question
+  cards and session fork.
+- Reasonix 2.61.0, Claude Code 2.1.330, agy 1.5.16 and 1.5.18, Cline 3.0.75,
+  Grok Build 1.0.92, Pi 1.6.0 and DeepSeek Harness 0.2.2-rc.5 are verified.
+- Kilo Code questions appear as question cards, and Kilo's own background-task
+  and wakeup reports no longer end the app's control of a session.
+- Claude Code: Stop ends only the turn and keeps background agents running, and
+  the context meter follows the window and count Claude Code reports.
+- Antigravity sessions driven from the app run in the mode the app shows, and
+  the mode picker offers Auto.
+- Version and readiness checks no longer let Claude Code, Kimi Code or agy
+  update themselves. The first full session list after a Server start is about
+  twice as fast for large Claude Code histories.
 
-For the full list, see the [0.8.5 changelog](../CHANGELOG.md#085--2026-10-26).
+For the full list, see the [0.9.0 changelog](../CHANGELOG.md#090--2026-11-27).
 
 ## Downloads
 
