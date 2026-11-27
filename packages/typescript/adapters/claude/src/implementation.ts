@@ -141,6 +141,7 @@ import {
   claudeModControl,
   claudeModLostControl,
   claudeModRowPatch,
+  claudeVersionAtLeast,
   CLAUDE_MOD_COMMAND_REFUSAL,
   type ClaudeAdapterOptions,
   type ClaudeModCommand,
@@ -974,8 +975,8 @@ export function resumeArgs(uuid: string, opts: { model?: string; mode?: string; 
   // an unknown wrapper model clamps to "supported" (modelSupportsEffort → true) so the endpoint decides.
   // ULTRACODE is special: it is NOT a valid `--effort` value (the launch flag warns + ignores it — confirmed
   // on minimax) — it's xhigh + a session orchestration flag enabled via the `--settings {ultracode:true}`
-  // launch flag (belt-and-suspenders with `--effort xhigh`, which ultracode implies). Sonnet/Haiku reject
-  // ultracode → clamped out (neither flag emitted). Cost-safety is unaffected (it lives in resumeEnv).
+  // launch flag (belt-and-suspenders with `--effort xhigh`, which ultracode implies). A model without xhigh
+  // (Sonnet 4.6, Haiku 4.5) rejects ultracode → clamped out (neither flag emitted). Cost-safety is unaffected (it lives in resumeEnv).
   if (opts.effort) {
     if (opts.effort === 'ultracode') {
       if (modelSupportsEffort(opts.model ?? 'opus', 'ultracode')) args.push('--settings', JSON.stringify({ ultracode: true }), '--effort', 'xhigh');
@@ -2310,7 +2311,18 @@ export class ClaudeObserveConnection implements SessionConnection {
           const activity = storedParentActivity(store);
           collectParentActivity(record.line, store.setOf('activityResolved'), activity.backgroundToolUseIds,
             activity.notifiedToolUseIds, activity.backgroundSpawnMs!, activity, Boolean(append && this.primed));
-          if (append && this.primed) this.noteSessionFacts(record.line);
+          if (append && this.primed) {
+            this.noteSessionFacts(record.line);
+            // The stored mapper replays without a per-connection type set, and the live rows reach
+            // subscribers from the store, so the drift alarm the plain tail raises has to be raised
+            // here: once per type per connection, for lines written while attached, never stored. A
+            // rebuild replays from the start of the file, so only a record at or past the boundary the
+            // last indexing reached is new; one before it was in the file before this read.
+            if (record.offset >= savedBoundary) {
+              const unknown = claudeUnknownLineTypeEvent(record.line, this.unknownLineTypes);
+              if (unknown) this.emit(unknown);
+            }
+          }
         }
         replay.checkpoint();
         const after = fileHistorySourceIdentity(this.path);
@@ -2974,8 +2986,8 @@ export class ClaudeLiveConnection implements SessionConnection {
       // (and so we never re-inject e.g. `/effort ultracode` onto a Sonnet/Haiku that rejects it).
       if (this.syncEffort && !modelSupportsEffort(model, this.syncEffort)) this.syncEffort = undefined;
     }
-    // Effort: inject only on a real change AND only if the (now-current) model supports it — Sonnet has no
-    // xhigh, Haiku no effort, and only Opus/Fable accept `ultracode`, so a stale pick never injects an invalid
+    // Effort: inject only on a real change AND only if the (now-current) model supports it — Sonnet 4.6 has no
+    // xhigh, Haiku 4.5 no effort, and only xhigh-capable models accept `ultracode`, so a stale pick never injects an invalid
     // `/effort`. ultracode is a valid mid-session slash command the live terminal parses natively.
     const effort = input.model?.reasoningEffort;
     if (effort && effort !== this.syncEffort && modelSupportsEffort(this.syncModel ?? model, effort)) {
@@ -3086,14 +3098,14 @@ const E_MEDIUM: Effort = { effort: 'medium', label: 'Medium' };
 const E_HIGH: Effort = { effort: 'high', label: 'High' };
 const E_XHIGH: Effort = { effort: 'xhigh', label: 'Extra high' };
 const E_MAX: Effort = { effort: 'max', label: 'Max', description: 'Most thinking, slowest' };
-const EFFORTS_FULL: Effort[] = [E_LOW, E_MEDIUM, E_HIGH, E_XHIGH, E_MAX]; // Opus 4.8/4.7, Fable 5
-const EFFORTS_NO_XHIGH: Effort[] = [E_LOW, E_MEDIUM, E_HIGH, E_MAX]; //        Sonnet 4.6 (no xhigh)
+const EFFORTS_FULL: Effort[] = [E_LOW, E_MEDIUM, E_HIGH, E_XHIGH, E_MAX]; // every 5.x model, Opus 4.7/4.8
+const EFFORTS_NO_XHIGH: Effort[] = [E_LOW, E_MEDIUM, E_HIGH, E_MAX]; //        Sonnet 4.6, Opus 4.6 (no xhigh)
 const EFFORTS_NONE: Effort[] = []; //                                         Haiku 4.5 (no effort control)
 
 /** Ultracode (binary 2.1.181: "Enable ultracode for the session: xhigh effort plus standing dynamic-workflow
  *  orchestration") = xhigh + an orchestration flag, NOT a real effort rung. It's SESSION-ONLY (never persisted)
- *  and gated to xhigh-capable models, so it rides ONLY on EFFORTS_FULL_ULTRA (Opus/Fable) — never on
- *  Sonnet/Haiku. The launch flag `--effort` does NOT accept it (it'd be ignored); Drive enables it via the
+ *  and gated to xhigh-capable models (2.1.330: the model declares `xhigh_effort`), so it rides ONLY on
+ *  EFFORTS_FULL_ULTRA, which every current alias carries, never on a concrete id without xhigh. The launch flag `--effort` does NOT accept it (it'd be ignored); Drive enables it via the
  *  `--settings {ultracode:true}` launch flag (+ `--effort xhigh`), Sync via the `/effort ultracode` slash
  *  command. Surfaced as one extra pseudo-effort token appended after `max` so the existing effort picker shows
  *  it with zero app-side change. */
@@ -3111,15 +3123,44 @@ function effortsWithDefaultNote(efforts: Effort[], defaultEffort: string | undef
 /** Curated, user-selectable Claude alias catalog. There is no complete zero-turn list command. Concrete ids
  *  below are matching keys for account gating only; they are not presented as verified alias resolutions.
  *  A model this list lacks still renders as the exact live current value from transcript/init.
- *  Fable: Claude Code 2.1.321+ resolves `fable` to `claude-fable-5-2`, whose registry `default_effort` is
- *  `medium` (read from the 2.1.330 build; an account-level server override can still change it). */
+ *
+ *  Each entry follows the CURRENT Claude Code's model registry (read from the 2.1.330 build; 2.1.331 is
+ *  the same): `opus`, `sonnet`, `haiku` and `fable` resolve to Opus 5.5, Sonnet 5.5, Haiku 5.5 and Fable
+ *  5.2, every one declares `effort`, `max_effort` and `xhigh_effort` (so ultracode too, which needs
+ *  xhigh), and every one's registry `default_effort` is `medium`. An account-level server override can
+ *  still change a default. The picker has no cheap CLI version to key on, so an older Claude, where an
+ *  alias still named a 4.x model (Opus 4.8 defaulting to high, Sonnet 4.6 with no xhigh, Haiku 4.5 with
+ *  no effort control), is shown today's ladder and default; {@link modelSupportsEffort} still clamps a
+ *  session whose model is one of those concrete ids. */
 type CatalogEntry = { alias: string; fullId: string; label: string; efforts: Effort[]; defaultEffort?: string };
 const CURATED_CLAUDE_CATALOG: CatalogEntry[] = [
-  { alias: 'opus', fullId: 'claude-opus-4-8', label: 'Opus', efforts: EFFORTS_FULL_ULTRA, defaultEffort: 'high' },
-  { alias: 'sonnet', fullId: 'claude-sonnet-4-6', label: 'Sonnet', efforts: EFFORTS_NO_XHIGH, defaultEffort: 'high' },
-  { alias: 'haiku', fullId: 'claude-haiku-4-5', label: 'Haiku', efforts: EFFORTS_NONE },
+  { alias: 'opus', fullId: 'claude-opus-5-5', label: 'Opus', efforts: EFFORTS_FULL_ULTRA, defaultEffort: 'medium' },
+  { alias: 'sonnet', fullId: 'claude-sonnet-5-5', label: 'Sonnet', efforts: EFFORTS_FULL_ULTRA, defaultEffort: 'medium' },
+  { alias: 'haiku', fullId: 'claude-haiku-5-5', label: 'Haiku', efforts: EFFORTS_FULL_ULTRA, defaultEffort: 'medium' },
   { alias: 'fable', fullId: 'claude-fable-5-2', label: 'Fable', efforts: EFFORTS_FULL_ULTRA, defaultEffort: 'medium' },
 ];
+
+/** Concrete ids whose effort ladder is narrower than the one their alias resolves to today, from the
+ *  registry's capabilities (2.1.330): Sonnet 4.6 and Opus 4.6 have `effort` and `max_effort` but no
+ *  `xhigh_effort`; Haiku 4.5, the older 4.x ids and every 3.x id declare no effort at all. A dated
+ *  spelling (`claude-haiku-4-5-20251001`) has its base id's ladder. Sonnet 4 and Opus 4 are listed under
+ *  the registry's `-4-0` aliases and under the base of their dated first-party ids
+ *  (`claude-sonnet-4-20250514` strips to `claude-sonnet-4`). */
+const CLAUDE_NARROW_EFFORT_MODELS: ReadonlyMap<string, Effort[]> = new Map([
+  ['claude-sonnet-4-6', EFFORTS_NO_XHIGH], ['claude-opus-4-6', EFFORTS_NO_XHIGH],
+  ['claude-haiku-4-5', EFFORTS_NONE], ['claude-sonnet-4-5', EFFORTS_NONE],
+  ['claude-sonnet-4-0', EFFORTS_NONE], ['claude-sonnet-4', EFFORTS_NONE],
+  ['claude-opus-4-5', EFFORTS_NONE], ['claude-opus-4-1', EFFORTS_NONE],
+  ['claude-opus-4-0', EFFORTS_NONE], ['claude-opus-4', EFFORTS_NONE],
+]);
+
+/** The ladder a concrete id is narrower than its alias's, or undefined when the alias's ladder holds. */
+function narrowEffortsOf(model: string | undefined): Effort[] | undefined {
+  if (!model) return undefined;
+  const base = model.toLowerCase().replace(/\[1m\]$/, '').replace(/-\d{8}$/, '');
+  if (/^claude-3-/.test(base)) return EFFORTS_NONE;
+  return CLAUDE_NARROW_EFFORT_MODELS.get(base);
+}
 /** Roster display label for a resolved model id, authored HERE because the adapter is the only party
  *  that knows Claude's tiers: the client's family table has no `fable` entry, so `claude-fable-5` showed
  *  no model at all while Opus/Sonnet/Haiku rendered. Family = a curated alias as a whole `-` segment (or
@@ -3150,11 +3191,13 @@ export const CLAUDE_MAX_GATING_ENTRIES = 256;
 
 /** Whether `model` (alias or full id) accepts `effort`. Unknown models (not in the curated catalog, e.g. a
  *  wrapper or a future tier) return true — we don't second-guess a model we don't know; the CLI validates.
- *  Known models clamp to their set (Sonnet drops `xhigh`; Haiku drops everything). The pseudo-effort
- *  `ultracode` lives only on the xhigh-capable entries (Opus/Fable), so it validates true for them and false
- *  for Sonnet/Haiku here. Used so neither a Drive relaunch nor a sync `/effort` injection carries a level the
- *  chosen model can't run. */
+ *  A concrete id with a narrower ladder than its alias clamps to that ladder ({@link narrowEffortsOf}:
+ *  Sonnet 4.6 drops `xhigh`, Haiku 4.5 drops everything); otherwise the alias's entry decides. The
+ *  pseudo-effort `ultracode` needs xhigh, so it is never in a narrow ladder. Used so neither a Drive
+ *  relaunch nor a sync `/effort` injection carries a level the chosen model can't run. */
 function modelSupportsEffort(model: string | undefined, effort: string): boolean {
+  const narrow = narrowEffortsOf(model);
+  if (narrow) return narrow.some((x) => x.effort === effort);
   const a = modelAlias(model);
   const e = CURATED_CLAUDE_CATALOG.find((c) => c.alias === a || c.fullId === model);
   return e ? e.efforts.some((x) => x.effort === effort) : true;
@@ -3225,7 +3268,7 @@ function readModelGating(store: ClaudeStore): Set<string> {
  *  store exposes a bounded curated alias list ({@link CURATED_CLAUDE_CATALOG}). GrowthBook data can remove a
  *  blocked alias, but never adds entries or turns an alias into a purported concrete model id. Each alias
  *  carries only the reasoning-effort levels supported by runtime information already used by the adapter
- *  (Opus full ladder; Sonnet no `xhigh`; Haiku none), so the app can infer the effort picker per model.
+ *  (every current alias: the full ladder plus ultracode), so the app can infer the effort picker per model.
  *  A wrapper store is pinned to the concrete backend models declared by that wrapper.
  *  `defaultReasoningEffort` preselects the model's default. (Issues B + D; dynamic-discovery refinement.) */
 export function claudeModelOptions(store: ClaudeStore): ModelOption[] {
@@ -3326,6 +3369,12 @@ export class ClaudeResumeConnection implements SessionConnection {
   private tailWakeTurnId?: string;
   private readonly seenTokenIds = new Set<string>();
   private contextWindow = newClaudeContextWindowState();
+  /** The window read in flight, and whether another was asked for while it ran ({@link readContextWindow}). */
+  private contextWindowRead?: Promise<void>;
+  private contextWindowReadAgain = false;
+  /** Turn `result`s this connection has counted. A window read records it with its request, so an answer
+   *  to a request sent before a `result` is not taken as the count after it. */
+  private resultsCounted = 0;
   /** Auto-surfaced subagent/workflow progress cards + parent-answered tool_use_ids (subagent done). The
    *  watcher re-points if the live process ever reports a rotated session id (defensive — issue 15a). */
   private activity?: ClaudeActivityWatcher;
@@ -4270,6 +4319,7 @@ export class ClaudeResumeConnection implements SessionConnection {
       const model = typeof response?.model === 'string' && response.model ? response.model : change.model;
       const effort = this.info.currentModel?.reasoningEffort;
       seedClaudeContextModel(this.contextWindow, model);
+      this.readContextWindow();
       this.info.model = model;
       this.info.currentModel = {
         providerID: this.store.isDefault ? 'anthropic' : 'wrapper',
@@ -4304,6 +4354,40 @@ export class ClaudeResumeConnection implements SessionConnection {
     }
     publish();
     return true;
+  }
+
+  /**
+   * Ask the child for the window it measures this session against and its own count of the context, and
+   * let the meter use both (CL-2).
+   *
+   * `get_context_usage` with `detail: "summary"` answers from the last response and local estimates, with
+   * no token-count request, and is answered while a turn runs (measured on 2.1.330). Asked when `init`
+   * names the model, after each turn's `result`, and after an accepted model switch; requests coalesce to
+   * one in flight. A child older than {@link CLAUDE_CONTEXT_USAGE_MIN_VERSION}, or one that refuses or does
+   * not answer, leaves the meter on the registry rules and the `result` reading. Nothing waits on it.
+   */
+  private readContextWindow(): void {
+    if (!this.proc || !claudeVersionAtLeast(this.contextWindow.cliVersion, CLAUDE_CONTEXT_USAGE_MIN_VERSION)) return;
+    if (this.contextWindowRead) {
+      this.contextWindowReadAgain = true;
+      return;
+    }
+    this.contextWindowRead = (async () => {
+      do {
+        this.contextWindowReadAgain = false;
+        const resultsAtRequest = this.resultsCounted;
+        const { outcome, response } = await this.requestControl({ subtype: 'get_context_usage', detail: 'summary' });
+        // A refused or unanswered read teaches nothing, but a read a later `result` or model switch asked
+        // for while it was out is still owed: the loop's condition decides, and ends the loop when none was.
+        if (outcome !== 'accepted') continue;
+        // A `result` counted while this request was out makes its count older than the reading: the
+        // window still holds, and the request queued behind it brings the count.
+        const corrected = learnClaudeContextWindow(this.contextWindow, response, this.resultsCounted === resultsAtRequest);
+        if (corrected) this.emit(corrected);
+      } while (this.contextWindowReadAgain && this.proc);
+    })().finally(() => {
+      this.contextWindowRead = undefined;
+    });
   }
 
   hasLiveBackgroundWork(): boolean {
@@ -4351,10 +4435,16 @@ export class ClaudeResumeConnection implements SessionConnection {
 
   /**
    * Stop the running turn and keep the child. Claude ends every background command and agent with
-   * its process; its own interrupt leaves them running (verified on 2.1.310). The `result` that
-   * follows settles the turn as cancelled, and `cancel_queued` drops prompts queued behind it, as
-   * ending the child did. A child that has not settled the turn within the grace is ended instead.
-   * With no turn of ours running, the interrupt still reaches whatever the child is doing.
+   * its process, so a Stop never ends the process while the turn can still be interrupted. An
+   * interrupt alone ends background agents and workflows too on current builds (2.1.312 and 2.1.330
+   * stop them unless the host declared a per-task stop); `spare_background_tasks` (2.1.330) keeps them,
+   * so a Stop ends only the turn, as it did when this was verified on 2.1.310. Measured on 2.1.330,
+   * with and without a turn running: a plain interrupt killed a background agent and the member kept
+   * it; background shell commands survived both and ended only with the process. An older build
+   * ignores the member. The `result` that follows settles the turn as cancelled, and `cancel_queued` drops
+   * prompts queued behind it, as ending the child did. A child that has not settled the turn within
+   * the grace is ended instead. With no turn of ours running, the interrupt still reaches whatever
+   * the child is doing.
    */
   private interruptTurn(): void {
     const proc = this.proc;
@@ -4370,7 +4460,7 @@ export class ClaudeResumeConnection implements SessionConnection {
     this.writeLine({
       type: 'control_request',
       request_id: `cosyncing-${this.connNonce}-${++this.controlSeq}`,
-      request: { subtype: 'interrupt', cancel_queued: true },
+      request: { subtype: 'interrupt', cancel_queued: true, spare_background_tasks: true },
     });
     if (!this.running) return;
     let settle!: () => void;
@@ -4474,6 +4564,7 @@ export class ClaudeResumeConnection implements SessionConnection {
         this.handleStreamEvent(o.event); // token-by-token deltas from --include-partial-messages
         return;
       case 'result': {
+        this.resultsCounted++;
         this.drainUserEcho();
         // The turn a Stop interrupted ends here. A turn that completed before the interrupt reached
         // the child keeps its own outcome.
@@ -4497,11 +4588,15 @@ export class ClaudeResumeConnection implements SessionConnection {
             numOrUndef(u.cache_read_input_tokens),
             numOrUndef(u.cache_creation_input_tokens),
           ];
-          if (resident.some((value) => value !== undefined)) {
-            const used = resident.reduce<number>(
-              (sum, value) => sum + Math.max(0, value ?? 0),
-              0,
-            );
+          const used = resident.reduce<number>(
+            (sum, value) => sum + Math.max(0, value ?? 0),
+            0,
+          );
+          // An interrupted turn's `result`, and one that failed before any model call, counts every
+          // token as 0 (measured on 2.1.330): it measured nothing, so the last reading stays until
+          // the answer asked for below restates it. A reading is never 0; the system prompt alone
+          // is thousands of tokens.
+          if (used > 0) {
             const context = claudeContextUsageMessage(
               this.contextWindow,
               this.contextWindow.lastModel,
@@ -4510,6 +4605,9 @@ export class ClaudeResumeConnection implements SessionConnection {
             if (context) this.emit(context);
           }
         }
+        // Claude's own count of the context replaces the reading above when it answers
+        // ({@link learnClaudeContextWindow}): `result.usage` sums every model call of the turn.
+        this.readContextWindow();
         if (o.is_error && !interrupted && typeof o.result === 'string' && o.result) this.emit({ type: 'error', message: oneLine(o.result) });
         // Turn over → the NEXT assistant event without a message_start is a local-command reply, not a
         // late per-block re-delivery of this turn's streamed message (see emitFinalAssistant).
@@ -4732,10 +4830,13 @@ export class ClaudeResumeConnection implements SessionConnection {
     // currentModel/Mode). `init` is the source of truth for the effort claude launched with when it reports
     // one; otherwise preserve the effort already chosen so a model re-seed doesn't drop it.
     const initEffort = typeof o.effort === 'string' && o.effort ? o.effort : this.info.currentModel?.reasoningEffort;
+    // The child's version decides whether its window can be asked for, and how an unregistered model reads.
+    if (typeof o.claude_code_version === 'string' && o.claude_code_version) this.contextWindow.cliVersion = o.claude_code_version;
     // Preserve the exact model id reported by init as resolved-session identity. Curated aliases remain
     // selection inputs only; they must not replace the concrete model a running session actually reports.
     if (typeof o.model === 'string' && o.model) {
       seedClaudeContextModel(this.contextWindow, o.model);
+      this.readContextWindow();
       this.info.model = o.model;
       this.info.currentModel = {
         providerID: this.store.isDefault ? 'anthropic' : 'wrapper',
@@ -5238,6 +5339,11 @@ function takeQueuedSendKey(state: ClaudeQueuedSends | undefined, uuid: string, t
 /** Durable evidence and latest reading for Claude's composer context meter. */
 export interface ClaudeContextWindowState {
   oneMillionModels: Set<string>;
+  /** The window Claude Code itself reported for a model (`get_context_usage` on a Drive child), by the
+   *  model id the meter keys on. Plain data, so the stored replay's checkpoint can carry it. */
+  reportedWindows?: Record<string, number>;
+  /** The Claude Code version behind the latest reading: a transcript row's `version`, or Drive `init`. */
+  cliVersion?: string;
   lastModel?: string;
   lastUsed?: number;
   lastEmittedUsed?: number;
@@ -5263,15 +5369,68 @@ const CLAUDE_NATIVE_1M_MODELS: ReadonlySet<string> = new Set([
   'claude-mythos-5', 'claude-mythos-5-1', 'claude-mythos-5-2',
 ]);
 
+/** The rest of the 2.1.330 registry: ids Claude Code knows, on a 200k window unless a `[1m]` spelling
+ *  asks for more. Every `claude-3-*` id is treated the same. Knowing them is what lets an id in NEITHER
+ *  set be read the way the CLI reads one it does not recognize ({@link CLAUDE_UNKNOWN_MODEL_1M_SINCE}).
+ *  Sonnet 4 and Opus 4 are listed under the registry's `-4-0` aliases and under the base of their dated
+ *  first-party ids (`claude-opus-4-20250514` strips to `claude-opus-4`). */
+const CLAUDE_REGISTRY_200K_MODELS: ReadonlySet<string> = new Set([
+  'claude-opus-4-0', 'claude-opus-4', 'claude-opus-4-1', 'claude-opus-4-5', 'claude-opus-4-6',
+  'claude-sonnet-4-0', 'claude-sonnet-4', 'claude-sonnet-4-5', 'claude-sonnet-4-6', 'claude-haiku-4-5',
+]);
+
+/** Claude Code 2.1.323 changed the window it assumes for a model id it does not recognize from 200k to 1M
+ *  (changelog; measured on 2.1.330: `get_context_usage` answers 1,000,000 with `autocompactSource:
+ *  "unknown-model"` for an unlisted `claude-*` id, and 200,000 under `CLAUDE_CODE_DISABLE_1M_CONTEXT=1`). */
+export const CLAUDE_UNKNOWN_MODEL_1M_SINCE = '2.1.323';
+
+/** The oldest Claude Code measured to answer `get_context_usage` with `detail: "summary"` (local, no
+ *  token-count requests). A child without it would count with the API and hold its exit for the reply. */
+export const CLAUDE_CONTEXT_USAGE_MIN_VERSION = '2.1.312';
+
 /** A dated id (`claude-opus-4-8-20260101`) has its base id's window. */
+function claudeBaseModel(model: string): string {
+  return model.replace(/-\d{8}$/, '');
+}
+
 function claudeNative1M(model: string): boolean {
-  return CLAUDE_NATIVE_1M_MODELS.has(model.replace(/-\d{8}$/, ''));
+  return CLAUDE_NATIVE_1M_MODELS.has(claudeBaseModel(model));
+}
+
+function claudeRegistry200k(model: string): boolean {
+  const base = claudeBaseModel(model);
+  return CLAUDE_REGISTRY_200K_MODELS.has(base) || /^claude-3-/.test(base);
 }
 
 function claudeContextModel(model: unknown): string | undefined {
   if (typeof model !== 'string') return undefined;
   const clean = model.replace(/\[1m\]$/, '');
   return /^claude-/i.test(clean) ? clean : undefined;
+}
+
+/** The model a reading is keyed on: a `claude-*` id without its `[1m]` suffix, or any other id (a
+ *  wrapper's backend model) once Claude Code has reported a window for it. */
+function claudeMeterModel(state: ClaudeContextWindowState, model: unknown): string | undefined {
+  const clean = claudeContextModel(model);
+  if (clean) return clean;
+  return typeof model === 'string' && model && state.reportedWindows?.[model] !== undefined ? model : undefined;
+}
+
+/**
+ * The window a reading is measured against, in the order the evidence is trusted:
+ *  1. what Claude Code reported for this model (Drive), which already follows `[1m]`, the 1M opt-out and
+ *     the window overrides a transcript never records;
+ *  2. `[1m]` evidence, or a reading already past 200k;
+ *  3. the registry's native-1M and 200k sets;
+ *  4. an id the registry does not know: 1M when the row was written by Claude Code 2.1.323 or later, as
+ *     that CLI assumes, else 200k. A row with no version is read as an older CLI.
+ */
+function claudeContextMax(state: ClaudeContextWindowState, model: string, used: number): number {
+  const reported = state.reportedWindows?.[model];
+  if (reported !== undefined) return reported;
+  if (claudeNative1M(model) || state.oneMillionModels.has(model) || used > CLAUDE_DEFAULT_CONTEXT_MAX) return CLAUDE_EXTENDED_CONTEXT_MAX;
+  if (claudeRegistry200k(model)) return CLAUDE_DEFAULT_CONTEXT_MAX;
+  return claudeVersionAtLeast(state.cliVersion, CLAUDE_UNKNOWN_MODEL_1M_SINCE) ? CLAUDE_EXTENDED_CONTEXT_MAX : CLAUDE_DEFAULT_CONTEXT_MAX;
 }
 
 /** `init.model` is Drive's durable model identity. Preserve the `[1m]` suffix as
@@ -5281,12 +5440,22 @@ function seedClaudeContextModel(
   model: unknown,
 ): void {
   const cleanModel = claudeContextModel(model);
-  state.lastModel = cleanModel;
+  // A wrapper's backend model is kept as reported: it has a meter once Claude Code reports its window.
+  state.lastModel = cleanModel ?? (typeof model === 'string' && model ? model : undefined);
   if (cleanModel && typeof model === 'string') {
+    const oneMillion = /\[1m\]$/.test(model);
+    // The window Claude Code reported is keyed by the clean id but was measured for the spelling the
+    // child ran then. A switch between `X[1m]` and `X` changes the window, so that answer no longer
+    // holds: the rules below decide until the child answers for the new spelling.
+    if (oneMillion !== state.oneMillionModels.has(cleanModel) && state.reportedWindows?.[cleanModel] !== undefined) {
+      const reportedWindows = { ...state.reportedWindows };
+      delete reportedWindows[cleanModel];
+      state.reportedWindows = reportedWindows;
+    }
     // Unlike cumulative transcript evidence, init describes the model/window
     // the live Drive child is using now. A later untagged init must therefore
     // revoke an earlier [1m] classification for the same clean model.
-    if (/\[1m\]$/.test(model)) state.oneMillionModels.add(cleanModel);
+    if (oneMillion) state.oneMillionModels.add(cleanModel);
     else state.oneMillionModels.delete(cleanModel);
   }
 }
@@ -5297,15 +5466,13 @@ function claudeContextUsageMessage(
   used: number,
   onlyWhenChanged = false,
 ): AgentMessage | undefined {
-  const cleanModel = claudeContextModel(model);
-  state.lastModel = cleanModel;
+  const cleanModel = claudeMeterModel(state, model);
+  // A wrapper's model is kept even before its window is known, so the window read that answers after
+  // this reading can still restate it ({@link learnClaudeContextWindow}).
+  state.lastModel = cleanModel ?? (typeof model === 'string' && model ? model : undefined);
   state.lastUsed = used;
   if (!cleanModel) return undefined;
-  // A resident reading above 200k is itself proof that this session is on the
-  // 1M window even when the durable cost-state marker has not landed yet.
-  const max = claudeNative1M(cleanModel) || state.oneMillionModels.has(cleanModel) || used > CLAUDE_DEFAULT_CONTEXT_MAX
-    ? CLAUDE_EXTENDED_CONTEXT_MAX
-    : CLAUDE_DEFAULT_CONTEXT_MAX;
+  const max = claudeContextMax(state, cleanModel, used);
   const boundedUsed = Math.min(used, max);
   if (
     onlyWhenChanged
@@ -5315,6 +5482,42 @@ function claudeContextUsageMessage(
   state.lastEmittedUsed = boundedUsed;
   state.lastEmittedMax = max;
   return { type: 'metadata-update', key: 'contextUsage', value: { used: boundedUsed, max } };
+}
+
+/** The most a reported window or reading may be: well past any model's window, short of nonsense. */
+const CLAUDE_MAX_REPORTED_TOKENS = 100_000_000;
+
+function claudeTokenCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= CLAUDE_MAX_REPORTED_TOKENS ? value : undefined;
+}
+
+/**
+ * Learn the window and the reading from Claude Code's answer to `get_context_usage`, and restate the
+ * meter when either moved.
+ *
+ * The answer names the model it measured (`model`, with any `[1m]` spelling) and the window it measured
+ * against (`rawMaxTokens`, equal to `maxTokens`): the model's own window, or a smaller compaction window
+ * when one is configured (`autocompactSource`), which is also what Claude's `/context` divides by. A
+ * Drive child's meter divides by that figure from then on.
+ *
+ * When the answer is for the model of the current reading, its `totalTokens` (the count `/context`
+ * shows: `percentage` is `totalTokens / maxTokens`) becomes the reading. The turn's `result` cannot be:
+ * its `usage` sums every model call of the turn (measured on 2.1.330: a three-call turn's `result`
+ * counted 65,739 where the answer that followed counted 23,374), so it is only the reading until this
+ * answer lands, and the reading of a child that is never asked. `countIsCurrent` is false for an answer
+ * to a request sent before the latest `result`: its count describes the context before that turn, so
+ * only its window is taken.
+ */
+export function learnClaudeContextWindow(state: ClaudeContextWindowState, response: unknown, countIsCurrent = true): AgentMessage | undefined {
+  const r = response as { model?: unknown; rawMaxTokens?: unknown; maxTokens?: unknown; totalTokens?: unknown } | null | undefined;
+  if (!r || typeof r !== 'object') return undefined;
+  const window = claudeTokenCount(r.rawMaxTokens) ?? claudeTokenCount(r.maxTokens);
+  if (!window || typeof r.model !== 'string' || !r.model) return undefined;
+  const model = claudeContextModel(r.model) ?? r.model;
+  state.reportedWindows = { ...state.reportedWindows, [model]: window };
+  if (state.lastModel !== model || state.lastUsed === undefined) return undefined;
+  const total = countIsCurrent ? claudeTokenCount(r.totalTokens) : undefined;
+  return claudeContextUsageMessage(state, model, total ? total : state.lastUsed, true);
 }
 
 /** Update the durable 1M model evidence. cost-state is cumulative session data:
@@ -5374,7 +5577,32 @@ export const CLAUDE_KNOWN_LINE_TYPES: ReadonlySet<string> = new Set([
   // audit never read: a pointer from a forked subagent back to the parent context it was forked
   // from. Bookkeeping, not conversation, so it is skipped like the sidecars above.
   'fork-context-ref',
+  // Read from the record table Claude Code 2.1.330 resumes from (every type that build writes, with
+  // how resume treats it) and from this host's transcripts on 2026-11-24. None is conversation: the
+  // per-request journals (`api-request*`, about 38% of transcript bytes here), the tool and data-flow
+  // ledgers, resume and compaction markers, latches, colours, tags and the end-by-model mark.
+  // `session-owner`, `hybrid-organization` and `history-suppression` carry account and organization
+  // UUIDs; like every member here they are skipped, and nothing else in the adapter reads them, so
+  // that content never leaves the transcript. `derived-from` is lineage (a session another session
+  // launched), which no row shows yet. `progress` and `summary` are older shapes the table still
+  // names. `host-row` is deliberately absent: Code Mode writes the calls a script made as host rows,
+  // the app shows none of them yet, and that is what the unknown-type event exists to say.
+  'api-request', 'api-request-blob', 'api-request-resumed', 'api-request-shape', 'tools-used',
+  'data-flow-records', 'data-flow-incomplete', 'content-replacement', 'resume-head-vouch', 'observer-ref',
+  'session-owner', 'hybrid-organization', 'history-suppression', 'attribution-snapshot', 'isolation-latch',
+  'dev-mods', 'memory-mode', 'agent-color', 'tag', 'ended-by-model', 'repl-mode', 'derived-from',
+  'progress', 'summary',
 ]);
+
+/** The drift alarm for one transcript line: the first line of a type this adapter has never decided
+ *  about yields one `transcript.unknown-type` event naming the type and nothing else; `seen` (MUTATED)
+ *  keeps it to one per type. */
+function claudeUnknownLineTypeEvent(ln: any, seen: Set<string>): AgentMessage | undefined {
+  const type = ln?.type;
+  if (typeof type !== 'string' || !type || CLAUDE_KNOWN_LINE_TYPES.has(type) || seen.has(type)) return undefined;
+  seen.add(type);
+  return { type: 'event', name: UNKNOWN_TRANSCRIPT_TYPE_EVENT, payload: { lineType: type } };
+}
 
 /**
  * Map ONE parsed transcript line to canonical messages (0..n). `callMeta` resolves a tool-result's
@@ -5398,6 +5626,8 @@ export function mapLine(
   peerNames?: Map<string, string>,
 ): AgentMessage[] {
   if (!ln || typeof ln !== 'object') return [];
+  // The CLI that wrote the row decides how an unregistered model's window is read (CL-3).
+  if (contextWindow && typeof ln.version === 'string' && ln.version) contextWindow.cliVersion = ln.version;
   const contextCorrection = feedClaudeCostState(contextWindow, ln);
   if (contextCorrection.length > 0) return contextCorrection;
   switch (ln.type) {
@@ -5434,13 +5664,10 @@ export function mapLine(
       // a Claude build changing its own history is that the app shows less and says nothing. So
       // the first occurrence per mapping run names the type, once, as an event the broker can
       // turn into an attention event. It carries the type verbatim and nothing else.
-      if (unknownTypes && typeof ln.type === 'string' && ln.type && !CLAUDE_KNOWN_LINE_TYPES.has(ln.type)) {
-        if (!unknownTypes.has(ln.type)) {
-          unknownTypes.add(ln.type);
-          return [{ type: 'event', name: UNKNOWN_TRANSCRIPT_TYPE_EVENT, payload: { lineType: ln.type } }];
-        }
+      {
+        const unknown = unknownTypes ? claudeUnknownLineTypeEvent(ln, unknownTypes) : undefined;
+        return unknown ? [unknown] : [];
       }
-      return [];
   }
 }
 

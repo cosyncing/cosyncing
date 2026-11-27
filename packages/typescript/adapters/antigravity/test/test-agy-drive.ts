@@ -31,6 +31,7 @@ import type { AgentMessage, SessionInfo } from '@cosyncing/adapter-api';
 import {
   AGY_CANCELED_STATUS,
   AGY_MAX_STEP_TEXT_BYTES,
+  AGY_PROVIDER_ID,
   AGY_STEP_TRUNCATION_NOTE,
   AgyAdapter,
   AgyDriveConnection,
@@ -43,6 +44,20 @@ import {
   type AgyTrace,
 } from '../src/index.ts';
 import { buildAgyFixtureTree, FIXTURE, jsonl, writeFakeAgyBinary, type AgyFakeScript } from './fixtures/tree.ts';
+
+/** Verbatim agy 1.5.16/1.5.18 output on modes (AG-4) — see `_provenance` in the file. */
+const MODES_1_5_16 = await Bun.file(new URL('./fixtures/agy-1.5.16-modes.json', import.meta.url)).json() as {
+  versionStdout: string;
+  stderr: { modeDefaultRefused: string; modeAutoUnavailable: string };
+  signedIn: {
+    versionStdout: Record<'1.5.16' | '1.5.18', string>;
+    /** `agy models` stdout, `id<TAB>name` per line. */
+    modelsStdout: string;
+    launches: Record<'settingsAuto', { args: string[]; stderr: string }>;
+    /** One `init` line, verbatim but for `<conversation>` and `<workspace>`. */
+    init: string;
+  };
+};
 
 const results: Array<{ name: string; ok: boolean }> = [];
 function check(name: string, ok: boolean, detail = ''): void {
@@ -541,28 +556,238 @@ function newDrive(
   }
 }
 
-// ── 11b. A mode agy would silently drop never becomes `currentMode` ─────────
+{
+  // agy 1.5.16 and 1.5.18 send `init` WITHOUT `model` when no `--model` was passed
+  // (MEASURED signed in, 2026-11-27; this is one captured line, scrubbed). `model`
+  // is where the Drive re-derived the row's model from the live child. A child
+  // launched with `--model` (a model switch from the app) shows that model, with
+  // the catalog's label; one launched without it publishes none, and the row keeps
+  // the model it had. The fake serves the captured `agy models` list.
+  const captured = JSON.parse(MODES_1_5_16.signedIn.init) as Record<string, unknown> & { init: Record<string, unknown> };
+  const h = newDrive({
+    init: captured,
+    defaultTurn: [RESULT_OK],
+    version: MODES_1_5_16.signedIn.versionStdout['1.5.16'].trim(),
+    models: MODES_1_5_16.signedIn.modelsStdout.split('\n').filter((line) => line.trim()),
+  });
+  try {
+    await h.connection.getHistory();
+    await h.connection.listModels();
+    const before = JSON.stringify(h.connection.info.currentModel ?? null);
+    await h.connection.sendPrompt({ text: 'go' });
+    check('the 1.5.16 init is read: its permission_mode is traced, not taken as the mode',
+      await waitFor(() => h.traces.some((trace) => trace.op === 'drive-init-permission-mode-ignored'))
+        && h.connection.info.currentMode === 'default',
+      h.traces.map((trace) => trace.op).join(','));
+    check('the captured init carries no model, at either level',
+      !('model' in captured) && !('model' in captured.init) && captured.init.permission_mode === 'request-review',
+      Object.keys(captured.init).join(','));
+    check('launched without --model, the row keeps the model it had and the drive publishes none from init',
+      !(h.fake.argv() ?? []).includes('--model')
+        && JSON.stringify(h.connection.info.currentModel ?? null) === before
+        && !h.messages.some((m) => m.type === 'metadata-update'
+          && JSON.stringify((m as { value: unknown }).value).includes('currentModel')),
+      `${before} -> ${JSON.stringify(h.connection.info.currentModel ?? null)}`);
+
+    // A model switch from the app: the turn ends, the next prompt names another model.
+    await waitFor(() => h.statuses().includes('idle'));
+    await h.connection.sendPrompt({
+      text: 'switch model',
+      model: { providerID: AGY_PROVIDER_ID, modelID: 'gemini-3.8-flash-high' },
+    });
+    check('the switch relaunches the child with --model',
+      await waitFor(() => h.fake.launches() === 2
+        && (h.fake.argv() ?? []).join(' ').includes('--model gemini-3.8-flash-high')),
+      (h.fake.argv() ?? []).join(' '));
+    check('after the model-less init, the row shows the launched model with the catalog\'s label',
+      await waitFor(() => h.connection.info.currentModel?.modelID === 'gemini-3.8-flash-high')
+        && h.connection.info.currentModel?.label === 'Gemini 3.8 Flash (High)'
+        && h.messages.some((m) => m.type === 'metadata-update'
+          && JSON.stringify((m as { value: unknown }).value).includes('"modelID":"gemini-3.8-flash-high"')),
+      JSON.stringify(h.connection.info.currentModel));
+  } finally {
+    h.cleanup();
+  }
+}
+
+// ── 11b. A mode agy would not apply never becomes `currentMode` ─────────────
 //
-// The host's own 1.1.20 changelog records fixing "`--mode` being ignored … an
-// unrecognized value produced no warning at all". So passing one leaves the
-// child in `default` while the row advertises the mode that was asked for: the
-// client believes X, the session is Y, and nothing says so (reflection §11).
+// agy does not apply a `--mode` it does not recognize: it warns and runs in its
+// own startup mode (MEASURED 1.5.16, AG-4). So passing one leaves the child in a
+// mode the row does not name: the client believes X, the session is Y
+// (reflection §11). Such a value is replaced by Default before launch.
 {
   const h = newDrive({ init: INIT_EVENT, defaultTurn: [RESULT_OK] }, { mode: 'request-review' });
   try {
-    check('an off-vocabulary launch mode is refused before it can be advertised',
-      h.connection.info.currentMode === undefined,
+    check('an off-vocabulary launch mode is refused before it can be advertised; the row names Default',
+      h.connection.info.currentMode === 'default',
       JSON.stringify({ currentMode: h.connection.info.currentMode }));
     await h.connection.getHistory();
     await h.connection.sendPrompt({ text: 'go', permissionMode: 'full-access' });
     await waitFor(() => h.fake.launches() === 1);
     const launched = h.fake.argv() ?? [];
-    check('a per-turn mode agy does not have is dropped from the argv, with a trace',
-      !launched.includes('--mode') && h.traces.some((trace) => trace.op === 'drive-mode-rejected'),
+    check('a per-turn mode agy does not have launches Default instead, with a trace',
+      !launched.includes('--mode') && !launched.includes('full-access')
+        && h.traces.some((trace) => trace.op === 'drive-mode-rejected'),
       `${launched.join(' ')} / ${h.traces.map((trace) => trace.op).join(',')}`);
     check('the dropped mode never reaches `currentMode` either',
-      h.connection.info.currentMode === undefined,
+      h.connection.info.currentMode === 'default',
       String(h.connection.info.currentMode));
+  } finally {
+    h.cleanup();
+  }
+}
+
+// ── 11c. Every launch names its mode, for the agy that runs it (AG-4) ───────
+//
+// Since agy 1.5.7 a launch that names no mode runs in Auto wherever agy offers
+// it (changelog and docs), and on 1.5.16 `--mode default` is refused (MEASURED
+// 2026-11-24). So the first child of a session nobody chose a mode for must still be
+// launched in Default, pinned with session settings; Auto is a choice, launched
+// with its own session setting, because print mode refuses `--mode auto` before
+// it restores the sign-in (MEASURED signed in, 2026-11-27, 1.5.16 and 1.5.18).
+// Before 1.5.7 Auto is `--mode auto`, and agy's "not available" answer to it
+// clears the row and says so. The fake prints the version and the stderr lines
+// agy printed, verbatim (`fixtures/agy-1.5.16-modes.json`).
+/** The notices a harness's connection emitted, oldest first. */
+const notices = (h: Harness): string[] =>
+  h.messages.filter((m) => m.type === 'notice').map((m) => (m as { message: string }).message);
+{
+  const h = newDrive({ init: INIT_EVENT, defaultTurn: [RESULT_OK], version: MODES_1_5_16.versionStdout.trim() });
+  try {
+    check('before any launch the row names Default — the mode the first child will be launched in',
+      h.connection.info.currentMode === 'default', String(h.connection.info.currentMode));
+    await h.connection.getHistory();
+    await h.connection.sendPrompt({ text: 'no mode chosen' });
+    await waitFor(() => h.fake.launches() === 1 && (h.fake.argv() ?? []).length > 0);
+    const argv = h.fake.argv() ?? [];
+    check('1.5.16, no mode chosen: the child is pinned to Default, never left to agy\'s Auto',
+      argv.includes('--settings') && argv[argv.indexOf('--settings') + 1] === '{"agentMode":""}'
+        && !argv.includes('--mode'),
+      argv.join(' '));
+    check('…and the row says Default', h.connection.info.currentMode === 'default', String(h.connection.info.currentMode));
+    const modes = await h.connection.listModes();
+    check('1.5.16 offers Auto in the existing picker',
+      modes.map((mode) => mode.value).join(',') === 'default,accept-edits,auto,plan',
+      modes.map((mode) => mode.value).join(','));
+  } finally {
+    h.cleanup();
+  }
+}
+for (const version of ['1.5.16', '1.5.18'] as const) {
+  // Auto from 1.5.7 is the session setting the signed-in capture saw reach Auto,
+  // with nothing on stderr; no `--mode` rides along, so agy has no `--mode` to refuse.
+  const captured = MODES_1_5_16.signedIn.launches.settingsAuto;
+  const h = newDrive({
+    init: INIT_EVENT,
+    defaultTurn: [RESULT_OK],
+    version: MODES_1_5_16.signedIn.versionStdout[version].trim(),
+    ...(captured.stderr ? { stderr: captured.stderr } : {}),
+  });
+  try {
+    await h.connection.getHistory();
+    await h.connection.sendPrompt({ text: 'go auto', permissionMode: 'auto' });
+    await waitFor(() => h.fake.launches() === 1 && (h.fake.argv() ?? []).length > 0);
+    const argv = h.fake.argv() ?? [];
+    check(`${version}: Auto launches with the captured \`--settings {"agentMode":"auto"}\` and no --mode`,
+      argv.join(' ').endsWith(captured.args.join(' ')) && !argv.includes('--mode')
+        && argv.filter((arg) => arg === '--settings').length === 1,
+      argv.join(' '));
+    check(`${version}: the row names Auto, the mode the child was launched in`,
+      h.connection.info.currentMode === 'auto'
+        && h.messages.some((m) => m.type === 'metadata-update'
+          && JSON.stringify((m as { value: unknown }).value) === '{"currentMode":"auto"}'),
+      String(h.connection.info.currentMode));
+    await h.connection.sendPrompt({ text: 'still auto' });
+    check(`${version}: no mode notice and no mode warning on this route`,
+      !notices(h).some((message) => /\bmode\b/i.test(message))
+        && !h.traces.some((trace) => trace.op === 'drive-mode-warning')
+        && h.connection.info.currentMode === 'auto' && h.fake.launches() === 1,
+      `${notices(h).join(' | ')}; ${h.traces.map((trace) => trace.op).join(',')}`);
+  } finally {
+    h.cleanup();
+  }
+}
+{
+  // Before 1.5.7 Auto is `--mode auto`. agy's "not available" answer to it (the
+  // line captured on 1.5.16) leaves the child in agy's own startup mode, which
+  // nothing pinned, so the row is cleared rather than left on Auto, and the user is told.
+  const h = newDrive({
+    init: INIT_EVENT,
+    defaultTurn: [RESULT_OK],
+    version: '1.5.6',
+    stderr: MODES_1_5_16.stderr.modeAutoUnavailable,
+  });
+  try {
+    await h.connection.getHistory();
+    await h.connection.sendPrompt({ text: 'go auto', permissionMode: 'auto' });
+    await waitFor(() => h.fake.launches() === 1 && (h.fake.argv() ?? []).length > 0);
+    const argv = h.fake.argv() ?? [];
+    check('before 1.5.7 Auto rides `--mode auto`, with no --settings flag',
+      argv.slice(argv.indexOf('--mode'), argv.indexOf('--mode') + 2).join(' ') === '--mode auto'
+        && !argv.includes('--settings'),
+      argv.join(' '));
+    check('the row first names the mode the child was launched in',
+      h.messages.some((m) => m.type === 'metadata-update'
+        && JSON.stringify((m as { value: unknown }).value) === '{"currentMode":"auto"}'),
+      h.messages.filter((m) => m.type === 'metadata-update').map((m) => JSON.stringify(m)).join(' | '));
+    check('agy\'s "not available" warning clears the row: nothing pinned Default underneath',
+      await waitFor(() => h.connection.info.currentMode === undefined),
+      String(h.connection.info.currentMode));
+    check('the user is told Auto is not available and the session runs in agy\'s own mode',
+      notices(h).some((message) => /Auto mode is not available.*the mode Antigravity starts in on its own/.test(message)),
+      notices(h).join(' | '));
+    check('the warning is traced', h.traces.some((trace) => trace.op === 'drive-mode-warning'),
+      h.traces.map((trace) => trace.op).join(','));
+  } finally {
+    h.cleanup();
+  }
+}
+{
+  // An agy older than Auto: the stored Auto launches Default, the picker drops Auto, and nothing pins settings.
+  const h = newDrive({ init: INIT_EVENT, defaultTurn: [RESULT_OK], version: '1.1.20' }, { mode: 'auto' });
+  try {
+    await h.connection.getHistory();
+    await h.connection.sendPrompt({ text: 'old agy' });
+    await waitFor(() => h.fake.launches() === 1 && (h.fake.argv() ?? []).length > 0);
+    const argv = h.fake.argv() ?? [];
+    check('before 1.5.7 Default rides `--mode default`, with no --settings flag that agy lacks',
+      argv.slice(argv.indexOf('--mode'), argv.indexOf('--mode') + 2).join(' ') === '--mode default'
+        && !argv.includes('--settings'),
+      argv.join(' '));
+    check('a stored Auto on an agy without Auto ends as Default on the row, and the user is told',
+      h.connection.info.currentMode === 'default' && notices(h).some((message) => /has no Auto mode/.test(message)),
+      `${String(h.connection.info.currentMode)}; ${notices(h).join(' | ')}`);
+    const modes = await h.connection.listModes();
+    check('the picker offers no Auto on an agy that predates it',
+      modes.map((mode) => mode.value).join(',') === 'default,accept-edits,plan', modes.map((mode) => mode.value).join(','));
+  } finally {
+    h.cleanup();
+  }
+}
+{
+  // A refused `--mode` (the captured 1.5.16 line, on a version this adapter still
+  // encodes with `--mode default`) leaves the child in a mode nobody named.
+  const h = newDrive({
+    init: INIT_EVENT,
+    defaultTurn: [RESULT_OK],
+    version: '1.5.6',
+    stderr: MODES_1_5_16.stderr.modeDefaultRefused,
+  });
+  try {
+    await h.connection.getHistory();
+    await h.connection.sendPrompt({ text: 'refused' });
+    check('a mode agy refused is cleared from the row rather than left as the one asked for',
+      await waitFor(() => h.connection.info.currentMode === undefined),
+      String(h.connection.info.currentMode));
+    check('…explicitly, so clients drop the old posture',
+      h.messages.some((m) => m.type === 'metadata-update'
+        && JSON.stringify((m as { value: unknown }).value) === '{}'
+        && 'currentMode' in ((m as { value: Record<string, unknown> }).value)),
+      h.messages.filter((m) => m.type === 'metadata-update').map((m) => JSON.stringify(m)).join(' | '));
+    check('and the user is told agy did not accept it',
+      notices(h).some((message) => /did not accept the Default mode/.test(message)),
+      notices(h).join(' | '));
   } finally {
     h.cleanup();
   }
@@ -655,6 +880,46 @@ function newDrive(
     check('a cold start settles nothing and emits no spurious error',
       h.errors().filter((message) => /cancelled without a result/i.test(message)).length === 1,
       h.errors().join(' | '));
+  } finally {
+    h.cleanup();
+  }
+}
+
+// ── 14b. A send behind a relaunching send reaches the new child ─────────────
+//
+// A send that switches the mode relaunches the child, and reads the agy version
+// first (AG-4), which yields. A plain send issued meanwhile wrote to the child
+// about to be replaced, and the relaunch then cancelled that turn. Sends run one
+// at a time, so the plain send waits and reaches the new child behind the switch.
+{
+  const h = newDrive({ init: INIT_EVENT, defaultTurn: [RESULT_OK] });
+  try {
+    await h.connection.getHistory();
+    await h.connection.sendPrompt({ text: 'warm the child' });
+    await waitFor(() => h.statuses()[h.statuses().length - 1] === 'idle');
+
+    // Neither send is awaited before the other is issued.
+    const switching = h.connection.sendPrompt({ text: 'switch the mode', permissionMode: 'accept-edits' });
+    const plain = h.connection.sendPrompt({ text: 'right behind the switch' });
+    const outcomes = await Promise.allSettled([switching, plain]);
+    check('a mode-switch send and a plain send issued behind it are both accepted',
+      outcomes.every((outcome) => outcome.status === 'fulfilled'),
+      outcomes.map((outcome) => outcome.status).join(','));
+
+    const prompts = (): unknown[] => h.fake.stdin().map((line) => (line.message as { content?: unknown } | undefined)?.content);
+    // The first child is killed before the second spawns, and only the second is ever written the
+    // switch's prompt, so a prompt recorded after it went to the second child.
+    check('the plain send reaches the new child, after the switch\'s own prompt',
+      await waitFor(() => h.fake.launches() === 2 && prompts().length === 3)
+        && JSON.stringify(prompts()) === JSON.stringify(['warm the child', 'switch the mode', 'right behind the switch'])
+        && (h.fake.argv() ?? []).join(' ').includes('--mode accept-edits'),
+      `${h.fake.launches()} launches; ${JSON.stringify(prompts())}; ${(h.fake.argv() ?? []).join(' ')}`);
+    check('no turn is cancelled by the relaunch, and both turns end on the new child',
+      await waitFor(() => h.statuses()[h.statuses().length - 1] === 'idle')
+        && !h.traces.some((trace) => trace.op === 'drive-turn-abandoned-by-relaunch')
+        && !h.errors().some((message) => /cancelled without a result/i.test(message))
+        && !h.messages.some((m) => m.type === 'run-summary' && (m as { status?: string }).status === 'cancelled'),
+      `${h.statuses().join(',')}; ${h.traces.map((trace) => trace.op).join(',')}; ${h.errors().join(' | ')}`);
   } finally {
     h.cleanup();
   }

@@ -216,6 +216,11 @@ export interface AgyFakeScript {
   /** Text written to stderr at startup (the "ignoring unsupported stream input message event" warning). */
   stderr?: string;
   /**
+   * What `agy --version` prints (AG-4; 1.5.16 prints `1.5.16`, MEASURED). Absent: the
+   * probe exits 64 with no output, the shape of a version the adapter could not read.
+   */
+  version?: string;
+  /**
    * Emit one stdout line padded to this many bytes BEFORE `init`.
    *
    * The reader buffers until it sees a newline, so a line larger than its cap is
@@ -268,6 +273,11 @@ const script = JSON.parse(readFileSync(${JSON.stringify(scriptPath)}, 'utf8'));
 if (process.argv[2] === 'models') {
   for (const line of script.models ?? []) process.stdout.write(line + '\\n');
   process.exit(0);
+}
+// The \`agy --version\` read (AG-4) is a probe too, answered and forgotten the same way.
+if (process.argv[2] === '--version') {
+  if (script.version) process.stdout.write(script.version + '\\n');
+  process.exit(script.version ? 0 : 64);
 }
 writeFileSync(${JSON.stringify(argvPath)}, JSON.stringify(process.argv.slice(2)));
 // Which launch this is. The turn counter is per-process, so a relaunch would

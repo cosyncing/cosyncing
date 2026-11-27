@@ -254,7 +254,7 @@ const agyExtras: ConformanceExtra[] = [
     },
   },
   {
-    title: 'the child argv: never --print or --effort, the effort variant is the sibling id, and a mode rides --mode',
+    title: 'the child argv: never --print or --effort, the effort variant is the sibling id, and every launch names its mode',
     async run(context) {
       const session = await context.drivableSession('argv contract');
       const stream = await context.openDrive(session);
@@ -270,7 +270,11 @@ const agyExtras: ConformanceExtra[] = [
       expect(argv).toContain('--output-format=stream-json');
       expect(argv).toContain('--input-format=stream-json');
       expect(argv.slice(argv.indexOf('--model'), argv.indexOf('--model') + 2)).toEqual(['--model', 'fixture-pro-low']);
-      for (const forbidden of ['--print', '--prompt', '--effort', '--mode']) expect(argv).not.toContain(forbidden);
+      for (const forbidden of ['--print', '--prompt', '--effort']) expect(argv).not.toContain(forbidden);
+      // No mode was chosen, and the launch still names Default (AG-4: since agy 1.5.7 a launch naming no mode
+      // runs in Auto). This kit's agy is 1.1.17, older than 1.5.7, so Default rides `--mode` itself.
+      expect(argv.slice(argv.indexOf('--mode'), argv.indexOf('--mode') + 2)).toEqual(['--mode', 'default']);
+      expect(argv).not.toContain('--settings');
       // The same selection on the same child starts nothing new.
       expect((await context.prompt(stream, 'low effort again', {
         model: { providerID: AGY_PROVIDER, modelID: 'fixture-pro-high', reasoningEffort: 'low' },
@@ -420,8 +424,10 @@ const agyExtras: ConformanceExtra[] = [
       expect((await context.prompt(stream, 'first created prompt')).kind).toBe('ack');
       const starts = context.childStarts(session, mark);
       expect(starts.length).toBe(1);
+      // A create names no mode, and the launch still names Default (AG-4); on this kit's 1.1.17 that is `--mode default`.
       expect(starts[0]!.argv).toEqual([
         '--conversation', info.id, '--output-format=stream-json', '--input-format=stream-json', '--model', 'fixture-lite',
+        '--mode', 'default',
       ]);
       expect(context.prompted(session, mark)).toEqual(['first created prompt']);
       // Once the CLI has written the conversation the store's row replaces the pending one: one row, same id and cwd.

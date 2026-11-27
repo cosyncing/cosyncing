@@ -1044,12 +1044,17 @@ export function resolveAgyLaunchModel(
 // ── The mode picker (P2b) ────────────────────────────────────────────────────
 
 /**
- * The `--mode` vocabulary, verbatim from the 1.1.20 binary (MEASURED 2026-08-25).
+ * The execution modes agy runs a session in, in the host's own cycle order
+ * (`default > accept-edits > auto > plan`).
  *
- * The flag's own help string enumerates exactly three: `default` ("standard
- * behavior"), `accept-edits` ("auto-approve file edits, prompt for commands")
- * and `plan` ("research and plan without making changes"). The TUI's hint agrees
- * — "Press shift+tab to cycle modes (default, accept-edits, plan)."
+ * 1.1.20 (MEASURED 2026-08-25): `--mode` took `default`, `accept-edits` and
+ * `plan`. 1.3.5 added `auto` on Linux and macOS (1.4.4 on Windows; changelog).
+ * 1.5.16 (MEASURED 2026-11-24, AG-4): the flag help reads "(accept-edits, auto,
+ * plan)" and `--mode default` is REFUSED — `warning: unrecognized --mode value
+ * "default" (valid: accept-edits, auto, plan)` — after which the child runs in
+ * agy's own startup mode, which since 1.5.7 is Auto. So the mode is a value the
+ * app chooses and {@link agyModeLaunchArgs} encodes per version; it is not always
+ * a `--mode` value.
  *
  * `full-access` IS NOT ONE OF THEM: that string does not occur anywhere in the
  * binary. Neither are `always-proceed`, `request-review` or `strict`, which DO
@@ -1060,8 +1065,9 @@ export function resolveAgyLaunchModel(
  * already forced `handleInit` to ignore the reported value; this is the reason it
  * had to. Two axes, and agy exposes a flag for only one of them.
  *
- * The descriptions are the host's own words, one clause each — no copy invented
- * here (reflection §3).
+ * The descriptions are the host's own words, one clause each, from the 1.5.16
+ * binary's mode list ("'auto': auto-approve edits and safe commands, prompt on
+ * irreversible actions") — no copy invented here (reflection §3).
  */
 export const AGY_MODES: ModeOption[] = [
   {
@@ -1077,6 +1083,12 @@ export const AGY_MODES: ModeOption[] = [
     category: 'approve-for-me',
   },
   {
+    value: 'auto',
+    label: 'Auto',
+    description: 'Auto-approve edits and safe commands, prompt on irreversible actions.',
+    category: 'approve-for-me',
+  },
+  {
     value: 'plan',
     label: 'Plan',
     // Not a permission posture at all, so it is not filed as one: it changes what
@@ -1086,9 +1098,152 @@ export const AGY_MODES: ModeOption[] = [
   },
 ];
 
-/** Is this a `--mode` value the host actually accepts? Guards the launch argv. */
+/** Is this one of the modes agy runs sessions in? Guards the launch argv. */
 export function isAgyMode(value: string | undefined): boolean {
   return value !== undefined && AGY_MODES.some((mode) => mode.value === value);
+}
+
+/** First agy with Auto mode on Linux and macOS (changelog 1.3.5). */
+export const AGY_AUTO_MODE_MIN_VERSION = '1.3.5';
+/** First agy with Auto mode on Windows (changelog 1.4.4, Windows 11 24H2 and later). */
+export const AGY_AUTO_MODE_MIN_VERSION_WINDOWS = '1.4.4';
+/**
+ * From here the mode rides session settings: Default is pinned with
+ * `--settings '{"agentMode":""}'` and Auto is `--settings '{"agentMode":"auto"}'`.
+ *
+ * 1.5.7 made Auto agy's startup mode when no mode is saved, so a launch that
+ * names no mode no longer means Default. `--settings` (session-only settings,
+ * never saved) is documented by 1.5.8 and MEASURED on 1.5.16: `agentMode: ""`
+ * overrides a saved `accept-edits`, keeps the rest of `settings.json`
+ * (permissions, tool policy) and is not written back to it; `--mode` on the same
+ * launch still wins. 1.5.7 itself was never run. An agy that lacks the flag
+ * refuses it — 1.5.16 answers an unknown flag with "flags provided but not
+ * defined" and exit 2, before any output — so the turn fails visibly (no
+ * `result`) instead of running in Auto unseen.
+ */
+export const AGY_SESSION_SETTINGS_MIN_VERSION = '1.5.7';
+/** The session-only setting that pins agy's Default mode (`""` is Default in `settings.json`). */
+export const AGY_DEFAULT_MODE_SETTINGS = '{"agentMode":""}';
+/**
+ * The session-only setting that launches agy in Auto, from {@link AGY_SESSION_SETTINGS_MIN_VERSION}.
+ *
+ * MEASURED 2026-11-27 on 1.5.16 and 1.5.18, signed in: `--mode auto` in print mode is
+ * checked against agy's Auto rollout flag BEFORE the saved sign-in is restored
+ * (`printmode.go:903] … --mode auto is unavailable (rollout flag off)` precedes
+ * `printmode.go:410] Print mode: not authenticated, trying silent auth`), so it is
+ * refused for every account. This setting instead takes effect once the flags
+ * load, before the prompt is sent (`SetCycleMode called: auto`), for a new
+ * conversation (both versions) and a resumed one (1.5.18). With the flag off
+ * (signed out) agy printed no mode warning on this route, only its sign-in error,
+ * so where Auto is not offered nothing says so.
+ */
+export const AGY_AUTO_MODE_SETTINGS = '{"agentMode":"auto"}';
+
+/** The first `major.minor.patch` in agy's `--version` output (`1.5.16`, MEASURED). */
+export function parseAgyVersion(text: string): string | undefined {
+  return /\b(\d+)\.(\d+)\.(\d+)\b/.exec(text)?.[0];
+}
+
+/** Numeric `major.minor.patch` comparison; negative when `a` is older. */
+export function compareAgyVersions(a: string, b: string): number {
+  const left = a.split('.').map(Number);
+  const right = b.split('.').map(Number);
+  for (let i = 0; i < 3; i += 1) {
+    const diff = (left[i] ?? 0) - (right[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+/** Below `min`? An unknown version is treated as current upstream, never as old. */
+function agyVersionBelow(version: string | undefined, min: string): boolean {
+  return version !== undefined && compareAgyVersions(version, min) < 0;
+}
+
+/** Does this agy have Auto mode at all? Whether this account and machine may use it is agy's to say at launch. */
+export function agyHasAutoMode(version: string | undefined, platform: NodeJS.Platform = process.platform): boolean {
+  return !agyVersionBelow(version, platform === 'win32' ? AGY_AUTO_MODE_MIN_VERSION_WINDOWS : AGY_AUTO_MODE_MIN_VERSION);
+}
+
+/** The modes the picker offers for this agy: all of {@link AGY_MODES}, less Auto where the binary predates it. */
+export function agyModesFor(version: string | undefined, platform: NodeJS.Platform = process.platform): ModeOption[] {
+  return agyHasAutoMode(version, platform) ? AGY_MODES : AGY_MODES.filter((mode) => mode.value !== 'auto');
+}
+
+/** How a launch will put the child in `mode`, and whether a fallback agy reports is still Default. */
+export interface AgyModeLaunch {
+  /** The mode the child is launched in. */
+  mode: string;
+  args: string[];
+  /**
+   * The launch pins Default underneath (`--settings {"agentMode":""}`), so agy's
+   * "continuing in the default mode" about its `--mode` means Default. False for
+   * Auto from 1.5.7, whose settings name Auto and which passes no `--mode`.
+   */
+  pinsDefault: boolean;
+  /** Set when the requested mode could not be used and Default was launched instead. */
+  refused?: string;
+}
+
+/**
+ * The argv that puts the child in a mode, for the agy version it will run (AG-4).
+ *
+ * Every launch names its mode: since 1.5.7 a launch that names none runs in Auto
+ * wherever agy offers it. From {@link AGY_SESSION_SETTINGS_MIN_VERSION} (and for an
+ * unknown version, read as current upstream) Auto is {@link AGY_AUTO_MODE_SETTINGS}
+ * alone, and every other mode pins Default with `--settings` and adds `--mode`
+ * for accept-edits and plan (all MEASURED signed in on 1.5.16 and 1.5.18); older
+ * agy gets `--mode` alone, `default` and `auto` included. A mode this agy does not
+ * have — Auto before 1.3.5, anything outside {@link AGY_MODES} — launches Default
+ * and says why.
+ */
+export function agyModeLaunchArgs(
+  requested: string | undefined,
+  version: string | undefined,
+  platform: NodeJS.Platform = process.platform,
+): AgyModeLaunch {
+  let mode = requested ?? 'default';
+  let refused: string | undefined;
+  if (!isAgyMode(mode)) {
+    refused = `agy has no mode ${JSON.stringify(mode)}`;
+    mode = 'default';
+  } else if (mode === 'auto' && !agyHasAutoMode(version, platform)) {
+    refused = `agy ${version} predates Auto mode`;
+    mode = 'default';
+  }
+  const sessionSettings = !agyVersionBelow(version, AGY_SESSION_SETTINGS_MIN_VERSION);
+  const pinsDefault = sessionSettings && mode !== 'auto';
+  const args = !sessionSettings
+    ? ['--mode', mode]
+    : mode === 'auto'
+      ? ['--settings', AGY_AUTO_MODE_SETTINGS]
+      : ['--settings', AGY_DEFAULT_MODE_SETTINGS, ...(mode === 'default' ? [] : ['--mode', mode])];
+  return { mode, args, pinsDefault, ...(refused ? { refused } : {}) };
+}
+
+/** What agy said on stderr about the mode it was launched with (MEASURED 1.5.16). */
+export type AgyModeWarning =
+  | { kind: 'unrecognized'; value: string }
+  | { kind: 'unavailable'; value: string };
+
+/**
+ * Read one agy stderr line for a mode it did not apply.
+ *
+ *   warning: unrecognized --mode value "default" (valid: accept-edits, auto, plan)
+ *   warning: --mode auto is not available for this account; continuing in the default mode.
+ *
+ * Both measured verbatim on 1.5.16 (and 1.5.18). The binary also carries "--mode %s
+ * is not supported in print mode; continuing in the default mode.", read the same
+ * way. Both are about a `--mode` value, so from 1.5.7 Auto (which passes none, see
+ * {@link AGY_AUTO_MODE_SETTINGS}) cannot produce them; the "not available" one is
+ * read for `--mode auto` on 1.3.5–1.5.6.
+ */
+export function parseAgyModeWarning(line: string): AgyModeWarning | undefined {
+  const unrecognized = /^warning: unrecognized --mode value "((?:[^"\\]|\\.){0,64})"/.exec(line.trim());
+  if (unrecognized) return { kind: 'unrecognized', value: unrecognized[1]! };
+  const unavailable = /^warning: --mode (\S{1,64}) is not [^;]{1,120}; continuing in the default mode/.exec(line.trim());
+  if (unavailable) return { kind: 'unavailable', value: unavailable[1]! };
+  return undefined;
 }
 
 // ── Small shared readers ─────────────────────────────────────────────────────

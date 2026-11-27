@@ -1,0 +1,8 @@
+{
+  "provenance": "captured claude 2.1.330 2026-11-27 (a scratch-home Drive session, stream-json, model haiku; every line kept in order; account and organization ids zeroed, the account e-mail, the scratch home path, user and host replaced; api-request* journals and prompt_snapshot attachments trimmed: tool entries keep only their names, strings over 240 characters are cut with a marker)",
+  "description": "a real Claude Code 2.1.330 transcript: the prompt arrives as a queue-operation and is delivered, then one turn of three API calls (two foreground Bash calls and the reply); the record types 2.1.330 writes beside the conversation (session-owner with account and organization ids, tools-used, api-request, api-request-blob, api-request-shape, atis-latch, last-prompt, cost-state and the attachment kinds) map to no row, and none of them raises transcript.unknown-type, at attach or on the tail",
+  "userTexts": [
+    "Use the Bash tool to run `echo one`. Then use the Bash tool again to run `echo two`. Then reply with the single word DONE."
+  ],
+  "sessionId": "54ac4a6e-ce4b-4285-a9f7-7e5d4bac8dba"
+}

@@ -4,9 +4,10 @@ cosyncing reads the Antigravity CLI's (`agy`) own on-disk conversation store —
 there is no server to connect to and nothing to install beyond the CLI itself.
 Conversations are discovered from the CLI's application data and cockpit cache
 and replayed read-only; driving happens through a broker-owned `agy` child
-process. It was verified against Antigravity CLI 1.1.22. The CLI updates
-itself silently, so the floor is the last verified store and wire shape rather
-than a pinned binary.
+process. It was verified against Antigravity CLI 1.1.22; Drive modes, the
+model list and the Drive stream were verified again on CLI 1.5.16 and 1.5.18.
+The CLI updates itself silently, so the floor is the last verified store and
+wire shape rather than a pinned binary.
 
 The adapter is registered for every broker. Clients built before the contract
 revision that added tolerant agent decoding are not shown it — one row they
@@ -29,6 +30,17 @@ cannot decode would cost them their whole agent list.
   variants collapse into one model with selectable low, medium, and high
   efforts; the CLI's frozen cockpit cache is only a fallback when the binary
   is missing.
+- The mode picker offers the CLI's execution modes: Default, Accept edits,
+  Auto (CLI 1.3.5 and later; 1.4.4 on Windows) and Plan. Every Drive launch
+  names its mode, and a session nobody chose a mode for runs in Default. Since
+  CLI 1.5.7 the CLI itself starts in Auto when no mode is named, and 1.5.16
+  no longer accepts `--mode default`. On 1.5.7 and later cosyncing therefore
+  uses the CLI's session-only `--settings` (never saved to your
+  `settings.json`): `{"agentMode":""}` pins Default, Accept edits and Plan add
+  `--mode`, and Auto is `{"agentMode":"auto"}`, because in the print mode
+  cosyncing drives, 1.5.16 and 1.5.18 refuse `--mode auto` whatever the account.
+  On older versions every mode is `--mode`; if such a version answers that
+  Auto is not available, the app clears the mode and shows a notice.
 - Checkpoint summaries and stripped user-row metadata replay as context
   events instead of raw notices.
 - `cosy doctor` diagnoses the installation.
@@ -36,6 +48,13 @@ cannot decode would cost them their whole agent list.
 ## Limits
 
 - Image and file attachments are not supported.
+- Where the CLI does not offer Auto to an account or computer, a session
+  launched in Auto on CLI 1.5.7 or later falls back without saying so: the app
+  can show Auto while the CLI runs in a stricter mode.
+- Approvals cannot be answered from the app: the CLI's stream-json mode has no
+  approval channel. An action the session's mode would ask about is decided
+  by the CLI's own policy (see its headless-mode documentation), so choose
+  the mode accordingly.
 - The store is the CLI's own; cosyncing never writes to it. History appears as
   the CLI records it, so a conversation the CLI has not flushed yet can trail
   the terminal by a moment.

@@ -626,6 +626,127 @@ peerCaptures.self.origin.from = peerCaptures.self.agentId;
   }
 }
 
+// CL-5: the stored history path is the one production attaches through, and its live rows reach
+// subscribers from the store. A record type nobody has decided about, written while attached, still
+// raises the drift alarm there: once per type, never for a known type, never stored as a row.
+{
+  const root = mkdtempSync(join(tmpdir(), 'cosyncing-stored-drift-'));
+  const previousHome = process.env.COSYNCING_HOME;
+  process.env.COSYNCING_HOME = root;
+  const file = join(root, 'drift-session.jsonl');
+  const info: SessionInfo = { id: 'drift-session', title: 'Drift fixture', tool: 'claude', status: 'idle', attachMode: 'observe' };
+  const conn = new ClaudeObserveConnection(file, info);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const user = (uuid: string, text: string) => ({ type: 'user', uuid, message: { role: 'user', content: text } });
+    writeFileSync(file, JSON.stringify(user('drift-u1', 'before attach')) + '\n');
+    await conn.openHistorySnapshot();
+    const received: AgentMessage[] = [];
+    const reached = new Promise<void>((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('the stored live tail never delivered the fence row')), 5000);
+      conn.subscribe((message) => {
+        received.push(message);
+        if (message.type === 'user-message' && message.text === 'after the new types') resolve();
+      });
+    });
+    appendFileSync(file, [
+      { type: 'a-record-type-no-build-writes', n: 1 },
+      { type: 'a-record-type-no-build-writes', n: 2 },
+      // A decided type: the account record, its identifiers zeroed.
+      { type: 'session-owner', accountUuid: '00000000-0000-4000-8000-000000000000', organizationUuid: '00000000-0000-4000-8000-000000000000', sessionId: 'drift-session' },
+      { type: 'tools-used', tools: ['Bash'], sessionId: 'drift-session' },
+      user('drift-u2', 'after the new types'),
+    ].map((line) => JSON.stringify(line)).join('\n') + '\n');
+    await reached;
+    clearTimeout(timer);
+    const alarms = received.filter((m) => m.type === 'event' && m.name === 'transcript.unknown-type') as any[];
+    check('stored live tail: a new record type raises one drift event naming only the type',
+      alarms.length === 1 && JSON.stringify(alarms[0].payload) === JSON.stringify({ lineType: 'a-record-type-no-build-writes' }),
+      JSON.stringify(alarms));
+    const snapshot = await conn.openHistorySnapshot();
+    const persisted = snapshot ? await snapshot.reader.read(Array.from({ length: snapshot.count }, (_, i) => i)) : undefined;
+    const rows = persisted && 'messages' in persisted ? persisted.messages : [];
+    check('stored live tail: the alarm is not stored as a history row, and no row is lost around it',
+      !rows.some((m) => m.type === 'event' && m.name === 'transcript.unknown-type')
+        && rows.filter((m) => m.type === 'user-message').map((m: any) => m.text).join('|') === 'before attach|after the new types',
+      JSON.stringify(rows.map((m) => m.type)));
+  } finally {
+    clearTimeout(timer);
+    await conn.close();
+    if (previousHome === undefined) delete process.env.COSYNCING_HOME; else process.env.COSYNCING_HOME = previousHome;
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+// CL-5: an appended call definition that an older tool result depends on makes the stored index replay
+// the file from its start. A record of an unlisted type that was in the file before the attach is not
+// new and raises nothing; one appended while attached still raises the alarm.
+{
+  const root = mkdtempSync(join(tmpdir(), 'cosyncing-stored-drift-rebuild-'));
+  const previousHome = process.env.COSYNCING_HOME;
+  process.env.COSYNCING_HOME = root;
+  const file = join(root, 'drift-rebuild.jsonl');
+  const info: SessionInfo = { id: 'drift-rebuild', title: 'Drift rebuild fixture', tool: 'claude', status: 'idle', attachMode: 'observe' };
+  const conn = new ClaudeObserveConnection(file, info);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    writeFileSync(file, [
+      { type: 'a-record-type-in-the-file-before-attach', n: 1 },
+      { type: 'user', uuid: 'rebuild-result', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'rebuild-call', content: 'result before definition' }] } },
+    ].map((line) => JSON.stringify(line)).join('\n') + '\n');
+    await conn.openHistorySnapshot();
+    const received: AgentMessage[] = [];
+    const rebuilt = new Promise<void>((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('the appended definition never rebuilt the stored index')), 5000);
+      conn.subscribe((message) => {
+        received.push(message);
+        if (message.type === 'history-reset') resolve();
+      });
+    });
+    appendFileSync(file, [
+      { type: 'assistant', uuid: 'rebuild-definition', message: { id: 'msg_rebuild', role: 'assistant', content: [{ type: 'tool_use', id: 'rebuild-call', name: 'Read', input: { file_path: '/late/file.ts' } }] } },
+      { type: 'a-record-type-appended-while-attached', n: 2 },
+    ].map((line) => JSON.stringify(line)).join('\n') + '\n');
+    await rebuilt;
+    clearTimeout(timer);
+    const alarms = received.filter((m) => m.type === 'event' && m.name === 'transcript.unknown-type') as any[];
+    check('stored live tail: a rebuild raises the drift alarm only for a record appended while attached',
+      JSON.stringify(alarms.map((m) => m.payload)) === JSON.stringify([{ lineType: 'a-record-type-appended-while-attached' }]),
+      JSON.stringify(alarms));
+  } finally {
+    clearTimeout(timer);
+    await conn.close();
+    if (previousHome === undefined) delete process.env.COSYNCING_HOME; else process.env.COSYNCING_HOME = previousHome;
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+// CL-3: an observed session's window when no list names its model. Claude Code 2.1.323 started assuming
+// 1M for an id it does not recognize (measured on 2.1.330 with `claude-zeta-9-9`); the row's `version`
+// says which CLI wrote it. Row shapes are a 2.1.330 assistant row's; the counts are arbitrary.
+{
+  const row = (model: string, version: string | undefined, id: string) => ({
+    type: 'assistant', uuid: `ctx-${id}`, ...(version ? { version } : {}),
+    message: { id: `msg_${id}`, role: 'assistant', model, content: [], usage: { input_tokens: 6, cache_creation_input_tokens: 1_200, cache_read_input_tokens: 48_794, output_tokens: 40 } },
+  });
+  const meter = (line: any) => (mapTranscript([line]).find((m) => m.type === 'metadata-update' && m.key === 'contextUsage') as any)?.value;
+  const cases: [string, any, number][] = [
+    ['an unregistered id written by 2.1.330', row('claude-zeta-9-9', '2.1.330', 'a'), 1_000_000],
+    ['an unregistered id written by 2.1.322', row('claude-zeta-9-9', '2.1.322', 'b'), 200_000],
+    ['an unregistered id on a row with no version', row('claude-zeta-9-9', undefined, 'c'), 200_000],
+    ['a registered 200k id written by 2.1.330', row('claude-sonnet-4-6', '2.1.330', 'd'), 200_000],
+    ['a dated registered 200k id written by 2.1.330', row('claude-haiku-4-5-20251001', '2.1.330', 'e'), 200_000],
+    // The registry lists Sonnet 4 and Opus 4 as `claude-sonnet-4-0` and `claude-opus-4-0`; their dated
+    // first-party ids (the registry's `provider_ids.first_party`) strip to `claude-sonnet-4` / `claude-opus-4`.
+    ['dated Sonnet 4 written by 2.1.330', row('claude-sonnet-4-20250514', '2.1.330', 'g'), 200_000],
+    ['dated Opus 4 written by 2.1.330', row('claude-opus-4-20250514', '2.1.330', 'h'), 200_000],
+    ['a native-1M id written by an old CLI', row('claude-opus-5-5', '2.1.300', 'f'), 1_000_000],
+  ];
+  const wrong = cases.filter(([, line, max]) => meter(line)?.max !== max || meter(line)?.used !== 50_000);
+  check('CL-3: the observed meter reads an unregistered id the way the CLI that wrote the row does',
+    wrong.length === 0, JSON.stringify(wrong.map(([label, line, max]) => ({ label, max, got: meter(line) }))));
+}
+
 // Drive uses a real child, controlled over a test-only TCP socket. All adapter
 // observations use SessionConnection: no private state, stdin or tail methods.
 {

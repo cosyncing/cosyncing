@@ -15,7 +15,7 @@ export {};
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CLAUDE_SUBMITTED_TEXTS_LIMIT, ClaudeResumeConnection, claudeModelLabel } from '../src/index.ts';
+import { CLAUDE_SUBMITTED_TEXTS_LIMIT, ClaudeResumeConnection, claudeModelLabel, resumeArgs } from '../src/index.ts';
 import type { ClaudeStore } from '../src/index.ts';
 import type { AgentMessage, SessionInfo } from '../../../adapter-api/src/index.ts';
 
@@ -539,7 +539,41 @@ async function main(): Promise<void> {
     check('P2: the fable picker preselects medium and names it as Claude\'s default',
       fable?.defaultReasoningEffort === 'medium' && JSON.stringify(noted) === JSON.stringify(['medium']),
       JSON.stringify(fable));
+    // The 2.1.330 registry: `opus`, `sonnet` and `haiku` resolve to the 5.5 models, which declare effort,
+    // max and xhigh (so ultracode, which needs xhigh) and default to medium.
+    const ladder = ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'];
+    const offered = await h.conn.listModels();
+    const wrongAliases = ['opus', 'sonnet', 'haiku', 'fable'].filter((alias) => {
+      const option = offered.find((m) => m.modelID === alias);
+      return option?.defaultReasoningEffort !== 'medium'
+        || JSON.stringify((option.reasoningEfforts ?? []).map((e) => e.effort)) !== JSON.stringify(ladder);
+    });
+    check('P2: every alias offers the 2.1.330 ladder with ultracode and preselects medium',
+      wrongAliases.length === 0, JSON.stringify(offered.map((m) => ({ id: m.modelID, d: m.defaultReasoningEffort, e: m.reasoningEfforts?.map((x) => x.effort) }))));
     await h.conn.close();
+  }
+
+  // ── a concrete id narrower than its alias still clamps the launch's effort ──────────────────────
+  {
+    const effortArgs = (model: string, effort: string): string[] => {
+      const args = resumeArgs('00000000-0000-4000-8000-000000000000', { model, effort, isDefault: true });
+      const at = args.indexOf('--effort');
+      return [at >= 0 ? args[at + 1]! : '', args.includes('--settings') ? 'settings' : ''].filter(Boolean);
+    };
+    const cases: [string, string, string[]][] = [
+      ['sonnet', 'xhigh', ['xhigh']],
+      ['haiku', 'ultracode', ['xhigh', 'settings']],
+      ['claude-sonnet-4-6', 'xhigh', []], // registry: effort and max, no xhigh
+      ['claude-sonnet-4-6', 'max', ['max']],
+      ['claude-haiku-4-5-20251001', 'high', []], // registry: no effort control
+      ['claude-sonnet-4-20250514', 'xhigh', []], // Sonnet 4's dated first-party id: no effort control
+      ['claude-opus-4-20250514', 'xhigh', []], // Opus 4's dated first-party id: no effort control
+      ['claude-opus-4-6', 'ultracode', []],
+      ['claude-opus-5-5', 'xhigh', ['xhigh']],
+    ];
+    const wrong = cases.filter(([model, effort, want]) => JSON.stringify(effortArgs(model, effort)) !== JSON.stringify(want));
+    check('launch clamps effort by the concrete model\'s registry ladder, the alias by today\'s',
+      wrong.length === 0, JSON.stringify(wrong.map(([model, effort, want]) => ({ model, effort, want, got: effortArgs(model, effort) }))));
   }
 
   // ── Drive context usage comes from init model + authoritative result usage ─────────────────────
@@ -639,6 +673,230 @@ async function main(): Promise<void> {
     await h.conn.close();
   }
 
+  // ── CL-2: the window Claude Code reports wins over every list ────────────────────────────────────
+  // Real `get_context_usage` answers from a scratch Claude Code 2.1.330 (2026-11-24, `detail: "summary"`,
+  // no sign-in needed), trimmed to the fields the adapter reads plus their neighbours; categories, grid,
+  // skills and memory files dropped. `claude-zeta-9-9` is an id no registry has; the 200k answers were
+  // taken under CLAUDE_CODE_DISABLE_1M_CONTEXT=1, where the CLI runs even a native-1M model at 200k.
+  {
+    const captured = {
+      unknown: { totalTokens: 14368, maxTokens: 1000000, rawMaxTokens: 1000000, autocompactSource: 'unknown-model', percentage: 1, model: 'claude-zeta-9-9', autoCompactThreshold: 967000, isAutoCompactEnabled: true, apiUsage: null },
+      unknownNo1m: { totalTokens: 14369, maxTokens: 200000, rawMaxTokens: 200000, autocompactSource: 'unknown-model', percentage: 7, model: 'claude-zeta-9-9', autoCompactThreshold: 167000, isAutoCompactEnabled: true, apiUsage: null },
+      opusNo1m: { totalTokens: 14455, maxTokens: 200000, rawMaxTokens: 200000, autocompactSource: 'model-default', percentage: 7, model: 'claude-opus-5-5', autoCompactThreshold: 167000, isAutoCompactEnabled: true, apiUsage: null },
+      // Launched as `claude-sonnet-4-6[1m]`: the answer names the `[1m]` spelling and the 1M window.
+      sonnet46OneM: { totalTokens: 20203, maxTokens: 1000000, rawMaxTokens: 1000000, autocompactSource: 'auto', percentage: 2, model: 'claude-sonnet-4-6[1m]', autoCompactThreshold: 967000, isAutoCompactEnabled: true, apiUsage: null },
+      // Signed in (2026-11-27, model haiku): S1's answers before its first turn and after a turn of three
+      // model calls, and S2's answer after a Stop. `totalTokens` is the count `/context` shows.
+      s1Before: { totalTokens: 15223, maxTokens: 1000000, rawMaxTokens: 1000000, autocompactSource: 'model-default', percentage: 2, model: 'claude-haiku-5-5', autoCompactThreshold: 967000, isAutoCompactEnabled: true, apiUsage: null },
+      s1After: { totalTokens: 23374, maxTokens: 1000000, rawMaxTokens: 1000000, autocompactSource: 'model-default', percentage: 2, model: 'claude-haiku-5-5', autoCompactThreshold: 967000, isAutoCompactEnabled: true, apiUsage: { input_tokens: 2, output_tokens: 5, cache_creation_input_tokens: 780, cache_read_input_tokens: 22592 } },
+      s2AfterStop: { totalTokens: 24135, maxTokens: 1000000, rawMaxTokens: 1000000, autocompactSource: 'model-default', percentage: 2, model: 'claude-haiku-5-5', autoCompactThreshold: 967000, isAutoCompactEnabled: true, apiUsage: { input_tokens: 2, output_tokens: 5, cache_creation_input_tokens: 3194, cache_read_input_tokens: 20898 } },
+    };
+    // S1's `result` for that three-call turn: `usage` is the sum of the three calls (resident 65,739).
+    const s1Result = { type: 'result', subtype: 'success', is_error: false, num_turns: 3, stop_reason: 'end_turn', terminal_reason: 'completed', total_cost_usd: 0.0026286300000000003, usage: { input_tokens: 6, cache_creation_input_tokens: 9980, cache_read_input_tokens: 55753, output_tokens: 149, iterations: [] } };
+    // S2's `result` for the turn its Stop interrupted: every count is 0.
+    const s2Interrupted = { type: 'result', subtype: 'error_during_execution', is_error: true, num_turns: 2, stop_reason: null, terminal_reason: 'aborted_streaming', total_cost_usd: 0.0031776750000000005, usage: { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 0, iterations: [] } };
+    /** Answers each `get_context_usage` with the next captured answer; later ones stay unanswered. */
+    const answerInOrder = (h: Harness, answers: object[]) => {
+      h.answerControl = (request) => {
+        if (request.subtype !== 'get_context_usage') return undefined;
+        const next = answers.shift();
+        return next ? { subtype: 'success', response: next } : undefined;
+      };
+    };
+    const result = (used: number) => ({
+      type: 'result',
+      usage: { input_tokens: 10, output_tokens: 99, cache_read_input_tokens: used - 10, cache_creation_input_tokens: 0 },
+    });
+    const meters = (h: Harness) => h.msgs.filter((m: any) => m.type === 'metadata-update' && m.key === 'contextUsage').map((m: any) => m.value);
+    const asked = (h: Harness) => h.stdin.filter((line: any) => line.type === 'control_request' && line.request?.subtype === 'get_context_usage');
+
+    for (const fixture of [
+      { label: 'an id in no list', answer: captured.unknownNo1m, max: 200_000 },
+      { label: 'a native-1M id the CLI runs at 200k', answer: captured.opusNo1m, max: 200_000 },
+      { label: 'an id in no list, CLI default', answer: captured.unknown, max: 1_000_000 },
+    ]) {
+      const h = newConn();
+      await h.history();
+      h.answerControl = (request) => request.subtype === 'get_context_usage' ? { subtype: 'success', response: fixture.answer } : undefined;
+      // The send launches the child; its `init` follows the first prompt, as the CLI's does.
+      await h.conn.sendPrompt({ text: `cli window ${fixture.label}` });
+      (h.conn as any).ingestInit({ model: fixture.answer.model, permissionMode: 'default', slash_commands: [], claude_code_version: '2.1.330' });
+      await settled();
+      h.msgs.length = 0;
+      (h.conn as any).handleEvent(result(150_000));
+      check(`CL-2 Drive (${fixture.label}): the meter divides by the window Claude Code reported`,
+        JSON.stringify(meters(h)) === JSON.stringify([{ used: 150_000, max: fixture.max }])
+          && asked(h).every((line: any) => line.request.detail === 'summary') && asked(h).length >= 1,
+        JSON.stringify({ meters: meters(h), asked: asked(h) }));
+      await h.conn.close();
+    }
+
+    // An answer that lands after the turn's reading restates the meter once against the reported window;
+    // the registry rule was on screen until then. Its request went out before the turn's `result`, so its
+    // count describes the context before the turn: the reading stays the result's until the request queued
+    // behind it answers.
+    {
+      const h = newConn();
+      await h.history();
+      await h.conn.sendPrompt({ text: 'late window' });
+      (h.conn as any).ingestInit({ model: 'claude-opus-5-5', permissionMode: 'default', slash_commands: [], claude_code_version: '2.1.330' });
+      h.msgs.length = 0;
+      (h.conn as any).handleEvent(result(150_000));
+      const pending = asked(h);
+      for (const line of pending) {
+        (h.conn as any).handleEvent({ type: 'control_response', response: { subtype: 'success', request_id: line.request_id, response: captured.opusNo1m } });
+      }
+      await settled();
+      check('CL-2 Drive: a late answer restates the reading against the reported window, once',
+        pending.length === 1 && JSON.stringify(meters(h)) === JSON.stringify([{ used: 150_000, max: 1_000_000 }, { used: 150_000, max: 200_000 }]),
+        JSON.stringify({ meters: meters(h), pending: pending.length }));
+      const followUp = asked(h).slice(pending.length);
+      for (const line of followUp) {
+        (h.conn as any).handleEvent({ type: 'control_response', response: { subtype: 'success', request_id: line.request_id, response: captured.opusNo1m } });
+      }
+      await settled();
+      check('CL-2 Drive: a count asked for before the turn\'s result never replaces its reading; the follow-up request\'s count does',
+        followUp.length === 1 && JSON.stringify(meters(h)) === JSON.stringify([{ used: 150_000, max: 1_000_000 }, { used: 150_000, max: 200_000 }, { used: 14_455, max: 200_000 }]),
+        JSON.stringify({ meters: meters(h), followUp: followUp.length }));
+      await h.conn.close();
+    }
+
+    // The read in flight is refused while the turn's `result` arrives: the read that `result` asked for
+    // still goes out, and its count becomes the reading.
+    {
+      const h = newConn();
+      await h.history();
+      await h.conn.sendPrompt({ text: 'refused window' });
+      (h.conn as any).ingestInit({ model: 'claude-opus-5-5', permissionMode: 'default', slash_commands: [], claude_code_version: '2.1.330' });
+      h.msgs.length = 0;
+      (h.conn as any).handleEvent(result(150_000));
+      const refused = asked(h);
+      for (const line of refused) {
+        (h.conn as any).handleEvent({ type: 'control_response', response: { subtype: 'error', request_id: line.request_id, error: 'refused by the fake' } });
+      }
+      await settled();
+      const queued = asked(h).slice(refused.length);
+      for (const line of queued) {
+        (h.conn as any).handleEvent({ type: 'control_response', response: { subtype: 'success', request_id: line.request_id, response: captured.opusNo1m } });
+      }
+      await settled();
+      check('CL-2 Drive: a refused read still sends the read a result asked for while it was out',
+        refused.length === 1 && queued.length === 1
+          && JSON.stringify(meters(h)) === JSON.stringify([{ used: 150_000, max: 1_000_000 }, { used: 14_455, max: 200_000 }]),
+        JSON.stringify({ refused: refused.length, queued: queued.length, meters: meters(h) }));
+      await h.conn.close();
+    }
+
+    // A switch from `X[1m]` to `X` changes the window. The window Claude Code reported for the `[1m]`
+    // spelling stops holding at the switch, so with the read after it refused the registry decides:
+    // Sonnet 4.6 is a 200k model. The only captured `[1m]` answer is Sonnet 4.6's.
+    {
+      const h = newConn();
+      await h.history();
+      h.answerControl = (request) => request.subtype === 'get_context_usage' ? { subtype: 'success', response: captured.sonnet46OneM } : undefined;
+      await h.conn.sendPrompt({ text: 'on the 1M spelling' });
+      (h.conn as any).ingestInit({ model: 'claude-sonnet-4-6[1m]', permissionMode: 'default', slash_commands: [], claude_code_version: '2.1.330' });
+      await settled();
+      (h.conn as any).handleEvent(result(150_000));
+      await settled();
+      const onOneM = meters(h);
+      h.answerControl = (request) => request.subtype === 'get_context_usage' ? { subtype: 'error', error: 'refused by the fake' } : { subtype: 'success' };
+      await h.conn.sendPrompt({ text: 'on the 200k spelling', model: { providerID: 'anthropic', modelID: 'claude-sonnet-4-6' } } as any);
+      await settled();
+      h.msgs.length = 0;
+      (h.conn as any).handleEvent(result(150_000));
+      await settled();
+      const switched = h.stdin.some((line: any) => line.type === 'control_request' && line.request?.subtype === 'set_model' && line.request.model === 'claude-sonnet-4-6');
+      check('CL-2 Drive: after a switch from X[1m] to X with the read refused, the meter divides by X\'s 200k',
+        switched
+          && JSON.stringify(onOneM) === JSON.stringify([{ used: 150_000, max: 1_000_000 }, { used: 20_203, max: 1_000_000 }])
+          && JSON.stringify(meters(h)) === JSON.stringify([{ used: 150_000, max: 200_000 }]),
+        JSON.stringify({ switched, onOneM, meters: meters(h) }));
+      await h.conn.close();
+    }
+
+    // A child older than the measured floor is never asked: it would count with the API and hold its exit.
+    {
+      const h = newConn();
+      await h.history();
+      await h.conn.sendPrompt({ text: 'old child' });
+      (h.conn as any).ingestInit({ model: 'claude-zeta-9-9', permissionMode: 'default', slash_commands: [], claude_code_version: '2.1.311' });
+      h.msgs.length = 0;
+      (h.conn as any).handleEvent(result(150_000));
+      await settled();
+      check('CL-2 Drive: a child below 2.1.312 is not asked, and an unknown id on it reads 200k (CL-3)',
+        asked(h).length === 0 && JSON.stringify(meters(h)) === JSON.stringify([{ used: 150_000, max: 200_000 }]),
+        JSON.stringify({ meters: meters(h), asked: asked(h).length }));
+      await h.conn.close();
+    }
+
+    // A turn of several model calls: its `result` sums them, so it is the reading only until Claude's own
+    // count, asked for after every `result`, answers.
+    {
+      const h = newConn();
+      await h.history();
+      const answers: object[] = [captured.s1Before, captured.s1After];
+      answerInOrder(h, answers);
+      await h.conn.sendPrompt({ text: 'three calls' });
+      (h.conn as any).ingestInit({ model: 'claude-haiku-5-5', permissionMode: 'default', slash_commands: [], claude_code_version: '2.1.330' });
+      await settled();
+      const beforeTurn = meters(h);
+      h.msgs.length = 0;
+      (h.conn as any).handleEvent(s1Result);
+      await settled();
+      check('CL-2 Drive: after a turn of several model calls the meter ends at Claude Code\'s own count, not the summed result usage',
+        beforeTurn.length === 0 && answers.length === 0
+          && JSON.stringify(meters(h)) === JSON.stringify([{ used: 65_739, max: 1_000_000 }, { used: 23_374, max: 1_000_000 }]),
+        JSON.stringify({ beforeTurn, meters: meters(h), unanswered: answers.length }));
+      await h.conn.close();
+    }
+
+    // A Stop: the interrupted turn's `result` counts nothing, so the meter keeps its reading until the
+    // answer asked for after it restates the reading with Claude's count.
+    {
+      const h = newConn();
+      await h.history();
+      const answers: object[] = [captured.s1Before, captured.s1After, captured.s2AfterStop];
+      answerInOrder(h, answers);
+      await h.conn.sendPrompt({ text: 'a turn that finishes' });
+      (h.conn as any).ingestInit({ model: 'claude-haiku-5-5', permissionMode: 'default', slash_commands: [], claude_code_version: '2.1.330' });
+      await settled();
+      (h.conn as any).handleEvent(s1Result);
+      await settled();
+      await h.conn.sendPrompt({ text: 'a turn to stop' });
+      await h.conn.runCommand('stop');
+      h.msgs.length = 0;
+      (h.conn as any).handleEvent(s2Interrupted);
+      const atStop = meters(h);
+      await settled();
+      check('CL-2 Drive: a Stop\'s all-zero result never shows used 0, and Claude Code\'s next count restates the reading',
+        h.stdin.some((line: any) => line.type === 'control_request' && line.request?.subtype === 'interrupt')
+          && atStop.length === 0 && answers.length === 0
+          && JSON.stringify(meters(h)) === JSON.stringify([{ used: 24_135, max: 1_000_000 }]),
+        JSON.stringify({ atStop, meters: meters(h), unanswered: answers.length }));
+      await h.conn.close();
+    }
+
+    // A child below 2.1.312 is never asked, so the `result` stays its reading; a Stop's all-zero result
+    // still shows nothing.
+    {
+      const h = newConn();
+      await h.history();
+      await h.conn.sendPrompt({ text: 'old child, three calls' });
+      (h.conn as any).ingestInit({ model: 'claude-haiku-5-5', permissionMode: 'default', slash_commands: [], claude_code_version: '2.1.311' });
+      h.msgs.length = 0;
+      (h.conn as any).handleEvent(s1Result);
+      await h.conn.sendPrompt({ text: 'old child, a turn to stop' });
+      await h.conn.runCommand('stop');
+      (h.conn as any).handleEvent(s2Interrupted);
+      await settled();
+      check('CL-2 Drive: a child below 2.1.312 keeps the result\'s reading, and its Stop shows no used 0',
+        asked(h).length === 0 && JSON.stringify(meters(h)) === JSON.stringify([{ used: 65_739, max: 1_000_000 }]),
+        JSON.stringify({ meters: meters(h), asked: asked(h).length }));
+      await h.conn.close();
+    }
+  }
+
   // ── every abnormal termination closes the live run exactly once ───────────────────────────────
   {
     const h = newConn();
@@ -650,6 +908,10 @@ async function main(): Promise<void> {
     (h.conn as any).handleEvent({ type: 'result', subtype: 'error_during_execution', is_error: true, terminal_reason: 'aborted_tools' });
     (h.conn as any).finishLiveAbnormally('cancelled');
     const closed = h.msgs.filter((m: any) => m.type === 'run-summary' && m.status !== 'running') as any[];
+    check('Stop asks the child to end the turn and spare its background agents and workflows',
+      h.stdin.some((line: any) => line.type === 'control_request' && line.request?.subtype === 'interrupt'
+        && line.request.cancel_queued === true && line.request.spare_background_tasks === true),
+      JSON.stringify(h.stdin.filter((line: any) => line.type === 'control_request')));
     check('abnormal close: Stop emits exactly one cancelled summary before Idle',
       h.stdin.some((line: any) => line.type === 'control_request' && line.request?.subtype === 'interrupt')
         && closed.length === 1 && closed[0].status === 'cancelled'
@@ -824,7 +1086,8 @@ async function main(): Promise<void> {
     Object.assign(h.conn as any, { launchModel: 'opus', launchEffort: 'ultracode' });
     (h.conn as any).handleEvent({ type: 'result', subtype: 'success', is_error: false, terminal_reason: 'completed' });
     h.answerControl = () => ({ subtype: 'success' });
-    await h.conn.sendPrompt({ text: 'on haiku', model: { providerID: 'anthropic', modelID: 'haiku' } } as any);
+    // Haiku 4.5 has no effort control at all (on 2.1.330 the `haiku` alias names Haiku 5.5, which has xhigh).
+    await h.conn.sendPrompt({ text: 'on haiku', model: { providerID: 'anthropic', modelID: 'claude-haiku-4-5' } } as any);
     const settings = h.stdin.filter((line: any) => line.request?.subtype === 'apply_flag_settings').map((line: any) => line.request.settings);
     check('live switch: moving to a model without ultracode turns ultracode off',
       JSON.stringify(settings) === JSON.stringify([{ ultracode: false }]), JSON.stringify(settings));

@@ -100,10 +100,11 @@ try {
   const modelIds = (optionsFrame?.models ?? []).map((m: any) => m.modelID);
   const optOpus = (optionsFrame?.models ?? []).find((m: any) => m.modelID === 'opus');
   check('options frame carries fable model + opus full reasoning-effort ladder (low..max)', modelIds.includes('fable') && ['low', 'medium', 'high', 'xhigh', 'max'].every((e) => (optOpus?.reasoningEfforts ?? []).some((r: any) => r.effort === e)), JSON.stringify(modelIds));
-  // Efforts auto-infer PER MODEL (dynamic-discovery refinement): Sonnet has max but no xhigh; Haiku has none.
+  // Efforts follow the current CLI's registry per alias: since the aliases name the 5.5 models (Claude Code
+  // 2.1.330), sonnet and haiku carry xhigh, and so ultracode, like opus and fable.
   const effortsOf = (id: string) => ((optionsFrame?.models ?? []).find((m: any) => m.modelID === id)?.reasoningEfforts ?? []).map((r: any) => r.effort);
-  check('options frame: per-model efforts — sonnet has max but NOT xhigh, haiku has none', effortsOf('sonnet').includes('max') && !effortsOf('sonnet').includes('xhigh') && effortsOf('haiku').length === 0, JSON.stringify({ sonnet: effortsOf('sonnet'), haiku: effortsOf('haiku') }));
-  check('options frame: ultracode offered ONLY on xhigh-capable models (opus/fable), never sonnet/haiku', effortsOf('opus').includes('ultracode') && effortsOf('fable').includes('ultracode') && !effortsOf('sonnet').includes('ultracode') && !effortsOf('haiku').includes('ultracode'), JSON.stringify(effortsOf('opus')));
+  check('options frame: per-model efforts — sonnet and haiku have the full ladder', ['sonnet', 'haiku'].every((id) => ['low', 'medium', 'high', 'xhigh', 'max'].every((e) => effortsOf(id).includes(e))), JSON.stringify({ sonnet: effortsOf('sonnet'), haiku: effortsOf('haiku') }));
+  check('options frame: ultracode offered on every xhigh-capable alias', ['opus', 'sonnet', 'haiku', 'fable'].every((id) => effortsOf(id).includes('ultracode')), JSON.stringify(effortsOf('opus')));
 
   // ── First prompt: spawns fake claude in plan mode → permission + question arrive; echo exactly once ──
   const mark = drive.frames.length;

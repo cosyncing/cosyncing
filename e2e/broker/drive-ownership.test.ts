@@ -440,7 +440,7 @@ describe('Drive ownership across clients, evictions and restarts', () => {
     expect((await prompt(stream, 'long work [fake:hold]')).kind).toBe('ack');
     expect((await stream.sendAndAwait({ kind: 'command', name: 'stop' })).kind).toBe('ack');
     await eventually(() => runSummaries(stream, 'cancelled').length === 1, { what: 'the interrupted turn to end as cancelled' });
-    expect(controlRequests(child)).toContainEqual({ subtype: 'interrupt', cancel_queued: true });
+    expect(controlRequests(child)).toContainEqual({ subtype: 'interrupt', cancel_queued: true, spare_background_tasks: true });
     expect(claude.alive(child)).toBe(true);
     expect(stream.messages().filter((message) => message.type === 'error')).toEqual([]);
 

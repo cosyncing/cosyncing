@@ -1,0 +1,150 @@
+{
+  "_provenance": {
+    "capturedOn": "2026-11-24 (no sign-in); 2026-11-27 (signed in, then signed out)",
+    "source": "agy 1.5.16 and 1.5.18 (linux-x64, each the release the vendor's update manifest served that day), installed into isolated prefixes and run in a bwrap sandbox whose OS home was a tmpfs, with a scratch HOME and AGY_CLI_DISABLE_AUTO_UPDATE=true. Each Drive-shaped run used the adapter's own argv (`--output-format=stream-json --input-format=stream-json`) plus the mode under test. On 2026-11-24 there was no sign-in and stdin was closed; on 2026-11-27 the owner signed in to the scratch home through agy's own sign-in, the runs sent one prompt each, and the sign-in was then deleted for the `signedOut` run.",
+    "sanitized": true,
+    "note": "Each string is ONE line copied verbatim from the run's stdout, stderr or agy's own run log (`~/.gemini/antigravity-cli/log/cli-<stamp>.log` in the scratch home). Scrubbed: in `signedIn.init`, `conversation_id` -> `<conversation>` and `init.cwd` (a scratch workspace path) -> `<workspace>`. Nothing else was changed. Lines carrying the account email, the sign-in URL, conversation ids or capture paths were not taken."
+  },
+  "versionStdout": "1.5.16\n",
+  "helpModeLine": "  --mode                          Set the agent execution mode for this session (accept-edits, auto, plan)",
+  "stderr": {
+    "modeDefaultRefused": "warning: unrecognized --mode value \"default\" (valid: accept-edits, auto, plan)",
+    "modeBogusRefused": "warning: unrecognized --mode value \"bogus\" (valid: accept-edits, auto, plan)",
+    "modeAutoUnavailable": "warning: --mode auto is not available for this account; continuing in the default mode.",
+    "settingsDefaultRefused": "Error: --settings: invalid value for setting \"agentMode\": agentMode: unrecognized value \"default\""
+  },
+  "log": {
+    "modeApplied": "I1124 17:43:42.911949       1 printmode.go:919] Print mode: applying agent mode accept-edits",
+    "modeAutoUnavailable": "W1124 17:43:50.931079       1 printmode.go:903] Print mode: --mode auto is unavailable (rollout flag off), continuing in the default mode",
+    "updaterDisabled": "I1124 17:43:34.925016       1 auto_updater.go:285] Auto-update disabled via environment variable AGY_CLI_DISABLE_AUTO_UPDATE",
+    "updaterSpawned": "I1124 17:41:30.960461       1 auto_updater.go:372] Spawned background update process with PID 21"
+  },
+  "updaterByValue": {
+    "_note": "AGY_CLI_DISABLE_AUTO_UPDATE value -> what the run's log said (one `agy models` run each, last-check stamp removed first).",
+    "true": "disabled",
+    "1": "spawned",
+    "TRUE": "spawned",
+    "yes": "spawned"
+  },
+  "signedIn": {
+    "_note": "Signed in (2026-11-27), one prompt per run asking for a workspace file write and a shell command. `args` are the mode arguments, passed after `--output-format=stream-json --input-format=stream-json`. `reached` is the mode the run's own evidence shows: its run-log mode lines, and whether the write landed and the command ran or was soft-denied. Every line is from 1.5.16. 1.5.18 ran noMode, settingsDefault, settingsDefaultModeAuto, modeDefault and settingsAuto with the same stderr, mode lines (timestamps aside) and outcome, plus settingsAuto on a resumed conversation (`settingsAuto1_5_18`); it did not run accept-edits or plan.",
+    "versionStdout": {
+      "1.5.16": "1.5.16\n",
+      "1.5.18": "1.5.18\n"
+    },
+    "helpModeLine1_5_18": "  --mode                          Set the agent execution mode for this session (accept-edits, auto, plan)",
+    "modelsStdout": "gemini-4-hydrogen-high\tGemini 4 Hydrogen (High)\ngemini-4-hydrogen-xhigh\tGemini 4 Hydrogen (XHigh)\ngemini-4-hydrogen-medium\tGemini 4 Hydrogen (Medium)\ngemini-4-hydrogen-low\tGemini 4 Hydrogen (Low)\ngemini-3.8-flash-high\tGemini 3.8 Flash (High)\ngemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\ngemini-3.8-flash-low\tGemini 3.8 Flash (Low)\nclaude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\nclaude-opus-4-6-thinking\tClaude Opus 4.6 (Thinking)\ngpt-oss-120b-medium\tGPT-OSS 120B (Medium)\n",
+    "launches": {
+      "noMode": {
+        "args": [],
+        "reached": "auto",
+        "stderr": "",
+        "log": [
+          "I1127 14:50:22.164293     212 manager.go:1796] SetCycleMode called: auto"
+        ]
+      },
+      "settingsDefault": {
+        "args": [
+          "--settings",
+          "{\"agentMode\":\"\"}"
+        ],
+        "reached": "default",
+        "stderr": "jetski: no output produced — a tool required the \"command\" permission that headless mode cannot prompt for, so it was auto-denied. Add an allow-rule under permissions.allow in settings.json (e.g. command(<target>)). Alternatively, re-run with --dangerously-skip-permissions to auto-approve all tools.",
+        "log": [
+          "I1127 14:50:51.262115     586 tool_confirmation_manager.go:222] Print mode: soft-denying tool confirmation \"Bash\" at step 4"
+        ]
+      },
+      "settingsDefaultModeAcceptEdits": {
+        "args": [
+          "--settings",
+          "{\"agentMode\":\"\"}",
+          "--mode",
+          "accept-edits"
+        ],
+        "reached": "accept-edits",
+        "stderr": "jetski: no output produced — a tool required the \"command\" permission that headless mode cannot prompt for, so it was auto-denied. Add an allow-rule under permissions.allow in settings.json (e.g. command(<target>)). Alternatively, re-run with --dangerously-skip-permissions to auto-approve all tools.",
+        "log": [
+          "I1127 14:50:52.185227       1 printmode.go:919] Print mode: applying agent mode accept-edits",
+          "I1127 14:51:02.300718     648 tool_confirmation_manager.go:222] Print mode: soft-denying tool confirmation \"Bash\" at step 4"
+        ]
+      },
+      "settingsDefaultModePlan": {
+        "args": [
+          "--settings",
+          "{\"agentMode\":\"\"}",
+          "--mode",
+          "plan"
+        ],
+        "reached": "plan",
+        "stderr": "jetski: no output produced — a tool required the \"command\" permission that headless mode cannot prompt for, so it was auto-denied. Add an allow-rule under permissions.allow in settings.json (e.g. command(<target>)). Alternatively, re-run with --dangerously-skip-permissions to auto-approve all tools.",
+        "log": [
+          "I1127 14:51:14.253835       1 printmode.go:919] Print mode: applying agent mode plan"
+        ]
+      },
+      "settingsDefaultModeAuto": {
+        "args": [
+          "--settings",
+          "{\"agentMode\":\"\"}",
+          "--mode",
+          "auto"
+        ],
+        "reached": "default",
+        "stderr": "warning: --mode auto is not available for this account; continuing in the default mode.",
+        "log": [
+          "W1127 14:51:03.228235       1 printmode.go:903] Print mode: --mode auto is unavailable (rollout flag off), continuing in the default mode",
+          "I1127 14:51:03.228293       1 printmode.go:410] Print mode: not authenticated, trying silent auth"
+        ]
+      },
+      "modeDefault": {
+        "args": [
+          "--mode",
+          "default"
+        ],
+        "reached": "auto",
+        "stderr": "warning: unrecognized --mode value \"default\" (valid: accept-edits, auto, plan)",
+        "log": [
+          "I1127 14:51:33.547198     226 manager.go:1796] SetCycleMode called: auto"
+        ]
+      },
+      "settingsAuto": {
+        "args": [
+          "--settings",
+          "{\"agentMode\":\"auto\"}"
+        ],
+        "reached": "auto",
+        "stderr": "",
+        "log": [
+          "I1127 14:54:38.156963     210 manager.go:1796] SetCycleMode called: auto"
+        ]
+      }
+    },
+    "settingsAuto1_5_18": {
+      "log": [
+        "I1127 14:56:27.489846     213 manager.go:1796] SetCycleMode called: auto"
+      ],
+      "resumedLog": [
+        "I1127 14:57:23.548246     237 manager.go:1796] SetCycleMode called: auto"
+      ]
+    },
+    "init": "{\"event\":\"init\",\"conversation_id\":\"<conversation>\",\"init\":{\"cwd\":\"<workspace>\",\"tools\":[\"ask_custom_permission\",\"ask_permission\",\"ask_question\",\"browser_click_element\",\"browser_drag_pixel_to_pixel\",\"browser_get_dom\",\"browser_get_network_request\",\"browser_input\",\"browser_list_network_requests\",\"browser_mouse_down\",\"browser_mouse_up\",\"browser_move_mouse\",\"browser_press_key\",\"browser_refresh_page\",\"browser_resize_window\",\"browser_scroll\",\"browser_scroll_dom\",\"browser_select_option\",\"browser_subagent\",\"call_mcp_tool\",\"capture_browser_console_logs\",\"capture_browser_screenshot\",\"click_browser_pixel\",\"command_status\",\"define_subagent\",\"delete_knowledge\",\"execute_browser_javascript\",\"find_by_name\",\"finish\",\"generate_image\",\"grep_search\",\"invoke_subagent\",\"list_browser_pages\",\"list_dir\",\"list_permissions\",\"list_plugin_accounts\",\"list_resources\",\"manage_inbox\",\"manage_subagents\",\"manage_task\",\"multi_replace_file_content\",\"notebook_edit\",\"notebook_execution\",\"open_browser_url\",\"read_browser_page\",\"read_resource\",\"read_url_content\",\"replace_file_content\",\"run_command\",\"run_workflow\",\"schedule\",\"search_marketplace\",\"search_web\",\"sed_file\",\"send_command_input\",\"send_message\",\"view_file\",\"wait\",\"wait_5_seconds\",\"write_to_file\"],\"permission_mode\":\"request-review\"}}"
+  },
+  "signedOut": {
+    "_note": "The same scratch home after its sign-in was deleted, so agy's Auto rollout flag is off; `--settings {\"agentMode\":\"auto\"}` plus the same prompt, no controlling terminal. Each version exited 1 within 1.3 s on its sign-in; no line, on stderr or in the log, mentions a mode. 1.5.18 printed the same lines.",
+    "args": [
+      "--settings",
+      "{\"agentMode\":\"auto\"}"
+    ],
+    "exitCode": 1,
+    "stderr": [
+      "Error: authentication required. Run 'agy' to log in, then retry.",
+      "error: authentication failed or timed out"
+    ],
+    "stdout": "{\"event\":\"result\",\"result\":{\"conversation_id\":\"\",\"status\":\"ERROR\",\"response\":\"\",\"error\":\"authentication failed or timed out\",\"duration_seconds\":0,\"num_turns\":0,\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"thinking_tokens\":0,\"cache_read_tokens\":0,\"total_tokens\":0},\"finished_reason\":\"error\"}}",
+    "log": [
+      "I1127 15:02:50.620012       1 printmode.go:209] Print mode: starting (promptLength=0, model=\"\", conversationID=\"\")",
+      "I1127 15:02:50.622222       1 printmode.go:410] Print mode: not authenticated, trying silent auth",
+      "I1127 15:02:50.622293       1 printmode.go:416] Print mode: silent auth failed",
+      "W1127 15:02:50.622312       1 printmode.go:428] Print mode: not logged in and no controlling terminal; cannot complete interactive login"
+    ]
+  }
+}

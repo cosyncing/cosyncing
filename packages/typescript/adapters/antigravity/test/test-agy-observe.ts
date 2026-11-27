@@ -957,7 +957,7 @@ function duplicates(messages: AgentMessage[]): string[] {
       models.some((model) => (model.reasoningEfforts?.length ?? 0) >= 2),
       models.map((model) => `${model.label}:${model.reasoningEfforts?.length ?? 0}`).join(' | '));
     const modes = await connection.listModes();
-    check('an observe connection lists the three modes',
+    check('an observe connection lists the modes (all four without a binary to read a version from)',
       JSON.stringify(modes) === JSON.stringify(AGY_MODES), modes.map((mode) => mode.value).join(','));
 
     let refused = false;

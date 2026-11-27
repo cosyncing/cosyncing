@@ -34,8 +34,9 @@
  * held ({@link agyCliCatalogForPicker}).
  */
 import { spawn } from 'node:child_process';
+import { statSync } from 'node:fs';
 
-import type { AgyModelCatalog, AgySignInEvidence, AgyTraceSink } from './store.ts';
+import { parseAgyVersion, type AgyModelCatalog, type AgySignInEvidence, type AgyTraceSink } from './store.ts';
 
 /** How long one `agy models` answer suppresses the next spawn — and the first back-off after a failure. */
 export const AGY_CLI_MODELS_TTL_MS = 15 * 60_000;
@@ -57,7 +58,7 @@ export const AGY_CLI_MODELS_MAX_BYTES = 256 * 1024;
  * AGY_CLI_DISABLE_AUTO_UPDATE` — while `1`, `TRUE` and `yes` still log
  * `Spawned background update process`. (An earlier `1`, chosen from the binary's
  * strings alone, still let agy update itself.) It is set on every PROBE the
- * broker runs — the model list here and doctor's `--version` —
+ * broker runs — the model list and version read here and doctor's `--version` —
  * and not on a Drive child, which is the user's own session under agy's own policy.
  */
 export const AGY_NO_AUTO_UPDATE_ENV: Readonly<Record<string, string>> = Object.freeze({
@@ -328,7 +329,108 @@ export function agyCliCatalogForPicker(
   return ensureAgyCliCatalog(binary, options);
 }
 
-/** Tests only: forget every cached list, failure and TTL stamp. */
+// ── The binary's version (AG-4) ──────────────────────────────────────────────
+
+/**
+ * How long `agy --version` may run. MEASURED 2026-11-24 on 1.5.16: 0.13 s, it
+ * prints `1.5.16`, writes no run log and does not repoint `cli.log`.
+ */
+export const AGY_CLI_VERSION_TIMEOUT_MS = 5_000;
+/** Output past this is not a version. */
+const AGY_CLI_VERSION_MAX_BYTES = 4096;
+
+interface AgyCliVersionState {
+  /** The binary's `mtime:size` when this was read: agy replaces itself, so a new stamp is a new version. */
+  stamp: string;
+  version?: string;
+  settledAt?: number;
+  inFlight?: Promise<string | undefined>;
+}
+
+const versionByBinary = new Map<string, AgyCliVersionState>();
+
+function agyBinaryStamp(binary: string): string {
+  try {
+    const stats = statSync(binary);
+    return `${stats.mtimeMs}:${stats.size}`;
+  } catch {
+    return 'unreadable';
+  }
+}
+
+/** One `agy --version` run, with the probe environment. Resolves undefined, with a trace, on any failure. */
+function runAgyCliVersion(binary: string, options: AgyCliCatalogOptions): Promise<string | undefined> {
+  const trace = options.trace;
+  const spawnImpl = options.spawnImpl ?? spawn;
+  return new Promise((resolve) => {
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawnImpl(binary, ['--version'], { stdio: ['ignore', 'pipe', 'pipe'], env: agyProbeEnv(options.env) });
+    } catch (error) {
+      trace?.({ op: 'cli-version', detail: `spawn failed: ${String(error)}` });
+      resolve(undefined);
+      return;
+    }
+    let out = '';
+    let settled = false;
+    const finish = (version: string | undefined, detail: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      trace?.({ op: 'cli-version', detail });
+      resolve(version);
+    };
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      finish(undefined, `agy --version timed out after ${AGY_CLI_VERSION_TIMEOUT_MS}ms`);
+    }, AGY_CLI_VERSION_TIMEOUT_MS);
+    child.stdout?.on('data', (chunk: Buffer) => {
+      if (out.length < AGY_CLI_VERSION_MAX_BYTES) out += chunk.toString('utf8').slice(0, AGY_CLI_VERSION_MAX_BYTES);
+    });
+    child.stderr?.on('data', () => {});
+    child.on('error', (error) => finish(undefined, `agy --version process error: ${String(error)}`));
+    child.on('close', (code) => {
+      const version = code === 0 ? parseAgyVersion(out) : undefined;
+      finish(version, version ? `agy ${version}` : `agy --version exited ${code} with no version`);
+    });
+  });
+}
+
+/**
+ * The installed agy's version, read once per binary image (AG-4).
+ *
+ * The mode a Drive child launches in is encoded per version (`agyModeLaunchArgs`),
+ * and the Auto row is offered only by an agy that has it. One `agy --version`
+ * per binary image, single-flight; a new image (agy replaced itself) is read
+ * again. A failed read is undefined — callers treat that as current upstream —
+ * and is retried after {@link AGY_CLI_MODELS_TTL_MS}. Never rejects.
+ */
+export function agyCliVersion(binary: string, options: AgyCliCatalogOptions = {}): Promise<string | undefined> {
+  const now = options.now ?? Date.now;
+  const stamp = agyBinaryStamp(binary);
+  let state = versionByBinary.get(binary);
+  if (!state || state.stamp !== stamp) {
+    state = { stamp };
+    versionByBinary.set(binary, state);
+  }
+  if (state.inFlight) return state.inFlight;
+  if (state.settledAt !== undefined
+    && (state.version !== undefined || now() - state.settledAt < AGY_CLI_MODELS_TTL_MS)) {
+    return Promise.resolve(state.version);
+  }
+  const held = state;
+  const flight = runAgyCliVersion(binary, options).then((version) => {
+    held.version = version;
+    held.settledAt = now();
+    held.inFlight = undefined;
+    return version;
+  });
+  held.inFlight = flight;
+  return flight;
+}
+
+/** Tests only: forget every cached list, failure, TTL stamp and version. */
 export function resetAgyCliCatalogForTests(): void {
   stateByBinary.clear();
+  versionByBinary.clear();
 }
