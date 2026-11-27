@@ -566,6 +566,8 @@ async function main(): Promise<void> {
       ['claude-sonnet-4-6', 'xhigh', []], // registry: effort and max, no xhigh
       ['claude-sonnet-4-6', 'max', ['max']],
       ['claude-haiku-4-5-20251001', 'high', []], // registry: no effort control
+      ['claude-sonnet-4-20250514', 'xhigh', []], // Sonnet 4's dated first-party id: no effort control
+      ['claude-opus-4-20250514', 'xhigh', []], // Opus 4's dated first-party id: no effort control
       ['claude-opus-4-6', 'ultracode', []],
       ['claude-opus-5-5', 'xhigh', ['xhigh']],
     ];

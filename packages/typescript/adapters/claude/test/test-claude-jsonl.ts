@@ -693,6 +693,10 @@ peerCaptures.self.origin.from = peerCaptures.self.agentId;
     ['an unregistered id on a row with no version', row('claude-zeta-9-9', undefined, 'c'), 200_000],
     ['a registered 200k id written by 2.1.330', row('claude-sonnet-4-6', '2.1.330', 'd'), 200_000],
     ['a dated registered 200k id written by 2.1.330', row('claude-haiku-4-5-20251001', '2.1.330', 'e'), 200_000],
+    // The registry lists Sonnet 4 and Opus 4 as `claude-sonnet-4-0` and `claude-opus-4-0`; their dated
+    // first-party ids (the registry's `provider_ids.first_party`) strip to `claude-sonnet-4` / `claude-opus-4`.
+    ['dated Sonnet 4 written by 2.1.330', row('claude-sonnet-4-20250514', '2.1.330', 'g'), 200_000],
+    ['dated Opus 4 written by 2.1.330', row('claude-opus-4-20250514', '2.1.330', 'h'), 200_000],
     ['a native-1M id written by an old CLI', row('claude-opus-5-5', '2.1.300', 'f'), 1_000_000],
   ];
   const wrong = cases.filter(([, line, max]) => meter(line)?.max !== max || meter(line)?.used !== 50_000);

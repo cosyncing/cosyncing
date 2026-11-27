@@ -3139,11 +3139,15 @@ const CURATED_CLAUDE_CATALOG: CatalogEntry[] = [
 /** Concrete ids whose effort ladder is narrower than the one their alias resolves to today, from the
  *  registry's capabilities (2.1.330): Sonnet 4.6 and Opus 4.6 have `effort` and `max_effort` but no
  *  `xhigh_effort`; Haiku 4.5, the older 4.x ids and every 3.x id declare no effort at all. A dated
- *  spelling (`claude-haiku-4-5-20251001`) has its base id's ladder. */
+ *  spelling (`claude-haiku-4-5-20251001`) has its base id's ladder. Sonnet 4 and Opus 4 are listed under
+ *  the registry's `-4-0` aliases and under the base of their dated first-party ids
+ *  (`claude-sonnet-4-20250514` strips to `claude-sonnet-4`). */
 const CLAUDE_NARROW_EFFORT_MODELS: ReadonlyMap<string, Effort[]> = new Map([
   ['claude-sonnet-4-6', EFFORTS_NO_XHIGH], ['claude-opus-4-6', EFFORTS_NO_XHIGH],
-  ['claude-haiku-4-5', EFFORTS_NONE], ['claude-sonnet-4-5', EFFORTS_NONE], ['claude-sonnet-4-0', EFFORTS_NONE],
-  ['claude-opus-4-5', EFFORTS_NONE], ['claude-opus-4-1', EFFORTS_NONE], ['claude-opus-4-0', EFFORTS_NONE],
+  ['claude-haiku-4-5', EFFORTS_NONE], ['claude-sonnet-4-5', EFFORTS_NONE],
+  ['claude-sonnet-4-0', EFFORTS_NONE], ['claude-sonnet-4', EFFORTS_NONE],
+  ['claude-opus-4-5', EFFORTS_NONE], ['claude-opus-4-1', EFFORTS_NONE],
+  ['claude-opus-4-0', EFFORTS_NONE], ['claude-opus-4', EFFORTS_NONE],
 ]);
 
 /** The ladder a concrete id is narrower than its alias's, or undefined when the alias's ladder holds. */
@@ -5363,10 +5367,12 @@ const CLAUDE_NATIVE_1M_MODELS: ReadonlySet<string> = new Set([
 
 /** The rest of the 2.1.330 registry: ids Claude Code knows, on a 200k window unless a `[1m]` spelling
  *  asks for more. Every `claude-3-*` id is treated the same. Knowing them is what lets an id in NEITHER
- *  set be read the way the CLI reads one it does not recognize ({@link CLAUDE_UNKNOWN_MODEL_1M_SINCE}). */
+ *  set be read the way the CLI reads one it does not recognize ({@link CLAUDE_UNKNOWN_MODEL_1M_SINCE}).
+ *  Sonnet 4 and Opus 4 are listed under the registry's `-4-0` aliases and under the base of their dated
+ *  first-party ids (`claude-opus-4-20250514` strips to `claude-opus-4`). */
 const CLAUDE_REGISTRY_200K_MODELS: ReadonlySet<string> = new Set([
-  'claude-opus-4-0', 'claude-opus-4-1', 'claude-opus-4-5', 'claude-opus-4-6',
-  'claude-sonnet-4-0', 'claude-sonnet-4-5', 'claude-sonnet-4-6', 'claude-haiku-4-5',
+  'claude-opus-4-0', 'claude-opus-4', 'claude-opus-4-1', 'claude-opus-4-5', 'claude-opus-4-6',
+  'claude-sonnet-4-0', 'claude-sonnet-4', 'claude-sonnet-4-5', 'claude-sonnet-4-6', 'claude-haiku-4-5',
 ]);
 
 /** Claude Code 2.1.323 changed the window it assumes for a model id it does not recognize from 200k to 1M
