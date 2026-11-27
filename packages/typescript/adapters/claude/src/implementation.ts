@@ -3364,6 +3364,9 @@ export class ClaudeResumeConnection implements SessionConnection {
   /** The window read in flight, and whether another was asked for while it ran ({@link readContextWindow}). */
   private contextWindowRead?: Promise<void>;
   private contextWindowReadAgain = false;
+  /** Turn `result`s this connection has counted. A window read records it with its request, so an answer
+   *  to a request sent before a `result` is not taken as the count after it. */
+  private resultsCounted = 0;
   /** Auto-surfaced subagent/workflow progress cards + parent-answered tool_use_ids (subagent done). The
    *  watcher re-points if the live process ever reports a rotated session id (defensive — issue 15a). */
   private activity?: ClaudeActivityWatcher;
@@ -4364,9 +4367,12 @@ export class ClaudeResumeConnection implements SessionConnection {
     this.contextWindowRead = (async () => {
       do {
         this.contextWindowReadAgain = false;
+        const resultsAtRequest = this.resultsCounted;
         const { outcome, response } = await this.requestControl({ subtype: 'get_context_usage', detail: 'summary' });
         if (outcome !== 'accepted') return;
-        const corrected = learnClaudeContextWindow(this.contextWindow, response);
+        // A `result` counted while this request was out makes its count older than the reading: the
+        // window still holds, and the request queued behind it brings the count.
+        const corrected = learnClaudeContextWindow(this.contextWindow, response, this.resultsCounted === resultsAtRequest);
         if (corrected) this.emit(corrected);
       } while (this.contextWindowReadAgain && this.proc);
     })().finally(() => {
@@ -4548,6 +4554,7 @@ export class ClaudeResumeConnection implements SessionConnection {
         this.handleStreamEvent(o.event); // token-by-token deltas from --include-partial-messages
         return;
       case 'result': {
+        this.resultsCounted++;
         this.drainUserEcho();
         // The turn a Stop interrupted ends here. A turn that completed before the interrupt reached
         // the child keeps its own outcome.
@@ -5476,9 +5483,11 @@ function claudeTokenCount(value: unknown): number | undefined {
  * shows: `percentage` is `totalTokens / maxTokens`) becomes the reading. The turn's `result` cannot be:
  * its `usage` sums every model call of the turn (measured on 2.1.330: a three-call turn's `result`
  * counted 65,739 where the answer that followed counted 23,374), so it is only the reading until this
- * answer lands, and the reading of a child that is never asked.
+ * answer lands, and the reading of a child that is never asked. `countIsCurrent` is false for an answer
+ * to a request sent before the latest `result`: its count describes the context before that turn, so
+ * only its window is taken.
  */
-export function learnClaudeContextWindow(state: ClaudeContextWindowState, response: unknown): AgentMessage | undefined {
+export function learnClaudeContextWindow(state: ClaudeContextWindowState, response: unknown, countIsCurrent = true): AgentMessage | undefined {
   const r = response as { model?: unknown; rawMaxTokens?: unknown; maxTokens?: unknown; totalTokens?: unknown } | null | undefined;
   if (!r || typeof r !== 'object') return undefined;
   const window = claudeTokenCount(r.rawMaxTokens) ?? claudeTokenCount(r.maxTokens);
@@ -5486,7 +5495,7 @@ export function learnClaudeContextWindow(state: ClaudeContextWindowState, respon
   const model = claudeContextModel(r.model) ?? r.model;
   state.reportedWindows = { ...state.reportedWindows, [model]: window };
   if (state.lastModel !== model || state.lastUsed === undefined) return undefined;
-  const total = claudeTokenCount(r.totalTokens);
+  const total = countIsCurrent ? claudeTokenCount(r.totalTokens) : undefined;
   return claudeContextUsageMessage(state, model, total ? total : state.lastUsed, true);
 }
 

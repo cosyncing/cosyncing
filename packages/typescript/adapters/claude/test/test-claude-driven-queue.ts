@@ -727,9 +727,10 @@ async function main(): Promise<void> {
       await h.conn.close();
     }
 
-    // An answer that lands after the turn's reading restates the meter once, with Claude Code's own count
-    // (`totalTokens`) against the window it reported; the result's reading and the registry rule were on
-    // screen until then.
+    // An answer that lands after the turn's reading restates the meter once against the reported window;
+    // the registry rule was on screen until then. Its request went out before the turn's `result`, so its
+    // count describes the context before the turn: the reading stays the result's until the request queued
+    // behind it answers.
     {
       const h = newConn();
       await h.history();
@@ -742,9 +743,17 @@ async function main(): Promise<void> {
         (h.conn as any).handleEvent({ type: 'control_response', response: { subtype: 'success', request_id: line.request_id, response: captured.opusNo1m } });
       }
       await settled();
-      check('CL-2 Drive: a late answer restates the reading once, with Claude Code\'s own count against the reported window',
-        pending.length === 1 && JSON.stringify(meters(h)) === JSON.stringify([{ used: 150_000, max: 1_000_000 }, { used: 14_455, max: 200_000 }]),
+      check('CL-2 Drive: a late answer restates the reading against the reported window, once',
+        pending.length === 1 && JSON.stringify(meters(h)) === JSON.stringify([{ used: 150_000, max: 1_000_000 }, { used: 150_000, max: 200_000 }]),
         JSON.stringify({ meters: meters(h), pending: pending.length }));
+      const followUp = asked(h).slice(pending.length);
+      for (const line of followUp) {
+        (h.conn as any).handleEvent({ type: 'control_response', response: { subtype: 'success', request_id: line.request_id, response: captured.opusNo1m } });
+      }
+      await settled();
+      check('CL-2 Drive: a count asked for before the turn\'s result never replaces its reading; the follow-up request\'s count does',
+        followUp.length === 1 && JSON.stringify(meters(h)) === JSON.stringify([{ used: 150_000, max: 1_000_000 }, { used: 150_000, max: 200_000 }, { used: 14_455, max: 200_000 }]),
+        JSON.stringify({ meters: meters(h), followUp: followUp.length }));
       await h.conn.close();
     }
 
