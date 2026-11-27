@@ -80,6 +80,12 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   and `cosy doctor` lists them. With Hub core 0.2.1, cosyncing also checks the
   Hub's own id, so a record left by an earlier Hub on the same port is no longer
   taken for the running one. The minimum versions are unchanged.
+- Claude Code: the model picker follows Claude Code 2.1.330. Opus, Sonnet and
+  Haiku offer extra high, max and ultracode, and preselect medium. Sonnet 4.6,
+  Opus 4.6 and Haiku 4.5 sessions still drop an effort level their model does not
+  accept.
+- Antigravity is verified against agy 1.5.16 and 1.5.18. The mode picker offers
+  Auto on agy versions that have it.
 
 ### Fixed
 
@@ -184,6 +190,26 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   turn off that agent's self-update, so a check can no longer update the
   installed agent. The managed `kimi web` host also starts with Kimi's self-update
   turned off.
+- Claude Code: in Take over, the context meter divides by the window Claude Code
+  reports, including for a model cosyncing does not list and when the 1M window is
+  turned off. After a turn with several model calls it shows Claude Code's own
+  count instead of the sum of every call, and stopping a turn keeps its reading
+  instead of showing 0. On transcripts from Claude Code 2.1.323 or newer, a model
+  Claude Code does not list reads as a 1M window, as Claude Code itself assumes.
+- Claude Code: Stop in Take over ends only the turn again. Recent Claude Code
+  versions also stopped the session's background agents and workflows on Stop;
+  from Claude Code 2.1.330 they keep running. Background commands were not
+  affected.
+- Claude Code: a transcript record type cosyncing does not know raises its
+  attention event again for sessions attached from stored history. The record
+  types Claude Code 2.1.330 writes are recognized and skipped.
+- Antigravity: a session driven from the app now always runs in the mode the app
+  shows. agy 1.5.7 and later start in Auto when no mode is named, and agy 1.5.16
+  no longer accepts `--mode default`, so a session with no mode chosen, or with
+  Default chosen, could run in Auto. cosyncing now names the mode on every launch,
+  using agy's session-only settings for Default and Auto on agy 1.5.7 and later.
+  On agy 1.5.16 and later, which no longer reports the model when a turn starts,
+  a session shows the model you switched to.
 
 ## 0.8.5 — 2026-10-26
 
