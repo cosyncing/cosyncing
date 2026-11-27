@@ -885,6 +885,46 @@ for (const version of ['1.5.16', '1.5.18'] as const) {
   }
 }
 
+// ── 14b. A send behind a relaunching send reaches the new child ─────────────
+//
+// A send that switches the mode relaunches the child, and reads the agy version
+// first (AG-4), which yields. A plain send issued meanwhile wrote to the child
+// about to be replaced, and the relaunch then cancelled that turn. Sends run one
+// at a time, so the plain send waits and reaches the new child behind the switch.
+{
+  const h = newDrive({ init: INIT_EVENT, defaultTurn: [RESULT_OK] });
+  try {
+    await h.connection.getHistory();
+    await h.connection.sendPrompt({ text: 'warm the child' });
+    await waitFor(() => h.statuses()[h.statuses().length - 1] === 'idle');
+
+    // Neither send is awaited before the other is issued.
+    const switching = h.connection.sendPrompt({ text: 'switch the mode', permissionMode: 'accept-edits' });
+    const plain = h.connection.sendPrompt({ text: 'right behind the switch' });
+    const outcomes = await Promise.allSettled([switching, plain]);
+    check('a mode-switch send and a plain send issued behind it are both accepted',
+      outcomes.every((outcome) => outcome.status === 'fulfilled'),
+      outcomes.map((outcome) => outcome.status).join(','));
+
+    const prompts = (): unknown[] => h.fake.stdin().map((line) => (line.message as { content?: unknown } | undefined)?.content);
+    // The first child is killed before the second spawns, and only the second is ever written the
+    // switch's prompt, so a prompt recorded after it went to the second child.
+    check('the plain send reaches the new child, after the switch\'s own prompt',
+      await waitFor(() => h.fake.launches() === 2 && prompts().length === 3)
+        && JSON.stringify(prompts()) === JSON.stringify(['warm the child', 'switch the mode', 'right behind the switch'])
+        && (h.fake.argv() ?? []).join(' ').includes('--mode accept-edits'),
+      `${h.fake.launches()} launches; ${JSON.stringify(prompts())}; ${(h.fake.argv() ?? []).join(' ')}`);
+    check('no turn is cancelled by the relaunch, and both turns end on the new child',
+      await waitFor(() => h.statuses()[h.statuses().length - 1] === 'idle')
+        && !h.traces.some((trace) => trace.op === 'drive-turn-abandoned-by-relaunch')
+        && !h.errors().some((message) => /cancelled without a result/i.test(message))
+        && !h.messages.some((m) => m.type === 'run-summary' && (m as { status?: string }).status === 'cancelled'),
+      `${h.statuses().join(',')}; ${h.traces.map((trace) => trace.op).join(',')}; ${h.errors().join(' | ')}`);
+  } finally {
+    h.cleanup();
+  }
+}
+
 // ── 16. Ownership is proved by the consumed claim, never by matching text ────
 //
 // The removed fallback exonerated any tail prompt whose text matched one of the

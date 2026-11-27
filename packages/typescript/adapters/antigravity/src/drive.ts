@@ -233,6 +233,8 @@ export class AgyDriveConnection extends AgyObserveConnection {
   private launchPinsDefault = false;
   /** The agy version the current child was launched for, as `agy --version` read it (AG-4). */
   private agyVersion?: string;
+  /** Sends run one at a time, in the order they arrived ({@link sendPrompt}). Settles, never rejects. */
+  private sendChain: Promise<void> = Promise.resolve();
   /** The current child's stderr since its last line end, read for agy's mode warnings. */
   private stderrLine = '';
 
@@ -516,7 +518,19 @@ export class AgyDriveConnection extends AgyObserveConnection {
 
   // ── Sending ────────────────────────────────────────────────────────────────
 
-  override async sendPrompt(input: PromptInput): Promise<void> {
+  /**
+   * Sends run one at a time, in arrival order. A send that relaunches the child yields while it reads
+   * the agy version (AG-4); a send let through meanwhile would write to the child about to be replaced,
+   * and the relaunch would then cancel that turn. Each send waits for every earlier one to launch and
+   * write, or to refuse: a refused send never holds up the next.
+   */
+  override sendPrompt(input: PromptInput): Promise<void> {
+    const send = this.sendChain.then(() => this.sendPromptInOrder(input));
+    this.sendChain = send.catch(() => undefined);
+    return send;
+  }
+
+  private async sendPromptInOrder(input: PromptInput): Promise<void> {
     const text = (input.text ?? '').trim();
     if (!text) return;
     if (this.closed) throw new Error('This Antigravity session is closed.');
@@ -541,9 +555,9 @@ export class AgyDriveConnection extends AgyObserveConnection {
       || Boolean(explicitMode && explicitMode !== this.launchMode);
     if (needsLaunch()) {
       // AG-4: how a mode is put on the argv depends on the agy version, read once
-      // per binary image (a cached answer after the first). Awaited BEFORE the
-      // launch decision is re-taken below, so a send that arrives meanwhile sees
-      // the child this one starts rather than starting a second.
+      // per binary image (a cached answer after the first). No other send runs
+      // while this one waits ({@link sendPrompt}); the launch decision is still
+      // re-taken below, on the state the read leaves.
       this.agyVersion = await agyCliVersion(
         this.binary,
         this.catalogOptions ?? { ...(this.trace ? { trace: this.trace } : {}) },
