@@ -2315,9 +2315,13 @@ export class ClaudeObserveConnection implements SessionConnection {
             this.noteSessionFacts(record.line);
             // The stored mapper replays without a per-connection type set, and the live rows reach
             // subscribers from the store, so the drift alarm the plain tail raises has to be raised
-            // here: once per type per connection, for lines written while attached, never stored.
-            const unknown = claudeUnknownLineTypeEvent(record.line, this.unknownLineTypes);
-            if (unknown) this.emit(unknown);
+            // here: once per type per connection, for lines written while attached, never stored. A
+            // rebuild replays from the start of the file, so only a record at or past the boundary the
+            // last indexing reached is new; one before it was in the file before this read.
+            if (record.offset >= savedBoundary) {
+              const unknown = claudeUnknownLineTypeEvent(record.line, this.unknownLineTypes);
+              if (unknown) this.emit(unknown);
+            }
           }
         }
         replay.checkpoint();

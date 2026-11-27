@@ -678,6 +678,49 @@ peerCaptures.self.origin.from = peerCaptures.self.agentId;
   }
 }
 
+// CL-5: an appended call definition that an older tool result depends on makes the stored index replay
+// the file from its start. A record of an unlisted type that was in the file before the attach is not
+// new and raises nothing; one appended while attached still raises the alarm.
+{
+  const root = mkdtempSync(join(tmpdir(), 'cosyncing-stored-drift-rebuild-'));
+  const previousHome = process.env.COSYNCING_HOME;
+  process.env.COSYNCING_HOME = root;
+  const file = join(root, 'drift-rebuild.jsonl');
+  const info: SessionInfo = { id: 'drift-rebuild', title: 'Drift rebuild fixture', tool: 'claude', status: 'idle', attachMode: 'observe' };
+  const conn = new ClaudeObserveConnection(file, info);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    writeFileSync(file, [
+      { type: 'a-record-type-in-the-file-before-attach', n: 1 },
+      { type: 'user', uuid: 'rebuild-result', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'rebuild-call', content: 'result before definition' }] } },
+    ].map((line) => JSON.stringify(line)).join('\n') + '\n');
+    await conn.openHistorySnapshot();
+    const received: AgentMessage[] = [];
+    const rebuilt = new Promise<void>((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('the appended definition never rebuilt the stored index')), 5000);
+      conn.subscribe((message) => {
+        received.push(message);
+        if (message.type === 'history-reset') resolve();
+      });
+    });
+    appendFileSync(file, [
+      { type: 'assistant', uuid: 'rebuild-definition', message: { id: 'msg_rebuild', role: 'assistant', content: [{ type: 'tool_use', id: 'rebuild-call', name: 'Read', input: { file_path: '/late/file.ts' } }] } },
+      { type: 'a-record-type-appended-while-attached', n: 2 },
+    ].map((line) => JSON.stringify(line)).join('\n') + '\n');
+    await rebuilt;
+    clearTimeout(timer);
+    const alarms = received.filter((m) => m.type === 'event' && m.name === 'transcript.unknown-type') as any[];
+    check('stored live tail: a rebuild raises the drift alarm only for a record appended while attached',
+      JSON.stringify(alarms.map((m) => m.payload)) === JSON.stringify([{ lineType: 'a-record-type-appended-while-attached' }]),
+      JSON.stringify(alarms));
+  } finally {
+    clearTimeout(timer);
+    await conn.close();
+    if (previousHome === undefined) delete process.env.COSYNCING_HOME; else process.env.COSYNCING_HOME = previousHome;
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 // CL-3: an observed session's window when no list names its model. Claude Code 2.1.323 started assuming
 // 1M for an id it does not recognize (measured on 2.1.330 with `claude-zeta-9-9`); the row's `version`
 // says which CLI wrote it. Row shapes are a 2.1.330 assistant row's; the counts are arbitrary.
