@@ -15,8 +15,9 @@ permissions:
 
 env:
   GH_REPO: ${{ github.repository }}
+  # The runtime the installers place (PINNED_BUN_RUNTIME_VERSION), not the CI test Bun.
   BUN_VERSION: 1.4.3
-  FLUTTER_VERSION: 3.44.3
+  FLUTTER_VERSION: 3.44.9
   RELEASE_REHEARSAL: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
   BROKER_PACKAGE_ARTIFACT_PREFIX: ${{ github.event_name == 'workflow_dispatch' && 'broker-rehearsal-package' || 'broker-package' }}
 

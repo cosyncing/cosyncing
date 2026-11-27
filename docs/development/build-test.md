@@ -1,6 +1,6 @@
 # Public build and test instructions
 
-Use Flutter 3.44.3 from `.fvmrc`, Dart supplied by that SDK, and Bun 1.4.3 from
+Use Flutter 3.44.9 from `.fvmrc`, Dart supplied by that SDK, and Bun 1.4.5 from
 `package.json`. No sibling checkout, private service, or locally preinstalled
 agent CLI is required for deterministic gates.
 
