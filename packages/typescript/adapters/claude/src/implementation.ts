@@ -4421,8 +4421,10 @@ export class ClaudeResumeConnection implements SessionConnection {
    * its process, so a Stop never ends the process while the turn can still be interrupted. An
    * interrupt alone ends background agents and workflows too on current builds (2.1.312 and 2.1.330
    * stop them unless the host declared a per-task stop); `spare_background_tasks` (2.1.330) keeps them,
-   * so a Stop ends only the turn, as it did when this was verified on 2.1.310. An older build ignores
-   * the member. The `result` that follows settles the turn as cancelled, and `cancel_queued` drops
+   * so a Stop ends only the turn, as it did when this was verified on 2.1.310. Measured on 2.1.330,
+   * with and without a turn running: a plain interrupt killed a background agent and the member kept
+   * it; background shell commands survived both and ended only with the process. An older build
+   * ignores the member. The `result` that follows settles the turn as cancelled, and `cancel_queued` drops
    * prompts queued behind it, as ending the child did. A child that has not settled the turn within
    * the grace is ended instead. With no turn of ours running, the interrupt still reaches whatever
    * the child is doing.
