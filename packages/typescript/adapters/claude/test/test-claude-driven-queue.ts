@@ -683,6 +683,8 @@ async function main(): Promise<void> {
       unknown: { totalTokens: 14368, maxTokens: 1000000, rawMaxTokens: 1000000, autocompactSource: 'unknown-model', percentage: 1, model: 'claude-zeta-9-9', autoCompactThreshold: 967000, isAutoCompactEnabled: true, apiUsage: null },
       unknownNo1m: { totalTokens: 14369, maxTokens: 200000, rawMaxTokens: 200000, autocompactSource: 'unknown-model', percentage: 7, model: 'claude-zeta-9-9', autoCompactThreshold: 167000, isAutoCompactEnabled: true, apiUsage: null },
       opusNo1m: { totalTokens: 14455, maxTokens: 200000, rawMaxTokens: 200000, autocompactSource: 'model-default', percentage: 7, model: 'claude-opus-5-5', autoCompactThreshold: 167000, isAutoCompactEnabled: true, apiUsage: null },
+      // Launched as `claude-sonnet-4-6[1m]`: the answer names the `[1m]` spelling and the 1M window.
+      sonnet46OneM: { totalTokens: 20203, maxTokens: 1000000, rawMaxTokens: 1000000, autocompactSource: 'auto', percentage: 2, model: 'claude-sonnet-4-6[1m]', autoCompactThreshold: 967000, isAutoCompactEnabled: true, apiUsage: null },
       // Signed in (2026-11-27, model haiku): S1's answers before its first turn and after a turn of three
       // model calls, and S2's answer after a Stop. `totalTokens` is the count `/context` shows.
       s1Before: { totalTokens: 15223, maxTokens: 1000000, rawMaxTokens: 1000000, autocompactSource: 'model-default', percentage: 2, model: 'claude-haiku-5-5', autoCompactThreshold: 967000, isAutoCompactEnabled: true, apiUsage: null },
@@ -782,6 +784,34 @@ async function main(): Promise<void> {
         refused.length === 1 && queued.length === 1
           && JSON.stringify(meters(h)) === JSON.stringify([{ used: 150_000, max: 1_000_000 }, { used: 14_455, max: 200_000 }]),
         JSON.stringify({ refused: refused.length, queued: queued.length, meters: meters(h) }));
+      await h.conn.close();
+    }
+
+    // A switch from `X[1m]` to `X` changes the window. The window Claude Code reported for the `[1m]`
+    // spelling stops holding at the switch, so with the read after it refused the registry decides:
+    // Sonnet 4.6 is a 200k model. The only captured `[1m]` answer is Sonnet 4.6's.
+    {
+      const h = newConn();
+      await h.history();
+      h.answerControl = (request) => request.subtype === 'get_context_usage' ? { subtype: 'success', response: captured.sonnet46OneM } : undefined;
+      await h.conn.sendPrompt({ text: 'on the 1M spelling' });
+      (h.conn as any).ingestInit({ model: 'claude-sonnet-4-6[1m]', permissionMode: 'default', slash_commands: [], claude_code_version: '2.1.330' });
+      await settled();
+      (h.conn as any).handleEvent(result(150_000));
+      await settled();
+      const onOneM = meters(h);
+      h.answerControl = (request) => request.subtype === 'get_context_usage' ? { subtype: 'error', error: 'refused by the fake' } : { subtype: 'success' };
+      await h.conn.sendPrompt({ text: 'on the 200k spelling', model: { providerID: 'anthropic', modelID: 'claude-sonnet-4-6' } } as any);
+      await settled();
+      h.msgs.length = 0;
+      (h.conn as any).handleEvent(result(150_000));
+      await settled();
+      const switched = h.stdin.some((line: any) => line.type === 'control_request' && line.request?.subtype === 'set_model' && line.request.model === 'claude-sonnet-4-6');
+      check('CL-2 Drive: after a switch from X[1m] to X with the read refused, the meter divides by X\'s 200k',
+        switched
+          && JSON.stringify(onOneM) === JSON.stringify([{ used: 150_000, max: 1_000_000 }, { used: 20_203, max: 1_000_000 }])
+          && JSON.stringify(meters(h)) === JSON.stringify([{ used: 150_000, max: 200_000 }]),
+        JSON.stringify({ switched, onOneM, meters: meters(h) }));
       await h.conn.close();
     }
 

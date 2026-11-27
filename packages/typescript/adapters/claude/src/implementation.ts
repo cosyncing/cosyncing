@@ -5439,10 +5439,19 @@ function seedClaudeContextModel(
   // A wrapper's backend model is kept as reported: it has a meter once Claude Code reports its window.
   state.lastModel = cleanModel ?? (typeof model === 'string' && model ? model : undefined);
   if (cleanModel && typeof model === 'string') {
+    const oneMillion = /\[1m\]$/.test(model);
+    // The window Claude Code reported is keyed by the clean id but was measured for the spelling the
+    // child ran then. A switch between `X[1m]` and `X` changes the window, so that answer no longer
+    // holds: the rules below decide until the child answers for the new spelling.
+    if (oneMillion !== state.oneMillionModels.has(cleanModel) && state.reportedWindows?.[cleanModel] !== undefined) {
+      const reportedWindows = { ...state.reportedWindows };
+      delete reportedWindows[cleanModel];
+      state.reportedWindows = reportedWindows;
+    }
     // Unlike cumulative transcript evidence, init describes the model/window
     // the live Drive child is using now. A later untagged init must therefore
     // revoke an earlier [1m] classification for the same clean model.
-    if (/\[1m\]$/.test(model)) state.oneMillionModels.add(cleanModel);
+    if (oneMillion) state.oneMillionModels.add(cleanModel);
     else state.oneMillionModels.delete(cleanModel);
   }
 }
