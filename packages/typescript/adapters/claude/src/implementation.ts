@@ -9077,6 +9077,27 @@ async function scanClaudeAuthorityRange(
     // pass reads larger chunks so that most records fall wholly inside one and can be skipped.
     const chunkBytes = options.titleFactsOnly ? CLAUDE_TITLE_BACKLOG_CHUNK_BYTES : CLAUDE_TURN_AUTHORITY_CHUNK_BYTES;
     const readBuffer = Buffer.allocUnsafe(Math.max(1, Math.min(chunkBytes, scanEnd - pos)));
+    // The larger title-pass reads keep the authority passes' rhythm: after every 128 KiB of the file
+    // handled, parsed or skipped, a macrotask turn, an abort check and a deadline check, including
+    // partway through a long record. True when the deadline has passed at `handledThrough`.
+    let checkedThrough = pos;
+    const titleCheckpointExpired = async (handledThrough: number): Promise<boolean> => {
+      if (!options.titleFactsOnly || handledThrough - checkedThrough < CLAUDE_TURN_AUTHORITY_CHUNK_BYTES) return false;
+      checkedThrough = handledThrough;
+      await yieldToEventLoop();
+      options.signal?.throwIfAborted();
+      return now() > deadline;
+    };
+    // Feed bytes starting at file offset `at` to the projection, one authority chunk at a time.
+    // Returns the offset reached if a checkpoint's deadline stopped it partway.
+    const feedProjection = async (bytes: Buffer, at: number): Promise<number | undefined> => {
+      for (let start = 0; start < bytes.length; start += CLAUDE_TURN_AUTHORITY_CHUNK_BYTES) {
+        const end = Math.min(bytes.length, start + CLAUDE_TURN_AUTHORITY_CHUNK_BYTES);
+        projection.append(bytes.subarray(start, end));
+        if (await titleCheckpointExpired(at + end)) return at + end;
+      }
+      return undefined;
+    };
     while (pos < scanEnd) {
       options.signal?.throwIfAborted();
       if (scannedBytes >= maxSourceBytes) {
@@ -9098,8 +9119,10 @@ async function scanClaudeAuthorityRange(
         break;
       }
       scannedBytes += len;
+      checkedThrough = pos;
       const titleMarkers = options.titleFactsOnly ? claudeTitleMarkerOffsets(chunk) : undefined;
       let segmentStart = 0;
+      let stoppedAt: number | undefined;
       for (let newline = chunk.indexOf(0x0a); newline >= 0; newline = chunk.indexOf(0x0a, newline + 1)) {
         const fragment = chunk.subarray(segmentStart, newline);
         if (skippingOversized) {
@@ -9112,7 +9135,8 @@ async function scanClaudeAuthorityRange(
           // Wholly inside this chunk and provably no title fact: nothing to parse. The authority
           // candidates this skips are not read from a title-only pass.
         } else {
-          await appendClaudeProjectionInSlices(projection, fragment);
+          stoppedAt = await feedProjection(fragment, pos + segmentStart);
+          if (stoppedAt !== undefined) break;
           const projected = projection.finish();
           if (projected.kind === 'opaque') {
             titleOpaque = true;
@@ -9134,10 +9158,24 @@ async function scanClaudeAuthorityRange(
         projection = new TitleRecordProjection();
         segmentStart = newline + 1;
         recordStart = pos + segmentStart;
+        if (await titleCheckpointExpired(recordStart)) {
+          stoppedAt = recordStart;
+          break;
+        }
       }
-      const trailing = chunk.subarray(segmentStart);
-      if (!skippingOversized && trailing.length > 0) {
-        await appendClaudeProjectionInSlices(projection, trailing);
+      if (stoppedAt === undefined) {
+        const trailing = chunk.subarray(segmentStart);
+        if (!skippingOversized && trailing.length > 0) {
+          stoppedAt = await feedProjection(trailing, pos + segmentStart);
+        }
+      }
+      if (stoppedAt !== undefined) {
+        // Out of time inside this read: end exactly where the last check left off, as a 128 KiB
+        // read would have, with any record in progress kept as the partial tail.
+        boundedReason = 'time-limit';
+        scannedBytes -= pos + len - stoppedAt;
+        pos = stoppedAt;
+        break;
       }
       pos += len;
       await yieldToEventLoop();
@@ -9242,17 +9280,10 @@ async function scanClaudeAuthorityRange(
 /** The tail both title record types share as a JSON string, `"custom-title"` and `"ai-title"`
  *  (see {@link observeClaudeTitles}). One marker keeps the search to one pass over the bytes. */
 const CLAUDE_TITLE_RECORD_MARKER = Buffer.from('-title"');
-/** Read size of the title-only pass; the authority passes keep their 128 KiB yield granularity. */
+/** Read size of the title-only pass, so most records fall wholly inside one read and can be
+ *  skipped. Yields and deadline checks stay at 128 KiB of the file handled; see
+ *  `titleCheckpointExpired` in {@link scanClaudeAuthorityRange}. */
 const CLAUDE_TITLE_BACKLOG_CHUNK_BYTES = 1024 * 1024;
-
-/** Feed a record's bytes to its projection no more than one authority chunk at a time, yielding
- *  between slices, so the larger title-pass reads never lengthen one synchronous stretch. */
-async function appendClaudeProjectionInSlices(projection: TitleRecordProjection, bytes: Buffer): Promise<void> {
-  for (let start = 0; start < bytes.length; start += CLAUDE_TURN_AUTHORITY_CHUNK_BYTES) {
-    if (start > 0) await yieldToEventLoop();
-    projection.append(bytes.subarray(start, start + CLAUDE_TURN_AUTHORITY_CHUNK_BYTES));
-  }
-}
 
 /** Byte offsets in `chunk` where a title record type name may occur, usually none. */
 function claudeTitleMarkerOffsets(chunk: Buffer): number[] {
