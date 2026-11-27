@@ -11,6 +11,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+## 0.9.0 — 2026-11-27
+
 ### Added
 
 - OpenCode 2.2.0 and newer 2.x: sessions run by the user's shared OpenCode
