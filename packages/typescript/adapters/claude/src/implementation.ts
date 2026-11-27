@@ -4369,7 +4369,9 @@ export class ClaudeResumeConnection implements SessionConnection {
         this.contextWindowReadAgain = false;
         const resultsAtRequest = this.resultsCounted;
         const { outcome, response } = await this.requestControl({ subtype: 'get_context_usage', detail: 'summary' });
-        if (outcome !== 'accepted') return;
+        // A refused or unanswered read teaches nothing, but a read a later `result` or model switch asked
+        // for while it was out is still owed: the loop's condition decides, and ends the loop when none was.
+        if (outcome !== 'accepted') continue;
         // A `result` counted while this request was out makes its count older than the reading: the
         // window still holds, and the request queued behind it brings the count.
         const corrected = learnClaudeContextWindow(this.contextWindow, response, this.resultsCounted === resultsAtRequest);

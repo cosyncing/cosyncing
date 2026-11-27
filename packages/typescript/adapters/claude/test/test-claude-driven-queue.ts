@@ -757,6 +757,32 @@ async function main(): Promise<void> {
       await h.conn.close();
     }
 
+    // The read in flight is refused while the turn's `result` arrives: the read that `result` asked for
+    // still goes out, and its count becomes the reading.
+    {
+      const h = newConn();
+      await h.history();
+      await h.conn.sendPrompt({ text: 'refused window' });
+      (h.conn as any).ingestInit({ model: 'claude-opus-5-5', permissionMode: 'default', slash_commands: [], claude_code_version: '2.1.330' });
+      h.msgs.length = 0;
+      (h.conn as any).handleEvent(result(150_000));
+      const refused = asked(h);
+      for (const line of refused) {
+        (h.conn as any).handleEvent({ type: 'control_response', response: { subtype: 'error', request_id: line.request_id, error: 'refused by the fake' } });
+      }
+      await settled();
+      const queued = asked(h).slice(refused.length);
+      for (const line of queued) {
+        (h.conn as any).handleEvent({ type: 'control_response', response: { subtype: 'success', request_id: line.request_id, response: captured.opusNo1m } });
+      }
+      await settled();
+      check('CL-2 Drive: a refused read still sends the read a result asked for while it was out',
+        refused.length === 1 && queued.length === 1
+          && JSON.stringify(meters(h)) === JSON.stringify([{ used: 150_000, max: 1_000_000 }, { used: 14_455, max: 200_000 }]),
+        JSON.stringify({ refused: refused.length, queued: queued.length, meters: meters(h) }));
+      await h.conn.close();
+    }
+
     // A child older than the measured floor is never asked: it would count with the API and hold its exit.
     {
       const h = newConn();
