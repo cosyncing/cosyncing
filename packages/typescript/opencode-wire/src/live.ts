@@ -564,7 +564,10 @@ export class OpenCodeLiveConnection implements SessionConnection {
     return this.options.loadModels?.(this.info.currentModel) ?? [];
   }
 
+  /** Choosing an agent is a write (the next prompt names it), so a connection that cannot write,
+   *  such as one demoted to Observe, offers none, and the broker refuses a choice it did not offer. */
   async listAgents(): Promise<AgentOption[]> {
+    if (!this.writable()) return [];
     return this.options.loadAgents?.() ?? [];
   }
 
@@ -1205,8 +1208,12 @@ export class OpenCodeLiveConnection implements SessionConnection {
     this.emit({ type: 'metadata-update', key: 'sessionInfo', value: { currentAgent: agent } });
   }
 
+  private writable(): boolean {
+    return !this.closed && !this.unavailable && !this.serverLoss && this.info.attachMode !== 'observe';
+  }
+
   private assertWritable(action: string): void {
-    if (!this.closed && !this.unavailable && !this.serverLoss && this.info.attachMode !== 'observe') return;
+    if (this.writable()) return;
     throw new Error(this.info.control?.drive.reason
       ?? `${this.options.dialect.displayName} ${action} refused: this connection is read-only.`);
   }

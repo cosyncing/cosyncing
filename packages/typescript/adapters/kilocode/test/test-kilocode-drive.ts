@@ -1594,7 +1594,8 @@ try {
   check('a 401 prompt response demotes and revokes the Kilo writer',
     promptAuthConnection.info.attachMode === 'observe' && !boundaries.has(created.id));
   await assert.rejects(promptAuthConnection.setAgent!('plan'), /authentication was rejected/u);
-  check('a demoted Kilo writer refuses an agent choice', promptAuthConnection.info.currentAgent !== 'plan');
+  check('a demoted Kilo writer refuses an agent choice and offers none',
+    promptAuthConnection.info.currentAgent !== 'plan' && (await promptAuthConnection.listAgents!()).length === 0);
   await promptAuthConnection.close();
 
   const closeStored = (await discoverKiloStore({
