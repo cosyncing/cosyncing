@@ -463,6 +463,74 @@ for await (const chunk of Bun.stdin.stream()) {
   });
 });
 
+await test('item lifecycle times give the live prompt the sentAt its rollout record replays, and a file change its duration', async () => {
+  // Frames in the shape Codex 0.172.0 streamed them (ids, paths and times are this fixture's). Since
+  // 0.171 an item has no `createdAt`: its time is `startedAtMs`, and `completedAtMs` once it is done.
+  return await withFakeCodex(`#!/usr/bin/env bun
+import { appendFileSync } from 'node:fs';
+const enc = new TextDecoder();
+let buf = '';
+const send = (o) => console.log(JSON.stringify(o));
+const record = (o) => appendFileSync('__ROLLOUT__', JSON.stringify(o) + String.fromCharCode(10));
+const inputText = (input) => (input || []).map((p) => p.text || '').join(' ').trim();
+for await (const chunk of Bun.stdin.stream()) {
+  buf += enc.decode(chunk, { stream: true });
+  let nl;
+  while ((nl = buf.indexOf(String.fromCharCode(10))) !== -1) {
+    const raw = buf.slice(0, nl);
+    buf = buf.slice(nl + 1);
+    if (!raw.trim()) continue;
+    const msg = JSON.parse(raw);
+    if (msg.method === 'initialize') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/loaded/list') send({ id: msg.id, result: { data: [], nextCursor: null } });
+    else if (msg.method === 'thread/settings/update') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/resume') send({ id: msg.id, result: { thread: { name: 'fake' }, model: 'fake-model', modelProvider: 'fake-provider' } });
+    else if (msg.method === 'turn/start') {
+      const threadId = 'fake-thread';
+      const turnId = 'turn-times';
+      const text = inputText(msg.params.input);
+      const user = { type: 'userMessage', id: 'u-times', clientId: msg.params.clientUserMessageId ?? null, content: [{ type: 'text', text, text_elements: [] }] };
+      const patch = { type: 'fileChange', id: 'call_times_patch', changes: [{ path: '__DIR__/notes.txt', kind: { type: 'add' }, diff: 'one line\\n' }] };
+      const view = { type: 'imageView', id: 'call_times_view', path: '__DIR__/pixel.png' };
+      send({ id: msg.id, result: { turn: { id: turnId } } });
+      send({ method: 'turn/started', params: { threadId, turn: { id: turnId, items: [], status: 'inProgress', error: null, startedAt: 1795837269, completedAt: null, durationMs: null } } });
+      record({ timestamp: '2026-11-28T03:41:09.020Z', type: 'event_msg', payload: { type: 'task_started', turn_id: turnId } });
+      send({ method: 'item/started', params: { threadId, turnId, startedAtMs: 1795837269026, item: { ...user, startedAtMs: 1795837269026, completedAtMs: null } } });
+      record({ timestamp: '2026-11-28T03:41:09.026Z', type: 'event_msg', payload: { type: 'item_completed', thread_id: threadId, turn_id: turnId, started_at_ms: 1795837269026, completed_at_ms: 1795837269026, item: { type: 'UserMessage', id: 'u-times', content: [{ type: 'text', text, text_elements: [] }] } } });
+      send({ method: 'item/completed', params: { threadId, turnId, completedAtMs: 1795837269026, item: { ...user, startedAtMs: 1795837269026, completedAtMs: 1795837269026 } } });
+      send({ method: 'item/started', params: { threadId, turnId, startedAtMs: 1795837269163, item: { ...patch, status: 'inProgress', startedAtMs: 1795837269163, completedAtMs: null } } });
+      send({ method: 'item/completed', params: { threadId, turnId, completedAtMs: 1795837269175, item: { ...patch, status: 'completed', startedAtMs: 1795837269163, completedAtMs: 1795837269175 } } });
+      send({ method: 'item/started', params: { threadId, turnId, startedAtMs: 1795837269180, item: { ...view, startedAtMs: 1795837269180, completedAtMs: null } } });
+      send({ method: 'item/completed', params: { threadId, turnId, completedAtMs: 1795837269186, item: { ...view, startedAtMs: 1795837269180, completedAtMs: 1795837269186 } } });
+      send({ method: 'item/completed', params: { threadId, turnId, completedAtMs: 1795837269197, item: { type: 'agentMessage', id: 'msg_times', text: 'TIMES_DONE', phase: null, startedAtMs: 1795837269197, completedAtMs: 1795837269197 } } });
+      send({ method: 'turn/completed', params: { threadId, turn: { id: turnId, items: [], status: 'completed', error: null, startedAt: 1795837269, completedAt: 1795837269, durationMs: 185 } } });
+    }
+  }
+}
+`, async (rollout) => {
+    const conn = await new CodexAdapter().attach(Buffer.from(rollout, 'utf8').toString('base64url'), 'resume');
+    const messages: any[] = [];
+    conn.subscribe((m: any) => messages.push(m));
+    try {
+      await conn.sendPrompt({ text: 'timed by lifecycle' });
+      await waitFor(() => messages.some((m) => m.type === 'model-output' && m.text === 'TIMES_DONE'), 5000);
+      const user = messages.find((m) => m.type === 'user-message' && m.turnId === 'turn-times');
+      const patch = messages.find((m) => m.type === 'tool-result' && m.callId === 'call_times_patch');
+      const view = messages.find((m) => m.type === 'tool-result' && m.callId === 'call_times_view');
+      const saved = ((await conn.getHistory()) as any[]).find((m) => m.type === 'user-message' && m.text === 'timed by lifecycle');
+      return [
+        user?.sentAt === 1795837269026 &&
+          saved?.sentAt === user.sentAt &&
+          patch?.durationMs === 12 &&
+          view !== undefined && view.durationMs === undefined,
+        `user=${user?.sentAt} saved=${saved?.sentAt} patch=${patch?.durationMs} view=${JSON.stringify(view?.durationMs)}`,
+      ];
+    } finally {
+      await conn.close().catch(() => {});
+    }
+  });
+});
+
 await test('CR4b: the live prompt uses the canonical (turn, ordinal) identity and the terminal summary names it', async () => {
   return await withFakeCodex(`#!/usr/bin/env bun
 const enc = new TextDecoder();
@@ -624,7 +692,8 @@ for await (const chunk of Bun.stdin.stream()) {
 // triple is one item from the real app-server (0.157.1): its rollout record, then the started and
 // completed item it streamed (content invented for the capture, working directory rewritten). The
 // fake below writes the records and streams the items, so the live rows come from the adapter's own
-// live mapping and the saved rows from its history read.
+// live mapping and the saved rows from its history read. It streams each item with the lifecycle
+// times Codex 0.171+ adds (`startedAtMs`, then `completedAtMs`), the same pair the record saves.
 const STREAMED_TOOL_ITEMS: Array<[any, any, any]> = [
   [{"type": "CommandExecution", "id": "f2f435b6-4091-4c0b-a29f-5b1cc649a388", "command": ["/bin/bash", "-lc", "printf 'shell out\\n'"], "cwd": "file:///work/proj", "parsed_cmd": [{"type": "unknown", "cmd": "printf 'shell out\\n'"}], "source": "user_shell", "status": "completed", "stdout": "shell out\n", "stderr": "", "aggregated_output": "shell out\n", "exit_code": 0, "duration": {"secs": 0, "nanos": 8153766}, "formatted_output": "shell out\n"},
     {"type": "commandExecution", "id": "f2f435b6-4091-4c0b-a29f-5b1cc649a388", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc \"printf 'shell out\\\\n'\"", "cwd": "/work/proj", "processId": null, "source": "userShell", "status": "inProgress", "commandActions": [{"type": "unknown", "command": "printf 'shell out\\n'"}], "aggregatedOutput": null, "exitCode": null, "durationMs": null},
@@ -673,21 +742,23 @@ for await (const chunk of Bun.stdin.stream()) {
       const turnId = 'turn-tools';
       const threadId = 'fake-thread';
       const done = (item) => ({ type: 'event_msg', payload: { type: 'item_completed', thread_id: threadId, turn_id: turnId, started_at_ms: 1, completed_at_ms: 2, item } });
+      const begun = (item) => ({ ...item, startedAtMs: 1, completedAtMs: null });
+      const ended = (item) => ({ ...item, startedAtMs: 1, completedAtMs: 2 });
       send({ id: msg.id, result: { turn: { id: turnId } } });
       send({ method: 'turn/started', params: { threadId, turn: { id: turnId } } });
       record({ type: 'event_msg', payload: { type: 'task_started', turn_id: turnId } });
       // A model-issued call: streamed as an item too, but saved from its response items.
-      const modelCall = { ...items[1][2], id: 'call_model1' };
+      const modelCall = ended({ ...items[1][2], id: 'call_model1' });
       record({ type: 'response_item', payload: { type: 'function_call', name: 'exec_command', call_id: 'call_model1', arguments: JSON.stringify({ cmd: 'ls' }) } });
-      send({ method: 'item/started', params: { threadId, turnId, item: { ...items[1][1], id: 'call_model1' } } });
+      send({ method: 'item/started', params: { threadId, turnId, startedAtMs: 1, item: begun({ ...items[1][1], id: 'call_model1' }) } });
       record(done({ ...items[1][0], id: 'call_model1' }));
       send({ method: 'item/completed', params: { threadId, turnId, completedAtMs: 2, item: modelCall } });
       record({ type: 'response_item', payload: { type: 'function_call_output', call_id: 'call_model1', output: 'a' } });
       record({ type: 'response_item', payload: { type: 'custom_tool_call', status: 'completed', call_id: 'call_cell1', name: 'exec', input: 'x' } });
       for (const [rollout, started, completed] of items) {
-        send({ method: 'item/started', params: { threadId, turnId, item: started } });
+        send({ method: 'item/started', params: { threadId, turnId, startedAtMs: 1, item: begun(started) } });
         record(done(rollout));
-        send({ method: 'item/completed', params: { threadId, turnId, completedAtMs: 2, item: completed } });
+        send({ method: 'item/completed', params: { threadId, turnId, completedAtMs: 2, item: ended(completed) } });
       }
       record({ type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: 'call_cell1', output: 'done' } });
       record({ type: 'event_msg', payload: { type: 'task_complete', turn_id: turnId } });
@@ -715,12 +786,19 @@ for await (const chunk of Bun.stdin.stream()) {
           : v
       ));
       const modelRows = history.filter((m) => m.callId === 'call_model1').map((m) => m.type);
+      const durationOf = (kind: string) => saved.find((m) => m.type === 'tool-result' && m.callId === STREAMED_TOOL_ITEMS.find(([record]) => record.type === kind)?.[0].id)?.durationMs;
       return [
         live.length === ids.length * 2 &&
           canon(saved) === canon(live) &&
+          // The lifecycle times reach both sides: a file change has no duration of its own, so its
+          // row takes their span; a command keeps its own; an image view takes none.
+          durationOf('FileChange') === 1 &&
+          durationOf('CommandExecution') === 8 &&
+          durationOf('ImageView') === undefined &&
           // The model-issued call keeps exactly its response-item rows.
           JSON.stringify(modelRows) === JSON.stringify(['tool-call', 'tool-result']),
         `live=${live.length} saved=${saved.length} equal=${canon(saved) === canon(live)} model=${JSON.stringify(modelRows)}`
+          + ` durations=${JSON.stringify(['FileChange', 'CommandExecution', 'ImageView'].map(durationOf))}`
           + (canon(saved) === canon(live) ? '' : ` first-diff=${live.findIndex((m, i) => canon(m) !== canon(saved[i]))}`),
       ];
     } finally {

@@ -6091,7 +6091,8 @@ class CodexResumeConnection implements SessionConnection {
         // is echo correlation, not identity, and it is never derived from text.
         key: this.liveUserMessageKey(turnId, item),
         turnId,
-        sentAt: timestampToMs(item.createdAt ?? item.created_at ?? item.timestamp ?? item.startedAt ?? item.started_at),
+        // Codex 0.171+ stamps the item with `startedAtMs`, the instant its rollout record carries.
+        sentAt: timestampToMs(item.createdAt ?? item.created_at ?? item.timestamp ?? item.startedAt ?? item.started_at ?? item.startedAtMs),
         ...(clientKey ? { clientKey } : {}),
       });
       // Native answers have no request id. Match only a unique quoted question title and a
@@ -6997,6 +6998,21 @@ function nativeDurationMs(value: any): number | undefined {
   return startedAt !== undefined && completedAt !== undefined && completedAt >= startedAt ? completedAt - startedAt : undefined;
 }
 
+/** The duration of a streamed item kind that has no duration field of its own (a file change, a web
+ *  search, an image generation): the span between its lifecycle times. Codex 0.171+ stamps every
+ *  item with `startedAtMs` and, once complete, `completedAtMs` (epoch ms), and saves the same pair
+ *  on the item's rollout record, so a row rebuilt from that record gets the same value. Kinds that
+ *  carry `durationMs` keep only that, as their saved rows do. */
+function codexItemDurationMs(item: any): number | undefined {
+  const native = nativeDurationMs(item);
+  if (native !== undefined) return native;
+  const startedAt = item?.startedAtMs;
+  const completedAt = item?.completedAtMs;
+  return typeof startedAt === 'number' && typeof completedAt === 'number' && startedAt > 0 && completedAt >= startedAt
+    ? completedAt - startedAt
+    : undefined;
+}
+
 function codexToolOutputText(value: unknown): string {
   if (typeof value === 'string') return value;
   if (Array.isArray(value)) return value.map((item) => codexToolOutputText(item)).filter(Boolean).join('\n');
@@ -7803,7 +7819,7 @@ export function mapLine(
         if (item?.type !== 'UserMessage') {
           const id = typeof item?.id === 'string' ? item.id : '';
           if (!id || runtime.isModelCall(id) || id.startsWith('call_')) return [];
-          const converted = codexRolloutToolItem(item);
+          const converted = codexRolloutToolItem(item, p);
           if (!converted) return [];
           const call = codexToolCallFromItem(converted.started, String(p.turn_id ?? runtime.currentTurnId ?? ''));
           const result = codexToolResultFromItem(converted.completed);
@@ -8431,7 +8447,7 @@ function codexToolResultFromItem(item: any): AgentMessage | null {
         additions: stats.additions,
         deletions: stats.deletions,
         exitCode: item.status === 'failed' || item.status === 'declined' ? 1 : undefined,
-        durationMs: nativeDurationMs(item),
+        durationMs: codexItemDurationMs(item),
       };
     }
     case 'mcpToolCall':
@@ -8465,7 +8481,7 @@ function codexToolResultFromItem(item: any): AgentMessage | null {
           results: Array.isArray(item.results) ? item.results : undefined,
         }))!,
         result: item.action ?? item.query ?? '',
-        durationMs: nativeDurationMs(item),
+        durationMs: codexItemDurationMs(item),
       };
     case 'imageView':
       return {
@@ -8475,6 +8491,8 @@ function codexToolResultFromItem(item: any): AgentMessage | null {
         toolClass: 'lookup',
         path: item.path ? String(item.path) : undefined,
         result: item.path ?? '',
+        // Not its lifecycle span: a view the model asked for is saved as a call and its output,
+        // which carry no time, so a history row could never match a live one that had it.
         durationMs: nativeDurationMs(item),
       };
     case 'imageGeneration':
@@ -8486,7 +8504,7 @@ function codexToolResultFromItem(item: any): AgentMessage | null {
         path: item.savedPath ? String(item.savedPath) : undefined,
         result: item.result ?? item.status ?? '',
         isError: /fail|error/i.test(String(item.status ?? '')),
-        durationMs: nativeDurationMs(item),
+        durationMs: codexItemDurationMs(item),
       };
     default:
       return null;
@@ -8517,8 +8535,27 @@ function fileChangeTitle(item: any): string | undefined {
  * client already holds. A web search item keeps the protocol's pass-through shape; a nested web
  * search needs a hosted provider, so it was not streamed during that comparison. Returns undefined
  * for items the live connection renders nothing for.
+ *
+ * Since 0.171 the streamed item also carries its lifecycle times, `startedAtMs` and, once complete,
+ * `completedAtMs`; the record keeps the same pair beside the item as `started_at_ms` and
+ * `completed_at_ms`. Passing the record restores them, so a duration read from them agrees.
  */
-export function codexRolloutToolItem(item: any): { started: any; completed: any } | undefined {
+export function codexRolloutToolItem(
+  item: any,
+  record?: { started_at_ms?: unknown; completed_at_ms?: unknown },
+): { started: any; completed: any } | undefined {
+  const converted = codexRolloutWireItem(item);
+  const started = record?.started_at_ms;
+  const completed = record?.completed_at_ms;
+  if (!converted || typeof started !== 'number') return converted;
+  return {
+    started: { ...converted.started, startedAtMs: started, completedAtMs: null },
+    completed: { ...converted.completed, startedAtMs: started, completedAtMs: typeof completed === 'number' ? completed : null },
+  };
+}
+
+/** {@link codexRolloutToolItem} without the lifecycle times. */
+function codexRolloutWireItem(item: any): { started: any; completed: any } | undefined {
   const id = String(item?.id ?? '');
   switch (item?.type) {
     case 'CommandExecution': {

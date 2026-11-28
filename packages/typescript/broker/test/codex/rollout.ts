@@ -458,6 +458,15 @@ const APP_SERVER_TOOL_ITEMS: Array<[any, any, any]> = [
       return `${record.id}: expected ${canon(completed).slice(0, 300)} got ${canon(converted?.completed).slice(0, 300)}`;
     }).join(' | '),
   );
+  // Since 0.171 the app-server also streams each item's lifecycle times, which the record keeps
+  // beside the item: given the record, the converted items carry them the same way.
+  const timed = codexRolloutToolItem(APP_SERVER_TOOL_ITEMS[16]![0], { started_at_ms: 1795837269163, completed_at_ms: 1795837269175 });
+  check(
+    'tool items: the record\'s lifecycle times come back on the started and completed items',
+    timed?.started.startedAtMs === 1795837269163 && timed?.started.completedAtMs === null
+      && timed?.completed.startedAtMs === 1795837269163 && timed?.completed.completedAtMs === 1795837269175,
+    JSON.stringify({ started: [timed?.started.startedAtMs, timed?.started.completedAtMs], completed: [timed?.completed.startedAtMs, timed?.completed.completedAtMs] }),
+  );
 
   const turn = '01a0defd-e83e-78a3-82d8-30487a0277bc';
   const done = (item: any) => ({ type: 'event_msg', payload: { type: 'item_completed', thread_id: 't', turn_id: turn, started_at_ms: 1, completed_at_ms: 2, item } });
@@ -516,6 +525,12 @@ const APP_SERVER_TOOL_ITEMS: Array<[any, any, any]> = [
       && mcp?.result?.isError === undefined && mcp?.toolName === 'fake.lookup'
       && search?.toolName === 'web_search',
     JSON.stringify({ title: quoted?.title, cwd: quoted?.args?.cwd, moved: moved?.fileChanges?.map((c: any) => c.path), mcp: mcp?.result, search: search?.toolName }),
+  );
+  const view = byId(APP_SERVER_TOOL_ITEMS.find(([record]) => record.type === 'ImageView')![0].id, 'tool-result');
+  check(
+    'tool items: a nested file change and web search take their duration from the record\'s lifecycle times; an image view takes none',
+    moved?.durationMs === 1 && search?.durationMs === 1 && view !== undefined && view.durationMs === undefined,
+    JSON.stringify({ moved: moved?.durationMs, search: search?.durationMs, view: view?.durationMs }),
   );
   // A read that starts after a model-issued call (an attach boundary between the two records)
   // still adds nothing for its `item_completed` record.
