@@ -13,9 +13,19 @@ export interface FakeV2Session {
 
 interface Ask { id: string; sessionID: string; kind: 'permission' | 'form'; value: Json; settle: (answer: unknown) => void; }
 
+/** Whether service version `version` is at least `minimum` (plain x.y.z). */
+function atLeast(version: string, minimum: string): boolean {
+  const a = version.split('.').map(Number), b = minimum.split('.').map(Number);
+  for (let i = 0; i < 3; i++) if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) > (b[i] ?? 0);
+  return true;
+}
+
 /** A shared service fixture with the native inbox, projection and durable-event ordering. */
 export class FakeOpenCodeV2Serve {
   readonly sessions = new Map<string, FakeV2Session>();
+  /** Background jobs that still run. As captured on 2.3.2 and 2.4.2, the list holds running jobs
+   *  only: a finished job leaves it as OpenCode delivers its report. */
+  readonly jobs = new Map<string, Json>();
   readonly pending = new Map<string, Ask>();
   readonly holds = new Map<string, () => void>();
   readonly record: (value: Json) => void;
@@ -172,6 +182,37 @@ export class FakeOpenCodeV2Serve {
   noise(id: string): void { this.emit('fixture.unknown', { sessionID: id }); }
   setBusy(id: string, busy: boolean): void { this.session(id).busy = busy; this.emit(busy ? 'session.execution.started' : 'session.execution.succeeded', { sessionID: id }, true); }
 
+  /**
+   * A subagent or a shell past its timeout moves to the background, in the shapes 2.3.2 and 2.4.2
+   * list (captured): a subagent job is keyed by its child session, a shell job by its shell. From
+   * 2.4.0 the service also reports the job as `experimental.job.updated` (no durable sequence).
+   */
+  startJob(sessionID: string, kind: 'subagent' | 'shell', text: string): Json {
+    const started = this.now();
+    const id = this.id(kind === 'subagent' ? 'ses' : 'sh');
+    const job = kind === 'subagent'
+      ? { kind, id, sessionID, status: 'running', title: text, time: { started }, childSessionID: id, agent: 'General', description: text }
+      : { kind, id, sessionID, status: 'running', title: text, time: { started }, shellID: id, command: text };
+    this.jobs.set(id, job);
+    this.reportJob(job);
+    return job;
+  }
+
+  /** The job ends: it leaves the list, and 2.4.0+ reports its outcome. A shell that exits non-zero
+   *  still ends `completed` (captured); only a cancel ends `cancelled`. */
+  finishJob(id: string, status: 'completed' | 'error' | 'cancelled' = 'completed', report = true): Json {
+    const job = this.jobs.get(id);
+    if (!job) throw new Error('Unknown fixture job.');
+    this.jobs.delete(id);
+    const ended = { ...job, status, time: { ...job.time, completed: this.now() } };
+    if (report) this.reportJob(ended);
+    return ended;
+  }
+
+  private reportJob(job: Json): void {
+    if (atLeast(this.version, '2.4.0')) this.emit('experimental.job.updated', { info: job }, false, this.session(job.sessionID).info.location);
+  }
+
   emit(type: string, data: Json, durable = false, location?: Json): void {
     const sessionID = data.sessionID ?? data.form?.sessionID;
     const seq = (this.sequences.get(sessionID) ?? 0) + 1;
@@ -218,6 +259,13 @@ export class FakeOpenCodeV2Serve {
       }), { headers: { 'content-type': 'text/event-stream' } });
     }
     if (path === '/api/experimental/migration/v1') return Response.json({ status: this.migration });
+    if (path === '/api/experimental/job' && method === 'GET') {
+      // 2.2.0 (captured) has no such route: 404 with an empty body. 2.2.6 added it.
+      if (!atLeast(this.version, '2.2.6')) return new Response('', { status: 404 });
+      const owner = url.searchParams.get('sessionID');
+      if (owner && !this.sessions.has(owner)) return Response.json({ _tag: 'SessionNotFoundError', sessionID: owner, message: `Session not found: ${owner}` }, { status: 404 });
+      return Response.json({ data: [...this.jobs.values()].filter((job) => !owner || job.sessionID === owner) });
+    }
     if (path === '/api/session/active') return Response.json({ data: Object.fromEntries([...this.sessions].filter(([, session]) => session.busy).map(([id]) => [id, { type: 'running' }])) });
     if (path === '/api/provider') return Response.json({ location: { directory: '/work/project' }, data: [{ id: 'test-provider', name: 'Test Provider', activation: 'enabled' }] });
     if (path === '/api/model') return Response.json({ location: { directory: '/work/project' }, data: ['model-a', 'model-b'].map((id) => ({ id, modelID: id, providerID: 'test-provider', name: id === 'model-a' ? 'Model A' : 'Model B', enabled: true, variants: [{ id: 'low' }, { id: 'high' }] })) });

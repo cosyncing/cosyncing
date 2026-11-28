@@ -192,7 +192,7 @@ export const SUPPORT_MATRIX_CLAIMS: SupportClaim[] = [
   // F11 subagents/workflows/activity
   claim('claude', 'F11', 'full', 'Task plus UltraCode/workflow activity'),
   claim('codex', 'F11', 'full', 'spawn/wait-derived subagents'),
-  claim('opencode', 'F11', 'partial', 'OpenCode 1 and foreground OpenCode 2 task/subagent progress; OpenCode 2.3 background subagents and shells leave the parent idle with no job rows until their report starts an unprompted turn'),
+  claim('opencode', 'F11', 'partial', 'OpenCode 1 and foreground OpenCode 2 task/subagent progress; OpenCode 2.3 background subagents and shells are background rows while the parent reads idle, from job events on 2.4 and bounded job-list reads on 2.3, with no progress inside a running job'),
   claim('pi', 'F11', 'n/a', 'no native subagent/workflow concept'),
   claim('omp', 'F11', 'n/a', 'native subagent events are deliberately outside the v1 adapter'),
   claim('reasonix', 'F11', 'n/a', 'subagent command exists, but no child-session store shape has been measured'),

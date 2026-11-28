@@ -1,9 +1,10 @@
-import { ControlRefusedError, SessionCreateTemporarilyUnavailableError, SessionNotFoundError, TranscriptExportTooLargeError, type AgentOption, type ModelOption, type PromptInput, type SessionDiscoveryOptions, type SessionInfo, type Unsubscribe } from '@cosyncing/adapter-api';
+import { compareSemanticVersions, ControlRefusedError, SessionCreateTemporarilyUnavailableError, SessionNotFoundError, TranscriptExportTooLargeError, type AgentOption, type ModelOption, type PromptInput, type SessionDiscoveryOptions, type SessionInfo, type Unsubscribe } from '@cosyncing/adapter-api';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BindingResolver, V2Binding } from '../binding.ts';
 import { attachedV2TuiSessions, v2TuiPresenceSupported, TUI_PRESENCE_WATCH_MS } from '../tui-presence.ts';
 import { OpenCodeV2Connection } from './connection.ts';
+import { JOB_EVENT_MINIMUM_VERSION, JOB_LIST_MINIMUM_VERSION } from './jobs.ts';
 import { arrayData, compactAttachments, formCard, isSession, modelsFrom, nativeId, newNativeId, object, permissionCard, sessionInfo, type Native } from './mapping.ts';
 import { MAX_MESSAGE_RESPONSE_BYTES, MESSAGE_READ_BUDGET_MS, V2Error, V2ResponseTooLargeError, V2Transport, type V2Event } from './transport.ts';
 
@@ -54,6 +55,19 @@ export class OpenCodeV2Backend {
   private readonly agentWaiters = new Set<(directory: string) => void>();
 
   constructor(readonly resolver: BindingResolver, private readonly options: V2BackendOptions) {}
+
+  /** Whether the bound service lists background jobs, and whether it also reports their changes. */
+  jobSupport(): { list: boolean; events: boolean } {
+    const version = this.binding?.version;
+    const atLeast = (minimum: string) => !!version && (compareSemanticVersions(version, minimum) ?? -1) >= 0;
+    return { list: atLeast(JOB_LIST_MINIMUM_VERSION), events: atLeast(JOB_EVENT_MINIMUM_VERSION) };
+  }
+
+  /** One session's background jobs, or undefined when this service has no job list. */
+  async jobs(id: string, signal?: AbortSignal): Promise<unknown[] | undefined> {
+    if (!this.jobSupport().list || !this.transport) return undefined;
+    return arrayData(await this.transport.json(`/api/experimental/job?sessionID=${encodeURIComponent(id)}`, { signal }));
+  }
 
   useBinding(binding: V2Binding): void {
     if (this.binding?.identity === binding.identity && this.binding.auth === binding.auth) return;
@@ -283,7 +297,7 @@ export class OpenCodeV2Backend {
       this.agentUpdates.set(directory, (this.agentUpdates.get(directory) ?? 0) + 1);
       for (const wake of [...this.agentWaiters]) wake(directory);
     }
-    if (!['server.connected', 'server.heartbeat', 'agent.updated', 'session.created', 'session.updated', 'session.renamed', 'session.forked', 'session.deleted', 'session.status', 'session.execution.started', 'session.execution.succeeded', 'session.execution.failed', 'session.execution.interrupted', 'session.inbox.enqueued', 'session.inbox.delivered', 'session.text.started', 'session.text.delta', 'session.text.ended', 'session.reasoning.started', 'session.reasoning.delta', 'session.reasoning.ended', 'session.step.started', 'session.step.first-token', 'session.step.streamed', 'session.step.ended', 'session.step.failed', 'session.usage.updated', 'session.instructions.updated', 'session.revert.staged', 'session.revert.cleared', 'session.revert.committed', 'session.compaction.started', 'session.compaction.delta', 'session.compaction.ended', 'session.compaction.failed', 'session.tool.input.started', 'session.tool.input.ended', 'session.tool.progress', 'session.tool.called', 'session.tool.success', 'session.tool.failed', 'permission.asked', 'permission.replied', 'form.created', 'form.replied', 'form.cancelled'].includes(event.type)) this.unknownEvents++;
+    if (!['server.connected', 'server.heartbeat', 'agent.updated', 'session.created', 'session.updated', 'session.renamed', 'session.forked', 'session.deleted', 'session.status', 'session.execution.started', 'session.execution.succeeded', 'session.execution.failed', 'session.execution.interrupted', 'session.inbox.enqueued', 'session.inbox.delivered', 'session.text.started', 'session.text.delta', 'session.text.ended', 'session.reasoning.started', 'session.reasoning.delta', 'session.reasoning.ended', 'session.step.started', 'session.step.first-token', 'session.step.streamed', 'session.step.ended', 'session.step.failed', 'session.usage.updated', 'session.instructions.updated', 'session.revert.staged', 'session.revert.cleared', 'session.revert.committed', 'session.compaction.started', 'session.compaction.delta', 'session.compaction.ended', 'session.compaction.failed', 'session.tool.input.started', 'session.tool.input.ended', 'session.tool.progress', 'session.tool.called', 'session.tool.success', 'session.tool.failed', 'permission.asked', 'permission.replied', 'form.created', 'form.replied', 'form.cancelled', 'experimental.job.updated'].includes(event.type)) this.unknownEvents++;
     if (event.type === 'session.inbox.enqueued' && object(data.item?.payload)) {
       event = { ...event, data: { ...data, item: { ...data.item, payload: compactAttachments(data.item.payload) } } };
     }

@@ -46,9 +46,13 @@ not offered. Forms that require external input, conditions or patterns stay
 visible and ask you to answer in the terminal.
 
 OpenCode 2.3 runs subagents, and shell commands that outlast their timeout,
-in the background. The session shows as idle while they run. When one
-finishes, OpenCode starts a new turn in that session by itself, and the app
-shows that turn's answer and summary like any other turn.
+in the background. The session shows as idle while they run, and each one
+shows as a background subagent or command row until it ends. OpenCode 2.4
+reports each change as it happens. With OpenCode 2.3, cosyncing asks for the
+session's jobs when a turn ends and every two seconds while one runs and the
+session is open; a job that ended unseen is removed without an outcome. When
+one finishes, OpenCode starts a new turn in that session by itself, and the
+app shows that turn's answer and summary like any other turn.
 
 For OpenCode 2, the terminal sync hint opens the same session with:
 
