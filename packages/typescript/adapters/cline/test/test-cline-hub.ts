@@ -14,7 +14,7 @@ import {
 import { join } from 'node:path';
 import type { AgentMessage, AttachMode, HistorySourceIdentity, SessionConnection } from '@cosyncing/adapter-api';
 import { AgentRegistry, isNativeSessionRenameUnsupportedError } from '@cosyncing/adapter-api';
-import { ClineAdapter } from '../src/implementation.ts';
+import { CLINE_HUB_CATALOG_FAILURE_TTL_MS, ClineAdapter } from '../src/implementation.ts';
 import { ClineHubDriveConnection } from '../src/hub-drive.ts';
 import type { ClineTerminalSummary } from '../src/mapping.ts';
 import { Hub } from '../../../broker/src/sessions/hub.ts';
@@ -1368,8 +1368,20 @@ try {
     catalogClock += 60_001;
     catalogHub.providerCatalog = undefined;
     await assert.rejects(unpairedAdapter.listModels!(), /providers\.list failed/u);
+    const socketsAfterFailure = catalogHub.protocols.length;
+    const listCallsAfterFailure = catalogHub.providerListCalls;
     check('a catalog the Hub fails to return is no answer rather than an empty one, and leaves Create off',
       !await unpairedAdapter.canCreateSession());
+    check('inside the failure window the failed read is answered again without reconnecting',
+      catalogHub.protocols.length === socketsAfterFailure
+        && catalogHub.providerListCalls === listCallsAfterFailure,
+      `sockets=${catalogHub.protocols.length - socketsAfterFailure} calls=${catalogHub.providerListCalls - listCallsAfterFailure}`);
+    catalogClock += CLINE_HUB_CATALOG_FAILURE_TTL_MS + 1;
+    await assert.rejects(unpairedAdapter.listModels!(), /providers\.list failed/u);
+    check('and once the window passes the catalog is read again',
+      catalogHub.protocols.length === socketsAfterFailure + 1
+        && catalogHub.providerListCalls === listCallsAfterFailure + 1,
+      `sockets=${catalogHub.protocols.length - socketsAfterFailure} calls=${catalogHub.providerListCalls - listCallsAfterFailure}`);
 
     // Cline 3.0.75 (Hub core 0.2.1) answers in the same shapes as 3.0.76 (core 0.2.2).
     catalogClock += 60_001;
@@ -1434,6 +1446,10 @@ try {
         && catalogHub.activeSocketCount() === 0
         && catalogHub.providerListCalls === listCallsBeforeStall,
       JSON.stringify({ stalledAnswer, sockets: catalogHub.protocols.length - stalledSockets }));
+    check('a second call inside the failure window answers at once, without reconnecting',
+      !await stalledAdapter.canCreateSession()
+        && catalogHub.protocols.length === stalledSockets + 1,
+      `sockets=${catalogHub.protocols.length - stalledSockets}`);
     catalogHub.stallRegistration = false;
 
     writeCatalogDiscovery([]);

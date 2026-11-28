@@ -190,6 +190,9 @@ export const CLINE_NATIVE_RENAME_TIMEOUT_MS = 30_000;
 /** `providers.list` is about 1.8 MB per call (see `CLINE_HUB_PROVIDER_CATALOG_COMMANDS`), and the
  *  roster, the model picker and Create availability each ask; one read per Hub epoch per minute. */
 const CLINE_HUB_CATALOG_TTL_MS = 60_000;
+/** A failed read is kept this long, for its Hub epoch, so Create availability, the picker and
+ *  Create do not each repeat a read that just failed or timed out. */
+export const CLINE_HUB_CATALOG_FAILURE_TTL_MS = 15_000;
 /** The whole catalog read, from opening the socket to the last model list. `GET /api/agents` asks
  *  Create availability of every agent and waits for it, so the read must not outlast this. */
 const CLINE_HUB_CATALOG_TIMEOUT_MS = 10_000;
@@ -206,7 +209,8 @@ interface ClineManagedModels {
   providers: ReadonlySet<string>;
 }
 
-/** One catalog read for one Hub epoch; `settled` once it has answered. */
+/** One catalog read for one Hub epoch; `settled` once it has answered. A failed read stays cached,
+ *  as its rejection, until {@link CLINE_HUB_CATALOG_FAILURE_TTL_MS} after it failed. */
 interface ClineCatalogRead {
   epoch: string;
   expiresAt: number;
@@ -661,8 +665,9 @@ export class ClineAdapter implements AgentBackend {
   }
 
   /** The pair when set; otherwise the Hub's catalog, cached per Hub epoch. A
-   *  failed read is not cached, and is `undefined` only for a Hub without the
-   *  catalog commands. */
+   *  failed read is cached briefly too, so callers inside that window get the
+   *  same rejection without reconnecting. `undefined` only for a Hub without
+   *  the catalog commands. */
   private managedModels(discovery: ClineHubDiscovery): Promise<ClineManagedModels | undefined> {
     const pair = this.configuredHubModel();
     if (pair) {
@@ -683,7 +688,7 @@ export class ClineAdapter implements AgentBackend {
     value.then((models) => {
       entry.settled = models;
     }, () => {
-      if (this.hubCatalog === entry) this.hubCatalog = undefined;
+      entry.expiresAt = Math.min(entry.expiresAt, this.now() + CLINE_HUB_CATALOG_FAILURE_TTL_MS);
     });
     return value;
   }
