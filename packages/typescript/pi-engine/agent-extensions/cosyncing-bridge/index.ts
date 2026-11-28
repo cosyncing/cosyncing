@@ -1856,7 +1856,7 @@ function buildHistory(ctx: any, heldUsage?: Set<string>): any[] {
   // between turns toward the next turn (the broker's mapper rule).
   let held: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: number } | undefined;
   let heldIds: string[] = [];
-  const opened = <T extends { tokens?: typeof held }>(turn: T): T => {
+  const opened = (turn: NonNullable<typeof openTurn>): NonNullable<typeof openTurn> => {
     if (held) turn.tokens = held;
     held = undefined;
     heldIds = [];
