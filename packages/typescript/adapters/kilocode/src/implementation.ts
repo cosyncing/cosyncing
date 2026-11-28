@@ -19,6 +19,7 @@ import {
   type AgentBackend,
   type AgentMessage,
   type AgentMessageHandler,
+  type AgentOption,
   type AgentCapabilities,
   type AgentSetupDiagnosis,
   type AttachMode,
@@ -47,7 +48,7 @@ import {
   type OpenCodeLiveRequestContext,
 } from '@cosyncing/opencode-wire';
 import { diagnoseKiloSetup } from './diagnostics.ts';
-import { kiloServerReport } from './mapping.ts';
+import { kiloAgentOptions, kiloServerReport } from './mapping.ts';
 import { KiloObserveConnection, type KiloObserveOptions } from './observe.ts';
 import {
   discoverKiloStore,
@@ -1390,11 +1391,14 @@ export class KiloAdapter implements AgentBackend {
         this.opening.delete(sessionId);
         throw error;
       }
+      const directory = live.cwd;
       const driver = new KiloLiveConnection({
         baseUrl: this.baseUrl,
         info: this.retagLiveInfo(live, true),
         loadModels: () => this.listLiveModels(),
         sendCurrentModelOnPrompt: true,
+        // The agent choice is the prompt's `agent`: Kilo keeps a session's agent only from a prompt.
+        loadAgents: () => this.listLiveAgents(directory),
         onModelObserved: (model) => {
           const catalogModel = this.cachedModels.find((candidate) =>
             candidate.providerID === model.providerID && candidate.modelID === model.modelID);
@@ -1856,6 +1860,20 @@ export class KiloAdapter implements AgentBackend {
     const info = this.liveSessionInfo(await readBoundedJson(response));
     // The serve answers for exactly the id asked: anything else is not this session.
     return info?.id === sessionId ? info : undefined;
+  }
+
+  /** Kilo's agents for one directory (a project can add its own). A refused or unreadable `/agent`
+   *  throws: the agent list is then unknown, which an empty list would misstate as "no agents". */
+  private async listLiveAgents(directory?: string): Promise<AgentOption[]> {
+    const query = directory ? `?directory=${encodeURIComponent(directory)}` : '';
+    const response = await this.fetcher(`${this.baseUrl}/agent${query}`, { signal: AbortSignal.timeout(4_000) });
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error(`Kilo agent list request failed with HTTP ${response.status}.`);
+    }
+    const agents = kiloAgentOptions(await readBoundedJson(response));
+    if (!agents) throw new Error('Kilo agent list response was not a list.');
+    return agents;
   }
 
   /** A refused `/provider` is not an empty catalogue: an empty array reaches the

@@ -165,7 +165,7 @@ export const SUPPORT_MATRIX_CLAIMS: SupportClaim[] = [
   claim('reasonix', 'F08', 'partial', 'durable provider/model identity is displayed; existing-session model switch is unsupported'),
   claim('grok', 'F08', 'full', 'durable labels plus ACP model, effort, and mode selection survive create, relaunch, replay, and restart'),
   claim('cline', 'F08', 'partial', 'durable labels plus configured provider/model and ask/auto/plan mode propagate at managed creation; per-turn switching remains disabled'),
-  claim('kilo', 'F08', 'partial', 'provider model labels and model selection propagate through create, live SSE, replay, and restart; no measured permission-mode vocabulary exists'),
+  claim('kilo', 'F08', 'partial', 'provider model labels and model selection propagate through create, live SSE, replay, and restart; Drive offers Kilo\'s primary agents and the next prompt names the chosen one; no measured permission-mode vocabulary exists'),
 
   // F09 slash commands/skills/templates
   claim('claude', 'F09', 'partial', 'native command discovery; hooks cannot inject prompt commands'),

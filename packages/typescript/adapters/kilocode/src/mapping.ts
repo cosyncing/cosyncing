@@ -1,5 +1,9 @@
-import type { AgentMessage } from '@cosyncing/adapter-api';
+import type { AgentMessage, AgentOption } from '@cosyncing/adapter-api';
 import { mapOpenCodePart, type OpenCodeServerReport } from '@cosyncing/opencode-wire';
+
+const KILO_MAX_AGENTS = 256;
+const KILO_MAX_AGENT_NAME_CHARS = 120;
+const KILO_MAX_AGENT_DESCRIPTION_CHARS = 2_000;
 
 /** Kilo 7.4.23 persists the OpenCode-lineage part vocabulary unchanged. */
 export interface KiloMapTrace { op: 'unknown-part'; detail: string }
@@ -112,4 +116,31 @@ export function kiloServerReport(parts: readonly unknown[]): OpenCodeServerRepor
     bodies.push(value.text);
   }
   return { source: wakeup ? 'Kilo scheduled wakeup' : 'Kilo background task', body: bodies.join('\n') };
+}
+
+/**
+ * The agents a Kilo prompt may name, from `GET /agent` (captured on 7.5.16 and 7.8.40, 2026-11-28: the
+ * same ten agents on both). Offered as the OpenCode adapter offers them: the primary agents that carry
+ * a description, in Kilo's order. Kilo's subagents (`explore`, `general`) run only through its task
+ * tool, and its internal agents (`compaction`, `summary`, `title`) are hidden and carry no description.
+ * A deprecated agent (`orchestrator`) still runs and Kilo's own picker still lists it, marked as
+ * deprecated, so it is offered with that mark. A name is kept exactly as Kilo gave it: a prompt must
+ * name it so. Anything but a list is unknown (undefined), not an empty list.
+ */
+export function kiloAgentOptions(raw: unknown): AgentOption[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const agents: AgentOption[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw.slice(0, KILO_MAX_AGENTS)) {
+    const agent = record(entry);
+    const name = agent?.name;
+    const description = typeof agent?.description === 'string' ? agent.description.trim() : '';
+    if (!agent || agent.mode !== 'primary' || agent.hidden === true || typeof name !== 'string' || !name
+      || name.length > KILO_MAX_AGENT_NAME_CHARS || /[\u0000-\u001f\u007f]/u.test(name) || !description
+      || seen.has(name)) continue;
+    seen.add(name);
+    const shown = description.slice(0, KILO_MAX_AGENT_DESCRIPTION_CHARS);
+    agents.push({ name, description: agent.deprecated === true ? `Deprecated. ${shown}` : shown });
+  }
+  return agents;
 }

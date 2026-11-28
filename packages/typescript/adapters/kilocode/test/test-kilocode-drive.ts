@@ -35,6 +35,12 @@ const same = (actual: unknown, expected: unknown): boolean => {
 const questionCapture = JSON.parse(readFileSync(join(import.meta.dir, 'fixtures', 'kilo-7.5.16-question.json'), 'utf8'));
 const capturedFor = <T>(value: T, sessionId: string): T =>
   JSON.parse(JSON.stringify(value).replaceAll(questionCapture.sessionID, sessionId)) as T;
+// Kilo's agents and a prompt naming one, captured live from `kilo serve` 7.5.16 and 7.8.40
+// (fixtures/kilo-agents.json; its `provenance` says how): the GET /agent list, that prompt as Kilo
+// accepted it, and the session.updated frame that followed.
+const agentCapture = JSON.parse(readFileSync(join(import.meta.dir, 'fixtures', 'kilo-agents.json'), 'utf8'));
+/** Which captured GET /agent list the fixture serve answers with. */
+let agentListVersion: 'v7.5.16' | 'v7.8.40' = 'v7.8.40';
 /** What the fixture serve lists on GET /question; a reply or reject removes its row, as Kilo does. */
 let pendingQuestionRows: Array<{ id: string }> = [];
 /** How GET /question fails, when it does: a serve without the route (404), or no answer at all. */
@@ -214,6 +220,7 @@ const fakeFetch = (async (input: string | URL | Request, init: RequestInit = {})
     const captured = questionRoute[2] === 'reply' ? questionCapture.answered.reply : questionCapture.rejected.reject;
     return json(captured.response, captured.status);
   }
+  if (parsed.pathname === '/agent' && method === 'GET') return json(agentCapture[agentListVersion].agentList);
   if (parsed.pathname === '/provider') return json({
     connected: ['fixture', 'native-provider', 'later-native-provider'],
     all: [
@@ -1126,7 +1133,58 @@ try {
       && live.some((row) => row.type === 'user-message'
         && row.text === 'now safe' && row.clientKey === 'client-kilo' && row.sentAt === 7));
   await settleIdle('ses_child');
+
+  // The agent choice (mode picker). Kilo lists its agents on GET /agent for a directory, and records a
+  // session's agent only from a prompt that names one (a prompt naming none runs the session's last).
+  const offered = new Map<string, Array<{ name: string; description?: string }>>();
+  for (const version of ['v7.5.16', 'v7.8.40'] as const) {
+    agentListVersion = version;
+    offered.set(version, await conn.listAgents!());
+  }
+  const agentReads = calls.filter((call) => call.url === '/agent');
+  const capturedCode = (agentCapture['v7.8.40'].agentList as any[]).find((agent) => agent.name === 'code');
+  check('the agent picker offers Kilo\'s primary agents from GET /agent for the session directory, the same on '
+    + 'the captured 7.5.16 and 7.8.40 lists: no subagent, no hidden internal agent, and the deprecated one marked',
+    same(offered.get('v7.5.16'), offered.get('v7.8.40'))
+      && same(offered.get('v7.8.40')!.map((agent) => agent.name), ['code', 'ask', 'debug', 'orchestrator', 'plan'])
+      && offered.get('v7.8.40')![0]!.description === capturedCode.description
+      && offered.get('v7.8.40')!.find((agent) => agent.name === 'orchestrator')!.description!.startsWith('Deprecated. ')
+      && agentReads.length === 2 && agentReads.every((call) => call.search === `?directory=${encodeURIComponent(root)}`),
+    JSON.stringify([...offered]));
+  // The captured session.updated that followed a prompt naming `ask`, for this session and without its
+  // model, so that the frame changes only the agent.
+  const kiloAgentFrame = () => {
+    const frame = structuredClone(agentCapture['v7.8.40'].sessionUpdated.payload);
+    frame.properties.sessionID = 'ses_child';
+    frame.properties.info.id = 'ses_child';
+    delete frame.properties.info.model;
+    return frame;
+  };
+  const shownAgents = () => live.flatMap((row) => row.type === 'metadata-update' && row.key === 'sessionInfo'
+    && typeof (row.value as Partial<SessionInfo>).currentAgent === 'string'
+    ? [(row.value as Partial<SessionInfo>).currentAgent!] : []);
+  emit(kiloAgentFrame());
+  await until('the session agent Kilo reports', () => conn.info.currentAgent === 'ask');
+  check('before any choice, the session shows the agent Kilo reports for it', same(shownAgents(), ['ask']));
+  const callsBeforeChoice = calls.length;
+  await conn.setAgent!('plan');
+  check('choosing an agent sends Kilo nothing and shows the choice at once',
+    calls.slice(callsBeforeChoice).every((call) => call.method === 'GET') && conn.info.currentAgent === 'plan'
+      && same(shownAgents(), ['ask', 'plan']));
+  emit(kiloAgentFrame());
+  await flush();
+  check('a later session.updated naming the agent Kilo last recorded does not undo the choice',
+    conn.info.currentAgent === 'plan' && same(shownAgents(), ['ask', 'plan']));
   await conn.sendPrompt({ text: 'second safe' });
+  const promptBodyOf = (text: string) => calls.find((call) => call.url.endsWith('/prompt_async')
+    && call.body?.parts?.[0]?.text === text)?.body;
+  check('the next prompt names the chosen agent as the captured accepted prompt named its own, and the '
+    + 'prompts sent before the choice name none',
+    promptBodyOf('second safe')?.agent === 'plan'
+      && agentCapture['v7.8.40'].promptNamingAgent.status === 204
+      && agentCapture['v7.8.40'].promptNamingAgent.body.agent === 'ask'
+      && !('agent' in promptBodyOf('now safe')) && !('agent' in promptBodyOf('successful prompt with oversized unused body')),
+    JSON.stringify(promptBodyOf('second safe')));
   check('a broker prompt without a client key still claims its native echo',
     conn.info.attachMode === 'live'
       && live.some((row) => row.type === 'user-message'
@@ -1535,6 +1593,8 @@ try {
   await assert.rejects(promptAuthConnection.sendPrompt({ text: 'auth lost' }), /prompt failed \(401\)/u);
   check('a 401 prompt response demotes and revokes the Kilo writer',
     promptAuthConnection.info.attachMode === 'observe' && !boundaries.has(created.id));
+  await assert.rejects(promptAuthConnection.setAgent!('plan'), /authentication was rejected/u);
+  check('a demoted Kilo writer refuses an agent choice', promptAuthConnection.info.currentAgent !== 'plan');
   await promptAuthConnection.close();
 
   const closeStored = (await discoverKiloStore({

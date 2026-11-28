@@ -534,7 +534,7 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
       { fn: 'F03', level: 'L0', agents: ['kilo'], note: 'prompt_async preserves caller correlation, serial admission, abort, and refusal after demotion' },
       { fn: 'F04', level: 'L0', agents: ['kilo'], note: 'SSE answer/reasoning parts share stable identity with replay and suppress duplicate streaming snapshots' },
       { fn: 'F06', level: 'L0', agents: ['kilo'], note: 'authenticated pending permissions, native replies, external settlement, and close cleanup preserve ownership' },
-      { fn: 'F08', level: 'L0', agents: ['kilo'], note: 'provider catalog labels and model selections survive create, native updates, history, and restart' },
+      { fn: 'F08', level: 'L0', agents: ['kilo'], note: 'provider catalog labels and model selections survive create, native updates, history, and restart; the captured GET /agent list feeds the agent picker and a chosen agent is named by the next prompt' },
       { fn: 'F11', level: 'L0', agents: ['kilo'], note: 'live-qualified native child sessions preserve parent_id and remain Observe-only' },
       { fn: 'F14', level: 'L0', agents: ['kilo'], note: 'create, abort, native rename, and history replacement preserve lifecycle boundaries' },
       { fn: 'F15', level: 'L0', agents: ['kilo'], note: 'SSE status, run summaries, cache-aware tokens, and cost converge with durable history' },
