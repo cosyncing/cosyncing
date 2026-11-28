@@ -73,7 +73,7 @@ export interface GrokDriveOpenOptions extends Omit<GrokObserveOptions, 'session'
   /** The session has a title the user gave it when creating it; the title Grok generates does not replace it. */
   keepTitle?: boolean;
   /** Custom models whose `[model.<key>]` key differs from the `model` id summary.json stores: the
-   *  id by key, as the adapter has seen them (Create, or a Resume that resolved one). */
+   *  id by key, as the adapter has seen them (at Create, or at a verified load). */
   customModelIds?: Map<string, string>;
   onHistoryBoundary?: (
     identity: HistorySourceIdentity,
@@ -283,6 +283,10 @@ class LazyGrokAcpTransport implements GrokAcpTransport {
   private desiredMode: string;
   private verifyRelaunchConfiguration = false;
   private readonly customModelIds: Map<string, string>;
+  /** The model id summary.json stored when last read (at open, then at each verified load), and
+   *  the model requested then. A relaunch onto another model must not take that id for its own. */
+  private durableModel?: string;
+  private durableModelFor?: string;
 
   constructor(
     private readonly session: GrokStoredSession,
@@ -291,6 +295,8 @@ class LazyGrokAcpTransport implements GrokAcpTransport {
   ) {
     this.customModelIds = options.customModelIds ?? new Map();
     this.desiredModel = options.model ?? session.model;
+    this.durableModel = session.model;
+    this.durableModelFor = this.desiredModel;
     this.desiredEffort = options.reasoningEffort ?? session.currentModel?.reasoningEffort;
     this.desiredMode = options.permissionMode ?? 'default';
   }
@@ -513,16 +519,28 @@ class LazyGrokAcpTransport implements GrokAcpTransport {
     }
     // summary.json stores a custom model's own id, which no catalogue entry names. Once session/load
     // resolved the stored id to a key, the summary must still store that id: one naming another
-    // model means Grok runs that model instead. A requested key whose id is known (Create saw it,
-    // or a Resume resolved it) also accepts a summary that stores that id. Any other id the summary
-    // holds is not the requested model's: it can be the previous model's, from before this relaunch.
+    // model means Grok runs that model instead. Otherwise session/load has confirmed the requested
+    // model, and the summary is a second guard against one thing: a summary from before this
+    // relaunch, still naming the model that ran then. So a requested key also accepts the id it is
+    // known to store (Create saw it, or an earlier load verified it), and a requested catalogue entry
+    // an id the catalogue does not list (a custom key's first use), unless that id is the one the
+    // summary stored before a relaunch onto another model, or is known to be another key's.
     const requestedModel = this.desiredModel;
     const knownModelId = requestedModel !== undefined && resolvedModel === undefined
       ? this.customModelIds.get(requestedModel)
       : undefined;
-    const durableModelMatches = (row: GrokStoredSession): boolean =>
-      requestedModel === undefined || row.model === requestedModel
-      || (knownModelId !== undefined && row.model === knownModelId);
+    const previousModelId = requestedModel !== this.durableModelFor ? this.durableModel : undefined;
+    const anotherKeysId = (id: string): boolean =>
+      [...this.customModelIds].some(([key, known]) => key !== requestedModel && known === id);
+    const durableModelMatches = (row: GrokStoredSession): boolean => {
+      if (requestedModel === undefined || row.model === requestedModel) return true;
+      if (resolvedModel !== undefined || row.model === undefined) return false;
+      if (knownModelId !== undefined && row.model === knownModelId) return true;
+      return catalogIds.has(requestedModel)
+        && !catalogIds.has(row.model)
+        && row.model !== previousModelId
+        && !anotherKeysId(row.model);
+    };
     // A promptless session's stored effort may lag a load that confirmed the requested one.
     const durableEffortMatches = (row: GrokStoredSession): boolean =>
       this.desiredEffort === undefined
@@ -551,7 +569,12 @@ class LazyGrokAcpTransport implements GrokAcpTransport {
       rememberGrokCustomModelId(this.customModelIds, resolvedModel, requestedModel!);
       this.desiredModel = resolvedModel;
       this.hooks.onModelResolved(this.currentModelFor(resolvedModel));
+    } else if (requestedModel !== undefined && durable.model !== undefined && durable.model !== requestedModel) {
+      // A custom key that stores another id: later relaunches on it find that id in the summary.
+      rememberGrokCustomModelId(this.customModelIds, requestedModel, durable.model);
     }
+    this.durableModel = durable.model;
+    this.durableModelFor = this.desiredModel;
   }
 
   /**

@@ -190,12 +190,14 @@ const argValue = (name) => {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : undefined;
 };
-// FAKE_GROK_CUSTOM_MODEL lists a custom model whose [model.byok] key differs from the model id
-// byok-model it names. As Grok 1.0.92 did with one (a 2026-11-24 capture), --model takes either,
-// the child answers with the key, and summary.json stores the id.
+// FAKE_GROK_CUSTOM_MODEL lists custom models whose [model.<key>] keys differ from the model ids
+// they name: byok names byok-model, byok-alt names byok-alt-model. As Grok 1.0.92 did with one
+// (a 2026-11-24 capture), --model takes either, the child answers with the key, and summary.json
+// stores the id.
 const customModel = process.env.FAKE_GROK_CUSTOM_MODEL === '1';
-const modelKey = (value) => customModel && value === 'byok-model' ? 'byok' : value;
-const storedModelId = (key) => customModel && key === 'byok' ? 'byok-model' : key;
+const customIds = { byok: 'byok-model', 'byok-alt': 'byok-alt-model' };
+const modelKey = (value) => customModel ? Object.keys(customIds).find((key) => customIds[key] === value) || value : value;
+const storedModelId = (key) => customModel && customIds[key] ? customIds[key] : key;
 // The model the child runs: a load override stands for Grok picking another one.
 const runningModel = process.env.FAKE_GROK_LOAD_MODEL_OVERRIDE || modelKey(argValue('--model')) || 'grok-4.6';
 const models = {
@@ -207,7 +209,7 @@ const models = {
       { value: 'low', label: 'Low', default: false },
     ] } },
     { modelId: 'grok-4.5', name: 'Grok 4.5' },
-    ...(customModel ? [{ modelId: 'byok', name: 'BYOK model' }] : []),
+    ...(customModel ? [{ modelId: 'byok', name: 'BYOK model' }, { modelId: 'byok-alt', name: 'BYOK alt model' }] : []),
   ],
 };
 const modes = {
