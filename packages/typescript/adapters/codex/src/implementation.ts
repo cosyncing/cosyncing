@@ -1020,10 +1020,16 @@ export class CodexAdapter implements AgentBackend {
     // roster rebuild. Both metas are still folded (`thread/fork` COPIES source provenance into the new
     // rollout on this machine's forks: user→user, marker-absent→marker-absent — never defaulted), so the
     // source arm stays as a second floor under the up-front refusal rather than its only enforcement.
+    // When the fork's own meta names no origin, only the source's ORIGIN carries over. A side chat's
+    // `parentThreadId` is its attachment to the thread it was opened from, and a fork does not inherit
+    // attachment (upstream), so a fork of a side chat is a session of its own, not a second side chat.
     const forkTag = codexSessionOrigin(readSessionMeta(newPath));
     const sourceTag = codexSessionOrigin(meta);
     const originTag =
-      forkTag.origin === 'subagent' ? forkTag : sourceTag.origin === 'subagent' ? sourceTag : forkTag.origin ? forkTag : sourceTag;
+      forkTag.origin === 'subagent' ? forkTag
+        : sourceTag.origin === 'subagent' ? sourceTag
+          : forkTag.origin ? forkTag
+            : { ...forkTag, ...(sourceTag.origin ? { origin: sourceTag.origin } : {}) };
     const agentOwned = codexAgentOwned(originTag.origin);
     const terminalSyncHint = this.syncHint(String(thread.id ?? ''), actualCwd, undefined, agentOwned);
     return {
