@@ -6593,9 +6593,10 @@ class CodexResumeConnection implements SessionConnection {
     ));
     if (configured.length) return configured.slice(0, CODEX_MAX_MODEL_OPTIONS);
 
-    // Scoped to the thread's own provider, so a thread on a custom provider lists that provider's
-    // models rather than the default provider's (Codex before 0.171 has no such field, and its
-    // params schema does not refuse unknown ones). Unscoped when the thread names no provider, and
+    // Scoped to the thread's own provider, so Codex is asked about that provider rather than the
+    // default one. Measured on 0.172: a custom gateway still answers with the bundled catalog, so this
+    // matters only where Codex has a provider-specific list (Codex before 0.171 has no such field, and
+    // its params schema does not refuse unknown ones). Unscoped when the thread names no provider, and
     // when the provider is defined only in a profile overlay: an app-server that loaded the base
     // config alone does not know that name (the resume injected it for this thread only), so asking
     // for it would just be refused.
