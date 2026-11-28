@@ -54,7 +54,8 @@ service reconfiguration instead of leaving omp without its bridge.
   commands, and byte-exact file input use omp's own RPC names.
 - The thinking picker offers the efforts omp lists for each model, `max`
   included. On omp 19.1.0 it also offers `auto`, where omp picks the effort for
-  each turn; a session left in auto mode is still in it when it is resumed.
+  each turn. Whether a session left in auto mode is still in it after Resume
+  has not been measured.
   omp 17.4.2 has no `auto`, so the picker does not offer it there.
 - A turn's token and cost totals include omp's own model usage records
   (titles, the auto-thinking judge, cache warms), including records written
