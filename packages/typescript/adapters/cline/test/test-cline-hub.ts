@@ -90,6 +90,12 @@ interface CapturedSubagentTurn {
   childDocument: Record<string, unknown>;
 }
 
+/** The managed profile's providers as a Hub with `providers.list` reports them. */
+interface FakeProviderCatalog {
+  list: Record<string, unknown>;
+  models: Record<string, Record<string, unknown>>;
+}
+
 class FakeHub {
   readonly sessionId = '1787424308272_2eapl';
   readonly messages: ClineNativeMessage[] = [];
@@ -141,6 +147,9 @@ class FakeHub {
   private trailingAssistantNext?: { received: () => void; release: Promise<void>; text: string; landed: () => void };
   private streamedTurnNext?: { modelTool: boolean; iterationEvents: boolean; received: () => void; release: Promise<void> };
   private subagentTurnNext?: CapturedSubagentTurn;
+  /** Unset, `providers.*` fail as a Hub without them does. */
+  providerCatalog?: FakeProviderCatalog;
+  providerListCalls = 0;
 
   constructor(readonly profile: string, readonly cwd: string) {}
 
@@ -193,6 +202,26 @@ class FakeHub {
     }
     if (command === 'client.unregister') {
       reply({ clientId: envelope.clientId });
+      return;
+    }
+    if (command === 'providers.list' || command === 'providers.models.list') {
+      if (command === 'providers.list') this.providerListCalls += 1;
+      const catalog = this.providerCatalog;
+      if (!catalog) {
+        socket.message({
+          kind: 'reply',
+          envelope: {
+            version: CLINE_HUB_PROTOCOL_VERSION,
+            requestId: envelope.requestId,
+            ok: false,
+            error: { code: 'not_implemented', message: `fixture Hub has no ${command}` },
+          },
+        });
+        return;
+      }
+      reply(structuredClone(command === 'providers.list'
+        ? catalog.list
+        : catalog.models[String(payload.providerId)] ?? { providerId: payload.providerId, models: [] }));
       return;
     }
     if (command === 'session.create') {
@@ -1189,6 +1218,158 @@ try {
     `${CLINE_MINIMUM_SUPPORTED_VERSION} -> ${String(CLINE_MEASURED_HUB_CORE[CLINE_MINIMUM_SUPPORTED_VERSION])}`);
 
   writeHubVersion(CLINE_HUB_CORE_MINIMUM_VERSION);
+
+  // Without COSYNCING_CLINE_PROVIDER/_MODEL, a Hub with `providers.list` offers the providers its
+  // managed profile has configured, each with the models Cline lists for it. The replies are the
+  // ones a 3.0.76 Hub gave for a profile with DeepSeek and an OpenAI-compatible endpoint configured.
+  {
+    const catalogProfile = join(fake.root, 'managed-cline-catalog');
+    const catalogDiscoveryPath = join(catalogProfile, 'locks', 'hub', 'cosyncing.json');
+    mkdirSync(join(catalogProfile, 'locks', 'hub'), { recursive: true });
+    const writeCatalogDiscovery = (capabilities: readonly string[]): void => {
+      writeFileSync(catalogDiscoveryPath, `${JSON.stringify({
+        hubId: 'fixture-catalog-hub',
+        protocolVersion: CLINE_HUB_PROTOCOL_VERSION,
+        capabilities: ['session.create', 'session.run', 'session.abort', 'run.enqueue', 'run.list', 'stream.replay', ...capabilities],
+        coreVersion: captured076.hubCoreVersion,
+        authToken: 'fixture-owner-token',
+        host: '127.0.0.1',
+        port: 25464,
+        url: 'ws://127.0.0.1:25464/hub',
+        pid: process.pid,
+        startedAt: '2026-11-28T00:00:00.000Z',
+        updatedAt: '2026-11-28T00:00:00.000Z',
+      })}\n`, { mode: 0o600 });
+    };
+    writeCatalogDiscovery(captured076.providers.capabilities);
+    const { COSYNCING_CLINE_PROVIDER: _provider, COSYNCING_CLINE_MODEL: _model, ...unpaired } = env;
+    const catalogEnv: NodeJS.ProcessEnv = {
+      ...unpaired,
+      COSYNCING_CLINE_PROFILE_DIR: catalogProfile,
+      FAKE_CLINE_MANAGED_DATA_ROOT: catalogProfile,
+    };
+    const catalogHub = new FakeHub(catalogProfile, fake.cwd);
+    const capturedCatalog: FakeProviderCatalog = {
+      list: captured076.providers.list,
+      models: captured076.providers.models,
+    };
+    catalogHub.providerCatalog = capturedCatalog;
+    let catalogClock = Date.parse('2026-11-28T01:00:00.000Z');
+    let catalogOwnershipChecks = 0;
+    const catalogAdapter = (adapterEnv: NodeJS.ProcessEnv) => new ClineAdapter({
+      command: fake.path,
+      env: adapterEnv,
+      homeDir: fake.root,
+      fetcher: healthAt(captured076.hubCoreVersion),
+      hubSocketFactory: catalogHub.socketFactory,
+      isManagedHostOwned: async () => {
+        catalogOwnershipChecks += 1;
+        return true;
+      },
+      now: () => catalogClock,
+    });
+    const unpairedAdapter = catalogAdapter(catalogEnv);
+    const expectedCatalog = [
+      { providerID: 'deepseek', providerLabel: 'DeepSeek', modelID: 'deepseek-v4-flash', label: 'deepseek-v4-flash' },
+      { providerID: 'deepseek', providerLabel: 'DeepSeek', modelID: 'deepseek-flash', label: 'DeepSeek V4.1 Flash 1017' },
+      { providerID: 'deepseek', providerLabel: 'DeepSeek', modelID: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
+      { providerID: 'openai-compatible', providerLabel: 'OpenAI Compatible', modelID: 'gpt-4o', label: 'gpt-4o' },
+    ];
+    const listed = await unpairedAdapter.listModels!();
+    check('without the pair, the picker lists the configured providers in Hub order, each provider default first',
+      JSON.stringify(listed) === JSON.stringify(expectedCatalog),
+      JSON.stringify(listed));
+    check('and Create is available from them, with one catalog read for both answers',
+      await unpairedAdapter.canCreateSession() && catalogHub.providerListCalls === 1,
+      `calls=${catalogHub.providerListCalls}`);
+    check('the catalog client advertises no capability, so no approval is ever routed to it',
+      catalogHub.frames.some((frame) => frame.envelope?.command === 'client.register'
+        && Array.isArray(frame.envelope.payload.capabilities)
+        && frame.envelope.payload.capabilities.length === 0)
+        && catalogHub.activeSocketCount() === 0);
+    await assert.rejects(
+      unpairedAdapter.createSession!({ directory: fake.cwd, model: { providerID: 'openai-compatible', modelID: 'fixture-model' } }),
+      /must match the configured isolated native profile/u,
+    );
+    await assert.rejects(
+      unpairedAdapter.createSession!({ directory: fake.cwd, model: { providerID: 'anthropic', modelID: 'claude-sonnet-5-5' } }),
+      /must match the configured isolated native profile/u,
+    );
+    await assert.rejects(
+      unpairedAdapter.createSession!({
+        directory: fake.cwd,
+        model: { providerID: 'openai-compatible', modelID: 'gpt-4o', reasoningEffort: 'high' },
+      }),
+      /must match the configured isolated native profile/u,
+    );
+    check('Create refuses a model the Hub does not list, a provider it does not report configured, and a reasoning effort',
+      !catalogHub.frames.some((frame) => frame.envelope?.command === 'session.create'));
+    const catalogCreated = await unpairedAdapter.createSession!({
+      directory: fake.cwd,
+      model: { providerID: 'openai-compatible', modelID: 'gpt-4o' },
+      permissionMode: 'auto',
+    });
+    const catalogCreate = catalogHub.frames.find((frame) => frame.envelope?.command === 'session.create')?.envelope.payload;
+    check('Create with a listed model sends that provider and model, and the session carries no picker-only label',
+      JSON.stringify(catalogCreated.currentModel)
+        === JSON.stringify({ providerID: 'openai-compatible', modelID: 'gpt-4o', label: 'gpt-4o' })
+        && catalogCreate?.sessionConfig.providerId === 'openai-compatible'
+        && catalogCreate.sessionConfig.modelId === 'gpt-4o'
+        && catalogCreate.modelSelection.provider === 'openai-compatible'
+        && catalogCreate.modelSelection.model === 'gpt-4o'
+        && catalogCreate.metadata.model === 'gpt-4o',
+      JSON.stringify({ currentModel: catalogCreated.currentModel, create: catalogCreate?.sessionConfig }));
+    const catalogConnection = await unpairedAdapter.attach(catalogCreated.id, 'resume');
+    check('a driven session lists only its own model: the model does not change per turn',
+      JSON.stringify(await catalogConnection.listModels!())
+        === JSON.stringify([{ providerID: 'openai-compatible', modelID: 'gpt-4o', label: 'gpt-4o' }]));
+    await catalogConnection.close();
+    check('every answer so far came from the one cached catalog read', catalogHub.providerListCalls === 1,
+      `calls=${catalogHub.providerListCalls}`);
+
+    const pairedAdapter = catalogAdapter({
+      ...catalogEnv,
+      COSYNCING_CLINE_PROVIDER: 'openai-compatible',
+      COSYNCING_CLINE_MODEL: 'fixture-model',
+    });
+    check('the pair, when set, still decides, because the Cline catalog cannot name an endpoint model',
+      JSON.stringify(await pairedAdapter.listModels!())
+        === JSON.stringify([{ providerID: 'openai-compatible', modelID: 'fixture-model', label: 'fixture-model' }])
+        && await pairedAdapter.canCreateSession()
+        && catalogHub.providerListCalls === 1);
+
+    catalogClock += 60_001;
+    catalogHub.providerCatalog = {
+      ...capturedCatalog,
+      list: {
+        providers: (capturedCatalog.list.providers as Array<Record<string, unknown>>)
+          .map((provider) => ({ ...provider, configured: false })),
+      },
+    };
+    check('a profile with no configured provider offers no model and no Create, once the cached read expires',
+      JSON.stringify(await unpairedAdapter.listModels!()) === '[]'
+        && !await unpairedAdapter.canCreateSession()
+        && catalogHub.providerListCalls === 2,
+      `calls=${catalogHub.providerListCalls}`);
+
+    catalogClock += 60_001;
+    catalogHub.providerCatalog = undefined;
+    await assert.rejects(unpairedAdapter.listModels!(), /providers\.list failed/u);
+    check('a catalog the Hub fails to return is no answer rather than an empty one, and leaves Create off',
+      !await unpairedAdapter.canCreateSession());
+
+    catalogHub.providerCatalog = capturedCatalog;
+    writeCatalogDiscovery([]);
+    const ownershipBeforeBareHub = catalogOwnershipChecks;
+    const listCallsBeforeBareHub = catalogHub.providerListCalls;
+    check('a Hub without the provider commands keeps Create on the pair, and asks neither the Hub nor ownership',
+      JSON.stringify(await unpairedAdapter.listModels!()) === '[]'
+        && !await unpairedAdapter.canCreateSession()
+        && catalogHub.providerListCalls === listCallsBeforeBareHub
+        && catalogOwnershipChecks === ownershipBeforeBareHub,
+      `calls=${catalogHub.providerListCalls - listCallsBeforeBareHub} ownership=${catalogOwnershipChecks - ownershipBeforeBareHub}`);
+    rmSync(catalogProfile, { recursive: true, force: true });
+  }
 
   const hub = new FakeHub(profile, fake.cwd);
   let boundary: HistorySourceIdentity | undefined;

@@ -104,6 +104,36 @@ export const CLINE_MINIMUM_SUPPORTED_VERSION = lowestSemanticVersion(
   CLINE_DRIVABLE_MEASURED_VERSIONS,
 );
 
+/**
+ * The first Hub core whose command set has `providers.list` and `providers.models.list`, through
+ * which Create offers the managed profile's own providers (`hub.ts`). Measured: 0.2.1 and 0.2.2
+ * have both; 0.0.82 has neither.
+ */
+export const CLINE_HUB_PROVIDER_CATALOG_CORE = '0.2.1';
+
+const CLINE_PROVIDER_CATALOG_MEASURED_VERSIONS = CLINE_MEASURED_VERSIONS.filter((cli) => {
+  if (!Object.hasOwn(CLINE_MEASURED_HUB_CORE, cli)) return false;
+  const core = CLINE_MEASURED_HUB_CORE[cli];
+  if (typeof core !== 'string') return false;
+  const order = compareSemanticVersions(core, CLINE_HUB_PROVIDER_CATALOG_CORE);
+  return order !== undefined && order >= 0;
+});
+
+/** The oldest measured CLI shipping such a Hub, derived from {@link CLINE_MEASURED_HUB_CORE}, or
+ *  `undefined` while none is measured. Doctor reads it, because a diagnosis may not open a
+ *  connection to ask the Hub. */
+export const CLINE_PROVIDER_CATALOG_MINIMUM_VERSION: string | undefined =
+  CLINE_PROVIDER_CATALOG_MEASURED_VERSIONS.length > 0
+    ? lowestSemanticVersion(CLINE_PROVIDER_CATALOG_MEASURED_VERSIONS)
+    : undefined;
+
+/** Whether the Hub this CLI version ships reports the managed profile's providers. */
+export function clineVersionOffersProviderCatalog(version: string | undefined): boolean {
+  if (!version || !CLINE_PROVIDER_CATALOG_MINIMUM_VERSION) return false;
+  const order = compareSemanticVersions(version, CLINE_PROVIDER_CATALOG_MINIMUM_VERSION);
+  return order !== undefined && order >= 0;
+}
+
 /** The newest physically verified build, retained under its original name. */
 export const CLINE_VERIFIED_VERSION = '3.0.75';
 

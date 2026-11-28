@@ -9,6 +9,7 @@ import {
 import {
   CLINE_HUB_CORE_MINIMUM_VERSION,
   CLINE_MANAGED_MODEL_VARIABLES,
+  clineManagedDataRoot,
   clineManagedHubModel,
   clineManagedHubModelUnset,
 } from './hub.ts';
@@ -18,6 +19,7 @@ import {
   CLINE_OBSERVE_VERSIONS,
   CLINE_VERIFIED_VERSION,
   clineDataRoot,
+  clineVersionOffersProviderCatalog,
   clineVersionStanding,
 } from './store.ts';
 
@@ -86,10 +88,16 @@ function storageCheck(context: SetupDiagnosisContext, binaryPresent: boolean): S
  * Setup is what copies the pair from a shell into the service, and it takes the
  * pair whole: a shell that sets only one clears the other
  * (`contextWithOwnedServiceAgentEnvironment`). So the remedy always names both.
+ *
+ * A Hub with `providers.list` (CLI 3.0.75 and later) needs no pair: Create then
+ * offers the providers configured in the managed profile itself. A diagnosis may
+ * not ask the Hub, and the profile's `settings/providers.json` holds the API keys,
+ * so only that file's presence is inspected, never its contents. A file listing no
+ * configured provider still passes here; the broker then reports Create off.
  */
 export const CLINE_CREATE_CONFIGURATION_CHECK_ID = 'cline.create-configuration';
 
-function createConfigurationCheck(context: SetupDiagnosisContext): SetupCheck {
+function createConfigurationCheck(context: SetupDiagnosisContext, installedVersion: string | undefined): SetupCheck {
   const model = clineManagedHubModel(context.env);
   if (model) {
     return {
@@ -102,12 +110,40 @@ function createConfigurationCheck(context: SetupDiagnosisContext): SetupCheck {
   }
   const unset = clineManagedHubModelUnset(context.env);
   const both = CLINE_MANAGED_MODEL_VARIABLES.join(' and ');
+  const notSet = `${unset.join(' and ')} ${unset.length === 1 ? 'is' : 'are'} not set`;
+  if (clineVersionOffersProviderCatalog(installedVersion)) {
+    const profile = clineManagedDataRoot(context.env, context.homeDir);
+    const settings = context.inspectPath(join(profile, 'settings', 'providers.json'));
+    if (settings.status === 'file' && settings.readable) {
+      return {
+        id: CLINE_CREATE_CONFIGURATION_CHECK_ID,
+        status: 'pass',
+        detailCode: 'create-providers-in-managed-profile',
+        summary: `Cline Create offers the providers configured in the managed Cline profile; ${both} are optional.`,
+        evidence: { providerSettings: settings.displayPath },
+      };
+    }
+    return {
+      id: CLINE_CREATE_CONFIGURATION_CHECK_ID,
+      status: 'warn',
+      detailCode: 'create-model-unset',
+      summary: `Cline Create, Drive and Resume need a provider configured in the managed Cline profile, or ${both} `
+        + `in the cosyncing service environment; the profile has no provider settings and ${notSet}. Observe is unaffected.`,
+      evidence: { unset: unset.join(', '), providerSettings: settings.displayPath },
+      remediation: {
+        kind: 'command',
+        message: `Configure a provider in the managed Cline profile, or export both ${both} in a shell `
+          + 'and run setup from that shell so the service keeps them.',
+        command: 'cosyncing setup',
+      },
+    };
+  }
   return {
     id: CLINE_CREATE_CONFIGURATION_CHECK_ID,
     status: 'warn',
     detailCode: 'create-model-unset',
     summary: `Cline Create, Drive and Resume need ${both} in the cosyncing service environment; `
-      + `${unset.join(' and ')} ${unset.length === 1 ? 'is' : 'are'} not set. Observe is unaffected.`,
+      + `${notSet}. Observe is unaffected.`,
     evidence: { unset: unset.join(', ') },
     remediation: {
       kind: 'command',
@@ -220,7 +256,7 @@ export async function diagnoseClineSetup(context: SetupDiagnosisContext): Promis
       ...binary.checks,
       storageCheck(context, !!binary.executable),
       // Without a binary, Create is unavailable for that reason, which `cline.binary` already says.
-      ...(binary.executable ? [createConfigurationCheck(context)] : []),
+      ...(binary.executable ? [createConfigurationCheck(context, binary.installedVersion)] : []),
     ],
   };
 }

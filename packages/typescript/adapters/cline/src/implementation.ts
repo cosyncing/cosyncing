@@ -67,12 +67,15 @@ import {
   clineChildEnvWithoutHubLaunch,
   clineHubEpoch,
   clineHubHistoryIdentity,
+  clineHubOffersProviderCatalog,
   clineManagedDataRoot,
   clineManagedHubDiscoveryPath,
   clineManagedHubIdentity,
   clineManagedHubModel,
   clineManagedHubPort,
+  parseClineHubConfiguredProviders,
   parseClineHubMessages,
+  parseClineHubProviderModels,
   probeClineHub,
   type ClineHubClientOptions,
   type ClineHubDiscovery,
@@ -182,6 +185,22 @@ interface PendingCreatedOwner {
 
 const DEFAULT_PENDING_CREATE_TIMEOUT_MS = 60_000;
 export const CLINE_NATIVE_RENAME_TIMEOUT_MS = 30_000;
+/** `providers.list` is about 1.8 MB per call (see `CLINE_HUB_PROVIDER_CATALOG_COMMANDS`), and the
+ *  roster, the model picker and Create availability each ask; one read per Hub epoch per minute. */
+const CLINE_HUB_CATALOG_TTL_MS = 60_000;
+const CLINE_HUB_CATALOG_TIMEOUT_MS = 10_000;
+
+/**
+ * The models Create may use and the providers Resume accepts. `environment` is the
+ * `COSYNCING_CLINE_PROVIDER`/`_MODEL` pair, which wins whenever it is set: Cline's own catalog
+ * cannot name an OpenAI-compatible endpoint's model. `hub` is what the managed Hub reports for
+ * the providers configured in its profile.
+ */
+interface ClineManagedModels {
+  source: 'environment' | 'hub';
+  models: ModelOption[];
+  providers: ReadonlySet<string>;
+}
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
@@ -320,6 +339,7 @@ export class ClineAdapter implements AgentBackend {
   private readonly recordStoredPromptCorrelation?: ClineAdapterOptions['recordStoredPromptCorrelation'];
   private readonly promptCorrelations = new Map<string, ClinePromptCorrelationRegistry>();
   private readonly terminalSummaries = new Map<string, TerminalSummaryRegistry<ClineTerminalSummary>>();
+  private hubCatalog?: { epoch: string; expiresAt: number; value: Promise<ClineManagedModels> };
   readonly listModels: () => Promise<ModelOption[]>;
   readonly listModes: () => Promise<ModeOption[]>;
   readonly createSession: (options?: {
@@ -448,12 +468,9 @@ export class ClineAdapter implements AgentBackend {
 
   async discoverSessions(options?: SessionDiscoveryOptions): Promise<SessionInfo[]> {
     const sessions = await this.storedSessions(options);
-    const descriptor = await this.describeManagedHost();
-    const writerAvailable = !!this.configuredHubModel()
-      && await clineVerifiedInvocation(this.command, this.env, this.now) !== undefined
-      && await this.isManagedHostOwned?.(descriptor.identityKey) === true
-      && await this.isManagedHostReady({ ...(options?.signal ? { signal: options.signal } : {}) });
-    const modelCatalog = writerAvailable ? await this.listHubModels() : [];
+    const writer = await this.writerModels(options?.signal);
+    const writerAvailable = writer !== undefined;
+    const modelCatalog = writer?.models ?? [];
     // ONE Hub probe for the whole pass. Created lazily and NOT awaited here: a
     // sweep with no managed session must not pay for a probe nobody reads, and
     // the sessions below share this promise rather than each issuing their own.
@@ -534,10 +551,7 @@ export class ClineAdapter implements AgentBackend {
   }
 
   async canCreateSession(): Promise<boolean> {
-    if (!await clineVerifiedInvocation(this.command, this.env, this.now) || !this.configuredHubModel()) return false;
-    const descriptor = await this.describeManagedHost();
-    return await this.isManagedHostOwned?.(descriptor.identityKey) === true
-      && await this.isManagedHostReady();
+    return ((await this.writerModels())?.models.length ?? 0) > 0;
   }
 
   /** Doctor reads the same pair (`cline.create-configuration`), so its reason for "Create
@@ -547,16 +561,121 @@ export class ClineAdapter implements AgentBackend {
     return model ? { ...model, label: model.modelID } : undefined;
   }
 
-  /** Throws rather than returning `[]` when the binary is off-version: an empty
-   *  catalogue is authoritative to the broker and answers create with 409
-   *  "that model is no longer available", which is not what an unverified
-   *  binary establishes. A configured-but-unset hub model is a genuine empty. */
+  /** Throws rather than returning `[]` when the binary is off-version, or when
+   *  the Hub's provider catalog cannot be read: an empty catalogue is
+   *  authoritative to the broker and answers create with 409 "that model is no
+   *  longer available", which is not what either establishes. An unset pair on
+   *  a Hub without the catalog, an unowned Hub, or a profile with no configured
+   *  provider is a genuine empty. */
   private async listHubModels(): Promise<ModelOption[]> {
     if (!await clineVerifiedInvocation(this.command, this.env, this.now)) {
       throw new Error(`Cline model catalog requires a ${CLINE_MINIMUM_SUPPORTED_VERSION}-or-newer binary.`);
     }
     const model = this.configuredHubModel();
-    return model ? [{ ...model }] : [];
+    if (model) return [{ ...model }];
+    const discovery = await this.probeManagedHub();
+    if (!discovery || !clineHubOffersProviderCatalog(discovery)) return [];
+    const descriptor = await this.describeManagedHost();
+    if (await this.isManagedHostOwned?.(descriptor.identityKey) !== true) return [];
+    return (await this.managedModels(discovery))!.models.map((entry) => ({ ...entry }));
+  }
+
+  private probeManagedHub(signal?: AbortSignal): Promise<ClineHubDiscovery | undefined> {
+    return probeClineHub({
+      env: this.env,
+      ...(this.homeDir ? { homeDir: this.homeDir } : {}),
+      fetcher: this.fetcher,
+      ...(signal ? { signal } : {}),
+    });
+  }
+
+  /**
+   * What a broker-owned, ready managed Hub lets Create and Resume use right
+   * now, or `undefined` when there is no writer: an off-version binary, no
+   * ready or no owned Hub, neither the pair nor a Hub provider catalog, a
+   * catalog that cannot be read, or a profile with no configured provider.
+   * Ownership is proven before the catalog is read and only when one of the
+   * two sources could answer, so a host with neither pays no ownership proof.
+   */
+  private async writerModels(signal?: AbortSignal): Promise<ClineManagedModels | undefined> {
+    if (await clineVerifiedInvocation(this.command, this.env, this.now) === undefined) return undefined;
+    const discovery = await this.probeManagedHub(signal);
+    if (!discovery || (!this.configuredHubModel() && !clineHubOffersProviderCatalog(discovery))) return undefined;
+    const descriptor = await this.describeManagedHost();
+    if (await this.isManagedHostOwned?.(descriptor.identityKey) !== true) return undefined;
+    const models = await this.managedModels(discovery).catch(() => undefined);
+    return models && models.providers.size > 0 ? models : undefined;
+  }
+
+  /** The pair when set; otherwise the Hub's catalog, cached per Hub epoch. A
+   *  failed read is not cached, and is `undefined` only for a Hub without the
+   *  catalog commands. */
+  private managedModels(discovery: ClineHubDiscovery): Promise<ClineManagedModels | undefined> {
+    const pair = this.configuredHubModel();
+    if (pair) {
+      const environment: ClineManagedModels = { source: 'environment', models: [pair], providers: new Set([pair.providerID]) };
+      return Promise.resolve(environment);
+    }
+    if (!clineHubOffersProviderCatalog(discovery)) return Promise.resolve(undefined);
+    const epoch = clineHubEpoch(discovery);
+    const cached = this.hubCatalog;
+    if (cached && cached.epoch === epoch && cached.expiresAt > this.now()) return cached.value;
+    const value = this.readHubCatalog(discovery);
+    const entry = { epoch, expiresAt: this.now() + CLINE_HUB_CATALOG_TTL_MS, value };
+    this.hubCatalog = entry;
+    value.catch(() => {
+      if (this.hubCatalog === entry) this.hubCatalog = undefined;
+    });
+    return value;
+  }
+
+  /**
+   * One short-lived client that advertises no capability, so the Hub never
+   * routes an approval to it. Only providers the Hub reports enabled and
+   * configured are kept, each with the models Cline lists for it; a provider
+   * whose model list fails or is malformed is skipped, not guessed.
+   */
+  private async readHubCatalog(discovery: ClineHubDiscovery): Promise<ClineManagedModels> {
+    const cwd = clineManagedDataRoot(this.env, this.homeDir);
+    const client = this.hubClientFactory({
+      discovery,
+      clientId: `cosyncing-${randomUUID()}`,
+      workspaceRoot: cwd,
+      cwd,
+      capabilities: [],
+      ...(this.hubSocketFactory ? { socketFactory: this.hubSocketFactory } : {}),
+    });
+    const signal = AbortSignal.timeout(CLINE_HUB_CATALOG_TIMEOUT_MS);
+    try {
+      const providers = parseClineHubConfiguredProviders(
+        await client.command('providers.list', {}, undefined, CLINE_HUB_CATALOG_TIMEOUT_MS, signal),
+      );
+      if (!providers) throw new Error('Cline Hub providers.list reply is not the measured shape.');
+      const models: ModelOption[] = [];
+      for (const provider of providers) {
+        const reply = await client.command(
+          'providers.models.list',
+          { providerId: provider.id },
+          undefined,
+          CLINE_HUB_CATALOG_TIMEOUT_MS,
+          signal,
+        ).catch((error: unknown) => {
+          if (signal.aborted) throw error;
+          return undefined;
+        });
+        for (const model of parseClineHubProviderModels(provider, reply) ?? []) {
+          models.push({
+            providerID: provider.id,
+            ...(provider.name ? { providerLabel: provider.name } : {}),
+            modelID: model.id,
+            label: model.name ?? model.id,
+          });
+        }
+      }
+      return { source: 'hub', models, providers: new Set(providers.map((provider) => provider.id)) };
+    } finally {
+      await client.close().catch(() => undefined);
+    }
   }
 
   private async newOwnedManagementClient(
@@ -601,7 +720,8 @@ export class ClineAdapter implements AgentBackend {
     model?: PromptInput['model'];
     permissionMode?: string;
   } = {}): Promise<SessionInfo> {
-    if (!await this.canCreateSession()) {
+    const writer = await this.writerModels();
+    if (!writer || writer.models.length === 0) {
       throw new NativeSessionUnresumableError(
         `Cline create requires ${CLINE_MINIMUM_SUPPORTED_VERSION} or newer, a broker-owned isolated Hub, and configured provider/model.`,
       );
@@ -610,12 +730,16 @@ export class ClineAdapter implements AgentBackend {
     if (!isAbsolute(cwd) || !await stat(cwd).then((value) => value.isDirectory(), () => false)) {
       throw new NativeSessionUnresumableError('Cline create requires an existing absolute workspace directory.');
     }
-    const configuredModel = this.configuredHubModel()!;
-    if (options.model && (options.model.providerID !== configuredModel.providerID
-      || options.model.modelID !== configuredModel.modelID
-      || options.model.reasoningEffort !== undefined)) {
+    const requested = options.model;
+    const selected = requested
+      ? writer.models.find((candidate) => candidate.providerID === requested.providerID
+        && candidate.modelID === requested.modelID)
+      : writer.models[0];
+    if (!selected || requested?.reasoningEffort !== undefined) {
       throw new NativeSessionUnresumableError('Cline create model must match the configured isolated native profile.');
     }
+    // Exactly the session's own model fields: `providerLabel` belongs to the picker entry.
+    const configuredModel = { providerID: selected.providerID, modelID: selected.modelID, label: selected.label };
     const requestedMode = options.permissionMode ?? 'ask';
     if (!CLINE_CREATION_MODES.some((candidate) => candidate.value === requestedMode)) {
       throw new NativeSessionUnresumableError(`Cline permission mode ${requestedMode} is not supported.`);
@@ -995,11 +1119,8 @@ export class ClineAdapter implements AgentBackend {
       && storedBoundaryInvalid) {
       this.invalidateDriveEligibility(sessionId);
     }
-    const descriptor = await this.describeManagedHost();
-    const writerReady = managed && !!this.configuredHubModel()
-      && await clineVerifiedInvocation(this.command, this.env, this.now) !== undefined
-      && await this.isManagedHostOwned?.(descriptor.identityKey) === true
-      && await this.isManagedHostReady();
+    const writer = managed ? await this.writerModels() : undefined;
+    const writerReady = writer !== undefined;
     const eligible = (writerReady || activeDriving)
       && !isSubagent && (this.driveEligible.has(sessionId) || storedBoundaryValid);
     if (effectiveMode === 'resume') {
@@ -1018,16 +1139,24 @@ export class ClineAdapter implements AgentBackend {
       const openingToken = Symbol('Cline Resume');
       this.opening.set(sessionId, openingToken);
       try {
-        const configuredModel = this.configuredHubModel()!;
         const nativeModel = preserveModelLabel(session.currentModel, stored?.currentModel);
-        if (!nativeModel || nativeModel.providerID !== configuredModel.providerID
-          || nativeModel.modelID !== configuredModel.modelID) {
+        const listed = nativeModel ? writer?.models.find((candidate) =>
+          candidate.providerID === nativeModel.providerID && candidate.modelID === nativeModel.modelID) : undefined;
+        // The pair names one model. A Hub-configured profile keeps each session's
+        // own model, so any provider the Hub still reports configured resumes.
+        const accepted = writer?.source === 'hub'
+          ? nativeModel !== undefined && writer.providers.has(nativeModel.providerID)
+          : listed !== undefined;
+        if (!nativeModel || !accepted) {
           throw new NativeSessionUnresumableError(
             'Cline Resume requires the managed session model to match the configured isolated profile.',
           );
         }
         const selectedMode = this.driveModes.get(sessionId) ?? session.currentMode ?? stored?.currentMode ?? 'ask';
-        this.driveModels.set(sessionId, { ...nativeModel, label: nativeModel.label ?? configuredModel.label });
+        this.driveModels.set(sessionId, {
+          ...nativeModel,
+          label: nativeModel.label ?? listed?.label ?? nativeModel.modelID,
+        });
         this.driveModes.set(sessionId, selectedMode);
         const discovery = await probeClineHub({
           env: this.env,
@@ -1309,7 +1438,12 @@ export class ClineAdapter implements AgentBackend {
       info,
       client,
       profileRoot: clineManagedDataRoot(this.env, this.homeDir),
-      models: this.configuredHubModel() ? [{ ...this.configuredHubModel()! }] : [],
+      // A session keeps one model; the connection lists exactly that one.
+      models: info.currentModel ? [{
+        providerID: info.currentModel.providerID,
+        modelID: info.currentModel.modelID,
+        label: info.currentModel.label ?? info.currentModel.modelID,
+      }] : [],
       modes: CLINE_CREATION_MODES,
       permissionMode: this.driveModes.get(sessionId) ?? session.currentMode ?? 'ask',
       ...(expectedHistoryBoundary ? { expectedHistoryBoundary } : {}),
