@@ -1152,6 +1152,14 @@ opencodeV2Kit.extras!.push(
           const reads = fake.ledger.routed('GET', JOB_LIST, reconnect);
           expect(reads.length).toBeGreaterThan(0);
           expect(reads.every((entry) => (entry.query as Record<string, string>).sessionID === session.id)).toBe(true);
+          // A client that opens the session after the jobs ended is given each one's outcome.
+          const later = await context.client.attach('opencode', session.id, { readOnly: true });
+          try {
+            const outcomes: Array<[string, string]> = [[childKey, 'done'], [shellKey, 'done'], [`cmd:${cancelled.id}`, 'error'], [`cmd:${lost.id}`, 'retired']];
+            for (const [key, status] of outcomes) {
+              await later.waitForMessage((message) => message.type === 'agent-activity' && message.key === key && message.status === status);
+            }
+          } finally { later.close(); }
         } finally { stream.close(); }
         // 2.2.0 (captured) has no job list: it is never asked, at attach or after a turn.
         fake.setVersion('2.2.0');
@@ -1192,6 +1200,37 @@ opencodeV2Kit.extras!.push(
         for (let i = 1; i < reads.length; i++) expect(reads[i]!.at - reads[i - 1]!.at).toBeGreaterThanOrEqual(1500);
         const settled = fake.ledger.mark();
         await never(() => fake.ledger.routed('GET', JOB_LIST, settled).length > 0, 2500, 'a job read with no job running');
+      } finally { stream.close(); }
+    },
+  },
+  {
+    title: 'a client away when a background job ends is given the job\'s last row when it opens the session again, not a running one',
+    async run(context) {
+      const fake = context.fake as OpencodeV2Fake;
+      const session = await context.drivableSession('jobs while away');
+      const stream = await context.openDrive(session);
+      try {
+        const from = stream.frames.length;
+        // 2.3.2 (captured): a shell past its timeout is listed as a running job, with no event.
+        fake.serve.setBusy(session.id, true);
+        const shell = fake.serve.startJob(session.id, 'shell', 'sleep 5; echo while away');
+        fake.serve.setBusy(session.id, false);
+        const key = `cmd:${shell.id}`;
+        const statusesIn = (client: SessionStream): string[] => client.messages()
+          .filter((message) => message.type === 'agent-activity' && message.key === key).map((message) => message.status);
+        await stream.waitForFrame(activityFrame(key, 'running'), { after: from });
+        const away = await context.client.attach('opencode', session.id, { readOnly: true });
+        try {
+          await away.waitForMessage((message) => message.type === 'agent-activity' && message.key === key && message.status === 'running');
+        } finally { away.close(); }
+        // The job ends while that client is away; only the client still attached sees its row change.
+        fake.serve.finishJob(shell.id);
+        await stream.waitForFrame(activityFrame(key, 'retired'), { after: from });
+        const back = await context.client.attach('opencode', session.id, { readOnly: true });
+        try {
+          await back.waitForMessage((message) => message.type === 'agent-activity' && message.key === key && message.status === 'retired');
+          expect(statusesIn(back).at(-1)).toBe('retired');
+        } finally { back.close(); }
       } finally { stream.close(); }
     },
   },

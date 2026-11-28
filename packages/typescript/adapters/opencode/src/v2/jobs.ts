@@ -11,6 +11,9 @@ export const JOB_EVENT_MINIMUM_VERSION = '2.4.0';
 export const JOB_POLL_MS = 2_000;
 /** Jobs tracked per session; later ones are ignored rather than evicting a running row. */
 const JOB_LIMIT = 32;
+/** Outcomes kept per session for a client that reattaches: as many as can run at once, so every
+ *  row a detached client last saw running is given its outcome. */
+const OUTCOME_LIMIT = JOB_LIMIT;
 
 const STATUSES = new Set(['running', 'completed', 'error', 'cancelled']);
 const bounded = (value: string, limit: number): string => value.length > limit ? value.slice(0, limit - 1) + '…' : value;
@@ -63,6 +66,9 @@ export function jobCard(job: Native, status: Activity['status'] = job.status ===
  */
 export class V2JobRows {
   private readonly running = new Map<string, Native>();
+  /** The last outcome rows (done, error or retired), oldest first. Outcomes are sent live only, so
+   *  a client that was detached when a job ended still shows it running until it is given one. */
+  private readonly outcomes = new Map<string, Activity>();
   private readonly emitted = new Map<string, string>();
 
   constructor(private readonly sessionId: string, private readonly emit: (message: AgentMessage) => void) {}
@@ -73,6 +79,7 @@ export class V2JobRows {
    *  that did not survive a service restart. */
   adopt(previous: V2JobRows): void {
     for (const [id, job] of previous.running) if (this.running.size < JOB_LIMIT) this.running.set(id, job);
+    for (const card of previous.outcomes.values()) this.remember(card);
     for (const [key, signature] of previous.emitted) this.emitted.set(key, signature);
   }
 
@@ -94,11 +101,13 @@ export class V2JobRows {
     if (job.status !== 'running') { this.finish(job); return; }
     if (!this.running.has(job.id) && this.running.size >= JOB_LIMIT) return;
     this.running.set(job.id, job);
-    this.publish(jobCard(job));
+    const card = jobCard(job);
+    this.outcomes.delete(card.key);
+    this.publish(card);
   }
 
-  /** Running rows, for a transcript read or a reattach. */
-  cards(): Activity[] { return [...this.running.values()].map((job) => jobCard(job)); }
+  /** The recent outcomes, then the rows that still run, for a transcript read or a reattach. */
+  cards(): Activity[] { return [...this.outcomes.values(), ...[...this.running.values()].map((job) => jobCard(job))]; }
 
   /** An idle session status ends every running subagent row on the client, but a background
    *  subagent outlives its parent's turn: restate the rows that still run. */
@@ -109,7 +118,15 @@ export class V2JobRows {
   private finish(job: Native, status?: Activity['status']): void {
     const tracked = this.running.delete(job.id);
     if (status === 'retired' && !tracked) return;
-    this.publish(jobCard(job, status));
+    const card = jobCard(job, status);
+    this.remember(card);
+    this.publish(card);
+  }
+
+  private remember(card: Activity): void {
+    this.outcomes.delete(card.key);
+    this.outcomes.set(card.key, card);
+    while (this.outcomes.size > OUTCOME_LIMIT) this.outcomes.delete(this.outcomes.keys().next().value!);
   }
 
   private publish(card: Activity, force = false): void {

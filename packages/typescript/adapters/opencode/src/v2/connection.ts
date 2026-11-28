@@ -292,7 +292,7 @@ class BoundV2Connection implements SessionConnection {
     return [...historyRows(boundary < 0 ? messages : messages.slice(0, boundary), this.backend.clientKeys), ...this.jobs.cards()];
   }
 
-  /** The background rows that still run: current state, outside the transcript. */
+  /** The background rows that still run and the recent outcomes: current state, outside the transcript. */
   async getHistoryOverlays(): Promise<AgentMessage[]> { return this.jobs.cards(); }
 
   async getHistorySourceIdentity(): Promise<HistorySourceIdentity> {
