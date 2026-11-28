@@ -173,6 +173,8 @@ export interface ClineAdapterOptions {
   renameTimeoutMs?: number;
   /** Deterministic fixture override for the measured native history-update child. */
   nativeRenameTimeoutMs?: number;
+  /** Deterministic fixture override for the whole provider catalog read, registration included. */
+  catalogTimeoutMs?: number;
   /** Clock for the binary version-probe cache (`version.ts`); fixtures pass a controlled one. */
   now?: () => number;
 }
@@ -188,6 +190,8 @@ export const CLINE_NATIVE_RENAME_TIMEOUT_MS = 30_000;
 /** `providers.list` is about 1.8 MB per call (see `CLINE_HUB_PROVIDER_CATALOG_COMMANDS`), and the
  *  roster, the model picker and Create availability each ask; one read per Hub epoch per minute. */
 const CLINE_HUB_CATALOG_TTL_MS = 60_000;
+/** The whole catalog read, from opening the socket to the last model list. `GET /api/agents` asks
+ *  Create availability of every agent and waits for it, so the read must not outlast this. */
 const CLINE_HUB_CATALOG_TIMEOUT_MS = 10_000;
 
 /**
@@ -208,6 +212,23 @@ interface ClineCatalogRead {
   expiresAt: number;
   value: Promise<ClineManagedModels>;
   settled?: ClineManagedModels;
+}
+
+/** `work`, or a rejection with the signal's reason once it aborts, whichever comes first. The work
+ *  is not cancelled; its later settlement is ignored. */
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(signal.reason);
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+    work.then((value) => {
+      signal.removeEventListener('abort', onAbort);
+      resolve(value);
+    }, (error: unknown) => {
+      signal.removeEventListener('abort', onAbort);
+      reject(error);
+    });
+  });
 }
 
 function shellQuote(value: string): string {
@@ -340,6 +361,7 @@ export class ClineAdapter implements AgentBackend {
   private readonly pendingCreateTimeoutMs: number;
   private readonly renameTimeoutMs: number;
   private readonly nativeRenameTimeoutMs: number;
+  private readonly catalogTimeoutMs: number;
   private readonly now: () => number;
   private readonly resolveStoredDriveState?: ClineAdapterOptions['resolveStoredDriveState'];
   private readonly revokeStoredDriveEligibility?: ClineAdapterOptions['revokeStoredDriveEligibility'];
@@ -392,6 +414,10 @@ export class ClineAdapter implements AgentBackend {
       && (options.nativeRenameTimeoutMs ?? 0) > 0
       ? options.nativeRenameTimeoutMs!
       : CLINE_NATIVE_RENAME_TIMEOUT_MS;
+    this.catalogTimeoutMs = Number.isSafeInteger(options.catalogTimeoutMs)
+      && (options.catalogTimeoutMs ?? 0) > 0
+      ? options.catalogTimeoutMs!
+      : CLINE_HUB_CATALOG_TIMEOUT_MS;
     this.now = options.now ?? Date.now;
     this.listModels = () => this.listHubModels();
     this.listModes = () => this.listCreationModes();
@@ -672,18 +698,26 @@ export class ClineAdapter implements AgentBackend {
    */
   private async readHubCatalog(discovery: ClineHubDiscovery): Promise<ClineManagedModels> {
     const cwd = clineManagedDataRoot(this.env, this.homeDir);
+    // One budget for the whole read. Registration runs inside `connect()`, which takes no signal and
+    // would otherwise wait the client's defaults (5 s to open, 30 s to register) on a Hub that answers
+    // `/health` but not `client.register`. So the client's own timeouts are capped at the budget, and
+    // the connect races the same deadline the commands below observe.
+    const budgetMs = this.catalogTimeoutMs;
+    const signal = AbortSignal.timeout(budgetMs);
     const client = this.hubClientFactory({
       discovery,
       clientId: `cosyncing-${randomUUID()}`,
       workspaceRoot: cwd,
       cwd,
       capabilities: [],
+      connectTimeoutMs: budgetMs,
+      requestTimeoutMs: budgetMs,
       ...(this.hubSocketFactory ? { socketFactory: this.hubSocketFactory } : {}),
     });
-    const signal = AbortSignal.timeout(CLINE_HUB_CATALOG_TIMEOUT_MS);
     try {
+      await untilAborted(client.connect(), signal);
       const providers = parseClineHubConfiguredProviders(
-        await client.command('providers.list', {}, undefined, CLINE_HUB_CATALOG_TIMEOUT_MS, signal),
+        await client.command('providers.list', {}, undefined, budgetMs, signal),
       );
       if (!providers) throw new Error('Cline Hub providers.list reply is not the measured shape.');
       const models: ModelOption[] = [];
@@ -692,7 +726,7 @@ export class ClineAdapter implements AgentBackend {
           'providers.models.list',
           { providerId: provider.id },
           undefined,
-          CLINE_HUB_CATALOG_TIMEOUT_MS,
+          budgetMs,
           signal,
         ).catch((error: unknown) => {
           if (signal.aborted) throw error;
@@ -709,7 +743,8 @@ export class ClineAdapter implements AgentBackend {
       }
       return { source: 'hub', models, providers: new Set(providers.map((provider) => provider.id)) };
     } finally {
-      await client.close().catch(() => undefined);
+      // Unregistering waits for the Hub too; past the budget it finishes on its own.
+      await untilAborted(client.close(), signal).catch(() => undefined);
     }
   }
 

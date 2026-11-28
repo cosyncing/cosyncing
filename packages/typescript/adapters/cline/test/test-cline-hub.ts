@@ -150,6 +150,8 @@ class FakeHub {
   /** Unset, `providers.*` fail as a Hub without them does. */
   providerCatalog?: FakeProviderCatalog;
   providerListCalls = 0;
+  /** Set, `client.register` is never answered, as by a Hub that serves `/health` but stalls. */
+  stallRegistration = false;
 
   constructor(readonly profile: string, readonly cwd: string) {}
 
@@ -197,6 +199,7 @@ class FakeHub {
       },
     });
     if (command === 'client.register') {
+      if (this.stallRegistration) return;
       reply({ clientId: payload.clientId });
       return;
     }
@@ -1257,7 +1260,7 @@ try {
     let catalogClock = Date.parse('2026-11-28T01:00:00.000Z');
     let catalogOwnershipChecks = 0;
     const catalogTraces: string[] = [];
-    const catalogAdapter = (adapterEnv: NodeJS.ProcessEnv) => new ClineAdapter({
+    const catalogAdapter = (adapterEnv: NodeJS.ProcessEnv, catalogTimeoutMs?: number) => new ClineAdapter({
       command: fake.path,
       env: adapterEnv,
       homeDir: fake.root,
@@ -1269,6 +1272,7 @@ try {
       },
       trace: (event) => { catalogTraces.push(JSON.stringify(event)); },
       now: () => catalogClock,
+      ...(catalogTimeoutMs === undefined ? {} : { catalogTimeoutMs }),
     });
     const unpairedAdapter = catalogAdapter(catalogEnv);
     const expectedCatalog = [
@@ -1410,6 +1414,28 @@ try {
       JSON.stringify({ malformed: malformed.split('\n')[0], traces: catalogTraces.length }));
 
     catalogHub.providerCatalog = capturedCatalog;
+
+    // A Hub that answers `/health` but never registers the catalog client. `GET /api/agents` waits
+    // on Create availability, so the whole read, registration included, stays inside its budget
+    // rather than the client's 30 s registration default. The guard is far above that budget.
+    catalogHub.stallRegistration = true;
+    const stalledAdapter = catalogAdapter(catalogEnv, 50);
+    const stalledSockets = catalogHub.protocols.length;
+    const listCallsBeforeStall = catalogHub.providerListCalls;
+    let stallGuard: ReturnType<typeof setTimeout> | undefined;
+    const stalledAnswer = await Promise.race([
+      stalledAdapter.canCreateSession(),
+      new Promise<'still waiting'>((resolve) => { stallGuard = setTimeout(() => resolve('still waiting'), 5_000); }),
+    ]);
+    clearTimeout(stallGuard);
+    check('a Hub that stalls registration leaves Create off within the catalog budget, and its socket closed',
+      stalledAnswer === false
+        && catalogHub.protocols.length === stalledSockets + 1
+        && catalogHub.activeSocketCount() === 0
+        && catalogHub.providerListCalls === listCallsBeforeStall,
+      JSON.stringify({ stalledAnswer, sockets: catalogHub.protocols.length - stalledSockets }));
+    catalogHub.stallRegistration = false;
+
     writeCatalogDiscovery([]);
     const ownershipBeforeBareHub = catalogOwnershipChecks;
     const listCallsBeforeBareHub = catalogHub.providerListCalls;
