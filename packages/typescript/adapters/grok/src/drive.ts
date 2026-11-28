@@ -377,6 +377,9 @@ class LazyGrokAcpTransport implements GrokAcpTransport {
     if (this.client?.alive) return this.client;
     if (!this.starting) {
       const generation = ++this.generation;
+      // The child this start launches, once it is connected: a notice it sends counts as the
+      // running child's only after its session/load is verified and it becomes `this.client`.
+      let launched: AcpClient | undefined;
       this.starting = (async () => {
         const command = this.options.command ?? 'grok';
         const env = grokChildEnv(this.options.env ?? process.env);
@@ -415,7 +418,7 @@ class LazyGrokAcpTransport implements GrokAcpTransport {
                   return null;
                 }
                 if (event.kind === 'notification' && event.method === '_x.ai/session_notification') {
-                  this.acceptSessionNotification(event.params, generation);
+                  this.acceptSessionNotification(event.params, launched);
                   return null;
                 }
                 // Grok's other notices in its `_x.ai/` wire namespace carry nothing this child
@@ -437,6 +440,7 @@ class LazyGrokAcpTransport implements GrokAcpTransport {
         });
         this.startupAbort = undefined;
         this.startupClient = client;
+        launched = client;
         if (this.closed || generation !== this.generation) {
           await client.close({ force: true });
           throw new Error('Grok ACP transport changed during startup.');
@@ -554,9 +558,10 @@ class LazyGrokAcpTransport implements GrokAcpTransport {
    * Grok's own notices about the session (1.0.92, 2026-11-24 capture): `session_summary_generated`
    * once, with the title it generated after the first prompt, and `model_changed` during every
    * session/load, naming the catalogue id the load answers with. That answer is verified, so only
-   * a `model_changed` from the running child is taken as a change of model.
+   * a `model_changed` from the running child (`from` is the verified current client) is taken as a
+   * change of model; one from a child still loading, or from a child already replaced, is not.
    */
-  private acceptSessionNotification(params: unknown, generation: number): void {
+  private acceptSessionNotification(params: unknown, from: AcpClient | undefined): void {
     if (!isRecord(params) || params.sessionId !== this.session.id || !isRecord(params.update)) return;
     const update = params.update;
     if (update.sessionUpdate === 'session_summary_generated') {
@@ -565,8 +570,8 @@ class LazyGrokAcpTransport implements GrokAcpTransport {
       return;
     }
     if (update.sessionUpdate !== 'model_changed'
-      || generation !== this.generation
-      || this.client === undefined
+      || from === undefined
+      || this.client !== from
       || typeof update.model_id !== 'string'
       || update.model_id === this.desiredModel
       || !this.models.some((model) => modelToken(model) === update.model_id)) return;
