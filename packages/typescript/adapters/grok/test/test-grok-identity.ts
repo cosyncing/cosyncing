@@ -188,6 +188,64 @@ try {
     }
   }
 
+  // Grok 1.0.92's own notices about the session (2026-11-24 capture; the fake sends the captured
+  // shapes under FAKE_GROK_SESSION_NOTICES): `model_changed` just before it answers session/load,
+  // and `session_summary_generated` with the title it generates during the first prompt.
+  {
+    const sessionInfoUpdates = (messages: readonly AgentMessage[], field: string) =>
+      messages.flatMap((message) => message.type === 'metadata-update' && message.key === 'sessionInfo'
+        && typeof message.value === 'object' && message.value !== null && field in message.value
+        ? [message.value as Record<string, unknown>]
+        : []);
+    const noticeDrive = async (name: string, options: { title?: string; modelChangedTo?: string }) => {
+      const noticeFake = writeFakeGrokBinary(join(root, `${name}-bin`), join(root, `${name}-home`));
+      noticeFake.env.FAKE_GROK_SESSION_NOTICES = '1';
+      if (options.modelChangedTo) noticeFake.env.FAKE_GROK_MODEL_CHANGED_TO = options.modelChangedTo;
+      const noticeAdapter = new GrokAdapter({ command: noticeFake.path, env: noticeFake.env, requestTimeoutMs: 2_000 });
+      const created = await noticeAdapter.createSession({
+        directory: cwd,
+        ...(options.title ? { title: options.title } : {}),
+        model: { providerID: 'xai', modelID: 'grok-4.6', reasoningEffort: 'high' },
+      });
+      const drive = await noticeAdapter.attach(created.id, 'resume') as GrokDriveConnection;
+      const live: AgentMessage[] = [];
+      drive.subscribe((message) => live.push(message));
+      let error: unknown;
+      try { await drive.sendPrompt({ text: 'first prompt' }); } catch (caught) { error = caught; }
+      return { drive, live, error };
+    };
+    const generated = await noticeDrive('generated-title', {});
+    check('the title Grok generates during the first prompt becomes the session title',
+      generated.error === undefined
+        && JSON.stringify(sessionInfoUpdates(generated.live, 'title')) === JSON.stringify([{ title: 'Generated fixture title' }])
+        && generated.drive.info.title === 'Generated fixture title',
+      JSON.stringify({ error: String(generated.error ?? ''), titles: sessionInfoUpdates(generated.live, 'title') }));
+    check('the model_changed Grok sends during session/load is not a change of model',
+      sessionInfoUpdates(generated.live, 'currentModel').length === 0
+        && generated.drive.info.currentModel?.modelID === 'grok-4.6',
+      JSON.stringify(sessionInfoUpdates(generated.live, 'currentModel')));
+    await generated.drive.close();
+
+    const chosen = await noticeDrive('chosen-title', { title: 'Chosen title' });
+    check('a title the user chose at Create is not replaced by the one Grok generates',
+      chosen.error === undefined
+        && sessionInfoUpdates(chosen.live, 'title').length === 0
+        && chosen.drive.info.title === 'Chosen title',
+      JSON.stringify({ error: String(chosen.error ?? ''), titles: sessionInfoUpdates(chosen.live, 'title') }));
+    await chosen.drive.close();
+
+    const switched = await noticeDrive('model-changed', { modelChangedTo: 'grok-4.5' });
+    check('a model_changed from the running child becomes the current model',
+      switched.error === undefined
+        && switched.drive.driving
+        && sessionInfoUpdates(switched.live, 'currentModel')
+          .some((value) => (value.currentModel as { modelID?: string; label?: string }).modelID === 'grok-4.5'
+            && (value.currentModel as { label?: string }).label === 'Grok 4.5')
+        && switched.drive.info.currentModel?.modelID === 'grok-4.5',
+      JSON.stringify({ error: String(switched.error ?? ''), models: sessionInfoUpdates(switched.live, 'currentModel') }));
+    await switched.drive.close();
+  }
+
   const fake = writeFakeGrokBinary(bin, store);
   const adapter = new GrokAdapter({ command: fake.path, env: fake.env, homeDir: root, requestTimeoutMs: 2_000, testOnlyEnableUnverifiedDrive: true });
   check('the exact fake binary is available, authenticated, and create-enabled',

@@ -659,6 +659,7 @@ export class GrokAdapter implements AgentBackend {
           if (configured.currentModel) this.driveModels.set(sessionId, { ...configured.currentModel });
           if (configured.currentMode) this.driveModes.set(sessionId, configured.currentMode);
         },
+        keepTitle: title !== undefined,
         onHistoryBoundary: (historyBoundary, terminalSummary) => {
           this.recordStoredDriveBoundary?.({
             tool: this.id,

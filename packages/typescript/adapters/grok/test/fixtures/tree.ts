@@ -315,6 +315,12 @@ const handle = (frame) => {
       count += 1;
     };
     if (previous) save(previous);
+    if (process.env.FAKE_GROK_SESSION_NOTICES === '1') {
+      // Grok 1.0.92 names the model it loaded just before it answers session/load (a 2026-11-24
+      // capture), with the catalogue id the answer carries.
+      send({ jsonrpc: '2.0', method: '_x.ai/session_notification', params: { sessionId: config.sessionId,
+        update: { sessionUpdate: 'model_changed', model_id: runningModel } } });
+    }
     send({ jsonrpc: '2.0', id: frame.id, result: { models, modes } });
     if (rewriteMs > 0) {
       const started = Date.now();
@@ -344,6 +350,17 @@ const handle = (frame) => {
   }
   if (frame.method === 'session/prompt') {
     promptCount += 1;
+    if (process.env.FAKE_GROK_SESSION_NOTICES === '1' && promptCount === 1) {
+      // Grok 1.0.92 sends the title it generated once, during the first prompt (a 2026-11-24 capture).
+      send({ jsonrpc: '2.0', method: '_x.ai/session_notification', params: { sessionId: config.sessionId,
+        update: { sessionUpdate: 'session_summary_generated', session_summary: 'Generated fixture title' } } });
+    }
+    if (process.env.FAKE_GROK_MODEL_CHANGED_TO) {
+      // Not captured: the captured shape, sent by the running child during a turn instead of
+      // during session/load, to stand for a model change Grok makes on its own.
+      send({ jsonrpc: '2.0', method: '_x.ai/session_notification', params: { sessionId: config.sessionId,
+        update: { sessionUpdate: 'model_changed', model_id: process.env.FAKE_GROK_MODEL_CHANGED_TO } } });
+    }
     const text = frame.params.prompt[0]?.text || '';
     const eventId = 'event-' + process.pid + '-' + promptCount;
     const promptId = 'prompt-' + process.pid + '-' + promptCount;

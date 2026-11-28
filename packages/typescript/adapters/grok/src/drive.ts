@@ -70,6 +70,8 @@ export interface GrokDriveOpenOptions extends Omit<GrokObserveOptions, 'session'
   authMethodId?: string;
   requestTimeoutMs?: number;
   onConfiguration?: (info: Pick<SessionInfo, 'currentModel' | 'currentMode' | 'model'>) => void;
+  /** The session has a title the user gave it when creating it; the title Grok generates does not replace it. */
+  keepTitle?: boolean;
   onHistoryBoundary?: (
     identity: HistorySourceIdentity,
     terminalSummary?: GrokTerminalSummary,
@@ -87,8 +89,17 @@ interface GrokLazyHooks {
   onUpdate(method: string, params: AcpSessionUpdateParams): void;
   onPermissionRequest(params: AcpRequestPermissionParams): Promise<AcpRequestPermissionResult> | AcpRequestPermissionResult;
   onExit(exit: AcpChildExit): void;
-  /** session/load confirmed the requested model under another catalogue id; see verifyLoadedConfiguration. */
+  /** The child runs another catalogue model than requested: session/load resolved a stored id
+   *  (see verifyLoadedConfiguration), or the running child reported `model_changed`. */
   onModelResolved(model: NonNullable<SessionInfo['currentModel']>): void;
+  /** Grok generated the session's title. */
+  onTitle(title: string): void;
+}
+
+/** A title as the store accepts one (`store.ts`): at most 4,096 characters, trimmed, not blank. */
+function generatedTitle(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 4_096) return undefined;
+  return value.trim() || undefined;
 }
 
 interface PendingPrompt {
@@ -388,6 +399,10 @@ class LazyGrokAcpTransport implements GrokAcpTransport {
                   this.hooks.onUpdate(event.method, event.params as AcpSessionUpdateParams);
                   return null;
                 }
+                if (event.kind === 'notification' && event.method === '_x.ai/session_notification') {
+                  this.acceptSessionNotification(event.params, generation);
+                  return null;
+                }
                 // Grok's other notices in its `_x.ai/` wire namespace carry nothing this child
                 // reads: turns settle from `session/prompt`, `_x.ai/session/update` and the
                 // durable log. Grok 1.0.92 sends many of them (one Drive capture: 275
@@ -516,6 +531,30 @@ class LazyGrokAcpTransport implements GrokAcpTransport {
     }
   }
 
+  /**
+   * Grok's own notices about the session (1.0.92, 2026-11-24 capture): `session_summary_generated`
+   * once, with the title it generated after the first prompt, and `model_changed` during every
+   * session/load, naming the catalogue id the load answers with. That answer is verified, so only
+   * a `model_changed` from the running child is taken as a change of model.
+   */
+  private acceptSessionNotification(params: unknown, generation: number): void {
+    if (!isRecord(params) || params.sessionId !== this.session.id || !isRecord(params.update)) return;
+    const update = params.update;
+    if (update.sessionUpdate === 'session_summary_generated') {
+      const title = generatedTitle(update.session_summary);
+      if (title) this.hooks.onTitle(title);
+      return;
+    }
+    if (update.sessionUpdate !== 'model_changed'
+      || generation !== this.generation
+      || this.client === undefined
+      || typeof update.model_id !== 'string'
+      || update.model_id === this.desiredModel
+      || !this.models.some((model) => modelToken(model) === update.model_id)) return;
+    this.desiredModel = update.model_id;
+    this.hooks.onModelResolved(this.currentModelFor(update.model_id));
+  }
+
   /** A catalogue model as the current model: its label, and the requested effort if it offers that one. */
   private currentModelFor(id: string): NonNullable<SessionInfo['currentModel']> {
     const option = this.models.find((model) => modelToken(model) === id);
@@ -642,6 +681,7 @@ export class GrokDriveConnection extends GrokObserveConnection {
   private readonly onDemoteHook?: (connection: GrokDriveConnection) => void;
   private readonly onCloseHook?: (connection: GrokDriveConnection) => void;
   private readonly onConfigurationHook?: GrokDriveOpenOptions['onConfiguration'];
+  private readonly keepTitle: boolean;
   private readonly onHistoryBoundaryHook?: GrokDriveOpenOptions['onHistoryBoundary'];
   private readonly expectedHistoryBoundary?: HistorySourceIdentity;
   private turnChain: Promise<void> = Promise.resolve();
@@ -695,6 +735,7 @@ export class GrokDriveConnection extends GrokObserveConnection {
     if (options.onDemote) this.onDemoteHook = options.onDemote;
     if (options.onClose) this.onCloseHook = options.onClose;
     if (options.onConfiguration) this.onConfigurationHook = options.onConfiguration;
+    this.keepTitle = options.keepTitle === true;
     if (options.onHistoryBoundary) this.onHistoryBoundaryHook = options.onHistoryBoundary;
     if (options.expectedHistoryBoundary) this.expectedHistoryBoundary = options.expectedHistoryBoundary;
     this.stopSettleMs = Number.isFinite(options.stopSettleMs) && (options.stopSettleMs ?? 0) > 0
@@ -714,6 +755,7 @@ export class GrokDriveConnection extends GrokObserveConnection {
         ?? { outcome: { outcome: 'cancelled' } },
       onExit: (exit) => connection?.demote(`Grok ACP child exited (code ${String(exit.code)}, signal ${String(exit.signal)}).`),
       onModelResolved: (model) => connection?.acceptCurrentModel(model),
+      onTitle: (title) => connection?.acceptGeneratedTitle(title),
     });
     connection = new GrokDriveConnection(session, info, transport, options);
     try {
@@ -1398,6 +1440,13 @@ export class GrokDriveConnection extends GrokObserveConnection {
       return;
     }
     if (foreignIfUnclaimed) this.demote();
+  }
+
+  /** The title Grok generated, unless the user gave the session one. */
+  private acceptGeneratedTitle(title: string): void {
+    if (this.closedDrive || this.demoted || this.keepTitle || this.info.title === title) return;
+    this.info.title = title;
+    this.emitLive({ type: 'metadata-update', key: 'sessionInfo', value: { title } });
   }
 
   /** The model Grok reports this session runs, shown as the current model and kept for the next attach. */
