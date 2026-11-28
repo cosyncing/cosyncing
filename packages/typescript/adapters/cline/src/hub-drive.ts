@@ -22,7 +22,16 @@ import {
   parseClineHubMessages,
   sameClineHubHistoryIdentity,
 } from './hub.ts';
-import { boundedText, clineMessageKey, clineTurnId, clineTurnTokens, clineUserText, mapClineTranscript } from './mapping.ts';
+import {
+  boundedText,
+  clineMessageKey,
+  clineSubagentFinished,
+  clineSubagentStarted,
+  clineTurnId,
+  clineTurnTokens,
+  clineUserText,
+  mapClineTranscript,
+} from './mapping.ts';
 import type { ClineMapTrace, ClineTerminalSummary } from './mapping.ts';
 import {
   CLINE_MAX_PROMPT_CORRELATIONS,
@@ -66,7 +75,47 @@ const TRANSCRIPT_RETRY_ATTEMPTS = 5;
 
 const MAX_PENDING_PROMPTS = 64;
 const MAX_PENDING_PERMISSIONS = 64;
+const MAX_LIVE_SUBAGENTS = 64;
 const MAX_FIELD_CHARS = 4_096;
+
+type SubagentCard = Extract<AgentMessage, { type: 'agent-activity' }>;
+
+/** A `spawn_agent` call's card while its subagent streams, keyed by the call id. */
+interface LiveSubagent {
+  card: SubagentCard;
+  /** The lead agent that started the call, when the Hub names agents. */
+  leadAgentId?: string;
+  /** The subagent bound to this call by its first event. */
+  agentId?: string;
+  finished: boolean;
+}
+
+interface ClineEventAgent {
+  kind?: string;
+  agentId?: string;
+  parentAgentId?: string;
+}
+
+/**
+ * The agent an event came from. Hub core 0.2.1 and later label every agent event with
+ * `agent {kind, agentId, conversationId, parentAgentId}` (measured on 0.2.1 and 0.2.2): `lead` for
+ * the session's own agent, `subagent` for one a `spawn_agent` call started, on the PARENT's
+ * session id. Core 0.0.82 has no label, so every event there is the lead's, as before.
+ */
+function eventAgent(payload: Record<string, unknown>): ClineEventAgent | undefined {
+  const agent = record(payload.agent);
+  if (!agent) return undefined;
+  const kind = field(agent.kind, 64);
+  const agentId = field(agent.agentId, 512);
+  const parentAgentId = field(agent.parentAgentId, 512);
+  return { ...(kind ? { kind } : {}), ...(agentId ? { agentId } : {}), ...(parentAgentId ? { parentAgentId } : {}) };
+}
+
+/** A child agent's event: a subagent or teammate, or any agent with a parent. */
+function isChildAgent(agent: ClineEventAgent | undefined): agent is ClineEventAgent {
+  return agent !== undefined
+    && (agent.kind === 'subagent' || agent.kind === 'teammate' || agent.parentAgentId !== undefined);
+}
 
 interface PendingPrompt {
   key: string;
@@ -371,6 +420,8 @@ export class ClineHubDriveConnection implements SessionConnection {
   private ownedTranscriptFile?: string;
   private authorityRecovery?: Promise<boolean>;
   private readonly terminalSummaryRegistry: TerminalSummaryRegistry<ClineTerminalSummary>;
+  private readonly liveSubagents = new Map<string, LiveSubagent>();
+  private readonly subagentCalls = new Map<string, string>();
 
   constructor(private readonly options: ClineHubDriveOptions) {
     this.info = options.info;
@@ -774,6 +825,8 @@ export class ClineHubDriveConnection implements SessionConnection {
         this.liveTurn = undefined;
         this.ownRunStarted = false;
         this.terminalRunEvent = undefined;
+        this.liveSubagents.clear();
+        this.subagentCalls.clear();
         // A Stop in progress rejects the open cards itself: the user did refuse them.
         if (!this.stopping) this.cancelPendingPermissions('Cline turn ended before the permission was resolved.');
         if (!this.demoted && !this.closed && generation === this.turnGeneration) {
@@ -1144,6 +1197,16 @@ export class ClineHubDriveConnection implements SessionConnection {
       }
       return;
     }
+    // Run, approval and capability events above are the session's whichever agent raised them: a
+    // subagent's approval still needs an answer. Everything below is one agent's own output, and a
+    // subagent's streams on its parent's session id. Taken as the lead's, its text joined the
+    // lead's answer row, its iterations and tools moved the lead's row keys off the ones history
+    // gives, and its usage replaced the lead's counts.
+    const agent = eventAgent(payload);
+    if (isChildAgent(agent)) {
+      this.acceptSubagentEvent(event.event, agent, payload);
+      return;
+    }
     if (event.event === 'assistant.delta') {
       const text = field(payload.text, 2 * 1024 * 1024);
       if (text) this.emit({ type: 'model-output', delta: text, key: this.liveDeltaKey('assistant', event.eventId) });
@@ -1165,6 +1228,7 @@ export class ClineHubDriveConnection implements SessionConnection {
       const callId = field(payload.toolCallId, 512) ?? event.eventId ?? `cline-tool:${Date.now()}`;
       const toolName = field(payload.toolName, 512) ?? 'Cline tool';
       this.emit({ type: 'tool-call', callId, toolName, title: toolName, args: payload.input });
+      if (toolName === 'spawn_agent') this.openSubagentCard(callId, payload.input, agent?.agentId, event.timestamp);
       // Answer text resumed after a tool call belongs in its own row, below the tool, not appended
       // to the text that preceded it.
       if (this.liveTurn) {
@@ -1183,6 +1247,7 @@ export class ClineHubDriveConnection implements SessionConnection {
         result: payload.output,
         isError: payload.error !== undefined,
       });
+      if (toolName === 'spawn_agent') this.closeSubagentCard(callId, payload.error !== undefined, payload.output);
       return;
     }
     if (event.event === 'usage.updated') {
@@ -1217,6 +1282,67 @@ export class ClineHubDriveConnection implements SessionConnection {
 
   private readTerminalRunEvent(): ClineNativeTerminal | undefined {
     return this.terminalRunEvent;
+  }
+
+  /** The lead started a `spawn_agent` call: open its card now, under the key history gives it,
+   *  rather than only when the settled transcript replays it. */
+  private openSubagentCard(callId: string, input: unknown, leadAgentId: string | undefined, timestamp?: number): void {
+    const card = clineSubagentStarted(callId, input, timestamp ?? Date.now());
+    this.liveSubagents.set(callId, { card, ...(leadAgentId ? { leadAgentId } : {}), finished: false });
+    if (this.liveSubagents.size > MAX_LIVE_SUBAGENTS) {
+      const [oldest, entry] = this.liveSubagents.entries().next().value!;
+      this.liveSubagents.delete(oldest);
+      if (entry.agentId) this.subagentCalls.delete(entry.agentId);
+    }
+    this.emit({ ...card });
+  }
+
+  private closeSubagentCard(callId: string, isError: boolean, output: unknown): void {
+    const entry = this.liveSubagents.get(callId);
+    if (entry) {
+      entry.finished = true;
+      if (entry.agentId) this.subagentCalls.delete(entry.agentId);
+    }
+    this.emit(clineSubagentFinished(callId, isError, output));
+  }
+
+  /**
+   * A child agent's own output goes to its card, never to the lead's rows: its usage becomes the
+   * card's tokens, and its text stays in its own subagent session. A subagent is bound to the one
+   * `spawn_agent` call of its parent still open without one; while two are open they cannot be told
+   * apart, so neither card claims it. Teammates are not cards: Create disables agent teams.
+   */
+  private acceptSubagentEvent(name: string, agent: ClineEventAgent, payload: Record<string, unknown>): void {
+    if (agent.kind !== 'subagent' || !agent.agentId) return;
+    let callId = this.subagentCalls.get(agent.agentId);
+    if (!callId) {
+      const open = [...this.liveSubagents].filter(([, entry]) => !entry.finished && !entry.agentId
+        && (!agent.parentAgentId || !entry.leadAgentId || entry.leadAgentId === agent.parentAgentId));
+      if (open.length !== 1) return;
+      callId = open[0]![0];
+      open[0]![1].agentId = agent.agentId;
+      this.subagentCalls.set(agent.agentId, callId);
+    }
+    const entry = this.liveSubagents.get(callId);
+    if (!entry || entry.finished) return;
+    if (name !== 'usage.updated') return;
+    // A subagent's `totals` are its own; `usage` beside them is the lead's (measured).
+    const totals = record(payload.totals);
+    const input = nonNegative(totals?.inputTokens);
+    const output = nonNegative(totals?.outputTokens);
+    const cacheRead = nonNegative(totals?.cacheReadTokens);
+    const cacheWrite = nonNegative(totals?.cacheWriteTokens);
+    if ([input, output, cacheRead, cacheWrite].every((value) => value === undefined)) return;
+    entry.card = {
+      ...entry.card,
+      tokens: {
+        ...(input === undefined ? {} : { input }),
+        ...(output === undefined ? {} : { output }),
+        ...(cacheRead === undefined ? {} : { cacheRead }),
+        ...(cacheWrite === undefined ? {} : { cacheWrite }),
+      },
+    };
+    this.emit({ ...entry.card });
   }
 
   private acceptCapabilityRequest(payload: Record<string, unknown>): void {

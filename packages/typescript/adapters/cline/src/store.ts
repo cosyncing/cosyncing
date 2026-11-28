@@ -655,6 +655,30 @@ function measuredParentOriginMatches(
     && Object.keys(origin).length === 3;
 }
 
+/**
+ * The subagent document a managed Hub writes for a `spawn_agent` of an app-created session,
+ * measured on Hub cores 0.2.1 and 0.2.2: the CLI's subagent document with origin
+ * `{source: 'cosyncing', mode, sessionId, parentThreadId, subagent}` and, like the managed parent,
+ * no `version`. Admitted only where the parent's own managed shape is: canonically beneath the
+ * exact broker-managed root, beside its parent's snapshot.
+ */
+function measuredManagedSubagentOriginMatches(
+  origin: Record<string, unknown>,
+  session: ClineStoredSession,
+): boolean {
+  const managedRoot = session.managedCosyncingRoot;
+  const parentId = session.parentThreadId;
+  const subagent = session.id.split('__')[1];
+  if (managedRoot === undefined || !parentId || !subagent) return false;
+  const exactSessionDir = join(resolve(managedRoot), 'sessions', parentId);
+  return resolve(session.dataRoot) === resolve(managedRoot)
+    && session.nativeId === session.id
+    && resolve(session.sessionDir) === exactSessionDir
+    && resolve(session.messagesPath) === join(exactSessionDir, `${subagent}.messages.json`)
+    && origin.source === 'cosyncing'
+    && Object.keys(origin).length === 5;
+}
+
 interface ReadClineMessagesOptions extends BoundedReadOptions {}
 
 export async function readClineMessages(
@@ -688,13 +712,13 @@ export async function readClineMessages(
     && (session.origin === 'subagent'
       ? parsed.agent === 'subagent'
         && parsed.taskType === 'subagent_task'
-        && origin?.source === 'cli'
-        && origin.mode === 'subagent'
+        && origin?.mode === 'subagent'
         && origin.sessionId === session.id
         && origin.parentThreadId === session.parentThreadId
         && origin.subagent === session.id.split('__')[1]
-        && typeof origin.version === 'string'
-        && CLINE_OBSERVE_VERSION_SET.has(origin.version)
+        && (origin.source === 'cli'
+          ? typeof origin.version === 'string' && CLINE_OBSERVE_VERSION_SET.has(origin.version)
+          : measuredManagedSubagentOriginMatches(origin, session))
       : parsed.agent === 'lead'
         && parsed.taskType === undefined
         && measuredParentOriginMatches(origin, session));

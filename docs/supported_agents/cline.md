@@ -55,7 +55,8 @@ Setup does not install or update Cline, copy credentials, or read
 - Parent sessions are discovered from `<data>/sessions/<id>/<id>.json` and
   `<id>.messages.json` through bounded, read-only, no-follow reads.
 - Measured `agent_*.messages.json` siblings appear as nested subagent sessions.
-  Their native id and parent native id remain separate.
+  Their native id and parent native id remain separate. This includes the ones
+  the managed Hub writes for sessions created here, which are Observe-only.
 - Answer, thinking, user text, tool calls/results, and `spawn_agent` activity
   map from the rewritten message document. Unknown blocks become named neutral
   context, never user messages.
@@ -75,6 +76,9 @@ Setup does not install or update Cline, copy credentials, or read
   every pending prompt and approval.
 - Live answer, reasoning, tool, usage, and status events feed the common client
   surfaces; the bounded native message document remains replay authority.
+  A `spawn_agent` subagent streams on its parent's session: its card appears
+  when the call starts and carries the subagent's own token usage, while its
+  text and usage stay out of the parent's answer and token count.
 - Native rename updates a parent title through the exact-id CLI route.
 - A replacement broker client can rejoin while the same managed Hub process is
   alive and the durable boundary is unchanged.

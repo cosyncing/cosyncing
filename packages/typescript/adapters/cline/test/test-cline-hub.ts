@@ -80,6 +80,16 @@ function runShape(rows: readonly AgentMessage[]): string {
   return JSON.stringify(runSummaries(rows).map((row) => `${row.status}@${row.key}`));
 }
 
+/** A Hub turn captured from Cline 3.0.76 (fixture `cline-3.0.76-hub-redacted.json`, `subagentTurn`). */
+interface CapturedSubagentTurn {
+  sessionId: string;
+  prompt: string;
+  events: Array<{ event: string; timestamp: number; payload: Record<string, unknown> }>;
+  messages: Array<ClineNativeMessage & { ts: number }>;
+  childFile: string;
+  childDocument: Record<string, unknown>;
+}
+
 class FakeHub {
   readonly sessionId = '1787424308272_2eapl';
   readonly messages: ClineNativeMessage[] = [];
@@ -130,6 +140,7 @@ class FakeHub {
   private delayedCreatedReply?: { received: () => void; release: Promise<void> };
   private trailingAssistantNext?: { received: () => void; release: Promise<void>; text: string; landed: () => void };
   private streamedTurnNext?: { modelTool: boolean; iterationEvents: boolean; received: () => void; release: Promise<void> };
+  private subagentTurnNext?: CapturedSubagentTurn;
 
   constructor(readonly profile: string, readonly cwd: string) {}
 
@@ -301,6 +312,16 @@ class FakeHub {
       this.snapshotFailureNext = undefined;
       const streamedTurn = this.streamedTurnNext;
       this.streamedTurnNext = undefined;
+      const subagentTurn = this.subagentTurnNext;
+      this.subagentTurnNext = undefined;
+      if (subagentTurn) {
+        this.status = 'running';
+        this.messages.push({ id: userId, role: 'user', ts: Date.now(), content: [{ type: 'text', text: String(payload.prompt) }] });
+        this.writeMessages();
+        this.event('run.started', this.sessionId, { clientId: envelope.clientId, runId: `run-${this.runCounter}` });
+        this.replaySubagentTurn(socket, envelope, subagentTurn);
+        return;
+      }
       if (streamedTurn) {
         this.status = 'running';
         this.messages.push({ id: userId, role: 'user', ts: Date.now(), content: [{ type: 'text', text: String(payload.prompt) }] });
@@ -674,6 +695,43 @@ class FakeHub {
   /** An answer delta this Drive's prompt did not cause, as a foreign client's run streams it. */
   foreignDelta(text: string): void { this.event('assistant.delta', this.sessionId, { text }); }
 
+  /** The next run.start replays a captured turn: its events in order, each message persisted as the
+   *  first event after it was written arrives, and the subagent document beside the parent's. */
+  replaySubagentTurnNext(turn: CapturedSubagentTurn): void { this.subagentTurnNext = turn; }
+
+  private replaySubagentTurn(socket: FakeSocket, envelope: Record<string, any>, turn: CapturedSubagentTurn): void {
+    const own = <T>(value: T): T => JSON.parse(JSON.stringify(value).replaceAll(turn.sessionId, this.sessionId)) as T;
+    const unwritten = [...turn.messages];
+    const persistWrittenBefore = (timestamp: number) => {
+      let wrote = false;
+      while (unwritten.length > 0 && unwritten[0]!.ts < timestamp) {
+        this.messages.push(own(unwritten.shift()!));
+        wrote = true;
+      }
+      if (wrote) this.writeMessages();
+    };
+    for (const captured of turn.events) {
+      persistWrittenBefore(captured.timestamp);
+      this.event(captured.event, this.sessionId, own(captured.payload), captured.timestamp);
+    }
+    persistWrittenBefore(Number.POSITIVE_INFINITY);
+    writeFileSync(
+      join(this.profile, 'sessions', this.sessionId, turn.childFile),
+      `${JSON.stringify(own(turn.childDocument))}\n`,
+    );
+    this.status = 'idle';
+    const last = turn.messages.at(-1)?.content[0];
+    socket.message({
+      kind: 'reply',
+      envelope: {
+        version: CLINE_HUB_PROTOCOL_VERSION,
+        requestId: envelope.requestId,
+        ok: true,
+        payload: { result: { finishReason: 'completed', text: typeof last?.text === 'string' ? last.text : '' } },
+      },
+    });
+  }
+
   private async streamTurn(
     socket: FakeSocket,
     envelope: Record<string, any>,
@@ -884,7 +942,7 @@ class FakeHub {
     this.writeMessages();
   }
 
-  private event(event: string, sessionId: string, payload: Record<string, unknown>): void {
+  private event(event: string, sessionId: string, payload: Record<string, unknown>, timestamp?: number): void {
     this.sequence += 1;
     for (const socket of this.sockets) socket.message({
       kind: 'event',
@@ -894,6 +952,7 @@ class FakeHub {
         eventId: `event-${this.sequence}`,
         sequence: this.sequence,
         sessionId,
+        ...(timestamp === undefined ? {} : { timestamp }),
         payload,
       },
     });
@@ -963,6 +1022,8 @@ class FakeSocket implements ClineHubSocketLike {
 }
 
 const fake = buildFakeClineAcp();
+// Captured from a Cline 3.0.76 managed Hub (core 0.2.2); see the fixture's `captured`.
+const captured076 = JSON.parse(readFileSync(new URL('./fixtures/cline-3.0.76-hub-redacted.json', import.meta.url), 'utf8'));
 const profile = join(fake.root, 'managed-cline');
 const discoveryPath = join(profile, 'locks', 'hub', 'cosyncing.json');
 mkdirSync(join(profile, 'locks', 'hub'), { recursive: true });
@@ -1570,6 +1631,64 @@ try {
         && owner.historyRefreshRefusal() === undefined
         && 'since' in midTurnRefresh,
       JSON.stringify(midTurnRefresh));
+  }
+
+  {
+    // A spawn_agent turn exactly as a Cline 3.0.76 Hub (core 0.2.2) streamed it. The subagent's own
+    // events arrive on this session, labelled `agent.kind: 'subagent'`: taken as the lead's, its
+    // answer joined the lead's answer row and its usage replaced the session's counts.
+    const turn = captured076.subagentTurn as CapturedSubagentTurn;
+    const spawn = turn.events.find((event) => event.event === 'tool.started')!.payload;
+    const callId = String(spawn.toolCallId);
+    const attachHistory = await connection.getHistory();
+    const turnLive: AgentMessage[] = [];
+    const unsubscribeTurn = connection.subscribe((message) => turnLive.push(message));
+    hub.replaySubagentTurnNext(turn);
+    await connection.sendPrompt({ text: turn.prompt, clientMessageId: 'client-subagent' });
+    unsubscribeTurn();
+    const settledHistory = await connection.getHistory();
+    const audit = auditLiveAgainstHistory({ attachHistory, live: turnLive, history: settledHistory });
+    check('a turn whose subagent streams on this session keeps every live row on its history key and text',
+      audit.liveOnly.length === 0
+        && audit.textMismatches.length === 0
+        && audit.duplicatesAfterRefresh.length === 0
+        && audit.duplicatesAfterReconnect.length === 0,
+      JSON.stringify(audit));
+    const answers = new Map<string, string>();
+    for (const row of turnLive) {
+      if (row.type !== 'model-output' || !row.key) continue;
+      answers.set(row.key, (answers.get(row.key) ?? '') + (row.delta ?? row.text ?? ''));
+    }
+    check('the subagent answer stays out of the lead rows',
+      JSON.stringify([...answers]) === JSON.stringify([['client-subagent:assistant:1', 'DONE']]),
+      JSON.stringify([...answers]));
+    const usage = turnLive.filter((row) => row.type === 'token-count')
+      .map((row) => (row.type === 'token-count' ? `${row.input}/${row.output}` : ''));
+    check('only the lead usage reaches the session token count',
+      JSON.stringify(usage) === JSON.stringify(['8/4', '16/8']),
+      JSON.stringify(usage));
+    const cards = turnLive.filter((row): row is Extract<AgentMessage, { type: 'agent-activity' }> =>
+      row.type === 'agent-activity' && row.key === `agent:${callId}`);
+    const settledCards = settledHistory.filter((row): row is Extract<AgentMessage, { type: 'agent-activity' }> =>
+      row.type === 'agent-activity' && row.key === `agent:${callId}`);
+    check('the spawn_agent call opens its subagent card live, gives it the subagent usage, and closes it as history does',
+      cards[0]?.status === 'running'
+        && cards[0].title === (spawn.input as { task: string }).task
+        && cards[0].tokens === undefined
+        && cards.some((card) => card.status === 'running'
+          && JSON.stringify(card.tokens) === JSON.stringify({ input: 8, output: 4, cacheRead: 0, cacheWrite: 0 }))
+        && cards.at(-1)?.status === 'done'
+        && JSON.stringify(cards.at(-1)) === JSON.stringify(settledCards.at(-1))
+        && JSON.stringify(settledCards.at(-1)?.tokens) === JSON.stringify({ input: 8, output: 4 }),
+      JSON.stringify({ cards, settledCards }));
+    const childId = `${hub.sessionId}__${turn.childFile.replace(/\.messages\.json$/u, '')}`;
+    const child = (await adapter.discoverSessions()).find((row) => row.id === childId);
+    check('the subagent document the managed Hub wrote lists under its parent, Observe-only',
+      child?.parentThreadId === hub.sessionId
+        && child.origin === 'subagent'
+        && child.control?.drive.supported === false,
+      JSON.stringify(child));
+    rmSync(join(profile, 'sessions', hub.sessionId, turn.childFile));
   }
 
   const nativeRenameSpawnsBefore = fake.ledger().filter((entry) => entry.kind === 'spawn'
