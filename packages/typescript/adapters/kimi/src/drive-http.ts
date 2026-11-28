@@ -292,8 +292,10 @@ export interface KimiDriveHttpOptions {
    * The wire the identity gate verified for this server (`server.ts`
    * `resolveVerifiedInstance`); 0.x when absent. On `'kap'` three of the ten
    * operations take their KAP paths and bodies — cancel, and the interaction
-   * answers — and two answers are reshaped to the 0.x `data` callers read.
-   * The SET of operations does not change with the wire.
+   * answers — two answers are reshaped to the 0.x `data` callers read, and a
+   * prompt submitted with `steer` is promoted into the running turn
+   * ({@link KimiDriveHttp.submitPrompt}). The SET of operations does not
+   * change with the wire.
    */
   wire?: KimiWire;
 }
@@ -341,9 +343,37 @@ export class KimiDriveHttp {
       : outcome;
   }
 
-  /** Submit a prompt. NEVER rejects as busy — a prompt sent mid-turn is queued natively. */
-  submitPrompt(sessionId: string, body: KimiPromptSubmissionBody): Promise<KimiWriteOutcome> {
-    return this.#post(`/api/v1/sessions/${encodeURIComponent(sessionId)}/prompts`, body);
+  /**
+   * Submit a prompt. NEVER rejects as busy — a prompt sent mid-turn is queued natively.
+   *
+   * With `steer` on KAP, a prompt the server QUEUED behind a running turn
+   * (answer `status: 'queued'`, captured) is then promoted into that turn with
+   * `POST .../prompts:steer {prompt_ids}`, so it reaches the agent at the
+   * turn's next safe point instead of after the turn. Promoting rather than
+   * posting to `.../steer` directly is deliberate: `/steer` holds its answer
+   * until the injection point (measured 7.3 s behind one 8 s tool call on
+   * 2.7.2), past this door's timeout, while the promotion answers at once
+   * (4 ms). The promotion is best effort and never fails the submission: the
+   * prompt is accepted either way, and one the turn ended under first (the
+   * server answers 40402, captured) simply runs as the next turn.
+   */
+  async submitPrompt(
+    sessionId: string,
+    body: KimiPromptSubmissionBody,
+    options: { steer?: boolean } = {},
+  ): Promise<KimiWriteOutcome> {
+    const session = encodeURIComponent(sessionId);
+    const outcome = await this.#post(`/api/v1/sessions/${session}/prompts`, body);
+    if (!this.kap || options.steer !== true) return outcome;
+    const answer = outcome.data as { prompt_id?: unknown; status?: unknown } | null | undefined;
+    if (answer?.status !== 'queued' || typeof answer.prompt_id !== 'string' || !answer.prompt_id) return outcome;
+    try {
+      await this.#post(`/api/v1/sessions/${session}/prompts:steer`, { prompt_ids: [answer.prompt_id] });
+    } catch (error) {
+      if (!isKimiWriteError(error)) throw error;
+      // Still queued, or already running as the next turn: delivered either way.
+    }
+    return outcome;
   }
 
   /**
