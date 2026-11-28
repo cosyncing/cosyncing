@@ -447,6 +447,15 @@ export class ReasonixObserveConnection implements SessionConnection {
   /** Called after a drain has published a snapshot and advanced the tail cursor past it. */
   protected afterTailPublish(_read: ReasonixTranscriptRead): void {}
 
+  /**
+   * Whether the tail publishes one frame mapped from a record it appends (or from the created
+   * session's initial snapshot). Drive withholds a stored frame its live state has already moved
+   * past; replay never consults this, and Observe publishes every frame.
+   */
+  protected publishesTailFrame(_message: AgentMessage): boolean {
+    return true;
+  }
+
   /** Whether the tail cursor is past this line, so the tail will never emit it again. */
   protected tailHasPublished(lineIndex: number): boolean {
     return this.primed && lineIndex < this.recordCount;
@@ -734,7 +743,7 @@ export class ReasonixObserveConnection implements SessionConnection {
               });
               this.onTailRecord(record, lineIndex, display, messages, snapshot);
               this.applyRecordCorrelation(read, identity, record, lineIndex, display, messages);
-              for (const message of messages) this.emit(message);
+              for (const message of messages) if (this.publishesTailFrame(message)) this.emit(message);
             }
             for (const issue of read.issues) this.emit({ type: 'notice', message: `Reasonix history: ${issue}.` });
           }
@@ -763,7 +772,7 @@ export class ReasonixObserveConnection implements SessionConnection {
           this.onTailRecord(record, lineIndex, display, messages, snapshot);
           this.applyRecordCorrelation(read, identity, record, lineIndex, display, messages);
           for (const message of this.appendedRecordPrefix(lineIndex, display, messages, snapshot)) this.emit(message);
-          for (const message of messages) this.emit(message);
+          for (const message of messages) if (this.publishesTailFrame(message)) this.emit(message);
         }
         for (const issue of read.issues) this.emit({ type: 'notice', message: `Reasonix history: ${issue}.` });
         this.setTailCursor(read, identity);
