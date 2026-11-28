@@ -119,6 +119,33 @@ try {
     return [ok, `discovered=${discovered?.id === id} decodedRealpath=${decoded === realpathSync(DISCOVERY_SESSION_FILE)}`];
   });
 
+  await test('a terminal session on max attaches showing max; auto, which the bridge cannot set, shows no level', async () => {
+    const client = new BrokerClient(BROKER, BROKER.replace('http:', 'ws:'), { kind: 'none' });
+    // A Pi 1.6.0 model whose level map names max (captured catalog shape).
+    const model = { provider: 'fixture', id: 'fixture-max', name: 'Fixture Max', reasoning: true, thinkingLevelMap: { xhigh: 'high', max: 'high' } };
+    const shown: Record<string, { current?: string; picker?: string }> = {};
+    for (const thinkingLevel of ['max', 'auto']) {
+      const response = await post('/pi/bridge/hello', {
+        sessionFile: join(ROOT, `thinking-${thinkingLevel}.jsonl`), cwd: DISCOVERY_CWD, title: `thinking ${thinkingLevel}`,
+        thinkingLevel, model: { providerID: 'fixture', modelID: 'fixture-max' }, models: [model],
+      });
+      const id = String((await response.json()).id);
+      const stream = await client.attach('pi', id);
+      try {
+        const info = (await stream.waitForKind('session')).info;
+        const options = await stream.waitForKind('options');
+        const offered = (options.models as any[] | undefined)?.find((option) => option.modelID === 'fixture-max');
+        shown[thinkingLevel] = { current: info.currentModel?.reasoningEffort, picker: offered?.defaultReasoningEffort };
+      } finally {
+        stream.close();
+        await bye(id, 'quit');
+      }
+    }
+    const ok = shown.max?.current === 'max' && shown.max?.picker === 'max'
+      && shown.auto?.current === undefined && shown.auto?.picker === undefined;
+    return [ok, JSON.stringify(shown)];
+  });
+
   await test('a re-hello that rewrites the transcript rotates the rewrite token', async () => {
     // The broker's page cache keeps a client's earlier snapshot valid across a GROWING
     // appendPosition only while `rewriteToken` is unchanged (history-page-cache.ts:142-146). A

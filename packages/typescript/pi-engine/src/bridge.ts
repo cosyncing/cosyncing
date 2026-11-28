@@ -57,9 +57,10 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { dirname, join, extname, resolve } from 'node:path';
 
-/** A level the bridge extension can set: every Pi level, never omp's `auto`, which omp's
- *  extension API (`setThinkingLevel`) does not take. */
-function normalizePiThinkingLevel(value: unknown): string | undefined {
+/** A level the bridge extension can set: every Pi level, `max` included, never omp's `auto`,
+ *  which omp's extension API (`setThinkingLevel`) does not take. The broker reads the level a
+ *  bridge hello reports with it too. */
+export function normalizePiBridgeThinkingLevel(value: unknown): string | undefined {
   const level = normalizeAnyPiThinkingLevel(value);
   return level === 'auto' ? undefined : level;
 }
@@ -190,7 +191,7 @@ const BRIDGED_APPROVAL_OPTIONS: readonly PermissionDecision[] = ['approve', 'app
 function piCurrentModelFromWire(model: any, thinkingLevel?: unknown): SessionInfo['currentModel'] | undefined {
   const modelID = model?.modelID ?? model?.id ?? model?.model;
   if (typeof modelID !== 'string' || !modelID) return undefined;
-  const effort = normalizePiThinkingLevel(thinkingLevel ?? model?.reasoningEffort ?? model?.thinkingLevel);
+  const effort = normalizePiBridgeThinkingLevel(thinkingLevel ?? model?.reasoningEffort ?? model?.thinkingLevel);
   return {
     providerID: String(model.providerID ?? model.provider ?? ''),
     modelID,
@@ -556,7 +557,7 @@ export class PiBridgeConnection implements SessionConnection {
 
   /** Store the model catalog relayed by the extension. Empty clears stale options on reload. */
   setModelOptions(models: unknown, currentEffort?: string): void {
-    const effort = normalizePiThinkingLevel(currentEffort);
+    const effort = normalizePiBridgeThinkingLevel(currentEffort);
     this.relayedModels = (Array.isArray(models) ? models : [])
       .map((m) => piModelOptionFromWire(m, effort))
       .filter((m): m is ModelOption => !!m);
@@ -621,7 +622,7 @@ export class PiBridgeConnection implements SessionConnection {
 
   private enqueueModelOverride(model: PromptInput['model'] | undefined): void {
     if (!model?.modelID) return;
-    const effort = normalizePiThinkingLevel(model.reasoningEffort);
+    const effort = normalizePiBridgeThinkingLevel(model.reasoningEffort);
     this.enqueue({
       kind: 'set-model',
       providerID: model.providerID,

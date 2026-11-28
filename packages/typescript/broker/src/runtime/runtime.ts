@@ -106,7 +106,7 @@ import {
 import { searchSessionFiles } from '../artifacts/fs-search.ts';
 import { attachmentContentDisposition } from '../artifacts/download-headers.ts';
 import { DownloadRangeError, ifRangeMatches, parseDownloadRange } from '../artifacts/fs-browse.ts';
-import { PiBridgeRegistry, PiBridgePayloads, PiBridgePayloadError } from '@cosyncing/adapter-pi';
+import { normalizePiBridgeThinkingLevel, PiBridgeRegistry, PiBridgePayloads, PiBridgePayloadError } from '@cosyncing/adapter-pi';
 import { ClaudeHooksRegistry } from '@cosyncing/adapter-claude';
 import { HISTORY_WEBSOCKET_OPTIONS } from '../transport/http-contracts.ts';
 import { sendJson, withJsonCompression } from '../transport/json-egress.ts';
@@ -7727,10 +7727,7 @@ server = Bun.serve<WsData>({
       const incomingEpoch = typeof b?.epoch === 'string' ? b.epoch : undefined;
       if (!piBridge.canHello(id, incomingEpoch)) return json({ error: 'session already bridged by another terminal; close it or reload after it exits' }, 409);
       piBridgeIds.remember(id, sessionFile);
-      const bridgeThinkingLevel =
-        typeof b?.thinkingLevel === 'string' && ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(b.thinkingLevel)
-          ? b.thinkingLevel
-          : undefined;
+      const bridgeThinkingLevel = normalizePiBridgeThinkingLevel(b?.thinkingLevel);
       // A provider is REQUIRED for a currentModel to exist at all
       // (`validSessionCurrentModel` rejects an empty `providerID`), and the
       // shipped bridge extension sends `String(model.provider ?? '')` precisely
@@ -7885,10 +7882,7 @@ server = Bun.serve<WsData>({
       const incomingEpoch = typeof b?.epoch === 'string' ? b.epoch : undefined;
       if (!ompBridge.canHello(id, incomingEpoch)) return json({ error: 'session already bridged by another terminal; close it or reload after it exits' }, 409);
       ompBridgeIds.remember(id, sessionFile);
-      const bridgeThinkingLevel =
-        typeof b?.thinkingLevel === 'string' && ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(b.thinkingLevel)
-          ? b.thinkingLevel
-          : undefined;
+      const bridgeThinkingLevel = normalizePiBridgeThinkingLevel(b?.thinkingLevel);
       // A provider is REQUIRED for a currentModel to exist at all
       // (`validSessionCurrentModel` rejects an empty `providerID`), and the
       // shipped bridge extension sends `String(model.provider ?? '')` precisely
