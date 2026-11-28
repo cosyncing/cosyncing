@@ -1,0 +1,1331 @@
+{
+  "provenance": "captured reasonix 1.25.2 and 2.61.0 2026-11-28 (isolated REASONIX_HOME and OS home under bwrap; an OpenAI-compatible provider on 127.0.0.1 answered from a fixed script). One prompt: todo_write with two steps, an approved bash command, complete_step for step 1, todo_write again, complete_step for step 2, then the answer. `live` is every session/update while the prompt ran, `replay` every session/update session/load sent for the same session in a fresh child, `transcript` the stored rows after the turn.",
+  "scrubbed": "same-length replacements of the workspace path, the run marker in the prompt, call ids and step ids, the local time zone, and the hex prefix of live message ids; the system prompt body replaced by an equal-length filler. Session ids, tool results and Reasonix-written text are as captured.",
+  "v1.25.2": {
+    "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+    "live": [
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "available_commands_update",
+          "availableCommands": [
+            {
+              "name": "explore",
+              "description": "Explore the codebase in an isolated subagent — wide-net read-only investigation that returns one distilled answer. Best for: 'find all places that...', 'how does X work across the project', 'survey the code for Y'.",
+              "input": {
+                "hint": "instructions"
+              }
+            },
+            {
+              "name": "init",
+              "description": "Bootstrap or refresh this project's AGENTS.md — analyze the codebase (structure, build/test commands, architecture, conventions) and write a concise memory file loaded into every future session. Inlined — runs in the main loop so you see and approve the write.",
+              "input": {
+                "hint": "instructions"
+              }
+            },
+            {
+              "name": "install-capability",
+              "description": "Install or uninstall Reasonix MCP servers and skills from a URL, GitHub/raw file, local path/folder, .mcp.json, executable, or package name. Plans with install_source (op=install or op=uninstall) before applying, surfacing per-action riskLevel.",
+              "input": {
+                "hint": "instructions"
+              }
+            },
+            {
+              "name": "reasonix-guide",
+              "description": "Troubleshoot and configure Reasonix capabilities: Skills (project/custom/global/builtin priority, discovery dirs), Commands (override order, /dir:file naming), Hooks (11 events, automatic project loading, matchers, timeouts), MCP (reasonix.toml + .mcp.json + plugin packages, auto_start), plugin packages (native/Codex/Claude manifests), and AGENTS.md / instruction docs. Use when the user asks how to configure, debug missing skills/commands/hooks/MCP/plugins, or diagnose capability loading.",
+              "input": {
+                "hint": "instructions"
+              }
+            },
+            {
+              "name": "research",
+              "description": "Research a question by combining web_fetch + code reading in an isolated subagent. Best for: 'is X supported by lib Y', 'what's the canonical way to do Z', 'compare our impl against the spec'.",
+              "input": {
+                "hint": "instructions"
+              }
+            },
+            {
+              "name": "review",
+              "description": "Review the pending changes (current branch diff by default) in an isolated subagent — flags correctness, security, missing tests, hidden behavior changes; reports a verdict + per-issue file:line. Read-only.",
+              "input": {
+                "hint": "instructions"
+              }
+            },
+            {
+              "name": "security-review",
+              "description": "Security-focused review of the current branch diff in an isolated subagent — flags injection/authz/secrets/deserialization/path-traversal/crypto issues, severity-tagged. Read-only.",
+              "input": {
+                "hint": "instructions"
+              }
+            },
+            {
+              "name": "test",
+              "description": "Run the project's test suite, diagnose failures, propose+apply fixes, re-run until green (or stop after 2 attempts on the same failure). Inlined — runs in the parent loop. Detects go/npm/pnpm/yarn/pytest/cargo.",
+              "input": {
+                "hint": "instructions"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "plan",
+          "entries": [
+            {
+              "content": "Inspect the workspace",
+              "priority": "high",
+              "status": "in_progress"
+            },
+            {
+              "content": "Report the result",
+              "priority": "high",
+              "status": "pending"
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "call_capt_todo_write_1",
+          "title": "todo_write",
+          "kind": "edit",
+          "status": "pending",
+          "rawInput": {
+            "todos": [
+              {
+                "content": "Inspect the workspace",
+                "status": "in_progress",
+                "activeForm": "Inspecting the workspace",
+                "step_id": "capt_step_1"
+              },
+              {
+                "content": "Report the result",
+                "status": "pending",
+                "activeForm": "Reporting the result",
+                "step_id": "capt_step_2"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_capt_todo_write_1",
+          "status": "completed",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "Todos updated: 2 total — 0 completed, 1 in progress, 1 pending."
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "call_capt_bash_2",
+          "title": "bash",
+          "kind": "execute",
+          "status": "pending",
+          "rawInput": {
+            "command": "echo CAPT_TOOL_LINE_1 && echo CAPT_TOOL_LINE_2",
+            "description": "Print two probe lines"
+          }
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_capt_bash_2",
+          "status": "completed",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "CAPT_TOOL_LINE_1\nCAPT_TOOL_LINE_2\n"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "call_capt_complete_step_3",
+          "title": "complete_step",
+          "kind": "other",
+          "status": "pending",
+          "rawInput": {
+            "step_id": "capt_step_1",
+            "result": "The workspace was inspected with the probe command.",
+            "evidence": [
+              {
+                "kind": "verification",
+                "summary": "The probe command printed both lines.",
+                "command": "echo CAPT_TOOL_LINE_1 && echo CAPT_TOOL_LINE_2"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "plan",
+          "entries": [
+            {
+              "content": "Inspect the workspace",
+              "priority": "high",
+              "status": "completed"
+            },
+            {
+              "content": "Report the result",
+              "priority": "high",
+              "status": "in_progress"
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "host-advance-1-1",
+          "title": "todo_write",
+          "kind": "edit",
+          "status": "pending",
+          "rawInput": {
+            "todos": [
+              {
+                "content": "Inspect the workspace",
+                "status": "completed",
+                "activeForm": "Inspecting the workspace",
+                "step_id": "capt_step_1"
+              },
+              {
+                "content": "Report the result",
+                "status": "in_progress",
+                "activeForm": "Reporting the result",
+                "step_id": "capt_step_2"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "host-advance-1-1",
+          "status": "completed",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "task list advanced by complete_step"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_capt_complete_step_3",
+          "status": "completed",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "Step \"capt_step_1\" signed off with 1 evidence item(s) [verification]. Host evidence: host-verified 1, manual/unverified 0. Todo step: todo-matched 1 (\"Inspect the workspace\"). The host advanced the task list; continue with the next step."
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "plan",
+          "entries": [
+            {
+              "content": "Inspect the workspace",
+              "priority": "high",
+              "status": "completed"
+            },
+            {
+              "content": "Report the result",
+              "priority": "high",
+              "status": "in_progress"
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "call_capt_todo_write_4",
+          "title": "todo_write",
+          "kind": "edit",
+          "status": "pending",
+          "rawInput": {
+            "todos": [
+              {
+                "content": "Inspect the workspace",
+                "status": "completed",
+                "activeForm": "Inspecting the workspace",
+                "step_id": "capt_step_1"
+              },
+              {
+                "content": "Report the result",
+                "status": "in_progress",
+                "activeForm": "Reporting the result",
+                "step_id": "capt_step_2"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_capt_todo_write_4",
+          "status": "completed",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "Todos updated: 2 total — 1 completed, 1 in progress, 0 pending."
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "call_capt_complete_step_5",
+          "title": "complete_step",
+          "kind": "other",
+          "status": "pending",
+          "rawInput": {
+            "step_id": "capt_step_2",
+            "result": "The result was reported.",
+            "evidence": [
+              {
+                "kind": "manual",
+                "summary": "The answer names the probe lines."
+              }
+            ]
+          }
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "plan",
+          "entries": [
+            {
+              "content": "Inspect the workspace",
+              "priority": "high",
+              "status": "completed"
+            },
+            {
+              "content": "Report the result",
+              "priority": "high",
+              "status": "completed"
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "host-advance-2-2",
+          "title": "todo_write",
+          "kind": "edit",
+          "status": "pending",
+          "rawInput": {
+            "todos": [
+              {
+                "content": "Inspect the workspace",
+                "status": "completed",
+                "activeForm": "Inspecting the workspace",
+                "step_id": "capt_step_1"
+              },
+              {
+                "content": "Report the result",
+                "status": "completed",
+                "activeForm": "Reporting the result",
+                "step_id": "capt_step_2"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "host-advance-2-2",
+          "status": "completed",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "task list advanced by complete_step"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_capt_complete_step_5",
+          "status": "completed",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "Step \"capt_step_2\" signed off with 1 evidence item(s) [manual]. Host evidence: host-verified 0, manual/unverified 1. Todo step: todo-matched 2 (\"Report the result\"). All steps completed — the task list has no remaining steps; deliver a final summary and end the turn."
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "agent_message_chunk",
+          "content": {
+            "type": "text",
+            "text": "CAPT_PLAN_DONE"
+          }
+        }
+      }
+    ],
+    "replay": [
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "user_message_chunk",
+          "content": {
+            "type": "text",
+            "text": "CAPT_PLAN: plan this work with todo_write, run the probe command, sign off the first step, update the plan, then reply. CAPT_FINISH: sign off the second step too."
+          }
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "call_capt_todo_write_1",
+          "title": "todo_write",
+          "kind": "edit",
+          "status": "completed",
+          "rawInput": {
+            "todos": [
+              {
+                "content": "Inspect the workspace",
+                "status": "in_progress",
+                "activeForm": "Inspecting the workspace",
+                "step_id": "capt_step_1"
+              },
+              {
+                "content": "Report the result",
+                "status": "pending",
+                "activeForm": "Reporting the result",
+                "step_id": "capt_step_2"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "plan",
+          "entries": [
+            {
+              "content": "Inspect the workspace",
+              "priority": "high",
+              "status": "in_progress"
+            },
+            {
+              "content": "Report the result",
+              "priority": "high",
+              "status": "pending"
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_capt_todo_write_1",
+          "status": "completed",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "Todos updated: 2 total — 0 completed, 1 in progress, 1 pending."
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "call_capt_bash_2",
+          "title": "bash",
+          "kind": "execute",
+          "status": "completed",
+          "rawInput": {
+            "command": "echo CAPT_TOOL_LINE_1 && echo CAPT_TOOL_LINE_2",
+            "description": "Print two probe lines"
+          }
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_capt_bash_2",
+          "status": "completed",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "CAPT_TOOL_LINE_1\nCAPT_TOOL_LINE_2\n"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "call_capt_complete_step_3",
+          "title": "complete_step",
+          "kind": "other",
+          "status": "completed",
+          "rawInput": {
+            "step_id": "capt_step_1",
+            "result": "The workspace was inspected with the probe command.",
+            "evidence": [
+              {
+                "kind": "verification",
+                "summary": "The probe command printed both lines.",
+                "command": "echo CAPT_TOOL_LINE_1 && echo CAPT_TOOL_LINE_2"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_capt_complete_step_3",
+          "status": "completed",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "Step \"capt_step_1\" signed off with 1 evidence item(s) [verification]. Host evidence: host-verified 1, manual/unverified 0. Todo step: todo-matched 1 (\"Inspect the workspace\"). The host advanced the task list; continue with the next step."
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "call_capt_todo_write_4",
+          "title": "todo_write",
+          "kind": "edit",
+          "status": "completed",
+          "rawInput": {
+            "todos": [
+              {
+                "content": "Inspect the workspace",
+                "status": "completed",
+                "activeForm": "Inspecting the workspace",
+                "step_id": "capt_step_1"
+              },
+              {
+                "content": "Report the result",
+                "status": "in_progress",
+                "activeForm": "Reporting the result",
+                "step_id": "capt_step_2"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "plan",
+          "entries": [
+            {
+              "content": "Inspect the workspace",
+              "priority": "high",
+              "status": "completed"
+            },
+            {
+              "content": "Report the result",
+              "priority": "high",
+              "status": "in_progress"
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_capt_todo_write_4",
+          "status": "completed",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "Todos updated: 2 total — 1 completed, 1 in progress, 0 pending."
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "call_capt_complete_step_5",
+          "title": "complete_step",
+          "kind": "other",
+          "status": "completed",
+          "rawInput": {
+            "step_id": "capt_step_2",
+            "result": "The result was reported.",
+            "evidence": [
+              {
+                "kind": "manual",
+                "summary": "The answer names the probe lines."
+              }
+            ]
+          }
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_capt_complete_step_5",
+          "status": "completed",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "Step \"capt_step_2\" signed off with 1 evidence item(s) [manual]. Host evidence: host-verified 0, manual/unverified 1. Todo step: todo-matched 2 (\"Report the result\"). All steps completed — the task list has no remaining steps; deliver a final summary and end the turn."
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "e8e0d1a8-5f82-40bf-95e0-8474b7c33a99",
+        "update": {
+          "sessionUpdate": "agent_message_chunk",
+          "content": {
+            "type": "text",
+            "text": "CAPT_PLAN_DONE"
+          }
+        }
+      }
+    ],
+    "transcript": "{\"role\":\"system\",\"content\":\"[scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reas\"}\n{\"role\":\"user\",\"content\":\"CAPT_PLAN: plan this work with todo_write, run the probe command, sign off the first step, update the plan, then reply. CAPT_FINISH: sign off the second step too.\\n\\n<execution-policy preset=\\\"balanced\\\" version=\\\"1\\\">\\nroute=light-plan risk=low verify=targeted review=none\\n</execution-policy>\",\"raw_content\":\"CAPT_PLAN: plan this work with todo_write, run the probe command, sign off the first step, update the plan, then reply. CAPT_FINISH: sign off the second step too.\",\"createdAt\":1795840609055}\n{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call_capt_todo_write_1\",\"name\":\"todo_write\",\"arguments\":\"{\\\"todos\\\":[{\\\"content\\\":\\\"Inspect the workspace\\\",\\\"status\\\":\\\"in_progress\\\",\\\"activeForm\\\":\\\"Inspecting the workspace\\\",\\\"step_id\\\":\\\"capt_step_1\\\"},{\\\"content\\\":\\\"Report the result\\\",\\\"status\\\":\\\"pending\\\",\\\"activeForm\\\":\\\"Reporting the result\\\",\\\"step_id\\\":\\\"capt_step_2\\\"}]}\"}],\"workDurationMs\":4}\n{\"role\":\"tool\",\"content\":\"Todos updated: 2 total — 0 completed, 1 in progress, 1 pending.\",\"tool_call_id\":\"call_capt_todo_write_1\",\"name\":\"todo_write\"}\n{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call_capt_bash_2\",\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"echo CAPT_TOOL_LINE_1 && echo CAPT_TOOL_LINE_2\\\",\\\"description\\\":\\\"Print two probe lines\\\"}\",\"resolved_name\":\"bash\",\"resolved_read_only\":true}],\"workDurationMs\":6}\n{\"role\":\"tool\",\"content\":\"CAPT_TOOL_LINE_1\\nCAPT_TOOL_LINE_2\\n\",\"tool_call_id\":\"call_capt_bash_2\",\"name\":\"bash\",\"tool_execution\":{\"kind\":\"shell\",\"shell\":\"bash\",\"platform\":\"linux\",\"supportsAndAnd\":true,\"state\":\"completed\",\"exitCode\":0,\"mutationRisk\":\"may_have_completed\",\"verification\":\"not_verification\",\"durationMs\":17}}\n{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call_capt_complete_step_3\",\"name\":\"complete_step\",\"arguments\":\"{\\\"step_id\\\":\\\"capt_step_1\\\",\\\"result\\\":\\\"The workspace was inspected with the probe command.\\\",\\\"evidence\\\":[{\\\"kind\\\":\\\"verification\\\",\\\"summary\\\":\\\"The probe command printed both lines.\\\",\\\"command\\\":\\\"echo CAPT_TOOL_LINE_1 && echo CAPT_TOOL_LINE_2\\\"}]}\"}],\"workDurationMs\":27}\n{\"role\":\"tool\",\"content\":\"Step \\\"capt_step_1\\\" signed off with 1 evidence item(s) [verification]. Host evidence: host-verified 1, manual/unverified 0. Todo step: todo-matched 1 (\\\"Inspect the workspace\\\"). The host advanced the task list; continue with the next step.\",\"tool_call_id\":\"call_capt_complete_step_3\",\"name\":\"complete_step\"}\n{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call_capt_todo_write_4\",\"name\":\"todo_write\",\"arguments\":\"{\\\"todos\\\":[{\\\"content\\\":\\\"Inspect the workspace\\\",\\\"status\\\":\\\"completed\\\",\\\"activeForm\\\":\\\"Inspecting the workspace\\\",\\\"step_id\\\":\\\"capt_step_1\\\"},{\\\"content\\\":\\\"Report the result\\\",\\\"status\\\":\\\"in_progress\\\",\\\"activeForm\\\":\\\"Reporting the result\\\",\\\"step_id\\\":\\\"capt_step_2\\\"}]}\"}],\"workDurationMs\":30}\n{\"role\":\"tool\",\"content\":\"Todos updated: 2 total — 1 completed, 1 in progress, 0 pending.\",\"tool_call_id\":\"call_capt_todo_write_4\",\"name\":\"todo_write\"}\n{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call_capt_complete_step_5\",\"name\":\"complete_step\",\"arguments\":\"{\\\"step_id\\\":\\\"capt_step_2\\\",\\\"result\\\":\\\"The result was reported.\\\",\\\"evidence\\\":[{\\\"kind\\\":\\\"manual\\\",\\\"summary\\\":\\\"The answer names the probe lines.\\\"}]}\"}],\"workDurationMs\":31}\n{\"role\":\"tool\",\"content\":\"Step \\\"capt_step_2\\\" signed off with 1 evidence item(s) [manual]. Host evidence: host-verified 0, manual/unverified 1. Todo step: todo-matched 2 (\\\"Report the result\\\"). All steps completed — the task list has no remaining steps; deliver a final summary and end the turn.\",\"tool_call_id\":\"call_capt_complete_step_5\",\"name\":\"complete_step\"}\n{\"role\":\"assistant\",\"content\":\"CAPT_PLAN_DONE\",\"workDurationMs\":34}\n"
+  },
+  "v2.61.0": {
+    "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+    "live": [
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "available_commands_update",
+          "availableCommands": [
+            {
+              "name": "explore",
+              "description": "Explore the codebase in an isolated subagent — wide-net read-only investigation that returns one distilled answer. Best for: 'find all places that...', 'how does X work across the project', 'survey the code for Y'.",
+              "input": {
+                "hint": "instructions"
+              }
+            },
+            {
+              "name": "init",
+              "description": "Bootstrap or refresh this project's AGENTS.md — analyze the codebase (structure, build/test commands, architecture, conventions) and write a concise memory file loaded into every future session. Inlined — runs in the main loop so you see and approve the write.",
+              "input": {
+                "hint": "instructions"
+              }
+            },
+            {
+              "name": "install-capability",
+              "description": "Install or uninstall Reasonix MCP servers and skills from a URL, GitHub/raw file, local path/folder, .mcp.json, executable, or package name. Plans with install_source (op=install or op=uninstall) before applying, surfacing per-action riskLevel.",
+              "input": {
+                "hint": "instructions"
+              }
+            },
+            {
+              "name": "locate",
+              "description": "Find where something lives in the codebase, fast — a read-only subagent that fires its searches in parallel within a few rounds and returns only file:line ranges with a one-line reason each. Best for: 'where is X defined / handled / configured', before reading or editing.",
+              "input": {
+                "hint": "instructions"
+              }
+            },
+            {
+              "name": "reasonix-guide",
+              "description": "Troubleshoot and configure Reasonix capabilities: Skills (project/custom/global/builtin priority, discovery dirs), Commands (override order, /dir:file naming), Hooks (11 events, automatic project loading, matchers, timeouts), MCP (reasonix.toml + .mcp.json + plugin packages, auto_start), plugin packages (native/Codex/Claude manifests), and AGENTS.md / instruction docs. Use when the user asks how to configure, debug missing skills/commands/hooks/MCP/plugins, or diagnose capability loading.",
+              "input": {
+                "hint": "instructions"
+              }
+            },
+            {
+              "name": "research",
+              "description": "Research a question by combining web_fetch + code reading in an isolated subagent. Best for: 'is X supported by lib Y', 'what's the canonical way to do Z', 'compare our impl against the spec'.",
+              "input": {
+                "hint": "instructions"
+              }
+            },
+            {
+              "name": "review",
+              "description": "Review the pending changes (current branch diff by default) in an isolated subagent — flags correctness, security, missing tests, hidden behavior changes; reports a verdict + per-issue file:line. Read-only.",
+              "input": {
+                "hint": "instructions"
+              }
+            },
+            {
+              "name": "security-review",
+              "description": "Security-focused review of the current branch diff in an isolated subagent — flags injection/authz/secrets/deserialization/path-traversal/crypto issues, severity-tagged. Read-only.",
+              "input": {
+                "hint": "instructions"
+              }
+            },
+            {
+              "name": "test",
+              "description": "Run the project's test suite, diagnose failures, propose+apply fixes, re-run until green (or stop after 2 attempts on the same failure). Inlined — runs in the parent loop. Detects go/npm/pnpm/yarn/pytest/cargo.",
+              "input": {
+                "hint": "instructions"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "plan",
+          "entries": [
+            {
+              "content": "Inspect the workspace",
+              "priority": "high",
+              "status": "in_progress"
+            },
+            {
+              "content": "Report the result",
+              "priority": "high",
+              "status": "pending"
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "call_capt_todo_write_1",
+          "name": "todo_write",
+          "title": "todo_write",
+          "kind": "edit",
+          "status": "pending",
+          "rawInput": {
+            "todos": [
+              {
+                "content": "Inspect the workspace",
+                "status": "in_progress",
+                "activeForm": "Inspecting the workspace",
+                "step_id": "capt_step_1"
+              },
+              {
+                "content": "Report the result",
+                "status": "pending",
+                "activeForm": "Reporting the result",
+                "step_id": "capt_step_2"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_capt_todo_write_1",
+          "status": "completed",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "Todos updated: 2 total — 0 completed, 1 in progress, 1 pending. The in_progress item is \"capt_step_1\" — cite that step_id when you sign it off."
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "call_capt_bash_2",
+          "name": "bash",
+          "title": "bash",
+          "kind": "execute",
+          "status": "pending",
+          "rawInput": {
+            "command": "echo CAPT_TOOL_LINE_1 && echo CAPT_TOOL_LINE_2",
+            "description": "Print two probe lines"
+          }
+        }
+      },
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_capt_bash_2",
+          "status": "completed",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "CAPT_TOOL_LINE_1\nCAPT_TOOL_LINE_2\n"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "call_capt_complete_step_3",
+          "name": "complete_step",
+          "title": "complete_step",
+          "kind": "other",
+          "status": "pending",
+          "rawInput": {
+            "step_id": "capt_step_1",
+            "result": "The workspace was inspected with the probe command.",
+            "evidence": [
+              {
+                "kind": "verification",
+                "summary": "The probe command printed both lines.",
+                "command": "echo CAPT_TOOL_LINE_1 && echo CAPT_TOOL_LINE_2"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "plan",
+          "entries": [
+            {
+              "content": "Inspect the workspace",
+              "priority": "high",
+              "status": "completed"
+            },
+            {
+              "content": "Report the result",
+              "priority": "high",
+              "status": "in_progress"
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "host-advance-1-1",
+          "name": "todo_write",
+          "title": "todo_write",
+          "kind": "edit",
+          "status": "pending",
+          "rawInput": {
+            "todos": [
+              {
+                "content": "Inspect the workspace",
+                "status": "completed",
+                "activeForm": "Inspecting the workspace",
+                "step_id": "capt_step_1"
+              },
+              {
+                "content": "Report the result",
+                "status": "in_progress",
+                "activeForm": "Reporting the result",
+                "step_id": "capt_step_2"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "host-advance-1-1",
+          "status": "completed",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "task list advanced by complete_step"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_capt_complete_step_3",
+          "status": "completed",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "Step \"capt_step_1\" done. The host advanced the task list; the next step is 2 \"Report the result\"."
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "call_capt_complete_step_5",
+          "name": "complete_step",
+          "title": "complete_step",
+          "kind": "other",
+          "status": "pending",
+          "rawInput": {
+            "step_id": "capt_step_2",
+            "result": "The result was reported.",
+            "evidence": [
+              {
+                "kind": "manual",
+                "summary": "The answer names the probe lines."
+              }
+            ]
+          }
+        }
+      },
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "plan",
+          "entries": [
+            {
+              "content": "Inspect the workspace",
+              "priority": "high",
+              "status": "completed"
+            },
+            {
+              "content": "Report the result",
+              "priority": "high",
+              "status": "completed"
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "host-advance-2-2",
+          "name": "todo_write",
+          "title": "todo_write",
+          "kind": "edit",
+          "status": "pending",
+          "rawInput": {
+            "todos": [
+              {
+                "content": "Inspect the workspace",
+                "status": "completed",
+                "activeForm": "Inspecting the workspace",
+                "step_id": "capt_step_1"
+              },
+              {
+                "content": "Report the result",
+                "status": "completed",
+                "activeForm": "Reporting the result",
+                "step_id": "capt_step_2"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "host-advance-2-2",
+          "status": "completed",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "task list advanced by complete_step"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_capt_complete_step_5",
+          "status": "completed",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "Step \"capt_step_2\" done. Every step in the task list is now complete. Do not open new work under this plan."
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "agent_message_chunk",
+          "messageId": "000000000000-sa-1-6",
+          "content": {
+            "type": "text",
+            "text": "CAPT_PLAN_DONE"
+          }
+        }
+      },
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "usage_update",
+          "used": 127,
+          "size": 131072
+        }
+      }
+    ],
+    "replay": [
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "user_message_chunk",
+          "content": {
+            "type": "text",
+            "text": "CAPT_PLAN: plan this work with todo_write, run the probe command, sign off the first step, update the plan, then reply. CAPT_FINISH: sign off the second step too."
+          }
+        }
+      },
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "call_capt_todo_write_1",
+          "name": "todo_write",
+          "title": "todo_write",
+          "kind": "edit",
+          "status": "completed",
+          "rawInput": {
+            "todos": [
+              {
+                "content": "Inspect the workspace",
+                "status": "in_progress",
+                "activeForm": "Inspecting the workspace",
+                "step_id": "capt_step_1"
+              },
+              {
+                "content": "Report the result",
+                "status": "pending",
+                "activeForm": "Reporting the result",
+                "step_id": "capt_step_2"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "plan",
+          "entries": [
+            {
+              "content": "Inspect the workspace",
+              "priority": "high",
+              "status": "in_progress"
+            },
+            {
+              "content": "Report the result",
+              "priority": "high",
+              "status": "pending"
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_capt_todo_write_1",
+          "status": "completed",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "Todos updated: 2 total — 0 completed, 1 in progress, 1 pending. The in_progress item is \"capt_step_1\" — cite that step_id when you sign it off."
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "call_capt_bash_2",
+          "name": "bash",
+          "title": "bash",
+          "kind": "execute",
+          "status": "completed",
+          "rawInput": {
+            "command": "echo CAPT_TOOL_LINE_1 && echo CAPT_TOOL_LINE_2",
+            "description": "Print two probe lines"
+          }
+        }
+      },
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_capt_bash_2",
+          "status": "completed",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "CAPT_TOOL_LINE_1\nCAPT_TOOL_LINE_2\n"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "call_capt_complete_step_3",
+          "name": "complete_step",
+          "title": "complete_step",
+          "kind": "other",
+          "status": "completed",
+          "rawInput": {
+            "step_id": "capt_step_1",
+            "result": "The workspace was inspected with the probe command.",
+            "evidence": [
+              {
+                "kind": "verification",
+                "summary": "The probe command printed both lines.",
+                "command": "echo CAPT_TOOL_LINE_1 && echo CAPT_TOOL_LINE_2"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_capt_complete_step_3",
+          "status": "completed",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "Step \"capt_step_1\" done. The host advanced the task list; the next step is 2 \"Report the result\"."
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "call_capt_todo_write_4",
+          "name": "todo_write",
+          "title": "todo_write",
+          "kind": "edit",
+          "status": "completed",
+          "rawInput": {
+            "todos": [
+              {
+                "content": "Inspect the workspace",
+                "status": "completed",
+                "activeForm": "Inspecting the workspace",
+                "step_id": "capt_step_1"
+              },
+              {
+                "content": "Report the result",
+                "status": "in_progress",
+                "activeForm": "Reporting the result",
+                "step_id": "capt_step_2"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "plan",
+          "entries": [
+            {
+              "content": "Inspect the workspace",
+              "priority": "high",
+              "status": "completed"
+            },
+            {
+              "content": "Report the result",
+              "priority": "high",
+              "status": "in_progress"
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_capt_todo_write_4",
+          "status": "completed",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "Task list unchanged: 2 total — 1 completed, 1 in progress, 0 pending. The host already holds this list. The in_progress item is \"capt_step_2\" — cite that step_id when you sign it off."
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "call_capt_complete_step_5",
+          "name": "complete_step",
+          "title": "complete_step",
+          "kind": "other",
+          "status": "completed",
+          "rawInput": {
+            "step_id": "capt_step_2",
+            "result": "The result was reported.",
+            "evidence": [
+              {
+                "kind": "manual",
+                "summary": "The answer names the probe lines."
+              }
+            ]
+          }
+        }
+      },
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "call_capt_complete_step_5",
+          "status": "completed",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "Step \"capt_step_2\" done. Every step in the task list is now complete. Do not open new work under this plan."
+              }
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "bb013991-3efc-484c-a985-787f3907fb0d",
+        "update": {
+          "sessionUpdate": "agent_message_chunk",
+          "messageId": "000000000000-r1",
+          "content": {
+            "type": "text",
+            "text": "CAPT_PLAN_DONE"
+          }
+        }
+      }
+    ],
+    "transcript": "{\"role\":\"system\",\"content\":\"[scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasonix system prompt] [scrubbed: Reasoni\"}\n{\"role\":\"user\",\"content\":\"<workspace>\\nCurrent workspace: \\\"/tmp/_________________________________________________________________________________________________________capt-ws\\\". Shell commands start there and every tool resolves relative paths from it.\\nVersion control: none (not a repository).\\n</workspace>\\n\\n<current-date>\\nToday's date is 2026-11-28 (Saturday); the local time zone is UTC+00:00.\\n</current-date>\\n\\n<session-scratch>\\nThis session has a private scratch directory, $TMPDIR, which the host deletes when the session ends. Put throwaway tests and probes at `$TMPDIR/<name>`, spelled that way in bash (quoted) and in the file tools, instead of the repository, /tmp or `mktemp -d`, and do not delete it.\\n</session-scratch>\\n\\n<available-skills>\\n# Skills — playbooks you can invoke\\n\\nOne-liner index. Before non-trivial work, scan it: if an untagged (inline) skill is even plausibly relevant to the task, invoke it before continuing instead of pre-judging — loading one imperfect inline skill is cheap. Skills tagged `[🧬 subagent]` are the heavy path; reach for them only when the task genuinely needs context-heavy work, not on weak relevance. Each entry is a built-in or a user-authored playbook. Call `run_skill({ name: \\\"<skill-name>\\\", arguments: \\\"<task>\\\" })` — `name` is JUST the identifier (e.g. `\\\"explore\\\"`), NOT the `[🧬 subagent]` tag that follows it. Prefer the dedicated top-level tool when one exists for a built-in subagent skill. Entries tagged `[🧬 subagent]` spawn an isolated subagent — its tool calls and reasoning never enter your context, only its final answer does; use them for context-heavy work (deep exploration, multi-step research) where you only need the conclusion. Untagged skills are inlined: the body becomes a tool result you read and act on directly. The user can also invoke a skill via `/<name>`.\\n\\n```\\n- explore [🧬 subagent] — Explore the codebase in an isolated subagent — wide-net read-only investigation that returns one distilled an…\\n- init — Bootstrap or refresh this project's AGENTS.md — analyze the codebase (structure, build/test commands, architecture, conventio…\\n- install-capability — Install or uninstall Reasonix MCP servers and skills from a URL, GitHub/raw file, local path/folder, .mcp.json,…\\n- locate [🧬 subagent] — Find where something lives in the codebase, fast — a read-only subagent that fires its searches in parallel wi…\\n- reasonix-guide — Troubleshoot and configure Reasonix capabilities: Skills (project/custom/global/builtin priority, discovery dirs), …\\n- research [🧬 subagent] — Research a question by combining web_fetch + code reading in an isolated subagent. Best for: 'is X supported…\\n- review [🧬 subagent] — Review the pending changes (current branch diff by default) in an isolated subagent — flags correctness, secur…\\n- security-review [🧬 subagent] — Security-focused review of the current branch diff in an isolated subagent — flags injection/authz/se…\\n- test — Run the project's test suite, diagnose failures, propose+apply fixes, re-run until green (or stop after 2 attempts on the sam…\\n```\\n</available-skills>\\n\\nCAPT_PLAN: plan this work with todo_write, run the probe command, sign off the first step, update the plan, then reply. CAPT_FINISH: sign off the second step too.\\n\\n<execution-policy preset=\\\"balanced\\\" version=\\\"3\\\">\\nverify=targeted\\n</execution-policy>\",\"raw_content\":\"CAPT_PLAN: plan this work with todo_write, run the probe command, sign off the first step, update the plan, then reply. CAPT_FINISH: sign off the second step too.\",\"createdAt\":1795840596281}\n{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call_capt_todo_write_1\",\"name\":\"todo_write\",\"arguments\":\"{\\\"todos\\\":[{\\\"content\\\":\\\"Inspect the workspace\\\",\\\"status\\\":\\\"in_progress\\\",\\\"activeForm\\\":\\\"Inspecting the workspace\\\",\\\"step_id\\\":\\\"capt_step_1\\\"},{\\\"content\\\":\\\"Report the result\\\",\\\"status\\\":\\\"pending\\\",\\\"activeForm\\\":\\\"Reporting the result\\\",\\\"step_id\\\":\\\"capt_step_2\\\"}]}\"}],\"workDurationMs\":11,\"modelRef\":\"fixture/fixture-model\"}\n{\"role\":\"tool\",\"content\":\"Todos updated: 2 total — 0 completed, 1 in progress, 1 pending. The in_progress item is \\\"capt_step_1\\\" — cite that step_id when you sign it off.\",\"tool_call_id\":\"call_capt_todo_write_1\",\"name\":\"todo_write\"}\n{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call_capt_bash_2\",\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"echo CAPT_TOOL_LINE_1 && echo CAPT_TOOL_LINE_2\\\",\\\"description\\\":\\\"Print two probe lines\\\"}\",\"resolved_name\":\"bash\",\"resolved_read_only\":true}],\"workDurationMs\":13,\"modelRef\":\"fixture/fixture-model\"}\n{\"role\":\"tool\",\"content\":\"CAPT_TOOL_LINE_1\\nCAPT_TOOL_LINE_2\\n\",\"tool_call_id\":\"call_capt_bash_2\",\"name\":\"bash\",\"tool_execution\":{\"kind\":\"shell\",\"shell\":\"bash\",\"platform\":\"linux\",\"supportsAndAnd\":true,\"state\":\"completed\",\"exitCode\":0,\"mutationRisk\":\"may_have_completed\",\"verification\":\"not_verification\",\"durationMs\":18}}\n{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call_capt_complete_step_3\",\"name\":\"complete_step\",\"arguments\":\"{\\\"step_id\\\":\\\"capt_step_1\\\",\\\"result\\\":\\\"The workspace was inspected with the probe command.\\\",\\\"evidence\\\":[{\\\"kind\\\":\\\"verification\\\",\\\"summary\\\":\\\"The probe command printed both lines.\\\",\\\"command\\\":\\\"echo CAPT_TOOL_LINE_1 && echo CAPT_TOOL_LINE_2\\\"}]}\"}],\"workDurationMs\":35,\"modelRef\":\"fixture/fixture-model\"}\n{\"role\":\"tool\",\"content\":\"Step \\\"capt_step_1\\\" done. The host advanced the task list; the next step is 2 \\\"Report the result\\\".\",\"tool_call_id\":\"call_capt_complete_step_3\",\"name\":\"complete_step\"}\n{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call_capt_todo_write_4\",\"name\":\"todo_write\",\"arguments\":\"{\\\"todos\\\":[{\\\"content\\\":\\\"Inspect the workspace\\\",\\\"status\\\":\\\"completed\\\",\\\"activeForm\\\":\\\"Inspecting the workspace\\\",\\\"step_id\\\":\\\"capt_step_1\\\"},{\\\"content\\\":\\\"Report the result\\\",\\\"status\\\":\\\"in_progress\\\",\\\"activeForm\\\":\\\"Reporting the result\\\",\\\"step_id\\\":\\\"capt_step_2\\\"}]}\"}],\"workDurationMs\":37,\"modelRef\":\"fixture/fixture-model\"}\n{\"role\":\"tool\",\"content\":\"Task list unchanged: 2 total — 1 completed, 1 in progress, 0 pending. The host already holds this list. The in_progress item is \\\"capt_step_2\\\" — cite that step_id when you sign it off.\",\"tool_call_id\":\"call_capt_todo_write_4\",\"name\":\"todo_write\"}\n{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call_capt_complete_step_5\",\"name\":\"complete_step\",\"arguments\":\"{\\\"step_id\\\":\\\"capt_step_2\\\",\\\"result\\\":\\\"The result was reported.\\\",\\\"evidence\\\":[{\\\"kind\\\":\\\"manual\\\",\\\"summary\\\":\\\"The answer names the probe lines.\\\"}]}\"}],\"workDurationMs\":40,\"modelRef\":\"fixture/fixture-model\"}\n{\"role\":\"tool\",\"content\":\"Step \\\"capt_step_2\\\" done. Every step in the task list is now complete. Do not open new work under this plan.\",\"tool_call_id\":\"call_capt_complete_step_5\",\"name\":\"complete_step\"}\n{\"role\":\"assistant\",\"content\":\"CAPT_PLAN_DONE\",\"workDurationMs\":42,\"modelRef\":\"fixture/fixture-model\"}\n"
+  }
+}

@@ -31,6 +31,7 @@ import {
   mapReasonixInterruptedTail,
   mapReasonixRecord,
   reasonixMessageKey,
+  reasonixTaskListState,
   type ReasonixDisplayEntry,
   type ReasonixTranscriptRecord,
 } from './mapping.ts';
@@ -673,6 +674,42 @@ function textContent(value: unknown): string | undefined {
   return typeof text === 'string' ? text : undefined;
 }
 
+/**
+ * The text of an ACP tool-call `content` list. Reasonix 1.25.2 and 2.61.0 send a tool's result as
+ * `[{type: 'content', content: {type: 'text', text}}]` and leave `text` out when it is empty
+ * (measured 2026-11-28; upstream `toolContent` and `ContentBlock` with `text,omitempty`). A list
+ * holding anything but text blocks is not read here.
+ */
+function toolContentText(value: unknown): string | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  let text = '';
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return undefined;
+    const { type, content } = entry as { type?: unknown; content?: unknown };
+    if (type !== 'content' || typeof content !== 'object' || content === null || Array.isArray(content)) {
+      return undefined;
+    }
+    const block = content as { type?: unknown; text?: unknown };
+    if (block.type !== 'text' || (block.text !== undefined && typeof block.text !== 'string')) return undefined;
+    text += block.text ?? '';
+  }
+  return text;
+}
+
+/**
+ * A well-formed ACP `plan` update as the session's task panel. Every update carries the whole list,
+ * so an empty one clears the panel; entries none of which can be shown are malformed, not a clear,
+ * and fall through to the unmapped-update context event.
+ */
+export function reasonixPlanUpdate(
+  sessionId: string,
+  update: Record<string, unknown>,
+): Extract<AgentMessage, { type: 'task-list-state' }> | undefined {
+  if (update.sessionUpdate !== 'plan' || !Array.isArray(update.entries)) return undefined;
+  const panel = reasonixTaskListState(sessionId, update.entries);
+  return update.entries.length > 0 && panel.items.length === 0 ? undefined : panel;
+}
+
 function optionId(option: AcpPermissionOption): string | undefined {
   return typeof option.optionId === 'string' ? option.optionId
     : typeof option.id === 'string' ? option.id
@@ -868,7 +905,10 @@ export function mapReasonixSessionUpdate(
       type: 'tool-result',
       callId,
       toolName: title,
-      result: boundedReasonixToolPayload(update.rawOutput ?? content ?? update.status, 'output'),
+      result: boundedReasonixToolPayload(
+        update.rawOutput ?? toolContentText(update.content) ?? content ?? update.status,
+        'output',
+      ),
       isError: status === 'failed',
     }];
   }
@@ -962,6 +1002,12 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
   private lastStatusSequence = -1;
   /** The latest ACP `usage_update` context reading (2.61.0), replayed to late joiners. */
   private contextUsage?: { used: number; max: number };
+  /**
+   * The latest ACP `plan` this connection received, replayed after the stored plans. It runs
+   * ahead of the transcript: Reasonix advances the list itself when `complete_step` signs a step
+   * off and sends that plan live without storing a `todo_write` for it.
+   */
+  private livePlan?: Extract<AgentMessage, { type: 'task-list-state' }>;
   private pendingCreate?: NonNullable<ReasonixDriveOpenOptions['pendingCreate']>;
   /**
    * The first durable snapshot of an ACP-created session must be fanned out
@@ -1137,11 +1183,24 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
     ];
   }
 
-  /** The latest context reading, so a replay or a cached history page carries it for a late joiner. */
+  /**
+   * The latest context reading and live plan, so a replay or a cached history page carries them for
+   * a late joiner. The plan comes after the stored ones under the same key, so it is the one shown.
+   */
   protected override snapshotLiveState(): AgentMessage[] {
-    return this.contextUsage
-      ? [{ type: 'metadata-update', key: 'contextUsage', value: { ...this.contextUsage } }]
-      : [];
+    const live: AgentMessage[] = [];
+    if (this.contextUsage) live.push({ type: 'metadata-update', key: 'contextUsage', value: { ...this.contextUsage } });
+    if (this.livePlan) live.push(structuredClone(this.livePlan));
+    return live;
+  }
+
+  /**
+   * While a live plan is held, a stored `todo_write` the tail appends is never newer than it: the
+   * plan went out when Reasonix dispatched the call, before the row was written, and a step signed
+   * off since then moved the live list on.
+   */
+  protected override publishesTailFrame(message: AgentMessage): boolean {
+    return !(this.livePlan && message.type === 'task-list-state' && message.key === this.livePlan.key);
   }
 
   /**
@@ -1481,6 +1540,7 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
   demote(reason = 'Reasonix transcript received a foreign user write.'): void {
     if (this.demoted || this.closedDrive) return;
     this.demoted = true;
+    this.livePlan = undefined;
     this.correlationInvalidated = true;
     this.claimedOffsets.clear();
     this.correlationRegistry?.invalidate(this.session.id);
@@ -1515,6 +1575,7 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
   override async close(): Promise<void> {
     if (this.closedDrive) return;
     this.closedDrive = true;
+    this.livePlan = undefined;
     this.stopPendingCreateProbe();
     this.cancelGeneration += 1;
     for (const pending of this.pendingPermissions.values()) pending.resolve({ outcome: { outcome: 'cancelled' } });
@@ -1969,6 +2030,12 @@ export class ReasonixDriveConnection extends ReasonixObserveConnection {
     const usage = reasonixUsageUpdate(params.update);
     if (usage !== undefined) {
       if (usage) this.acceptUsageUpdate(usage);
+      return;
+    }
+    const plan = reasonixPlanUpdate(this.session.id, params.update);
+    if (plan) {
+      this.livePlan = plan;
+      this.emitLive(structuredClone(plan));
       return;
     }
     const assistantIndex = this.activeAssistantIndex;

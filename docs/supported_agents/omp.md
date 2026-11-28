@@ -52,6 +52,20 @@ service reconfiguration instead of leaving omp without its bridge.
   app/terminal synchronization.
 - Prompts, cancellation, per-tool approvals, model/thinking selection, native
   commands, and byte-exact file input use omp's own RPC names.
+- The thinking picker offers the efforts omp lists for each model, `max`
+  included. On omp 19.1.0 it also offers `auto`, where omp picks the effort for
+  each turn. Whether a session left in auto mode is still in it after Resume
+  has not been measured.
+  omp 17.4.2 has no `auto`, so the picker does not offer it there.
+- A turn's token and cost totals include omp's own model usage records
+  (titles, the auto-thinking judge, cache warms), including records written
+  off the active branch; usage between turns counts toward the next turn. In
+  sessions driven from the app these records count once the session is read
+  again, because omp does not announce them while it runs.
+- On omp 19.1.0, a prompt sent from the app while a turn runs is accepted as
+  soon as omp queues it, so more prompts can follow at once; each shows as
+  queued until omp starts it at its next turn boundary. On omp 17.4.2 the app
+  waits for each such prompt to start before it sends the next.
 - New sessions and session names are supported.
 - Multiple clients reuse one bridge/Drive owner.
 - On omp 19.1.0, extension HTML form dialogs appear as question cards. Radio
@@ -83,6 +97,8 @@ service reconfiguration instead of leaving omp without its bridge.
 - omp's native `ask` tool exists only in its `--mode rpc-ui`; Drive runs
   `--mode rpc`, where the tool is unavailable. The bridge's `ask_user` tool and
   extension form dialogs still reach the app.
+- A session started in the terminal (live bridge) cannot switch to `auto`
+  from the app: omp's extension API sets only fixed efforts.
 - The v1 adapter deliberately omits native subagent events.
 - A session written by a newer omp than the one cosyncing runs stays
   readable, but cosyncing does not resume, fork or rename it natively: an

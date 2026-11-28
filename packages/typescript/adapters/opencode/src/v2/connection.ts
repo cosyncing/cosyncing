@@ -4,7 +4,8 @@ import { dirname, resolve } from 'node:path';
 import { OPENCODE_SHARED_ACTIONS } from '../commands.ts';
 import type { V2Binding } from '../binding.ts';
 import type { OpenCodeV2Backend } from './backend.ts';
-import { arrayData, compactAttachments, contentKey, finite, formAnswer, formCard, historyRows, isRunInput, messageRows, nativeId, newNativeId, object, permissionCard, runSummary, sessionPatch, toolMessages, type Native } from './mapping.ts';
+import { JOB_POLL_MS, V2JobRows } from './jobs.ts';
+import { arrayData, compactAttachments, contentKey, finite, formAnswer, formCard, historyRows, isRunInput, messageRows, nativeId, newNativeId, object, OPENCODE_ARCHIVED_REASON, permissionCard, runSummary, sessionPatch, toolMessages, type Native } from './mapping.ts';
 import { MAX_MESSAGE_RESPONSE_BYTES, MESSAGE_READ_BUDGET_MS, V2Error, type V2Event } from './transport.ts';
 
 /** A V1 history seat switches source when the shared service imports that same native ID. */
@@ -15,6 +16,7 @@ export function followV2Import(backend: OpenCodeV2Backend, legacy: SessionConnec
   let closed = false;
   let imported = false;
   let upgrading: Promise<void> | undefined;
+  let clients: number | undefined;
   const emit = (message: AgentMessage) => {
     if (closed) return;
     Object.assign(info, current.info);
@@ -33,6 +35,7 @@ export function followV2Import(backend: OpenCodeV2Backend, legacy: SessionConnec
       stopWatching();
       Object.assign(info, replacement.info);
       unsubscribe = replacement.subscribe(emit);
+      if (clients !== undefined) replacement.setClientCount?.(clients);
       await previous.close();
       emit({ type: 'metadata-update', key: 'sessionInfo', value: sessionPatch(info) });
       emit({ type: 'history-reset' });
@@ -41,7 +44,9 @@ export function followV2Import(backend: OpenCodeV2Backend, legacy: SessionConnec
   return {
     info, historyUsesToolSlots: true,
     subscribe(handler) { handlers.add(handler); return () => handlers.delete(handler); },
+    setClientCount(count) { clients = count; current.setClientCount?.(count); },
     async getHistory(query) { await upgrading; return current.getHistory(query); },
+    async getHistoryOverlays(query) { await upgrading; return current.getHistoryOverlays?.(query) ?? []; },
     async getHistorySourceIdentity() { await upgrading; return current.getHistorySourceIdentity?.(); },
     async getPending() { await upgrading; return current.getPending?.() ?? []; },
     async sendPrompt(input) { await upgrading; return current.sendPrompt(input); },
@@ -66,6 +71,7 @@ export class OpenCodeV2Connection implements SessionConnection {
   private unsubscribe: Unsubscribe;
   private retired = false;
   private closed = false;
+  private clients?: number;
 
   constructor(readonly backend: OpenCodeV2Backend, readonly info: SessionInfo, binding: V2Binding, private readonly observe: boolean) {
     this.current = new BoundV2Connection(backend, info, binding, observe);
@@ -84,9 +90,12 @@ export class OpenCodeV2Connection implements SessionConnection {
     if (this.closed) return;
     const replaced = this.retired;
     if (replaced) {
+      const previous = this.current;
       this.unsubscribe();
       this.current = new BoundV2Connection(this.backend, this.info, this.backend.binding!, this.observe);
+      this.current.adoptJobs(previous);
       this.unsubscribe = this.current.subscribe((message) => this.emit(message));
+      if (this.clients !== undefined) this.current.setClientCount(this.clients);
       this.retired = false;
     }
     await this.current.resnapshot();
@@ -95,7 +104,9 @@ export class OpenCodeV2Connection implements SessionConnection {
       this.emit({ type: 'history-reset' });
     }
   }
+  setClientCount(count: number): void { this.clients = count; this.current.setClientCount(count); }
   getHistory(query?: HistoryQuery) { return this.current.getHistory(query); }
+  getHistoryOverlays() { return this.current.getHistoryOverlays(); }
   getHistorySourceIdentity() { return this.current.getHistorySourceIdentity(); }
   getPending() { return this.current.getPending(); }
   sendPrompt(input: PromptInput) { return this.current.sendPrompt(input); }
@@ -134,8 +145,17 @@ class BoundV2Connection implements SessionConnection {
   private published: Partial<SessionInfo> = {};
   private publishedStatus?: string;
   private run?: { key: string; startedAt?: number; user: boolean };
+  /** Background jobs this session started, as background rows. */
+  private readonly jobs: V2JobRows;
+  private jobTimer?: ReturnType<typeof setTimeout>;
+  /** Each job list read takes a ticket; only the newest read may apply. */
+  private jobReads = 0;
+  /** A turn ended while no client was attached, so a job may have started unseen. */
+  private jobsUnread = false;
+  private clients = 0;
 
   constructor(readonly backend: OpenCodeV2Backend, readonly info: SessionInfo, private readonly binding: V2Binding, private readonly observe: boolean) {
+    this.jobs = new V2JobRows(info.id, (message) => this.emit(message));
     this.updateInfo();
   }
 
@@ -147,7 +167,9 @@ class BoundV2Connection implements SessionConnection {
     this.info.status = this.backend.status(this.info.id);
     if (this.observe) {
       this.info.attachMode = 'observe';
-      this.info.control = { drive: native?.parentID ? { supported: false, state: 'observing', reason: 'This session is controlled by its parent agent.' } : { supported: true, state: 'observing' }, terminalSync: this.info.control!.terminalSync };
+      this.info.control = { drive: native?.parentID ? { supported: false, state: 'observing', reason: 'This session is controlled by its parent agent.' }
+        : this.backend.archived.has(this.info.id) ? { supported: false, state: 'observing', reason: OPENCODE_ARCHIVED_REASON }
+          : { supported: true, state: 'observing' }, terminalSync: this.info.control!.terminalSync };
     }
     this.publishInfo();
   }
@@ -159,7 +181,43 @@ class BoundV2Connection implements SessionConnection {
     this.published = structuredClone(next);
     if (Object.keys(changed).length) this.emit({ type: 'metadata-update', key: 'sessionInfo', value: changed });
     const status = this.info.status === 'idle' ? 'idle' : 'running';
-    if (status !== this.publishedStatus) { this.publishedStatus = status; this.emit({ type: 'status', status }); }
+    if (status !== this.publishedStatus) {
+      this.publishedStatus = status;
+      this.emit({ type: 'status', status });
+      // OpenCode 2.3+ runs subagents in the background: the parent reads idle while they work.
+      if (status === 'idle') this.jobs.restateAfterIdle();
+    }
+  }
+
+  adoptJobs(previous: BoundV2Connection): void { this.jobs.adopt(previous.jobs); }
+
+  setClientCount(count: number): void {
+    this.clients = count;
+    if (count > 0 && (this.jobs.size || this.jobsUnread)) this.scheduleJobRead(0);
+    else if (count <= 0) { clearTimeout(this.jobTimer); this.jobTimer = undefined; }
+  }
+
+  /**
+   * A service with a job list but no job events (2.2.6 to 2.3.x) is asked again: once a turn of
+   * this session ends (a job starts only inside one), then every {@link JOB_POLL_MS} while one of
+   * its jobs runs and a client is attached. 2.4.0+ reports every change as an event instead.
+   */
+  private scheduleJobRead(delayMs: number): void {
+    clearTimeout(this.jobTimer);
+    this.jobTimer = undefined;
+    const support = this.backend.jobSupport();
+    if (this.closed || !support.list || support.events) return;
+    if (this.clients <= 0) { this.jobsUnread = true; return; }
+    this.jobTimer = setTimeout(() => { this.jobTimer = undefined; void this.readJobs(); }, delayMs);
+    this.jobTimer.unref?.();
+  }
+
+  private async readJobs(): Promise<void> {
+    const ticket = ++this.jobReads;
+    const jobs = await this.backend.jobs(this.info.id).catch(() => undefined);
+    if (this.closed || ticket !== this.jobReads || this.binding !== this.backend.binding) return;
+    if (jobs) { this.jobsUnread = false; this.jobs.snapshot(jobs); }
+    if (this.jobs.size) this.scheduleJobRead(JOB_POLL_MS);
   }
 
   onGap(identityChanged: boolean): void {
@@ -182,7 +240,9 @@ class BoundV2Connection implements SessionConnection {
         this.reloadNotice = undefined;
         this.ready = false;
         const binding = this.backend.binding!;
-        const [native, messages] = await Promise.all([this.backend.getSession(this.info.id), this.backend.history(this.info.id), this.backend.pending(this.info.id)]);
+        const jobRead = ++this.jobReads;
+        // The job list is an addition: a service that cannot answer it still attaches.
+        const [native, messages, , jobs] = await Promise.all([this.backend.getSession(this.info.id), this.backend.history(this.info.id), this.backend.pending(this.info.id), this.backend.jobs(this.info.id).catch(() => undefined)]);
         if (this.closed) return;
         if (binding !== this.backend.binding) { this.reloadNeeded = true; this.reloadNotice ??= notice; continue; }
         if (binding.identity !== this.binding.identity || binding.auth !== this.binding.auth) throw new V2Error('unavailable');
@@ -210,6 +270,10 @@ class BoundV2Connection implements SessionConnection {
         this.syncPending();
         if (this.hasSnapshot) this.emit({ type: 'history-reset', ...notice });
         this.hasSnapshot = true;
+        // Job changes that arrived during the read are in the buffer and apply after it. A service
+        // without the job list (an older one after a restart) can vouch for no row.
+        if (jobRead === this.jobReads && (jobs || !this.backend.jobSupport().list)) { this.jobsUnread = false; this.jobs.snapshot(jobs ?? []); }
+        if (this.jobs.size) this.scheduleJobRead(JOB_POLL_MS);
         const buffered = this.buffered;
         this.buffered = []; this.bufferedBytes = 0;
         // Snapshot rows already include volatile text observed while the read was in flight.
@@ -225,8 +289,11 @@ class BoundV2Connection implements SessionConnection {
     const messages = await this.backend.history(this.info.id, query?.signal);
     this.updateInfo(native);
     const boundary = messages.findIndex((message) => message.id === native.revert?.messageID);
-    return historyRows(boundary < 0 ? messages : messages.slice(0, boundary), this.backend.clientKeys);
+    return [...historyRows(boundary < 0 ? messages : messages.slice(0, boundary), this.backend.clientKeys), ...this.jobs.cards()];
   }
+
+  /** The background rows that still run and the recent outcomes: current state, outside the transcript. */
+  async getHistoryOverlays(): Promise<AgentMessage[]> { return this.jobs.cards(); }
 
   async getHistorySourceIdentity(): Promise<HistorySourceIdentity> {
     const native = await this.backend.getSession(this.info.id);
@@ -255,7 +322,8 @@ class BoundV2Connection implements SessionConnection {
 
   onEvent(event: V2Event): void {
     const data = event.data;
-    if ((data.sessionID ?? data.form?.sessionID ?? data.session?.id) !== this.info.id) return;
+    const sessionId = event.type === 'experimental.job.updated' ? data.info?.sessionID : data.sessionID ?? data.form?.sessionID ?? data.session?.id;
+    if (sessionId !== this.info.id) return;
     if (!this.ready) {
       this.bufferedBytes += JSON.stringify(event).length;
       if (this.buffered.length >= 512 || this.bufferedBytes > 2 * 1024 * 1024) {
@@ -293,7 +361,11 @@ class BoundV2Connection implements SessionConnection {
       const input = [...this.inbox.values()].find((entry) => entry.id !== this.run?.key && !this.terminalRuns.has(entry.id));
       this.run = { key: input?.id ?? `execution:${event.durable?.seq ?? event.created}`, startedAt: event.created, user: input?.type === 'user' };
       this.emit(runSummary(this.run.key, 'running', this.run.startedAt, undefined, undefined, this.run.user));
+    } else if (event.type === 'experimental.job.updated') {
+      this.jobs.update(data.info);
     } else if (['session.execution.succeeded', 'session.execution.failed', 'session.execution.interrupted'].includes(event.type)) {
+      // A job outlives the turn that started it, so a turn's end is when one may have appeared.
+      this.scheduleJobRead(0);
       const run = this.run ?? { key: `execution:${event.durable?.seq ?? event.created}`, startedAt: undefined, user: false };
       this.run = undefined;
       if (!this.terminalRuns.has(run.key)) {
@@ -350,6 +422,9 @@ class BoundV2Connection implements SessionConnection {
   private path(suffix: string): string { return `/api/session/${encodeURIComponent(this.info.id)}${suffix}`; }
   private assertMutable(): void {
     if (this.closed || this.observe || !this.ready) throw new ControlRefusedError('This OpenCode connection is read-only or reconnecting.', 'command-unsupported');
+    // From 2.4.2 OpenCode would restore the session on send; on older services the turn would run
+    // in a session its list no longer shows. Either way the user restores it in OpenCode first.
+    if (this.backend.archived.has(this.info.id)) throw new ControlRefusedError(OPENCODE_ARCHIVED_REASON, 'command-unsupported');
   }
 
   async sendPrompt(input: PromptInput): Promise<void> {
@@ -493,5 +568,5 @@ class BoundV2Connection implements SessionConnection {
     return { notice: `Running /${name}…` };
   }
 
-  async close(): Promise<void> { this.closed = true; this.ready = false; this.handlers.clear(); }
+  async close(): Promise<void> { this.closed = true; this.ready = false; this.handlers.clear(); clearTimeout(this.jobTimer); this.jobTimer = undefined; }
 }

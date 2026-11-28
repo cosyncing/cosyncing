@@ -190,8 +190,18 @@ const argValue = (name) => {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : undefined;
 };
+// FAKE_GROK_CUSTOM_MODEL lists custom models whose [model.<key>] keys differ from the model ids
+// they name: byok names byok-model, byok-alt names byok-alt-model. As Grok 1.0.92 did with one
+// (a 2026-11-24 capture), --model takes either, the child answers with the key, and summary.json
+// stores the id.
+const customModel = process.env.FAKE_GROK_CUSTOM_MODEL === '1';
+const customIds = { byok: 'byok-model', 'byok-alt': 'byok-alt-model' };
+const modelKey = (value) => customModel ? Object.keys(customIds).find((key) => customIds[key] === value) || value : value;
+const storedModelId = (key) => customModel && customIds[key] ? customIds[key] : key;
+// The model the child runs: a load override stands for Grok picking another one.
+const runningModel = process.env.FAKE_GROK_LOAD_MODEL_OVERRIDE || modelKey(argValue('--model')) || 'grok-4.6';
 const models = {
-  currentModelId: process.env.FAKE_GROK_LOAD_MODEL_OVERRIDE || argValue('--model') || 'grok-4.6',
+  currentModelId: runningModel,
   currentReasoningEffort: process.env.FAKE_GROK_LOAD_EFFORT_OVERRIDE || argValue('--reasoning-effort') || 'high',
   availableModels: [
     { modelId: 'grok-4.6', name: 'Grok 4.6', _meta: { reasoningEfforts: [
@@ -199,6 +209,7 @@ const models = {
       { value: 'low', label: 'Low', default: false },
     ] } },
     { modelId: 'grok-4.5', name: 'Grok 4.5' },
+    ...(customModel ? [{ modelId: 'byok', name: 'BYOK model' }, { modelId: 'byok-alt', name: 'BYOK alt model' }] : []),
   ],
 };
 const modes = {
@@ -218,7 +229,9 @@ const ensureSession = (cwd) => {
     updated_at: '2026-08-30T10:00:00.000Z',
     last_active_at: '2026-08-30T10:00:00.000Z',
     num_messages: 0,
-    current_model_id: argValue('--model') || 'grok-4.6',
+    // FAKE_GROK_SUMMARY_MODEL_OVERRIDE: a summary that names another model than the one loaded.
+    current_model_id: process.env.FAKE_GROK_SUMMARY_MODEL_OVERRIDE
+      || storedModelId(customModel ? runningModel : argValue('--model') || 'grok-4.6'),
     reasoning_effort: process.env.FAKE_GROK_SUMMARY_EFFORT_OVERRIDE || argValue('--reasoning-effort') || 'high',
     agent_name: 'build',
   }) + '\\n');
@@ -306,6 +319,12 @@ const handle = (frame) => {
       count += 1;
     };
     if (previous) save(previous);
+    if (process.env.FAKE_GROK_SESSION_NOTICES === '1') {
+      // Grok 1.0.92 names the model it loaded just before it answers session/load (a 2026-11-24
+      // capture), with the catalogue id the answer carries.
+      send({ jsonrpc: '2.0', method: '_x.ai/session_notification', params: { sessionId: config.sessionId,
+        update: { sessionUpdate: 'model_changed', model_id: runningModel } } });
+    }
     send({ jsonrpc: '2.0', id: frame.id, result: { models, modes } });
     if (rewriteMs > 0) {
       const started = Date.now();
@@ -335,6 +354,17 @@ const handle = (frame) => {
   }
   if (frame.method === 'session/prompt') {
     promptCount += 1;
+    if (process.env.FAKE_GROK_SESSION_NOTICES === '1' && promptCount === 1) {
+      // Grok 1.0.92 sends the title it generated once, during the first prompt (a 2026-11-24 capture).
+      send({ jsonrpc: '2.0', method: '_x.ai/session_notification', params: { sessionId: config.sessionId,
+        update: { sessionUpdate: 'session_summary_generated', session_summary: 'Generated fixture title' } } });
+    }
+    if (process.env.FAKE_GROK_MODEL_CHANGED_TO) {
+      // Not captured: the captured shape, sent by the running child during a turn instead of
+      // during session/load, to stand for a model change Grok makes on its own.
+      send({ jsonrpc: '2.0', method: '_x.ai/session_notification', params: { sessionId: config.sessionId,
+        update: { sessionUpdate: 'model_changed', model_id: process.env.FAKE_GROK_MODEL_CHANGED_TO } } });
+    }
     const text = frame.params.prompt[0]?.text || '';
     const eventId = 'event-' + process.pid + '-' + promptCount;
     const promptId = 'prompt-' + process.pid + '-' + promptCount;

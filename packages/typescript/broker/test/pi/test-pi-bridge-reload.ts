@@ -119,6 +119,33 @@ try {
     return [ok, `discovered=${discovered?.id === id} decodedRealpath=${decoded === realpathSync(DISCOVERY_SESSION_FILE)}`];
   });
 
+  await test('a terminal session on max attaches showing max; auto, which the bridge cannot set, shows no level', async () => {
+    const client = new BrokerClient(BROKER, BROKER.replace('http:', 'ws:'), { kind: 'none' });
+    // A Pi 1.6.0 model whose level map names max (captured catalog shape).
+    const model = { provider: 'fixture', id: 'fixture-max', name: 'Fixture Max', reasoning: true, thinkingLevelMap: { xhigh: 'high', max: 'high' } };
+    const shown: Record<string, { current?: string; picker?: string }> = {};
+    for (const thinkingLevel of ['max', 'auto']) {
+      const response = await post('/pi/bridge/hello', {
+        sessionFile: join(ROOT, `thinking-${thinkingLevel}.jsonl`), cwd: DISCOVERY_CWD, title: `thinking ${thinkingLevel}`,
+        thinkingLevel, model: { providerID: 'fixture', modelID: 'fixture-max' }, models: [model],
+      });
+      const id = String((await response.json()).id);
+      const stream = await client.attach('pi', id);
+      try {
+        const info = (await stream.waitForKind('session')).info;
+        const options = await stream.waitForKind('options');
+        const offered = (options.models as any[] | undefined)?.find((option) => option.modelID === 'fixture-max');
+        shown[thinkingLevel] = { current: info.currentModel?.reasoningEffort, picker: offered?.defaultReasoningEffort };
+      } finally {
+        stream.close();
+        await bye(id, 'quit');
+      }
+    }
+    const ok = shown.max?.current === 'max' && shown.max?.picker === 'max'
+      && shown.auto?.current === undefined && shown.auto?.picker === undefined;
+    return [ok, JSON.stringify(shown)];
+  });
+
   await test('a re-hello that rewrites the transcript rotates the rewrite token', async () => {
     // The broker's page cache keeps a client's earlier snapshot valid across a GROWING
     // appendPosition only while `rewriteToken` is unchanged (history-page-cache.ts:142-146). A
@@ -402,6 +429,37 @@ try {
           && store.listEvents().length === eventsBefore
           && store.listObservations().length === openBefore;
         return [ok, `reset=${reset} hellos=${helloBodies.length} backfill=${JSON.stringify([...backfill])} live=${JSON.stringify(live)} events=${eventsBefore}->${store.listEvents().length} open=${openBefore}->${store.listObservations().length}`];
+      });
+
+      await test('cache warms count toward the turn they ran in, or the next turn, live and after a reload', async () => {
+        phase = 'warms';
+        // A Pi 1.6.0 cache warm (captured 2026-11-28): spend outside any message, never a row.
+        const warm = (id: string, parentId: string, ms: number) => ({
+          type: 'usage', id, parentId, timestamp: new Date(ms).toISOString(), kind: 'cache_warm', provider: 'fixture', model: 'fixture-reasoning',
+          usage: { input: 500, output: 1, cacheRead: 1500, cacheWrite: 0, reasoning: 0, totalTokens: 2001, cost: { input: 0.5, output: 0.001, cacheRead: 0.015, cacheWrite: 0, total: 0.516, totalFromProvider: false } },
+        });
+        const start = at + 20_000;
+        // One warm while the session sat idle between turns, one while the next turn ran.
+        entries = [...entries, warm('warm-idle', 'live-assistant-2', start - 1_000)];
+        await fire('agent_start', { timestamp: start });
+        await fire('turn_start', { timestamp: start });
+        await fire('message_start', { message: { role: 'user', content: [{ type: 'text', text: 'warmed turn' }], timestamp: start } });
+        entries = [...entries, userEntry('live-user-3', 'warm-idle', 'warmed turn', start), warm('warm-run', 'live-user-3', start + 1_000)];
+        await fire('message_end', { timestamp: start + 2_000, message: assistantMessage('reply: warmed turn', false) });
+        await fire('agent_end', { timestamp: start + 2_000 });
+        await waitUntil(() => summariesIn('warms').some((m) => m.key === 'pi:run:u3' && m.status === 'done'));
+        const live = summariesIn('warms').find((m) => m.key === 'pi:run:u3' && m.status === 'done');
+        entries = [...entries, { type: 'message', id: 'live-assistant-3', parentId: 'warm-run', timestamp: new Date(start + 2_000).toISOString(), message: assistantMessage('reply: warmed turn', false) }];
+        await fire('session_shutdown', { reason: 'reload' });
+        fire = await loadExtension();
+        await fire('session_start');
+        await waitUntil(() => helloBodies.length === 3);
+        const backfilled = (helloBodies[2]?.history ?? []).find((ev: any) => ev.t === 'run-summary' && ev.key === 'pi:run:u3');
+        const counted = (tokens: any) => tokens && tokens.input === 1001 && tokens.output === 3 && tokens.cacheRead === 3000
+          && tokens.cacheWrite === 0 && tokens.cost === 1.032;
+        const rows = (helloBodies[2]?.history ?? []).filter((ev: any) => ev.t !== 'run-summary' && ev.t !== 'runtime-totals' && ev.t !== 'context-usage');
+        const ok = counted(live?.tokens) && counted(backfilled?.tokens) && rows.length === 8;
+        return [ok, `live=${JSON.stringify(live?.tokens)} backfilled=${JSON.stringify(backfilled?.tokens)} rows=${JSON.stringify(rows.map((ev: any) => ev.t))}`];
       });
     } finally {
       await fire('session_shutdown', { reason: 'quit' }).catch(() => undefined);

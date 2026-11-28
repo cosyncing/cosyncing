@@ -23,6 +23,14 @@ import { homedir } from 'node:os';
 import { isOwnershipConflictError } from '@cosyncing/adapter-api';
 import { assertNoPiNativeOwner } from './native-presence.ts';
 import { parsePiFormDialog, piFormAnswer, piFormQuestions, type PiFormDialog } from './form-dialog.ts';
+import {
+  normalizePiThinkingLevel,
+  piOffersAutoThinking,
+  piThinkingCatalog,
+  piThinkingEfforts,
+  piThinkingSelector,
+  type PiThinkingCatalog,
+} from './thinking-levels.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   closeSync,
@@ -239,15 +247,6 @@ const PI_AWAITING_ASYNC_WORK_DETAIL = 'Waiting for background work…';
 /** A dialog the runtime waits on: its method, a select's options, a form's fields, and whether the
  *  run that was streaming when it arrived owns it. */
 type PiPendingUi = { method: string; options?: string[]; form?: PiFormDialog; duringRun: boolean };
-const PI_THINKING_LEVELS = [
-  { effort: 'off', label: 'Off' },
-  { effort: 'minimal', label: 'Minimal' },
-  { effort: 'low', label: 'Low' },
-  { effort: 'medium', label: 'Medium' },
-  { effort: 'high', label: 'High' },
-  { effort: 'xhigh', label: 'Extra high' },
-] as const;
-const PI_THINKING_LEVEL_SET = new Set(PI_THINKING_LEVELS.map((x) => x.effort));
 
 const enc = (s: string): string => Buffer.from(s, 'utf8').toString('base64url');
 const dec = (s: string): string => Buffer.from(s, 'base64url').toString('utf8');
@@ -380,7 +379,7 @@ export class PiEngineAdapter implements AgentBackend {
     });
     return (response.models ?? [])
       .slice(0, PI_MAX_MODEL_OPTIONS)
-      .map((model) => piModelOption(model, response.thinkingLevel))
+      .map((model) => piModelOption(model, response.thinkingLevel, response.thinkingCatalog))
       .filter((model): model is ModelOption => !!model);
   }
 
@@ -406,14 +405,14 @@ export class PiEngineAdapter implements AgentBackend {
       cwd,
       String(state.sessionId ?? ''),
       title,
-      { model: state.model, thinkingLevel: state.thinkingLevel },
+      state,
     );
     const st = statSafe(file);
     const actualCwd = readSessionCwd(file) ?? cwd;
     const naming = await readSessionNaming(this.rt, file);
     const name = title ?? naming.title;
     const sessionId = String(state.sessionId ?? '').trim();
-    const currentModel = piCurrentModelFromNative(state.model, state.thinkingLevel);
+    const currentModel = piCurrentModelFromNative(state.model, piThinkingSelector(state));
     return {
       id: sessionIdForFile(file),
       ...(sessionId ? { nativeId: sessionId } : {}),
@@ -602,7 +601,7 @@ export class PiEngineAdapter implements AgentBackend {
     const state = await renamePiSessionViaRpc(this.rt, path, requested);
     const st = statSafe(path);
     const nativeId = readSessionNativeId(path);
-    const currentModel = piCurrentModelFromNative(state.model, state.thinkingLevel);
+    const currentModel = piCurrentModelFromNative(state.model, piThinkingSelector(state));
     const naming = await readSessionNaming(this.rt, path);
     const nativeTitle =
       (typeof state.sessionName === 'string' && state.sessionName.trim()) ||
@@ -690,7 +689,13 @@ type PiRpcSessionState = {
   sessionName?: string;
   model?: { provider?: string; id?: string; name?: string };
   thinkingLevel?: string;
+  /** omp: `auto` while auto mode picks the effort `thinkingLevel` names. */
+  configuredThinkingLevel?: string;
+  /** omp: the current model's selectors, `auto` among them. */
+  thinkingLevels?: unknown;
   models?: any[];
+  /** A catalog read: what the agent said about the current model's thinking levels. */
+  thinkingCatalog?: PiThinkingCatalog;
 };
 
 interface PiCreateRpcOptions {
@@ -728,6 +733,7 @@ async function createPiSessionViaRpc(
   let reqId = 0;
   let stderr = '';
   const pending = new Map<string, (resp: any) => void>();
+  const pendingTypes = new Map<string, string>();
   const split = createJsonlSplitter((line) => {
     let obj: any;
     try {
@@ -735,9 +741,13 @@ async function createPiSessionViaRpc(
     } catch {
       return;
     }
-    if (obj?.type === 'response' && obj.id && pending.has(obj.id)) {
-      pending.get(obj.id)!(obj);
-      pending.delete(obj.id);
+    const id = obj?.type === 'response' && obj.id && pending.has(obj.id)
+      ? String(obj.id)
+      : piUnansweredProbeRefusal(obj, pendingTypes);
+    if (id) {
+      pending.get(id)?.(obj);
+      pending.delete(id);
+      pendingTypes.delete(id);
     }
   });
   const stdoutPump = (async () => {
@@ -770,8 +780,10 @@ async function createPiSessionViaRpc(
     const id = `create-${++reqId}`;
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
+        pendingTypes.delete(id);
         if (pending.delete(id)) resolve({ success: false, timeout: true, error: `${rt.dialect.displayName} RPC ${cmd.type} timed out` });
       }, timeoutMs);
+      pendingTypes.set(id, String(cmd.type));
       pending.set(id, (resp) => {
         clearTimeout(timer);
         resolve(resp);
@@ -797,13 +809,13 @@ async function createPiSessionViaRpc(
       // This zero-turn process uses the same configured initial thinking level as a subsequent
       // create. Carry that native default with the catalog instead of making the client guess.
       const state = await rpc({ type: 'get_state' }, 15000);
+      const native = state?.success === true ? state.data : undefined;
       return {
         models: Array.isArray(catalog?.data?.models)
           ? catalog.data.models.slice(0, PI_MAX_MODEL_OPTIONS)
           : [],
-        thinkingLevel: state?.success === true
-          ? normalizePiThinkingLevel(state?.data?.thinkingLevel)
-          : undefined,
+        thinkingLevel: piThinkingSelector(native),
+        thinkingCatalog: piThinkingCatalog(native, native ? await piAdvertisedLevels(native, rpc) : undefined),
       };
     }
     let stateResp = await rpc({ type: 'get_state' }, 20000);
@@ -828,6 +840,12 @@ async function createPiSessionViaRpc(
         throw new Error(modelResp?.error ?? `${rt.dialect.displayName} set_model failed during create.`);
       }
       const effort = normalizePiThinkingLevel(options.model.reasoningEffort);
+      if (effort === 'auto') {
+        const selected = await rpc({ type: 'get_state' }, 15000);
+        if (!piOffersAutoThinking(selected?.data)) {
+          throw new Error(`${rt.dialect.displayName} does not offer the auto thinking level for this model.`);
+        }
+      }
       if (effort) {
         const effortResp = await rpc(
           { type: 'set_thinking_level', level: effort },
@@ -1212,7 +1230,7 @@ async function piSessionInfoFromState(
   const cwd = readSessionCwd(file) ?? fallbackCwd ?? decodeCwdDir(baseDir(file));
   const st = statSafe(file);
   const sessionId = String(state.sessionId ?? '').trim();
-  const currentModel = piCurrentModelFromNative(state.model, state.thinkingLevel);
+  const currentModel = piCurrentModelFromNative(state.model, piThinkingSelector(state));
   const naming = await readSessionNaming(rt, file);
   const title =
     (typeof state.sessionName === 'string' && state.sessionName.trim()) ||
@@ -1383,6 +1401,16 @@ class PiConnection implements SessionConnection {
   private proc: Bun.Subprocess<'pipe', 'pipe', 'pipe'> | undefined;
   private reqId = 0;
   private readonly pendingRpc = new Map<string, (resp: any) => void>();
+  /** The command type of each pending request, for the one refusal an older build sends without an id. */
+  private readonly pendingRpcTypes = new Map<string, string>();
+  /** The levels the runtime listed for one model (omp in its state, Pi on request), by model key. */
+  private thinkingCatalog: { model: string; catalog: PiThinkingCatalog } | undefined;
+  /** omp's selectors for every model with reasoning, once a state showed this build lists them. */
+  private thinkingSelectors: string[] | undefined;
+  /** The build refused `get_available_thinking_levels`: it lacks the command, so it is not asked again. */
+  private thinkingLevelsRefused = false;
+  /** Usage written while no turn was open (an idle cache warm): the next turn's, as a reload counts it. */
+  private heldUsage: { tokens?: PiOpenTurn['tokens'] } = {};
   /** Connection-wide prompt transaction tail. Broker clients have independent WebSocket queues,
    *  so the adapter must serialize native-state reconciliation, optimistic FIFO mutation, model
    *  override, and prompt acknowledgement across every caller sharing this PiConnection. */
@@ -1456,6 +1484,11 @@ class PiConnection implements SessionConnection {
     reject: (error: Error) => void;
     timer?: ReturnType<typeof setTimeout>;
   }>();
+  /** OMP prompts its queue already listed (`queue_update`): accepted and waiting for omp's next
+   *  turn boundary, not yet started. Until they start, a degraded stream links no fallback turn. */
+  private readonly ompQueuedPromptKeys = new Set<string>();
+  /** The prompt texts omp's queue listed last (steering, then follow-up). */
+  private ompQueuedTexts: string[] = [];
   private closed = false;
   /** When the current RUN began: stamped at agent_start. Only the FALLBACK turn anchor (a
    *  degraded stream that never forwards `message_start`) consumes it; the authoritative
@@ -1553,7 +1586,9 @@ class PiConnection implements SessionConnection {
     if (selected?.modelID) {
       args.push('--model', selected.providerID ? `${selected.providerID}/${selected.modelID}` : selected.modelID);
       const effort = normalizePiThinkingLevel(selected.reasoningEffort);
-      if (effort) args.push('--thinking', effort);
+      // `auto` stays off argv: only an omp that lists it takes it, and the session file it wrote
+      // already restores it.
+      if (effort && effort !== 'auto') args.push('--thinking', effort);
     }
     this.proc = await spawnPi(this.rt.dialect, bin, args, {
       stdin: 'pipe',
@@ -1588,11 +1623,13 @@ class PiConnection implements SessionConnection {
       this.turnSeq = countJsonlLines(raw);
       this.userSeq = this.turnSeq;
       this.nextUserTurnOrdinal = countPiJsonlUserMessages(raw);
-      for (const row of activePiJsonlRows(parsePiJsonlRows(raw.split('\n')))) {
+      const rows = parsePiJsonlRows(raw.split('\n'));
+      for (const row of activePiJsonlRows(rows)) {
         const message = piJsonlRowMessage(row.obj);
         const base = message?.role === 'assistant' ? piAssistantKeyBase(message) : undefined;
         if (base) nextPiAssistantKeyBase(base, this.assistantKeyBaseCounts);
       }
+      this.heldUsage = { tokens: piTrailingUsage(rows) };
     } catch {
       /* a fresh session file may not exist yet — counters stay at 0 */
     }
@@ -1617,7 +1654,7 @@ class PiConnection implements SessionConnection {
         new Promise<any>((r) => setTimeout(() => r(null), 2500)),
       ]);
       const m = st?.data?.model;
-      const currentModel = piCurrentModelFromNative(m, st?.data?.thinkingLevel);
+      const currentModel = piCurrentModelFromNative(m, piThinkingSelector(st?.data));
       if (currentModel) {
         this.info.currentModel = currentModel;
         this.info.model = String(m?.name ?? m?.id ?? currentModel.modelID);
@@ -1773,8 +1810,10 @@ class PiConnection implements SessionConnection {
     const id = `rpc-${++this.reqId}`;
     return new Promise<T>((resolve) => {
       this.pendingRpc.set(id, resolve);
+      this.pendingRpcTypes.set(id, String(cmd.type));
       this.write({ id, ...cmd });
       setTimeout(() => {
+        this.pendingRpcTypes.delete(id);
         if (this.pendingRpc.delete(id)) resolve({ success: false, timeout: true } as T);
       }, 15000);
     });
@@ -1787,9 +1826,25 @@ class PiConnection implements SessionConnection {
     } catch {
       return;
     }
+    // Pi announces each entry it appends; usage spent outside a message (a cache warm) is one. omp
+    // announces none, so its model usage reaches the totals when the file is read again.
+    if (obj.type === 'entry_appended') {
+      const usage = piUsageEntryUsage(obj.entry);
+      if (usage) accumulatePiUsage(this.currentRun ?? this.heldUsage, usage);
+      return;
+    }
     if (obj.type === 'response' && obj.id && this.pendingRpc.has(obj.id)) {
+      if (obj.command === 'get_state' && obj.success === true) this.noteThinkingState(obj.data);
       this.pendingRpc.get(obj.id)!(obj);
       this.pendingRpc.delete(obj.id);
+      this.pendingRpcTypes.delete(obj.id);
+      return;
+    }
+    const refusedProbe = piUnansweredProbeRefusal(obj, this.pendingRpcTypes);
+    if (refusedProbe) {
+      this.pendingRpcTypes.delete(refusedProbe);
+      this.pendingRpc.get(refusedProbe)?.(obj);
+      this.pendingRpc.delete(refusedProbe);
       return;
     }
     if (
@@ -1877,6 +1932,13 @@ class PiConnection implements SessionConnection {
     return `${streaming.base}:${suffix}:${ordinal}`;
   }
 
+  /** The usage written while no turn was open, for the turn opening now. */
+  private takeHeldUsage(): { tokens?: PiOpenTurn['tokens'] } {
+    const tokens = this.heldUsage.tokens;
+    this.heldUsage = {};
+    return tokens ? { tokens } : {};
+  }
+
   /** Degraded RPC fallback: Pi normally emits turn_start BEFORE the user message_start, so
    *  turn_start itself must never mint a summary. If a runtime omits the user event entirely,
    *  the first assistant event opens the turn here using the run clock and queued prompt link. */
@@ -1884,7 +1946,7 @@ class PiConnection implements SessionConnection {
     if (this.currentRun) return;
     const anchor = `u${this.nextUserTurnOrdinal++}`;
     const ompCorrelationPending = this.rt.dialect.toolId === 'omp'
-      && this.pendingNativePromptAcks.size > 0;
+      && (this.pendingNativePromptAcks.size > 0 || this.ompQueuedPromptKeys.size > 0);
     this.currentRun = {
       key: `${this.rt.dialect.eventKeyNamespace}${anchor}`,
       turnId: anchor,
@@ -1895,6 +1957,7 @@ class PiConnection implements SessionConnection {
         ? undefined
         : this.consumePendingUserTurn() ?? this.lastUserMessageKey,
       startedAt: this.runStartedAt ?? Date.now(),
+      ...this.takeHeldUsage(),
     };
     this.emit({ type: 'run-summary', ...this.currentRun, status: 'running', source: this.rt.dialect.eventSources.rpc });
   }
@@ -1903,6 +1966,7 @@ class PiConnection implements SessionConnection {
    *  prompts. A blanket shift/pop is wrong when several steers are pending: the later successful
    *  message_start must still consume its own optimistic bubble key. */
   private removePendingUserTurn(userKey: string): void {
+    this.ompQueuedPromptKeys.delete(userKey);
     const index = this.pendingUserTurns.indexOf(userKey);
     if (index !== -1) this.pendingUserTurns.splice(index, 1);
     this.pendingUserEchoes.delete(userKey);
@@ -1985,6 +2049,28 @@ class PiConnection implements SessionConnection {
 
   private resolveNativePromptAck(userKey: string): void {
     this.pendingNativePromptAcks.get(userKey)?.resolve();
+  }
+
+  /**
+   * omp 19.1.0 lists the prompts it has queued (`queue_update`, captured): on each enqueue (before
+   * the prompt's RPC response), when a queued prompt starts, and when an abort clears the list. A
+   * prompt sent while a run is open otherwise proves itself only when it starts, at omp's next turn
+   * boundary, and every later prompt waits behind it. Prompt delivery is serialized, so at most one
+   * prompt is waiting; a snapshot that lists its text once more than the last one did is omp
+   * accepting it, so its sender, and the prompts after it, need not wait for that boundary. Its row
+   * stays queued until its exact correlated message starts.
+   */
+  private noteOmpQueue(ev: any): void {
+    const texts = [...(Array.isArray(ev?.steering) ? ev.steering : []), ...(Array.isArray(ev?.followUp) ? ev.followUp : [])]
+      .filter((text: unknown): text is string => typeof text === 'string');
+    const count = (list: string[], text: string): number => list.filter((entry) => entry === text).length;
+    const [waiting, ...others] = this.pendingNativePromptAcks.keys();
+    const text = waiting && !others.length ? this.pendingUserEchoes.get(waiting)?.text : undefined;
+    if (waiting && text !== undefined && count(texts, text) > count(this.ompQueuedTexts, text)) {
+      this.ompQueuedPromptKeys.add(waiting);
+      this.resolveNativePromptAck(waiting);
+    }
+    this.ompQueuedTexts = texts;
   }
 
   /** The end of a run the runtime will not continue: a terminal `agent_end`, or `session_settled`
@@ -2092,7 +2178,10 @@ class PiConnection implements SessionConnection {
             queued: false,
           });
         }
-        if (correlation) this.resolveNativePromptAck(correlation.messageKey);
+        if (correlation) {
+          this.resolveNativePromptAck(correlation.messageKey);
+          this.ompQueuedPromptKeys.delete(correlation.messageKey);
+        }
         const anchor = correlation?.messageKey ?? ordinalAnchor;
         this.currentRun = {
           key: `${this.rt.dialect.eventKeyNamespace}${anchor}`,
@@ -2101,6 +2190,7 @@ class PiConnection implements SessionConnection {
           // The message's own clock is the turn's start — the durable record of the same
           // instant the JSONL entry carries, so live and reload agree.
           startedAt: userStartedAt,
+          ...this.takeHeldUsage(),
         };
         this.emit({ type: 'run-summary', ...this.currentRun, status: 'running', source: this.rt.dialect.eventSources.rpc });
         return;
@@ -2163,6 +2253,9 @@ class PiConnection implements SessionConnection {
           return;
         }
         this.finishRun(ev);
+        return;
+      case 'queue_update':
+        this.noteOmpQueue(ev);
         return;
       case 'session_settled':
         // omp's "nothing is live, queued or scheduled" (measured after every terminal agent_end).
@@ -2453,9 +2546,39 @@ class PiConnection implements SessionConnection {
     for (const message of await this.sessionStatsMessages()) this.emit(message);
   }
 
+  /** Keep what a native state says about thinking levels: omp lists the current model's selectors
+   *  in every state, so the picker needs no read of its own. */
+  private noteThinkingState(state: any): void {
+    const catalog = piThinkingCatalog(state);
+    if (catalog.selectors) this.thinkingSelectors = catalog.selectors;
+    const model = piCurrentModelFromNative(state?.model);
+    if (model && catalog.current) this.thinkingCatalog = { model: piModelKey(model), catalog };
+  }
+
+  /** The levels for the picker without a state read: omp's from its last state, else its selectors
+   *  beside each model's efforts; Pi's from one `get_available_thinking_levels` per current model.
+   *  A build without that command answers once, without an id, and is not asked again. */
+  private async pickerThinkingCatalog(): Promise<PiThinkingCatalog> {
+    const current = this.info.currentModel;
+    if (!current?.modelID) return this.thinkingSelectors ? { selectors: this.thinkingSelectors } : {};
+    const key = piModelKey(current);
+    if (this.thinkingCatalog?.model === key) return this.thinkingCatalog.catalog;
+    if (this.thinkingSelectors) return { selectors: this.thinkingSelectors };
+    if (this.thinkingLevelsRefused) return {};
+    const answer = await this.rpc({ type: 'get_available_thinking_levels' });
+    if (answer?.success !== true) {
+      if (!answer?.timeout) this.thinkingLevelsRefused = true;
+      return {};
+    }
+    // The answer is for the runtime's current model, which this selection mirrors.
+    const catalog = piThinkingCatalog({ model: { provider: current.providerID, id: current.modelID } }, answer.data?.levels);
+    if (this.info.currentModel === current) this.thinkingCatalog = { model: key, catalog };
+    return catalog;
+  }
+
   /** Make the broker's advertised selection match one acknowledged native Pi state. */
   private publishNativeModelState(state: any): boolean {
-    const currentModel = piCurrentModelFromNative(state?.model, state?.thinkingLevel);
+    const currentModel = piCurrentModelFromNative(state?.model, piThinkingSelector(state));
     if (!currentModel) return false;
     this.modelStateUncertain = false;
     this.info.currentModel = currentModel;
@@ -2483,14 +2606,14 @@ class PiConnection implements SessionConnection {
    *  pieces of the previous native selection. If either rollback command is rejected/ambiguous,
    *  read Pi's actual state and advertise that instead of guessing which mutation took effect. */
   private async restoreNativeModelState(previousState: any): Promise<void> {
-    const previousModel = piCurrentModelFromNative(previousState?.model, previousState?.thinkingLevel);
+    const previousModel = piCurrentModelFromNative(previousState?.model, piThinkingSelector(previousState));
     if (!previousModel) throw new Error(`${this.rt.dialect.displayName} model rollback has no valid previous model.`);
     const modelResp = await this.rpc({
       type: 'set_model',
       provider: previousModel.providerID,
       modelId: previousModel.modelID,
     });
-    const previousEffort = normalizePiThinkingLevel(previousState?.thinkingLevel ?? previousModel.reasoningEffort);
+    const previousEffort = piThinkingSelector(previousState) ?? normalizePiThinkingLevel(previousModel.reasoningEffort);
     if (!previousEffort) throw new Error(`${this.rt.dialect.displayName} model rollback has no valid previous thinking level.`);
     const effortResp = await this.rpc({ type: 'set_thinking_level', level: previousEffort });
     if (modelResp?.success === true && effortResp?.success === true) {
@@ -2512,24 +2635,22 @@ class PiConnection implements SessionConnection {
     const previousResp = await this.rpc({ type: 'get_state' });
     const previousModel = piCurrentModelFromNative(
       previousResp?.data?.model,
-      previousResp?.data?.thinkingLevel,
+      piThinkingSelector(previousResp?.data),
     );
     if (previousResp?.success !== true || !previousModel) {
       throw new Error(previousResp?.error ?? `${this.rt.dialect.displayName} get_state failed before model override.`);
     }
+    const previousEffort = piThinkingSelector(previousResp.data) ?? normalizePiThinkingLevel(previousModel.reasoningEffort);
     // Already on it: switching would change nothing but append a model entry to the session file.
     if (
       previousModel.providerID === model.providerID
       && previousModel.modelID === model.modelID
-      && (!effort || normalizePiThinkingLevel(previousResp.data?.thinkingLevel ?? previousModel.reasoningEffort) === effort)
+      && (!effort || previousEffort === effort)
     ) {
       this.info.currentModel = previousModel;
       return;
     }
-    if (
-      effort
-      && !normalizePiThinkingLevel(previousResp.data?.thinkingLevel ?? previousModel.reasoningEffort)
-    ) {
+    if (effort && !previousEffort) {
       throw new Error(`${this.rt.dialect.displayName} get_state returned no rollback-safe thinking level.`);
     }
     const modelResp = await this.rpc({ type: 'set_model', provider: model.providerID, modelId: model.modelID });
@@ -2537,7 +2658,12 @@ class PiConnection implements SessionConnection {
       throw new Error(modelResp?.error ?? `${this.rt.dialect.displayName} set_model failed.`);
     }
     if (effort) {
-      const effortResp = await this.rpc({ type: 'set_thinking_level', level: effort });
+      // Only an omp that lists `auto` for the selected model takes it; anything else is refused
+      // here, as a level the runtime rejected, and the previous selection is restored.
+      const autoRefused = effort === 'auto' && !piOffersAutoThinking((await this.rpc({ type: 'get_state' }))?.data);
+      const effortResp = autoRefused
+        ? { success: false, error: `${this.rt.dialect.displayName} does not offer the auto thinking level for this model.` }
+        : await this.rpc({ type: 'set_thinking_level', level: effort });
       if (effortResp?.success !== true) {
         const failure = effortResp?.error ?? `${this.rt.dialect.displayName} set_thinking_level failed.`;
         // Native Pi may already be on the requested model. Block concurrent/later delivery until
@@ -2895,8 +3021,9 @@ class PiConnection implements SessionConnection {
       const models: any[] = Array.isArray(resp?.data?.models)
         ? resp.data.models.slice(0, PI_MAX_MODEL_OPTIONS)
         : [];
+      const catalog = await this.pickerThinkingCatalog();
       return models
-        .map((m) => piModelOption(m, this.info.currentModel?.reasoningEffort))
+        .map((m) => piModelOption(m, this.info.currentModel?.reasoningEffort, catalog))
         .filter((m): m is ModelOption => !!m);
     } catch {
       return [];
@@ -2915,6 +3042,7 @@ class PiConnection implements SessionConnection {
       pending.reject(new Error(`${this.rt.dialect.displayName} Drive connection closed before prompt persistence.`));
     }
     this.pendingNativePromptAcks.clear();
+    this.ompQueuedPromptKeys.clear();
     try {
       this.write({ type: 'abort' });
     } catch {
@@ -3200,6 +3328,28 @@ class PiObserveConnection implements SessionConnection {
 }
 
 // ── mapping helpers ───────────────────────────────────────────────────────────
+
+/** Commands the engine asks only to learn whether a build has them. A build without one answers
+ *  `Unknown command` with no id (Pi 0.78.1 and omp 17.4.2 rpc-mode), so the refusal is matched by
+ *  its command name to the request of that type still waiting, instead of waiting out a timeout. */
+const PI_OPTIONAL_PROBES: ReadonlySet<string> = new Set(['get_available_thinking_levels']);
+
+function piUnansweredProbeRefusal(obj: any, pendingTypes: ReadonlyMap<string, string>): string | undefined {
+  if (obj?.type !== 'response' || obj.id || obj.success !== false || !PI_OPTIONAL_PROBES.has(obj.command)) return undefined;
+  for (const [id, type] of pendingTypes) if (type === obj.command) return id;
+  return undefined;
+}
+
+function piModelKey(model: { providerID: string; modelID: string }): string {
+  return `${model.providerID}\u0000${model.modelID}`;
+}
+
+/** Pi lists the current model's levels on request; omp already put them in its state. */
+async function piAdvertisedLevels(state: any, rpc: (cmd: Record<string, unknown>) => Promise<any>): Promise<unknown> {
+  if (Array.isArray(state?.thinkingLevels)) return undefined;
+  const answer = await rpc({ type: 'get_available_thinking_levels' });
+  return answer?.success === true ? answer.data?.levels : undefined;
+}
 
 const PI_COLLAB_PROMPT_TYPE = 'collab-prompt';
 const PI_SKILL_PROMPT_TYPE = 'skill-prompt';
@@ -3637,6 +3787,8 @@ export interface PiJsonlTurnCarry {
   /** Arguments of the tool calls read so far whose result has not been read yet, by call id: a
    *  result in a later window is built from them exactly as a whole-file read builds it. */
   toolArgs?: Map<string, any>;
+  /** Usage written while no turn was open, held for the next turn. */
+  heldTokens?: PiOpenTurn['tokens'];
 }
 
 /** Tool calls a tail keeps waiting for their result; the oldest are forgotten beyond this. */
@@ -3672,10 +3824,19 @@ function mapPiJsonlLines(
   activeBranchOnly = false,
   userEchoes?: PiUserEchoAssigner,
 ): AgentMessage[] {
-  const entries: { message: any; index: number; keyBase: string; entryAt?: number; messageAt?: number }[] = [];
+  const entries: PiMappedEntry[] = [];
   const parsedRows = parsePiJsonlRows(lines, firstIndex);
-  const rows = activeBranchOnly ? activePiJsonlRows(parsedRows) : parsedRows;
-  for (const { obj, index } of rows) {
+  const active = activeBranchOnly ? new Set(activePiJsonlRows(parsedRows)) : undefined;
+  for (const row of parsedRows) {
+    const { obj, index } = row;
+    // Usage the runtime spent outside a message (Pi's cache warms, omp's model usage) counts toward
+    // the turn totals wherever it sits in the tree, an abandoned branch included, and is never a row.
+    const usage = piUsageEntryUsage(obj);
+    if (usage) {
+      entries.push({ message: undefined, usage, index, keyBase: `h${index}` });
+      continue;
+    }
+    if (active && !active.has(row)) continue;
     const message = piJsonlRowMessage(obj);
     if (!message) continue;
     const keyBase = obj.id != null ? String(obj.id) : message.id != null ? String(message.id) : `h${index}`;
@@ -3764,7 +3925,7 @@ function accumulatePiUsage(
  *  - Missing or contradictory clocks omit the duration rather than guess.
  */
 function mapPiMessages(
-  entries: { message: any; index: number; keyBase: string; entryAt?: number; messageAt?: number }[],
+  entries: PiMappedEntry[],
   argsByCallId: Map<string, any>,
   includeTotals: boolean,
   carry?: PiJsonlTurnCarry,
@@ -3838,7 +3999,29 @@ function mapPiMessages(
     summaries.push(summary);
   };
 
+  // Usage outside a message counts toward the turn open where it was written, and usage written
+  // between turns (an idle cache warm, omp's judge before the prompt it judges) toward the next
+  // turn: the live paths can then add it as it comes, and no finished summary changes afterwards.
+  let held = carry?.heldTokens;
+  const countUsage = (usage: any): void => {
+    if (open) return accumulatePiUsage(open, usage);
+    const into: { tokens?: PiOpenTurn['tokens'] } = { tokens: held };
+    accumulatePiUsage(into, usage);
+    held = into.tokens;
+  };
+  const opened = (turn: PiOpenTurn): PiOpenTurn => {
+    if (held) {
+      turn.tokens = held;
+      held = undefined;
+    }
+    return turn;
+  };
+
   for (const e of entries) {
+    if (e.usage) {
+      countUsage(e.usage);
+      continue;
+    }
     if (e.message?.role === 'cosyncingRunEnd') {
       const end = e.message;
       const anchor = open?.summaryAnchor;
@@ -3887,15 +4070,15 @@ function mapPiMessages(
         : correlation && allowCorrelation
           ? correlation.messageKey
           : (skill ? ordinalAnchor! : echo?.key ?? e.keyBase);
-      open = {
+      open = opened({
         summaryAnchor: correlation
           ? (allowCorrelation ? correlation.messageKey : e.keyBase)
           : ordinalAnchor!,
         userKey,
         startedAt: correlation?.sentAt ?? skill?.sentAt ?? e.messageAt ?? e.entryAt,
-      };
+      });
     } else if (e.message?.role === 'assistant') {
-      open ??= {};
+      open ??= opened({});
       const supersededRetry = piAssistantRetryIsSuperseded(e.message);
       if (!supersededRetry) {
         open.lastAssistant = {
@@ -3923,6 +4106,7 @@ function mapPiMessages(
     // report the turn as running, so nothing fabricates a completion.
     carry.open = open;
     carry.nextUserOrdinal = nextUserOrdinal;
+    carry.heldTokens = held;
     close(open, false);
   } else {
     close(open, false);
@@ -3968,6 +4152,34 @@ function firstPiAssistantTextKey(message: any, keyBase: string): string | undefi
   if (message.content.some((c: any) => c?.type === 'text' && c.text)) return `${keyBase}:t:0`;
   if (message.content.some((c: any) => c?.type === 'thinking' && c.thinking)) return `${keyBase}:r:0`;
   return undefined;
+}
+
+/** Usage written after the session's last turn boundary, which a reload counts toward the next turn. */
+function piTrailingUsage(rows: ParsedPiJsonlRow[]): PiOpenTurn['tokens'] {
+  const into: { tokens?: PiOpenTurn['tokens'] } = {};
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const obj = rows[index]!.obj;
+    const usage = piUsageEntryUsage(obj);
+    if (usage) {
+      accumulatePiUsage(into, usage);
+      continue;
+    }
+    const message = piJsonlRowMessage(obj);
+    if (message?.role === 'user' || message?.role === 'assistant'
+      || piCollabPromptCorrelation(message) || piSkillPromptInvocation(message)) break;
+  }
+  return into.tokens;
+}
+
+/** One mapped session entry: a message, or usage the runtime spent outside a message. */
+type PiMappedEntry = { message: any; index: number; keyBase: string; entryAt?: number; messageAt?: number; usage?: any };
+
+/** The usage of an entry that records spend outside any message: Pi's `usage` entries (cache
+ *  warms, captured Pi 1.6.0) and omp's `model_usage` (titles, the auto-thinking judge, cache warms
+ *  and discarded turns; captured omp 19.1.0). Both runtimes count them in their own totals. */
+function piUsageEntryUsage(obj: any): any | undefined {
+  if (obj?.type !== 'usage' && obj?.type !== 'model_usage') return undefined;
+  return obj.usage && typeof obj.usage === 'object' ? obj.usage : undefined;
 }
 
 function piUsageTokens(usage: any): { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: number } | undefined {
@@ -4343,28 +4555,6 @@ function contentImageCount(content: unknown): number {
     : 0;
 }
 
-function normalizePiThinkingLevel(value: unknown): string | undefined {
-  const level = typeof value === 'string' ? value.trim() : '';
-  return PI_THINKING_LEVEL_SET.has(level as any) ? level : undefined;
-}
-
-function piThinkingEfforts(model: any): ModelOption['reasoningEfforts'] | undefined {
-  if (model?.reasoning !== true) return undefined;
-  const nativeEfforts = Array.isArray(model?.thinking)
-    ? model.thinking
-    : Array.isArray(model?.thinking?.efforts)
-      ? model.thinking.efforts
-      : undefined;
-  const nativeThinking = nativeEfforts
-    ? new Set(nativeEfforts.map((value: unknown) => normalizePiThinkingLevel(value)).filter(Boolean))
-    : undefined;
-  const map = model?.thinkingLevelMap && typeof model.thinkingLevelMap === 'object' ? model.thinkingLevelMap : undefined;
-  const efforts = PI_THINKING_LEVELS
-    .filter(({ effort }) => nativeThinking ? nativeThinking.has(effort) : map?.[effort] !== null)
-    .map(({ effort, label }) => ({ effort, label }));
-  return efforts.length ? efforts : undefined;
-}
-
 function piCurrentModelFromNative(model: any, thinkingLevel?: unknown): SessionInfo['currentModel'] | undefined {
   const modelID = model?.id ?? model?.modelID ?? model?.model;
   if (typeof modelID !== 'string' || !modelID) return undefined;
@@ -4376,7 +4566,7 @@ function piCurrentModelFromNative(model: any, thinkingLevel?: unknown): SessionI
   };
 }
 
-function piModelOption(model: any, currentEffort?: string): ModelOption | undefined {
+function piModelOption(model: any, currentEffort?: string, catalog?: PiThinkingCatalog): ModelOption | undefined {
   const modelID = model?.id ?? model?.modelID;
   if (typeof modelID !== 'string' || !modelID) return undefined;
   const option: ModelOption = {
@@ -4384,7 +4574,7 @@ function piModelOption(model: any, currentEffort?: string): ModelOption | undefi
     modelID,
     label: String(model.name ?? model.label ?? modelID),
   };
-  const efforts = piThinkingEfforts(model);
+  const efforts = piThinkingEfforts(model, catalog);
   if (efforts?.length) {
     option.reasoningEfforts = efforts;
     if (currentEffort && efforts.some((e) => e.effort === currentEffort)) option.defaultReasoningEffort = currentEffort;
@@ -4434,7 +4624,9 @@ function scanSessionSurface(lines: string[], dialect: PiDialect): PiSessionSurfa
     } catch {
       continue;
     }
-    const level = normalizePiThinkingLevel(obj?.thinkingLevel ?? obj?.thinking_level ?? obj?.data?.thinkingLevel);
+    // omp records the selector beside the level it resolved to (`configured: 'auto'`).
+    const level = (obj?.type === 'thinking_level_change' ? piThinkingSelector(obj) : undefined)
+      ?? normalizePiThinkingLevel(obj?.thinkingLevel ?? obj?.thinking_level ?? obj?.data?.thinkingLevel);
     if (obj?.type === 'thinking_level_change' && level) {
       thinkingLevel = level;
       if (currentModel) currentModel = { ...currentModel, reasoningEffort: level };
@@ -4585,7 +4777,7 @@ function materializePiSessionFile(
   cwd: string,
   sessionId?: string,
   title?: string,
-  nativeState?: Pick<PiRpcSessionState, 'model' | 'thinkingLevel'>,
+  nativeState?: Pick<PiRpcSessionState, 'model' | 'thinkingLevel' | 'configuredThinkingLevel'>,
 ): void {
   try {
     if (!existsSync(file)) {
@@ -4621,7 +4813,7 @@ function materializePiSessionFile(
     // The same zero-turn gap applies to set_model/set_thinking_level. Persist the native state
     // returned by get_state so the immediately-following resume process cannot fall back to a
     // different global default before the first prompt.
-    const selected = piCurrentModelFromNative(nativeState?.model, nativeState?.thinkingLevel);
+    const selected = piCurrentModelFromNative(nativeState?.model, piThinkingSelector(nativeState));
     const durable = readSessionSurface(rt, file).currentModel;
     if (
       selected?.modelID
@@ -4654,8 +4846,10 @@ function materializePiSessionFile(
             id: `cosyncing-thinking-${Date.now()}`,
             parentId: modelEntryId,
             timestamp: new Date().toISOString(),
-            thinkingLevel: selected.reasoningEffort,
-            configured: null,
+            // omp's own shape for auto mode: the level it resolved to, and `auto` as the selector.
+            ...(selected.reasoningEffort === 'auto'
+              ? { thinkingLevel: normalizePiThinkingLevel(nativeState?.thinkingLevel) ?? null, configured: 'auto' }
+              : { thinkingLevel: selected.reasoningEffort, configured: null }),
           }) + '\n',
           { flag: 'a' },
         );

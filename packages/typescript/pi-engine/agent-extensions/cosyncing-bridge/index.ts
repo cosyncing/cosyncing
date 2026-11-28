@@ -91,7 +91,9 @@ const SHUTDOWN_SAFETY_MS = 250;
 // ownership boundary and cannot be reconstructed; buffered events can, from the
 // native transcript on the next replay. So the transcript yields to it.
 const SHUTDOWN_BYE_RESERVE_MS = 600;
-const PI_THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh']);
+// Every level the extension API sets, `max` included (Pi and omp both take it for a model that
+// lists it). omp's `auto` is a selector its extension API does not take.
+const PI_THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 const COLLAB_PROMPT_TYPE = 'collab-prompt';
 const SKILL_PROMPT_TYPE = 'skill-prompt';
 const REMOTE_USER_KEY_PREFIX = 'u:remote:';
@@ -300,6 +302,12 @@ export default function (pi: ExtensionAPI) {
   let agentStartAt: number | undefined;
   /** Usage summed across the OPEN TURN's message_ends, reported on that turn's summary. */
   let currentRunTokens: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: number } | undefined;
+  /** Usage entries (Pi's cache warms, omp's model usage) already counted, by entry id. */
+  let countedUsage = new Set<string>();
+  /** How far the session's entries were swept for usage, and the id of the last entry swept: a
+   *  list that is shorter or holds another entry there is another session's, swept again whole. */
+  let usageSwept = 0;
+  let usageSweptId: string | undefined;
   let retryActive = false;
   let lastUserMessageKey: string | undefined;
   // Per-user-message key counter. Pi's UserMessage has NO id field (message_start emits a bare
@@ -937,7 +945,15 @@ export default function (pi: ExtensionAPI) {
     const prepared = await post('/pi/bridge/hello', { ...metadata, prepare: true, running: isBusyNow() }, undefined, signal);
     if (!prepared?.id || ended || epoch !== expected || signal.aborted
       || ctx.sessionManager?.getSessionFile?.() !== sessionFile) return false;
-    const history = [...buildHistory(ctx), ...([contextUsageEvent(ctx)].filter(Boolean))];
+    const held = new Set<string>();
+    const history = [...buildHistory(ctx, held), ...([contextUsageEvent(ctx)].filter(Boolean))];
+    // The backfill counted the usage written so far, except what waits for the next turn; live
+    // sweeps count the rest, into that turn, starting from the first entry still waiting.
+    const written = sessionEntries(ctx);
+    countedUsage = new Set(written.filter((entry: any) => entry?.id != null && entryUsage(entry))
+      .map((entry: any) => String(entry.id)).filter((id: string) => !held.has(id)));
+    const firstHeld = written.findIndex((entry: any) => entry?.id != null && held.has(String(entry.id)));
+    markUsageSwept(written, firstHeld < 0 ? written.length : firstHeld);
     const running = isBusyNow();
     const restored = history.findLast((event: any) => event.t === 'run-summary' && event.status === 'running');
     // Reconstruct the OPEN turn, not just its replay row. A fresh extension may join while a
@@ -1107,6 +1123,8 @@ export default function (pi: ExtensionAPI) {
     alive = false;
     currentRun = undefined;
     currentRunTokens = undefined;
+    usageSwept = 0;
+    usageSweptId = undefined;
     agentStartAt = undefined;
     retryActive = false;
     lastUserMessageKey = undefined;
@@ -1242,6 +1260,31 @@ export default function (pi: ExtensionAPI) {
     });
   };
 
+  const markUsageSwept = (entries: any[], count: number): void => {
+    usageSwept = count;
+    usageSweptId = count > 0 ? String(entries[count - 1]?.id) : undefined;
+  };
+
+  /** Usage entries written since the last sweep (the extension API announces none) count toward
+   *  the open turn: those written while it ran, and those written between turns, which a reload of
+   *  the file counts toward the next turn too. Entries are only appended within a session, so each
+   *  sweep reads on from where the last one stopped. */
+  const sweepUsage = (ctx: any): void => {
+    const entries = sessionEntries(ctx);
+    if (usageSwept > entries.length
+      || (usageSwept > 0 && String(entries[usageSwept - 1]?.id) !== usageSweptId)) markUsageSwept(entries, 0);
+    for (let index = usageSwept; index < entries.length; index++) {
+      const entry = entries[index];
+      const usage = entryUsage(entry);
+      if (!usage || entry?.id == null) continue;
+      const id = String(entry.id);
+      if (countedUsage.has(id)) continue;
+      countedUsage.add(id);
+      currentRunTokens = addUsage(currentRunTokens, usage);
+    }
+    markUsageSwept(entries, entries.length);
+  };
+
   /** Pi normally emits turn_start BEFORE the user message_start. A fallback created at
    *  turn_start therefore becomes an orphan as soon as the real user turn opens. Wait until the
    *  first assistant event; only a degraded stream with no user event reaches this path. */
@@ -1367,20 +1410,10 @@ export default function (pi: ExtensionAPI) {
       // Summed for the OPEN TURN's summary. A run with tool calls has many message_ends
       // inside one turn — only a TERMINAL stopReason below ends the turn, so a mid-turn
       // toolUse end never stamps a premature completed footer.
-      const sum = currentRunTokens ?? {};
-      for (const [field, value] of [
-        ['input', u.input],
-        ['output', u.output],
-        ['cacheRead', u.cacheRead],
-        ['cacheWrite', u.cacheWrite],
-        ['cost', u.cost?.total],
-      ] as const) {
-        if (typeof value === 'number' && Number.isFinite(value)) {
-          sum[field] = (sum[field] ?? 0) + value;
-        }
-      }
-      currentRunTokens = sum;
+      currentRunTokens = addUsage(currentRunTokens, u);
     }
+    // Usage written while this turn ran (a cache warm, omp's judge or title) is this turn's too.
+    sweepUsage(ctx);
     // The message's END clock is the live analog of the entry write time buildHistory reads —
     // the only authoritative completion evidence. A terminal stopReason closes the turn HERE,
     // as buildHistory closes on the entry, so a queued follow-up's next turn never inherits
@@ -1720,7 +1753,64 @@ function countUserMessages(ctx: any): number {
   return n;
 }
 
-function buildHistory(ctx: any): any[] {
+/** The usage of an entry that records spend outside any message: Pi's `usage` entries (cache warms)
+ *  and omp's `model_usage` (titles, the auto-thinking judge, cache warms, discarded turns). Both
+ *  runtimes count them in their own totals; they are never transcript rows. */
+function entryUsage(entry: any): any {
+  if (entry?.type !== 'usage' && entry?.type !== 'model_usage') return undefined;
+  return entry.usage && typeof entry.usage === 'object' ? entry.usage : undefined;
+}
+
+/** Every entry the session holds, on any branch, in the order it was written. */
+function sessionEntries(ctx: any): any[] {
+  try {
+    const entries = ctx?.sessionManager?.getEntries?.();
+    return Array.isArray(entries) ? entries : [];
+  } catch {
+    return [];
+  }
+}
+
+function addUsage(
+  sum: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: number } | undefined,
+  usage: any,
+): { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: number } | undefined {
+  if (!usage) return sum;
+  let next = sum;
+  for (const [field, value] of [
+    ['input', usage.input],
+    ['output', usage.output],
+    ['cacheRead', usage.cacheRead],
+    ['cacheWrite', usage.cacheWrite],
+    ['cost', usage.cost?.total],
+  ] as const) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      next ??= {};
+      next[field] = (next[field] ?? 0) + value;
+    }
+  }
+  return next;
+}
+
+/** The branch entries with every usage entry, on any branch, at the place it was written. A store
+ *  whose entries carry no ids keeps the branch alone. */
+function entriesWithUsage(ctx: any, branch: any[]): any[] {
+  if (!branch.every((entry: any) => entry?.id != null)) return branch;
+  let all: any[] | undefined;
+  try {
+    const entries = ctx?.sessionManager?.getEntries?.();
+    if (Array.isArray(entries)) all = entries;
+  } catch {
+    /* the branch alone */
+  }
+  if (!all) return branch;
+  const onBranch = new Set(branch.map((entry: any) => String(entry.id)));
+  return all.filter((entry: any) => (entry?.id != null && onBranch.has(String(entry.id))) || entryUsage(entry));
+}
+
+/** `heldUsage` receives the ids of usage entries written after the last turn, which count toward
+ *  the next one. */
+function buildHistory(ctx: any, heldUsage?: Set<string>): any[] {
   const entries = currentBranchEntries(ctx);
   // Tool-call args by id (a toolResult's file path lives on the originating call) — same recovery the
   // live relay does via toolArgs, but resolved here across the stored entries.
@@ -1762,6 +1852,16 @@ function buildHistory(ctx: any): any[] {
         tokens?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: number };
       }
     | undefined;
+  // Usage outside a message counts toward the turn open where it was written, and usage written
+  // between turns toward the next turn (the broker's mapper rule).
+  let held: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: number } | undefined;
+  let heldIds: string[] = [];
+  const opened = (turn: NonNullable<typeof openTurn>): NonNullable<typeof openTurn> => {
+    if (held) turn.tokens = held;
+    held = undefined;
+    heldIds = [];
+    return turn;
+  };
   const closeTurn = (closed: boolean): void => {
     const turnState = openTurn;
     openTurn = undefined;
@@ -1785,7 +1885,7 @@ function buildHistory(ctx: any): any[] {
       ? completedAt - startedAt
       : undefined;
     const anchor = turnState.userKey ?? last!.key;
-    out.push({
+    const summary = {
       t: 'run-summary',
       key: `pi:run:${anchor}`,
       turnId: anchor,
@@ -1797,14 +1897,24 @@ function buildHistory(ctx: any): any[] {
       ...(duration != null ? { totalRuntimeMs: duration } : {}),
       ...(turnState.tokens ? { tokens: turnState.tokens } : {}),
       source: 'pi-bridge-history',
-    });
+    };
+    out.push(summary);
     if (duration != null) {
       totalRuntimeMs += duration;
       turnCount++;
       if (completedAt != null) updatedAt = updatedAt == null ? completedAt : Math.max(updatedAt, completedAt);
     }
   };
-  for (const e of entries) {
+  for (const e of entriesWithUsage(ctx, entries)) {
+    const usage = entryUsage(e);
+    if (usage) {
+      if (openTurn) openTurn.tokens = addUsage(openTurn.tokens, usage);
+      else {
+        held = addUsage(held, usage);
+        heldIds.push(String(e.id));
+      }
+      continue;
+    }
     const key = String(e.id ?? `h${i++}`);
     if (e?.type === 'custom' && e.customType === 'cosyncing-run-end') {
       const end = e.data;
@@ -1838,7 +1948,7 @@ function buildHistory(ctx: any): any[] {
         ...(imageCount ? { imageCount } : {}),
         sentAt,
       });
-      openTurn = { userKey, startedAt: sentAt };
+      openTurn = opened({ userKey, startedAt: sentAt });
       continue;
     }
     if (e?.type !== 'message') continue;
@@ -1854,7 +1964,7 @@ function buildHistory(ctx: any): any[] {
         t: 'user', text, key: userKey, turnId: userKey, sentAt,
         ...(imageCount ? { imageCount } : {}),
       });
-      openTurn = { userKey, startedAt: sentAt };
+      openTurn = opened({ userKey, startedAt: sentAt });
     } else if (m.role === 'assistant') {
       const think = thinkingText(m.content);
       if (think) out.push({ t: 'final', kind: 'thinking', key: `${key}:r`, text: think });
@@ -1864,7 +1974,7 @@ function buildHistory(ctx: any): any[] {
         for (const p of m.content)
           if (p?.type === 'toolCall')
             out.push({ t: 'tool-call', callId: String(p.id ?? ''), name: String(p.name ?? 'tool'), args: p.arguments });
-      openTurn ??= {};
+      openTurn ??= opened({});
       const supersededRetry = assistantRetryIsSuperseded(m);
       if (!supersededRetry) {
         openTurn.last = {
@@ -1877,19 +1987,7 @@ function buildHistory(ctx: any): any[] {
           anchor: text ? `${key}:t` : think ? `${key}:r` : undefined,
         };
       }
-      if (m.usage) {
-        const sum = openTurn.tokens ?? {};
-        for (const [field, value] of [
-          ['input', m.usage.input],
-          ['output', m.usage.output],
-          ['cacheRead', m.usage.cacheRead],
-          ['cacheWrite', m.usage.cacheWrite],
-          ['cost', m.usage.cost?.total],
-        ] as const) {
-          if (typeof value === 'number' && Number.isFinite(value)) sum[field] = (sum[field] ?? 0) + value;
-        }
-        openTurn.tokens = sum;
-      }
+      if (m.usage) openTurn.tokens = addUsage(openTurn.tokens, m.usage);
       const terminal = !supersededRetry
         && (m.stopReason === 'stop' || m.stopReason === 'aborted' || m.stopReason === 'error' || !!m.error);
       if (terminal) closeTurn(true);
@@ -1909,6 +2007,7 @@ function buildHistory(ctx: any): any[] {
   // A backfill taken mid-run reports the trailing turn as running — never as a
   // completed footer the run has not earned yet.
   closeTurn(false);
+  for (const id of heldIds) heldUsage?.add(id);
   if (turnCount) out.push({ t: 'runtime-totals', value: { totalRuntimeMs, turnCount, updatedAt, source: 'pi-bridge-history' } });
   return out;
 }

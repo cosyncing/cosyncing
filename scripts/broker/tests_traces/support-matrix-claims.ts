@@ -121,7 +121,7 @@ export const SUPPORT_MATRIX_CLAIMS: SupportClaim[] = [
   claim('opencode', 'F05', 'full', 'bash/edit/read/search summaries'),
   claim('pi', 'F05', 'full', 'common built-ins after enrichment'),
   claim('omp', 'F05', 'full', 'common built-ins after shared-engine enrichment'),
-  claim('reasonix', 'F05', 'partial', 'ACP tool titles and bounded raw results are preserved without path/diff enrichment'),
+  claim('reasonix', 'F05', 'partial', 'ACP tool titles and bounded text results (live content text, stored rows) are preserved without path/diff enrichment'),
   claim('grok', 'F05', 'partial', 'ACP tool metadata, arguments, and bounded results are preserved without unmeasured path/diff promotion'),
   claim('cline', 'F05', 'partial', 'live Hub and stored tool identities, names, bounded payloads, and subagent activity render without guessed path/diff promotion'),
   claim('kilo', 'F05', 'n/a', 'a synthetic shared-lineage mapper candidate exists, but no native Kilo tool part has been captured; tool identity, display, paths, and diffs remain unsupported'),
@@ -165,7 +165,7 @@ export const SUPPORT_MATRIX_CLAIMS: SupportClaim[] = [
   claim('reasonix', 'F08', 'partial', 'durable provider/model identity is displayed; existing-session model switch is unsupported'),
   claim('grok', 'F08', 'full', 'durable labels plus ACP model, effort, and mode selection survive create, relaunch, replay, and restart'),
   claim('cline', 'F08', 'partial', 'durable labels plus configured provider/model and ask/auto/plan mode propagate at managed creation; per-turn switching remains disabled'),
-  claim('kilo', 'F08', 'partial', 'provider model labels and model selection propagate through create, live SSE, replay, and restart; no measured permission-mode vocabulary exists'),
+  claim('kilo', 'F08', 'partial', 'provider model labels and model selection propagate through create, live SSE, replay, and restart; Drive offers Kilo\'s primary agents and the next prompt names the chosen one; no measured permission-mode vocabulary exists'),
 
   // F09 slash commands/skills/templates
   claim('claude', 'F09', 'partial', 'native command discovery; hooks cannot inject prompt commands'),
@@ -184,7 +184,7 @@ export const SUPPORT_MATRIX_CLAIMS: SupportClaim[] = [
   claim('opencode', 'F10', 'full', 'todowrite to task-list-state'),
   claim('pi', 'F10', 'n/a', 'no native todo tool'),
   claim('omp', 'F10', 'n/a', 'no mapped native todo tool'),
-  claim('reasonix', 'F10', 'n/a', 'no native task-list record or mapped todo tool'),
+  claim('reasonix', 'F10', 'partial', 'ACP plan updates and stored todo_write calls map to one task panel; host-advanced steps are live-only; no mutation controls'),
   claim('grok', 'F10', 'partial', 'measured task_completed snapshots map to native task-list state; mutation controls are not exposed'),
   claim('cline', 'F10', 'n/a', 'no measured Cline snapshot block carries a native todo or task-list state'),
   claim('kilo', 'F10', 'n/a', 'the shared mapper recognizes OpenCode-lineage todos, but no Kilo todo capture exists to advertise the feature'),
@@ -192,7 +192,7 @@ export const SUPPORT_MATRIX_CLAIMS: SupportClaim[] = [
   // F11 subagents/workflows/activity
   claim('claude', 'F11', 'full', 'Task plus UltraCode/workflow activity'),
   claim('codex', 'F11', 'full', 'spawn/wait-derived subagents'),
-  claim('opencode', 'F11', 'partial', 'OpenCode 1 and foreground OpenCode 2 task/subagent progress; OpenCode 2.3 background subagents and shells leave the parent idle with no job rows until their report starts an unprompted turn'),
+  claim('opencode', 'F11', 'partial', 'OpenCode 1 and foreground OpenCode 2 task/subagent progress; OpenCode 2.3 background subagents and shells are background rows while the parent reads idle, from job events on 2.4 and bounded job-list reads on 2.3, with no progress inside a running job'),
   claim('pi', 'F11', 'n/a', 'no native subagent/workflow concept'),
   claim('omp', 'F11', 'n/a', 'native subagent events are deliberately outside the v1 adapter'),
   claim('reasonix', 'F11', 'n/a', 'subagent command exists, but no child-session store shape has been measured'),

@@ -6,7 +6,8 @@
  * measured tool rows become bounded tool results, and unknown shapes use the
  * named context-injection category so a future Reasonix schema cannot turn
  * machine-authored material into user speech or take out replay. An assistant row's
- * `tool_calls` become the calls its tool rows answer.
+ * `tool_calls` become the calls its tool rows answer, and each `todo_write` call also becomes the
+ * session's task panel.
  */
 import {
   CONTEXT_INJECTION_EVENT,
@@ -45,6 +46,14 @@ const MAX_TOOL_RESULT_BYTES = 64 * 1024;
 const MAX_TOOL_PAYLOAD_BYTES = 64 * 1024;
 /** Calls restated from one assistant row, which bounds what a malformed row can cost. */
 const MAX_TOOL_CALLS_PER_RECORD = 256;
+/** Bounds for one task panel; Reasonix sets none of its own. */
+const MAX_PLAN_ITEMS = 256;
+const MAX_PLAN_ITEM_CHARS = 4_000;
+
+/** The tool whose arguments Reasonix mirrors as an ACP `plan` update. */
+export const REASONIX_PLAN_TOOL = 'todo_write';
+
+type ReasonixTaskListState = Extract<AgentMessage, { type: 'task-list-state' }>;
 
 export interface ReasonixDisplayEntry {
   index: number;
@@ -73,6 +82,66 @@ export function reasonixMessageKey(sessionId: string, index: number): string {
 
 export function reasonixTurnId(sessionId: string, turn: number): string {
   return `reasonix:${sessionId}:turn:${turn}`;
+}
+
+/** One task panel per session: every plan Reasonix sends replaces the whole list. */
+export function reasonixPlanKey(sessionId: string): string {
+  return `reasonix:${sessionId}:plan`;
+}
+
+/**
+ * The task panel for one list of `{content, status}` entries. Reasonix 1.25.2 and 2.61.0 build
+ * the ACP `plan` update from the `todo_write` arguments (`planEntriesFromTodoArgs` in
+ * `internal/acp/dispatch.go` and `internal/frontend/acp/dispatch.go`), so the live entries and the
+ * stored arguments name the same items and both map here. As upstream does, a blank entry is
+ * skipped and a status other than in_progress or completed reads as pending.
+ */
+export function reasonixTaskListState(sessionId: string, entries: readonly unknown[]): ReasonixTaskListState {
+  const items: ReasonixTaskListState['items'] = [];
+  for (const entry of entries) {
+    if (items.length >= MAX_PLAN_ITEMS) break;
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue;
+    const { content, status } = entry as { content?: unknown; status?: unknown };
+    if (typeof content !== 'string' || content.trim() === '') continue;
+    items.push({
+      id: String(items.length),
+      title: content.length <= MAX_PLAN_ITEM_CHARS ? content : `${content.slice(0, MAX_PLAN_ITEM_CHARS - 1)}…`,
+      status: status === 'completed' ? 'done' : status === 'in_progress' ? 'in-progress' : 'open',
+    });
+  }
+  return {
+    type: 'task-list-state',
+    key: reasonixPlanKey(sessionId),
+    status: items.length === 0 ? 'cleared'
+      : items.every((item) => item.status === 'done') ? 'done'
+        : 'running',
+    source: 'native',
+    sourceTool: REASONIX_PLAN_TOOL,
+    items,
+  };
+}
+
+/**
+ * The panel a stored `todo_write` call shows, or none where Reasonix's own session/load replay sends
+ * no plan: arguments that do not decode as `{todos: [{content: string, status: string, level:
+ * integer}]}` (upstream decodes them into that Go struct and gives up on any type error), or a list
+ * with no non-blank item. A call the tool then rejected still shows its list, live and replayed
+ * alike, because Reasonix sends the plan when it dispatches the call.
+ */
+function storedTaskListState(sessionId: string, args: unknown): ReasonixTaskListState | undefined {
+  if (typeof args !== 'object' || args === null || Array.isArray(args)) return undefined;
+  const todos = (args as { todos?: unknown }).todos;
+  if (!Array.isArray(todos)) return undefined;
+  for (const todo of todos) {
+    if (todo === null) continue;
+    if (typeof todo !== 'object' || Array.isArray(todo)) return undefined;
+    const { content, status, level } = todo as { content?: unknown; status?: unknown; level?: unknown };
+    if (content != null && typeof content !== 'string') return undefined;
+    if (status != null && typeof status !== 'string') return undefined;
+    if (level != null && !Number.isSafeInteger(level)) return undefined;
+  }
+  const panel = reasonixTaskListState(sessionId, todos);
+  return panel.items.length > 0 ? panel : undefined;
 }
 
 function textOf(value: unknown): string | undefined {
@@ -107,9 +176,10 @@ export function boundedReasonixToolPayload(value: unknown, label: 'input' | 'out
  * over ACP under the id it stores in `tool_calls`, and writes that id again on the tool row that
  * holds the result (upstream `internal/agent/run_loop.go`, `execute_batch.go`), so a replayed call
  * pairs with its result and matches the live row. ACP sends the stored arguments as raw JSON when
- * they parse and omits them otherwise.
+ * they parse and omits them otherwise. A `todo_write` call is preceded by its task panel, in the
+ * order the live drive receives the `plan` update and then the call.
  */
-function toolCallsOf(value: unknown, key: string): AgentMessage[] {
+function toolCallsOf(value: unknown, key: string, sessionId: string): AgentMessage[] {
   if (!Array.isArray(value)) return [];
   return value.slice(0, MAX_TOOL_CALLS_PER_RECORD).flatMap((entry, index): AgentMessage[] => {
     if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return [];
@@ -123,17 +193,27 @@ function toolCallsOf(value: unknown, key: string): AgentMessage[] {
       }
     }
     const toolName = boundedToolField(call.name, 'Reasonix tool');
-    return [{
-      type: 'tool-call',
-      callId: boundedToolField(call.id, `${key}:call:${index}`),
-      toolName,
-      title: toolName,
-      args: boundedReasonixToolPayload(args, 'input'),
-    }];
+    const panel = call.name === REASONIX_PLAN_TOOL ? storedTaskListState(sessionId, args) : undefined;
+    return [
+      ...(panel ? [panel] : []),
+      {
+        type: 'tool-call',
+        callId: boundedToolField(call.id, `${key}:call:${index}`),
+        toolName,
+        title: toolName,
+        args: boundedReasonixToolPayload(args, 'input'),
+      },
+    ];
   });
 }
 
+/**
+ * A stored tool result. Reasonix leaves `content` out of a row whose text is empty (an assistant
+ * step without text has no `content` key either), and the live drive shows that result as empty
+ * text, so an absent value is the empty result rather than an omission.
+ */
 function boundedToolResult(value: unknown): unknown {
+  if (value === undefined) return '';
   if (typeof value !== 'string') return '[Reasonix tool result was not textual; omitted]';
   return Buffer.byteLength(value, 'utf8') <= MAX_TOOL_RESULT_BYTES
     ? value
@@ -218,7 +298,7 @@ export function mapReasonixRecord(
         });
       }
       // After the step's footer, so each call sits beside the tool rows that follow with its result.
-      out.push(...toolCallsOf(record.tool_calls, key));
+      out.push(...toolCallsOf(record.tool_calls, key, context.sessionId));
       if (out.length > 0) return out;
     }
 

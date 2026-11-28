@@ -57,6 +57,18 @@ deliberate nonstandard executable.
 - Prompt queue, allow-once/reject permission, commands, model/mode relaunch, and
   cross-client writer sharing are covered by deterministic regressions. Foreign
   writes or transcript rewrites terminate and revoke the broker writer.
+- While the app drives a session, the title Grok generates after the first
+  prompt replaces the session title, unless you named the session when you
+  created it. The broker keeps that name only in memory: if it restarts between
+  Create and the first prompt, Grok's title replaces the name you gave. If the
+  running Grok child reports a switch to another listed model, the current
+  model follows; 1.0.92 was seen sending that report only while it loaded a
+  session.
+- A custom model whose `[model.<key>]` key differs from the `model` id it names
+  keeps Drive on Resume and when chosen in the model picker. Grok stores the id
+  and loads the model under its key, so the app shows the key, as the model
+  picker lists it. After a model switch, Drive continues only once Grok's stored
+  summary no longer names the model that ran before the switch.
 - In the default mode Grok 1.0.92 asks before writing a file and reads without
   asking. Rejecting a write ends the turn as cancelled: Grok stops the turn
   itself rather than letting the model continue.

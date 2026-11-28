@@ -286,6 +286,7 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
     nativeVersion: '1.25.2',
     coverage: [
       { fn: 'F05', level: 'L0', agents: ['reasonix'], note: 'a replayed tool step matches the rows the live drive emitted; interrupted partial calls are never restated' },
+      { fn: 'F10', level: 'L0', agents: ['reasonix'], note: 'a stored todo_write shows the plan Reasonix replays for it on session/load, at the live plan\'s position; blank or undecodable lists show no plan' },
     ],
   },
   {
@@ -319,6 +320,7 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
       { fn: 'F03', level: 'L0', agents: ['reasonix'], note: 'bounded FIFO prompt admission, durable echo reconciliation, cancel, and write refusal after demotion' },
       { fn: 'F04', level: 'L0', agents: ['reasonix'], note: 'pre-tool ACP answer/thought chunks use replay-compatible assistant sequence keys; ambiguous post-tool deltas remain keyless' },
       { fn: 'F05', level: 'L0', agents: ['reasonix'], note: 'terminal tool results preserve native title/name and bounded raw output' },
+      { fn: 'F10', level: 'L0', agents: ['reasonix'], note: 'live plan updates drive one task panel, the stored tail does not take it back, and a demoted connection replays the stored plans only' },
       { fn: 'F06', level: 'L0', agents: ['reasonix'], note: 'canonical permission decisions map to measured ACP option ids' },
       { fn: 'F14', level: 'L0', agents: ['reasonix'], note: 'history rewrite invalidates correlations and cancels the writer' },
       { fn: 'F16', level: 'L0', agents: ['reasonix'], note: 'admission caps, foreign-session permission refusal, ownership fences, and demotion on detectable conflicts' },
@@ -534,7 +536,7 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
       { fn: 'F03', level: 'L0', agents: ['kilo'], note: 'prompt_async preserves caller correlation, serial admission, abort, and refusal after demotion' },
       { fn: 'F04', level: 'L0', agents: ['kilo'], note: 'SSE answer/reasoning parts share stable identity with replay and suppress duplicate streaming snapshots' },
       { fn: 'F06', level: 'L0', agents: ['kilo'], note: 'authenticated pending permissions, native replies, external settlement, and close cleanup preserve ownership' },
-      { fn: 'F08', level: 'L0', agents: ['kilo'], note: 'provider catalog labels and model selections survive create, native updates, history, and restart' },
+      { fn: 'F08', level: 'L0', agents: ['kilo'], note: 'provider catalog labels and model selections survive create, native updates, history, and restart; the captured GET /agent list feeds the agent picker and a chosen agent is named by the next prompt' },
       { fn: 'F11', level: 'L0', agents: ['kilo'], note: 'live-qualified native child sessions preserve parent_id and remain Observe-only' },
       { fn: 'F14', level: 'L0', agents: ['kilo'], note: 'create, abort, native rename, and history replacement preserve lifecycle boundaries' },
       { fn: 'F15', level: 'L0', agents: ['kilo'], note: 'SSE status, run summaries, cache-aware tokens, and cost converge with durable history' },

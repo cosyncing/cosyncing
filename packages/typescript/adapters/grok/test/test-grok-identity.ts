@@ -188,6 +188,64 @@ try {
     }
   }
 
+  // Grok 1.0.92's own notices about the session (2026-11-24 capture; the fake sends the captured
+  // shapes under FAKE_GROK_SESSION_NOTICES): `model_changed` just before it answers session/load,
+  // and `session_summary_generated` with the title it generates during the first prompt.
+  {
+    const sessionInfoUpdates = (messages: readonly AgentMessage[], field: string) =>
+      messages.flatMap((message) => message.type === 'metadata-update' && message.key === 'sessionInfo'
+        && typeof message.value === 'object' && message.value !== null && field in message.value
+        ? [message.value as Record<string, unknown>]
+        : []);
+    const noticeDrive = async (name: string, options: { title?: string; modelChangedTo?: string }) => {
+      const noticeFake = writeFakeGrokBinary(join(root, `${name}-bin`), join(root, `${name}-home`));
+      noticeFake.env.FAKE_GROK_SESSION_NOTICES = '1';
+      if (options.modelChangedTo) noticeFake.env.FAKE_GROK_MODEL_CHANGED_TO = options.modelChangedTo;
+      const noticeAdapter = new GrokAdapter({ command: noticeFake.path, env: noticeFake.env, requestTimeoutMs: 2_000 });
+      const created = await noticeAdapter.createSession({
+        directory: cwd,
+        ...(options.title ? { title: options.title } : {}),
+        model: { providerID: 'xai', modelID: 'grok-4.6', reasoningEffort: 'high' },
+      });
+      const drive = await noticeAdapter.attach(created.id, 'resume') as GrokDriveConnection;
+      const live: AgentMessage[] = [];
+      drive.subscribe((message) => live.push(message));
+      let error: unknown;
+      try { await drive.sendPrompt({ text: 'first prompt' }); } catch (caught) { error = caught; }
+      return { drive, live, error };
+    };
+    const generated = await noticeDrive('generated-title', {});
+    check('the title Grok generates during the first prompt becomes the session title',
+      generated.error === undefined
+        && JSON.stringify(sessionInfoUpdates(generated.live, 'title')) === JSON.stringify([{ title: 'Generated fixture title' }])
+        && generated.drive.info.title === 'Generated fixture title',
+      JSON.stringify({ error: String(generated.error ?? ''), titles: sessionInfoUpdates(generated.live, 'title') }));
+    check('the model_changed Grok sends during session/load is not a change of model',
+      sessionInfoUpdates(generated.live, 'currentModel').length === 0
+        && generated.drive.info.currentModel?.modelID === 'grok-4.6',
+      JSON.stringify(sessionInfoUpdates(generated.live, 'currentModel')));
+    await generated.drive.close();
+
+    const chosen = await noticeDrive('chosen-title', { title: 'Chosen title' });
+    check('a title the user chose at Create is not replaced by the one Grok generates',
+      chosen.error === undefined
+        && sessionInfoUpdates(chosen.live, 'title').length === 0
+        && chosen.drive.info.title === 'Chosen title',
+      JSON.stringify({ error: String(chosen.error ?? ''), titles: sessionInfoUpdates(chosen.live, 'title') }));
+    await chosen.drive.close();
+
+    const switched = await noticeDrive('model-changed', { modelChangedTo: 'grok-4.5' });
+    check('a model_changed from the running child becomes the current model',
+      switched.error === undefined
+        && switched.drive.driving
+        && sessionInfoUpdates(switched.live, 'currentModel')
+          .some((value) => (value.currentModel as { modelID?: string; label?: string }).modelID === 'grok-4.5'
+            && (value.currentModel as { label?: string }).label === 'Grok 4.5')
+        && switched.drive.info.currentModel?.modelID === 'grok-4.5',
+      JSON.stringify({ error: String(switched.error ?? ''), models: sessionInfoUpdates(switched.live, 'currentModel') }));
+    await switched.drive.close();
+  }
+
   const fake = writeFakeGrokBinary(bin, store);
   const adapter = new GrokAdapter({ command: fake.path, env: fake.env, homeDir: root, requestTimeoutMs: 2_000, testOnlyEnableUnverifiedDrive: true });
   check('the exact fake binary is available, authenticated, and create-enabled',
@@ -448,6 +506,191 @@ try {
         JSON.stringify({ error: String(staleError ?? ''), staleRewrites, info: staleDrive.info }));
     } finally {
       await staleDrive?.close();
+    }
+  }
+
+  // A custom model whose `[model.<key>]` key differs from the model id it names. Grok 1.0.92
+  // lists and loads it under the key and stores the id in summary.json (a 2026-11-24 capture;
+  // the fake does the same under FAKE_GROK_CUSTOM_MODEL), so the stored session asks for the id.
+  {
+    const customStore = join(root, 'custom-home');
+    const customFake = writeFakeGrokBinary(join(root, 'custom-bin'), customStore);
+    customFake.env.FAKE_GROK_CUSTOM_MODEL = '1';
+    const customAdapter = new GrokAdapter({ command: customFake.path, env: customFake.env, requestTimeoutMs: 2_000 });
+    const restartedCustomAdapter = async (sessionId: string) => {
+      const row = (await discoverGrokStore({ root: customStore })).find((candidate) => candidate.id === sessionId)!;
+      const historyBoundary = await grokHistorySourceIdentity(row);
+      return new GrokAdapter({
+        command: customFake.path,
+        env: customFake.env,
+        requestTimeoutMs: 2_000,
+        resolveStoredDriveState: (info) => info.id === sessionId ? { historyBoundary } : undefined,
+      });
+    };
+    let customDrive: GrokDriveConnection | undefined;
+    let resumedDrive: GrokDriveConnection | undefined;
+    let fallbackDrive: GrokDriveConnection | undefined;
+    try {
+      const customCreated = await customAdapter.createSession({
+        directory: cwd,
+        model: { providerID: 'xai', modelID: 'byok' },
+        permissionMode: 'default',
+      });
+      customDrive = await customAdapter.attach(customCreated.id, 'resume') as GrokDriveConnection;
+      let customError: unknown;
+      try { await customDrive.sendPrompt({ text: 'prompt on the custom model' }); } catch (error) { customError = error; }
+      const customStored = (await discoverGrokStore({ root: customStore })).find((row) => row.id === customCreated.id);
+      check('a custom model picked by its key keeps Drive while summary.json stores the model id',
+        customError === undefined
+          && customDrive.driving
+          && customStored?.model === 'byok-model'
+          && customDrive.info.currentModel?.modelID === 'byok',
+        JSON.stringify({ error: String(customError ?? ''), stored: customStored?.model, info: customDrive.info.currentModel }));
+      await customDrive.close();
+
+      // After a broker restart, Resume starts from the stored id; session/load answers the key.
+      resumedDrive = await (await restartedCustomAdapter(customCreated.id))
+        .attach(customCreated.id, 'resume') as GrokDriveConnection;
+      const resumedSeen: AgentMessage[] = [];
+      resumedDrive.subscribe((message) => resumedSeen.push(message));
+      let resumedError: unknown;
+      try { await resumedDrive.sendPrompt({ text: 'resumed on the custom model' }); } catch (error) { resumedError = error; }
+      const resumedSpawn = customFake.events().filter((event) => event.kind === 'spawn').at(-1);
+      const resumedArgv = Array.isArray(resumedSpawn?.argv) ? resumedSpawn.argv as unknown[] : [];
+      check('Resume asks for the stored model id, keeps Drive, and shows the model under its key',
+        resumedError === undefined
+          && resumedDrive.driving
+          && resumedArgv[resumedArgv.indexOf('--model') + 1] === 'byok-model'
+          && resumedDrive.info.currentModel?.modelID === 'byok'
+          && resumedDrive.info.currentModel?.label === 'BYOK model'
+          && resumedSeen.some((message) => message.type === 'metadata-update' && message.key === 'sessionInfo'
+            && (message.value as { currentModel?: { modelID?: string } }).currentModel?.modelID === 'byok'),
+        JSON.stringify({ error: String(resumedError ?? ''), argv: resumedArgv, info: resumedDrive.info.currentModel }));
+      await resumedDrive.close();
+
+      // The stored id answered by a model whose own id is another one is not that model.
+      customFake.env.FAKE_GROK_LOAD_MODEL_OVERRIDE = 'grok-4.5';
+      fallbackDrive = await (await restartedCustomAdapter(customCreated.id))
+        .attach(customCreated.id, 'resume') as GrokDriveConnection;
+      let fallbackRefused = false;
+      try { await fallbackDrive.sendPrompt({ text: 'must not run on another model' }); } catch { fallbackRefused = true; }
+      delete customFake.env.FAKE_GROK_LOAD_MODEL_OVERRIDE;
+      check('Resume refuses a session/load that answers the stored id with a different model',
+        fallbackRefused && !fallbackDrive.driving,
+        JSON.stringify({ info: fallbackDrive.info.currentModel }));
+    } finally {
+      await customDrive?.close();
+      await resumedDrive?.close();
+      await fallbackDrive?.close();
+    }
+  }
+
+  // Switching models while driving, with custom models whose keys differ from their ids (byok
+  // names byok-model, byok-alt names byok-alt-model). session/load confirms the requested key;
+  // summary.json is checked only for the stale case, a summary that still names the model that ran
+  // before the switch. Each case has its own fake (one session per fake) and adapter.
+  {
+    const switchCase = async (name: string, modelID: string) => {
+      const store = join(root, `${name}-home`);
+      const switchFake = writeFakeGrokBinary(join(root, `${name}-bin`), store);
+      switchFake.env.FAKE_GROK_CUSTOM_MODEL = '1';
+      const switchAdapter = new GrokAdapter({ command: switchFake.path, env: switchFake.env, requestTimeoutMs: 2_000 });
+      const created = await switchAdapter.createSession({ directory: cwd, model: { providerID: 'xai', modelID }, permissionMode: 'default' });
+      const switchDrive = await switchAdapter.attach(created.id, 'resume') as GrokDriveConnection;
+      const prompt = async (text: string, model?: string): Promise<unknown> => {
+        try {
+          await switchDrive.sendPrompt({ text, ...(model ? { model: { providerID: 'xai', modelID: model } } : {}) });
+          return undefined;
+        } catch (error) { return error; }
+      };
+      const stored = async () => (await discoverGrokStore({ root: store })).find((row) => row.id === created.id)?.model;
+      return { switchFake, switchDrive, prompt, stored };
+    };
+
+    // From a custom model to a listed one while the summary still names the custom model's id.
+    const away = await switchCase('switch-away', 'byok');
+    try {
+      const first = await away.prompt('on the custom model');
+      away.switchFake.env.FAKE_GROK_SUMMARY_MODEL_OVERRIDE = 'byok-model';
+      const switched = await away.prompt('must not run while the summary names the previous model', 'grok-4.6');
+      delete away.switchFake.env.FAKE_GROK_SUMMARY_MODEL_OVERRIDE;
+      check('a switch to a listed model is refused while summary.json still names the previous custom model\'s id',
+        first === undefined
+          && switched !== undefined
+          && /durable summary reports model byok-model/u.test(String(switched))
+          && !away.switchDrive.driving,
+        JSON.stringify({ first: String(first ?? ''), switched: String(switched ?? ''), info: away.switchDrive.info.currentModel }));
+    } finally {
+      delete away.switchFake.env.FAKE_GROK_SUMMARY_MODEL_OVERRIDE;
+      await away.switchDrive.close();
+    }
+
+    // To a custom key this broker has not seen: session/load confirms it and the summary stores
+    // its id, which is then known as that key's.
+    const fresh = await switchCase('switch-fresh', 'grok-4.6');
+    try {
+      const first = await fresh.prompt('on a listed model');
+      const switched = await fresh.prompt('on a custom model not seen before', 'byok-alt');
+      const storedAfterSwitch = await fresh.stored();
+      check('a switch to a custom key not seen before keeps Drive while summary.json stores its id',
+        first === undefined
+          && switched === undefined
+          && fresh.switchDrive.driving
+          && fresh.switchDrive.info.currentModel?.modelID === 'byok-alt'
+          && storedAfterSwitch === 'byok-alt-model',
+        JSON.stringify({ first: String(first ?? ''), switched: String(switched ?? ''), stored: storedAfterSwitch, info: fresh.switchDrive.info.currentModel }));
+      // Learned: byok-alt-model is byok-alt's id, so another key whose summary names it is not running.
+      const listed = await fresh.prompt('on a listed model again', 'grok-4.5');
+      fresh.switchFake.env.FAKE_GROK_SUMMARY_MODEL_OVERRIDE = 'byok-alt-model';
+      const other = await fresh.prompt('must not run while the summary names another key\'s id', 'byok');
+      delete fresh.switchFake.env.FAKE_GROK_SUMMARY_MODEL_OVERRIDE;
+      check('the id a custom key stored is then known as that key\'s, not another one\'s',
+        listed === undefined
+          && other !== undefined
+          && /durable summary reports model byok-alt-model/u.test(String(other))
+          && !fresh.switchDrive.driving,
+        JSON.stringify({ listed: String(listed ?? ''), other: String(other ?? '') }));
+    } finally {
+      delete fresh.switchFake.env.FAKE_GROK_SUMMARY_MODEL_OVERRIDE;
+      await fresh.switchDrive.close();
+    }
+
+    // From one custom key to another: the summary from before the switch, naming the first key's
+    // id, is not taken for the second's; Drive continues once the second's id is saved.
+    const between = await switchCase('switch-between', 'byok');
+    try {
+      const first = await between.prompt('on the first custom model');
+      between.switchFake.env.FAKE_GROK_LOAD_SUMMARY_REWRITE_MS = '300';
+      between.switchFake.env.FAKE_GROK_LOAD_SUMMARY_STALE_MS = '200';
+      const switched = await between.prompt('on the second custom model', 'byok-alt');
+      delete between.switchFake.env.FAKE_GROK_LOAD_SUMMARY_REWRITE_MS;
+      delete between.switchFake.env.FAKE_GROK_LOAD_SUMMARY_STALE_MS;
+      const rewritesDone = await waitFor(
+        () => between.switchFake.events().some((event) => event.kind === 'summary-rewrites-done'), 3_000);
+      const staleSaves = between.switchFake.events().filter((event) => event.kind === 'summary-rewrites-done');
+      const storedAfterSwitch = await between.stored();
+      check('a switch between custom keys keeps Drive once the summary stores the second key\'s id',
+        first === undefined
+          && switched === undefined
+          && between.switchDrive.driving
+          && between.switchDrive.info.currentModel?.modelID === 'byok-alt'
+          && rewritesDone
+          && staleSaves.some((event) => typeof event.stale === 'number' && event.stale > 0)
+          && storedAfterSwitch === 'byok-alt-model',
+        JSON.stringify({ first: String(first ?? ''), switched: String(switched ?? ''), staleSaves, stored: storedAfterSwitch }));
+      between.switchFake.env.FAKE_GROK_SUMMARY_MODEL_OVERRIDE = 'byok-alt-model';
+      const back = await between.prompt('must not run while the summary names the first key\'s id', 'byok');
+      delete between.switchFake.env.FAKE_GROK_SUMMARY_MODEL_OVERRIDE;
+      check('a switch between custom keys is refused while the summary still names the previous key\'s id',
+        back !== undefined
+          && /durable summary reports model byok-alt-model/u.test(String(back))
+          && !between.switchDrive.driving,
+        JSON.stringify({ back: String(back ?? '') }));
+    } finally {
+      delete between.switchFake.env.FAKE_GROK_SUMMARY_MODEL_OVERRIDE;
+      delete between.switchFake.env.FAKE_GROK_LOAD_SUMMARY_REWRITE_MS;
+      delete between.switchFake.env.FAKE_GROK_LOAD_SUMMARY_STALE_MS;
+      await between.switchDrive.close();
     }
   }
 

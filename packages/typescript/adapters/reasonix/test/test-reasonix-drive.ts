@@ -1276,6 +1276,85 @@ try {
     JSON.stringify(usageCaptured.filter((message) => message.type === 'metadata-update')));
   await usageConnection.close();
 
+  // One planning turn captured on 1.25.2 and 2.61.0 (see test-reasonix-mapping.ts): the live `plan`
+  // updates drive the task panel, and complete_step advances it past what the transcript stores.
+  const capturedPlan = JSON.parse(readFileSync(
+    join(import.meta.dir, 'fixtures', 'reasonix-plan-capture.json'),
+    'utf8',
+  )) as Record<'v1.25.2' | 'v2.61.0', { live: AcpSessionUpdateParams[]; transcript: string }>;
+  type PanelFrame = Extract<AgentMessage, { type: 'task-list-state' }>;
+  type ResultFrame = Extract<AgentMessage, { type: 'tool-result' }>;
+  const panels = (frames: readonly AgentMessage[]) =>
+    frames.filter((frame): frame is PanelFrame => frame.type === 'task-list-state');
+  const toolResults = (frames: readonly AgentMessage[]) =>
+    frames.filter((frame): frame is ResultFrame => frame.type === 'tool-result');
+  const unmapped = (frames: readonly AgentMessage[]) => frames.filter((frame) => frame.type === 'event'
+    && (frame.payload as { source?: string }).source === 'Reasonix live update (unmapped)');
+  const planKey = `reasonix:${id}:plan`;
+  let planRevision = 200;
+  for (const label of ['v1.25.2', 'v2.61.0'] as const) {
+    const planRows = capturedRows(capturedPlan[label].transcript);
+    const planTurns = planRows.map((_, index) => (index === 0 ? 0 : 1));
+    // The system and prompt rows are stored when the turn's updates begin.
+    writeDurableRows(planRows.slice(0, 2), planRevision++, planTurns);
+    const planConnection = new TestDriveConnection({ ...session }, info, new FakeTransport());
+    const planSeen: AgentMessage[] = [];
+    planConnection.subscribe((message) => planSeen.push(message));
+    await planConnection.getHistory();
+    for (const params of capturedPlan[label].live) planConnection.pushUpdate({ ...params, sessionId: id });
+    const livePanels = panels(planSeen);
+    const liveResults = new Map(toolResults(planSeen).map((frame) => [frame.callId, frame.result] as const));
+    const liveCount = planSeen.length;
+    check(`${label}: live plan updates drive one task panel, ending with every step done`,
+      livePanels.length >= 3
+        && livePanels.every((panel) => panel.key === planKey && panel.source === 'native' && panel.sourceTool === 'todo_write')
+        && livePanels.at(-1)?.status === 'done'
+        && livePanels.at(-1)?.items.every((item) => item.status === 'done') === true
+        && unmapped(planSeen).length === 0,
+      JSON.stringify(livePanels).slice(0, 800));
+
+    writeDurableRows(planRows, planRevision++, planTurns);
+    const tailed = await waitFor(() => planSeen.slice(liveCount)
+      .some((frame) => frame.type === 'model-output' && frame.final === true), 10_000);
+    const tailFrames = planSeen.slice(liveCount);
+    const tailResults = toolResults(tailFrames);
+    check(`${label}: the stored todo_write rows the tail appends do not take the panel back`,
+      tailed
+        && panels(tailFrames).length === 0
+        && tailResults.length === 5
+        && !planSeen.some((frame) => frame.type === 'notice'),
+      JSON.stringify(tailFrames.map((frame) => frame.type)));
+    check(`${label}: each live tool result is the text of the stored row the tail appends for it`,
+      tailResults.every((frame) => !liveResults.has(frame.callId) || liveResults.get(frame.callId) === frame.result)
+        && tailResults.filter((frame) => liveResults.has(frame.callId)).length >= 4,
+      JSON.stringify({ live: [...liveResults], tail: tailResults }).slice(0, 800));
+
+    planConnection.pushUpdate({ sessionId: id, update: { sessionUpdate: 'plan', entries: [{ content: ' ', status: 'pending' }] } });
+    check(`${label}: a plan with nothing to show stays an unmapped update and keeps the panel`,
+      unmapped(planSeen).length === 1 && panels(planSeen).length === livePanels.length,
+      JSON.stringify(unmapped(planSeen)));
+
+    const planHistory = await planConnection.getHistory();
+    const planCaptured: AgentMessage[] = [];
+    await planConnection.captureHistorySnapshot({
+      accept(message) { planCaptured.push(message); return true; },
+    });
+    check(`${label}: a replay and a captured history snapshot end on the live plan, after the stored ones`,
+      panels(planHistory).length === 3
+        && JSON.stringify(panels(planHistory).at(-1)) === JSON.stringify(livePanels.at(-1))
+        && panels(planHistory)[1]?.status === 'running'
+        && JSON.stringify(panels(planCaptured).at(-1)) === JSON.stringify(livePanels.at(-1)),
+      JSON.stringify({ history: panels(planHistory), captured: panels(planCaptured).at(-1) }).slice(0, 800));
+
+    planConnection.demote('Fixture demotion.');
+    const demotedHistory = await planConnection.getHistory();
+    check(`${label}: a demoted connection replays the stored plans only`,
+      panels(demotedHistory).length === 2 && panels(demotedHistory).at(-1)?.status === 'running',
+      JSON.stringify(panels(demotedHistory).at(-1)));
+    await planConnection.close();
+  }
+  writeDurableRows(initial, planRevision++);
+
   // A Reasonix tool turn persists one assistant row per model step, and v1.25.2
   // stamps `workDurationMs` on every one (upstream internal/agent/run_loop.go),
   // so the mapper writes a `done` footer per step. Only the last closes the

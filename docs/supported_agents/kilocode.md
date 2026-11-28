@@ -51,15 +51,24 @@ records and supervises only the process it owns. A user-managed server on port
   Measured against Kilo Code 7.5.16 and 7.8.32.
 - While Kilo cannot reach the model provider and waits to retry, the session
   shows as working, not idle.
+- The mode picker of a driven session lists Kilo's primary agents for the
+  session's folder: Code, Ask, Debug, Plan, the deprecated Orchestrator, and
+  any primary agent your Kilo configuration adds. Kilo's subagents and its
+  internal agents are not listed. A choice applies from the next prompt you
+  send, which names it, and Kilo records it for the session with that prompt.
+  Until you choose, the picker shows the agent Kilo last recorded. Measured
+  against Kilo Code 7.5.16 and 7.8.40.
 - Native child rows are Observe-only and require a live-server-qualified
   `parent_id` relationship. The installed physical capture confirmed native
   parent/child identity while keeping the child free of writer controls.
 
 ## Limits
 
-- No terminal handoff, permission-mode vocabulary, agent switch, files,
-  artifacts, fork, clone, export, or trustworthy context-window denominator has
-  been measured.
+- No terminal handoff, permission-mode vocabulary, files, artifacts, fork,
+  clone, export, or trustworthy context-window denominator has been measured.
+- A mode chosen in the app reaches Kilo only with the next prompt. If the
+  session is closed and opened again before then, the choice is gone and the
+  picker shows the agent Kilo last recorded.
 - A Kilo session goal (7.6 and newer) runs its later turns by itself, and Kilo
   marks those turns in no way that tells them apart from text another client
   could send. The first such turn ends Drive of that session; Observe continues.

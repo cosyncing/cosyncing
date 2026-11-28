@@ -20,6 +20,16 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   with any alternative approaches the agent offered.
 - Kimi Code 2.7 and newer: a message sent while a turn runs reaches the agent
   after the current tool call instead of after the turn.
+- OpenCode 2.3 and newer: background subagents and shell commands get a
+  background activity row while their session is idle, and the row leaves when
+  the job finishes or is lost. OpenCode 2.4 reports job changes as they happen;
+  on 2.3 the job list is read after each turn and every two seconds while a job
+  runs.
+- Kilo Code: the mode picker of a driven session lists Kilo's agents (Code,
+  Ask, Debug, Plan and any your Kilo configuration adds). The agent you choose
+  runs from your next prompt.
+- Pi and omp: the thinking picker offers the levels the agent lists for each
+  model, including `max`, and omp 19.1.0's `auto`.
 
 ### Changed
 
@@ -36,6 +46,13 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   lists for it. When both variables are set they still decide, which is how to
   name an OpenAI-compatible endpoint's model. `cosy doctor` no longer warns
   about the variables once the managed profile has provider settings.
+- OpenCode 2: a session archived in OpenCode leaves the session list at the
+  next refresh and is read-only while it stays open. Restoring it in OpenCode
+  brings it back.
+- Pi and omp: turn token and cost totals include cache warms and omp's own
+  model usage.
+- omp 19.1.0: a prompt sent while a turn runs is accepted as soon as omp
+  queues it.
 
 ### Fixed
 
@@ -56,6 +73,14 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   the app are listed under their parent.
 - Cline: prompts from a CLI run that approves every tool show without the
   `<user_input mode="yolo">` wrapper.
+- Reasonix: the task list the model keeps with `todo_write` shows as the
+  session's task panel, live and after a reload. While the app drives the
+  session, the panel also follows steps Reasonix marks done. Live tool results
+  show the tool's output instead of only "completed".
+- Grok: resuming a session on a custom model whose `[model.<key>]` key differs
+  from its `model` id keeps Drive; before, Resume was refused. The title Grok
+  generates after the first prompt replaces the session title while the app
+  drives it, unless you named the session when you created it.
 
 ## 0.9.0 — 2026-11-27
 

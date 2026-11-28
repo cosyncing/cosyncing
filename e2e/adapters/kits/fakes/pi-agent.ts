@@ -14,9 +14,16 @@
  *                                      clone and Drive all start this
  *
  * RPC commands (one JSON object per stdin line, `{type:'response'}` per command with an id):
- * get_state, get_available_models, set_model, set_thinking_level, set_session_name, get_messages,
- * get_commands (omp: get_available_commands), prompt (`streamingBehavior: 'steer'` while a run is
- * open), abort, compact, fork, clone, export_html, extension_ui_response.
+ * get_state, get_available_models, get_available_thinking_levels, set_model, set_thinking_level,
+ * set_session_name, get_messages, get_commands (omp: get_available_commands), prompt
+ * (`streamingBehavior: 'steer'` while a run is open), abort, compact, fork, clone, export_html,
+ * extension_ui_response.
+ *
+ * Thinking levels follow the version the fake reports. Pi 0.81.0 and later, and omp 19 and later,
+ * answer `get_available_thinking_levels`; an older build refuses it as an unknown command, with no
+ * id (Pi 0.78.1 rpc-mode). omp 19 and later also list the current model's selectors, `auto` among
+ * them, in `get_state.thinkingLevels`, and name the configured selector beside the effective level
+ * (captured, omp 19.1.0).
  *
  * A turn follows the measured event order: agent_start, turn_start, the user message (omp: the
  * `collab-prompt` custom message the broker's correlated prompt creates), the assistant message
@@ -45,9 +52,15 @@
  *   [[hold:TAG]]     keep the run open until the control file `release-TAG` appears, or `abort`
  *   [[retry]]        one failed attempt (`auto_retry_start`/`auto_retry_end`) before the answer
  *   [[tool]]         a bash tool call and its result before the answer
+ *   [[warm]]         Pi only: a cache warm while the turn runs, before the answer: a `usage` entry
+ *                    in the captured Pi 1.6.0 shape, announced by `entry_appended`
+ *   [[warmafter]]    Pi only: the same cache warm once the run has ended, while the session is idle
  *
  * A prompt that arrives while a run is open and says `streamingBehavior: 'steer'` is injected at the
- * next turn boundary of the same run (answered in order). Everything observable is appended to the
+ * next turn boundary of the same run (answered in order). omp 19 and later list the queued prompts
+ * in `queue_update {steering, followUp, liveSteered}` (captured, omp 19.1.0): when one is queued,
+ * before the prompt's response; when one starts, between `turn_end` and `turn_start`; and when the
+ * queue is cleared. Everything observable is appended to the
  * ledger (JSONL): every start with argv, cwd and the variables it inherited, every version probe,
  * every stdin command (`recv`, with the session file it reached), every turn start and end, every
  * abort, and every exit. Tests read the ledger; they never patch the fake.
@@ -64,6 +77,10 @@ export interface FakePiModel {
   id: string;
   name: string;
   reasoning?: boolean;
+  /** Pi: the model's level map (`null` drops a level; `xhigh` and `max` exist only when named). */
+  thinkingLevelMap?: Record<string, string | null>;
+  /** omp: the efforts the model lists (`thinking.efforts`). */
+  efforts?: string[];
 }
 
 export interface FakePiConfig {
@@ -246,12 +263,15 @@ function runFakePi(): void {
 
   let model: { provider: string; id: string; name?: string } = { provider: config.models[0]!.provider, id: config.models[0]!.id };
   let thinkingLevel = 'medium';
+  /** omp 19.1.0: the selector set, when it differs from the effective level (`auto`). */
+  let configuredThinkingLevel: string | undefined;
   const modelByArg = argValue('--model');
   if (modelByArg) {
     const slash = modelByArg.indexOf('/');
     model = slash >= 0 ? { provider: modelByArg.slice(0, slash), id: modelByArg.slice(slash + 1) } : { provider: '', id: modelByArg };
   }
   thinkingLevel = argValue('--thinking') ?? thinkingLevel;
+  if (thinkingLevel === 'auto') record({ kind: 'fault', message: '--thinking auto on argv' });
 
   let file: string;
   let sessionId: string;
@@ -267,6 +287,11 @@ function runFakePi(): void {
           if (entry.type === 'session' && typeof entry.id === 'string') sessionId = entry.id;
           if (entry.type === 'session_info' && typeof entry.name === 'string') sessionName = entry.name;
           if ((entry.type === 'title' || entry.type === 'title_change') && typeof entry.title === 'string') sessionName = entry.title;
+          // A resumed session restores its last level, and omp its `auto` selector, unless argv names one.
+          if (!argValue('--thinking') && entry.type === 'thinking_level_change') {
+            if (typeof entry.thinkingLevel === 'string') thinkingLevel = entry.thinkingLevel;
+            configuredThinkingLevel = entry.configured === 'auto' ? 'auto' : undefined;
+          }
           if (!modelByArg && entry.type === 'model_change') {
             if (typeof entry.model === 'string' && entry.model.includes('/')) {
               model = { provider: entry.model.slice(0, entry.model.indexOf('/')), id: entry.model.slice(entry.model.indexOf('/') + 1) };
@@ -293,9 +318,42 @@ function runFakePi(): void {
   };
   const readConfigFromDisk = (): FakePiConfig => ({ ...readConfig(), next: undefined });
 
-  const modelObject = () => {
-    const known = config.models.find((candidate) => candidate.provider === model.provider && candidate.id === model.id);
-    return { provider: model.provider, id: model.id, name: known?.name ?? model.id, reasoning: known?.reasoning === true };
+  /** A catalog model in the dialect's shape: Pi carries its level map, omp its efforts. */
+  const catalogModel = (entry: FakePiModel | undefined, fallback: { provider: string; id: string }): Json => ({
+    provider: entry?.provider ?? fallback.provider,
+    id: entry?.id ?? fallback.id,
+    name: entry?.name ?? fallback.id,
+    reasoning: entry?.reasoning === true,
+    ...(dialect === 'pi' && entry?.thinkingLevelMap ? { thinkingLevelMap: entry.thinkingLevelMap } : {}),
+    ...(dialect === 'omp' && entry?.efforts ? { thinking: { mode: 'effort', efforts: entry.efforts, requiresEffort: true } } : {}),
+  });
+  const currentEntry = (): FakePiModel | undefined =>
+    config.models.find((candidate) => candidate.provider === model.provider && candidate.id === model.id);
+  const modelObject = () => catalogModel(currentEntry(), model);
+
+  const versionAtLeast = (major: number, minor = 0): boolean => {
+    const [have = 0, haveMinor = 0] = String(config.version).split('.').map((part) => Number.parseInt(part, 10) || 0);
+    return have > major || (have === major && haveMinor >= minor);
+  };
+  const answersThinkingLevels = (): boolean => (dialect === 'omp' ? versionAtLeast(19) : versionAtLeast(0, 81));
+  const ompSelectors = (): boolean => dialect === 'omp' && versionAtLeast(19);
+  /** The levels the current model takes, as `get_available_thinking_levels` lists them: Pi's map
+   *  rule (`getSupportedThinkingLevels`), or omp's efforts; `off` alone without reasoning. */
+  const modelLevels = (): string[] => {
+    const entry = currentEntry();
+    if (entry?.reasoning !== true) return ['off'];
+    if (dialect === 'omp') return ['off', ...(entry.efforts ?? ['minimal', 'low', 'medium', 'high'])];
+    const map = entry.thinkingLevelMap;
+    return ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].filter((level) => {
+      const mapped = map?.[level];
+      if (mapped === null) return false;
+      return level === 'xhigh' || level === 'max' ? mapped !== undefined : true;
+    });
+  };
+  /** omp 19.1.0's selector list: `off`, `auto`, then the efforts; empty without reasoning. */
+  const selectorLevels = (): string[] => {
+    const levels = modelLevels();
+    return levels.length > 1 ? ['off', 'auto', ...levels.slice(1)] : [];
   };
 
   let clock = Date.now();
@@ -324,6 +382,11 @@ function runFakePi(): void {
   let turnNumber = 0;
   const steers: Input[] = [];
   const awaiting = new Map<string, (response: Json) => void>();
+  /** omp 19.1.0's queue snapshot, sent whenever the queued prompts change. */
+  const queueUpdate = (): void => {
+    if (dialect !== 'omp' || !versionAtLeast(19)) return;
+    emit({ type: 'queue_update', steering: steers.map((steer) => steer.text), followUp: [], liveSteered: 0 });
+  };
 
   const decode = (message: string): Input => {
     if (dialect === 'omp' && message.startsWith(PI_COLLAB_PROMPT_PREFIX)) {
@@ -387,6 +450,20 @@ function runFakePi(): void {
     emit({ type: 'message_end', message: snapshot(message) });
     if (persisted) persistMessage(message);
     return message;
+  };
+
+  /** A cache warm as Pi 1.6.0 records and announces it (captured 2026-11-28; usage from the run). */
+  const cacheWarm = (): void => {
+    const entry: Json = {
+      type: 'usage', id: shortId(), parentId: lastEntryId(file), timestamp: new Date().toISOString(),
+      kind: 'cache_warm', provider: model.provider, model: model.id,
+      usage: {
+        input: 500, output: 1, cacheRead: 1500, cacheWrite: 0, reasoning: 0, totalTokens: 2001,
+        cost: { input: 0.5, output: 0.001, cacheRead: 0.015, cacheWrite: 0, total: 0.516, totalFromProvider: false },
+      },
+    };
+    appendLines(file, [entry]);
+    emit({ type: 'entry_appended', entry: snapshot(entry) });
   };
 
   const released = (tag: string): Promise<void> => new Promise((resolve) => {
@@ -477,6 +554,7 @@ function runFakePi(): void {
       emit({ type: 'auto_retry_start', attempt: 1, maxAttempts: 3, delayMs: 10, errorMessage: '429 rate limited' });
       emit({ type: 'auto_retry_end', success: true, attempt: 1 });
     }
+    if (text.includes('[[warm]]') && dialect === 'pi') cacheWarm();
     const hold = /\[\[hold:([\w-]+)\]\]/.exec(text)?.[1];
     if (hold) await released(hold);
     if (aborted) {
@@ -506,8 +584,10 @@ function runFakePi(): void {
       }
       record({ kind: 'turn-end', text: input.text, session: file, aborted });
       emit({ type: 'turn_end', toolResults: [] });
+      const queued = steers.length;
       if (aborted) steers.length = 0;
       input = steers.shift();
+      if (queued) queueUpdate();
     }
     const background = /\[\[background(gone)?:([\w-]+)\]\]/.exec(first.text);
     if (background && !aborted) {
@@ -546,6 +626,7 @@ function runFakePi(): void {
     }
     emit({ type: 'agent_end', messages: [] });
     running = false;
+    if (first.text.includes('[[warmafter]]') && dialect === 'pi') cacheWarm();
   };
 
   // ------------------------------------------------------------ the commands
@@ -562,6 +643,7 @@ function runFakePi(): void {
     ...(sessionName ? { sessionName } : {}),
     model: modelObject(),
     thinkingLevel,
+    ...(ompSelectors() ? { configuredThinkingLevel: configuredThinkingLevel ?? thinkingLevel, thinkingLevels: selectorLevels() } : {}),
     isStreaming: running,
   });
 
@@ -583,7 +665,14 @@ function runFakePi(): void {
         return ok(command, state());
       case 'get_available_models':
         catalogProbe = true;
-        return ok(command, { models: config.models.map((entry) => ({ provider: entry.provider, id: entry.id, name: entry.name, reasoning: entry.reasoning === true })) });
+        return ok(command, { models: config.models.map((entry) => catalogModel(entry, entry)) });
+      case 'get_available_thinking_levels':
+        if (!answersThinkingLevels()) {
+          // An older build's refusal of a command it lacks carries no id. The product asks on purpose
+          // (to learn whether the build has it), so this is no fault.
+          return out({ type: 'response', command: command.type, success: false, error: `Unknown command: ${String(command.type)}` });
+        }
+        return ok(command, { levels: modelLevels() });
       case 'set_model': {
         const known = config.models.find((entry) => entry.provider === command.provider && entry.id === command.modelId);
         if (!known) return fail(command, `Model not found: ${String(command.provider)}/${String(command.modelId)}`);
@@ -591,9 +680,22 @@ function runFakePi(): void {
         if (existsSync(file)) persist(piModelEntry(dialect, null, model, Date.now()));
         return ok(command, modelObject());
       }
-      case 'set_thinking_level':
-        thinkingLevel = String(command.level);
+      case 'set_thinking_level': {
+        const level = String(command.level);
+        if (level === 'auto') {
+          if (!ompSelectors() || !selectorLevels().includes('auto')) {
+            record({ kind: 'fault', message: `set_thinking_level auto on ${dialect} ${config.version} (${model.id})` });
+            return fail(command, `Invalid thinking level: ${level}`);
+          }
+          // Captured: auto mode reports the level it resolved to beside the `auto` selector.
+          configuredThinkingLevel = 'auto';
+          thinkingLevel = 'high';
+          return ok(command);
+        }
+        configuredThinkingLevel = undefined;
+        thinkingLevel = level;
         return ok(command);
+      }
       case 'set_session_name': {
         const requested = String(command.name ?? '');
         // Measured omp behaviour: an empty name is rejected, so a rename cannot clear an omp title.
@@ -640,9 +742,12 @@ function runFakePi(): void {
         }
         const input = decode(String(command.message ?? ''));
         if (running && command.streamingBehavior !== 'steer') return fail(command, 'Agent is already processing a prompt.');
+        if (running) {
+          steers.push(input);
+          queueUpdate();
+        }
         ok(command);
-        if (running) steers.push(input);
-        else void run(input).catch((error) => record({ kind: 'fault', message: String(error) }));
+        if (!running) void run(input).catch((error) => record({ kind: 'fault', message: String(error) }));
         return;
       }
       case 'abort': {

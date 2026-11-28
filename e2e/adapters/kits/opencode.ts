@@ -27,7 +27,8 @@ import { PROMPT_ATTACHMENT_LIMITS } from '../../../packages/typescript/protocol/
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { eventually, fixturePath, type FixturePaths, type SessionStream } from '../../harness/index.ts';
+import { eventually, fixturePath, never, type FixturePaths, type SessionStream } from '../../harness/index.ts';
+import { RosterFeed } from '../../harness/roster.ts';
 import { openCodeRows } from '../../harness/fakes/opencode-server.ts';
 import { FakeOpenCodeServe } from './fakes/opencode-serve.ts';
 import { FakeOpenCodeV2Serve } from './fakes/opencode-v2-serve.ts';
@@ -1085,6 +1086,197 @@ opencodeV2Kit.extras!.push(
         fake.serve.failNext('GET', '/api/event', 503, 0);
         await context.restart({ env: { COSYNCING_OPENCODE_SSE_RECONNECT_MS: saved.reconnect, COSYNCING_OPENCODE_SSE_IDLE_MS: saved.idle } });
       }
+    },
+  },
+);
+
+/** A live background row with this key and status. */
+const activityFrame = (key: string, status: string) => (frame: any) =>
+  frame.kind === 'message' && frame.message.type === 'agent-activity' && frame.message.key === key && frame.message.status === status;
+const JOB_LIST = /^\/api\/experimental\/job$/;
+
+opencodeV2Kit.extras!.push(
+  {
+    title: 'background jobs are background rows while the parent reads idle, and a service without the job list is never asked',
+    async run(context) {
+      const fake = context.fake as OpencodeV2Fake;
+      fake.setVersion('2.4.2');
+      await context.restart();
+      try {
+        const session = await context.drivableSession('background jobs');
+        const stream = await context.openDrive(session);
+        try {
+          const from = stream.frames.length;
+          // As captured on 2.4.2: a subagent's job starts inside its parent's turn and runs on after it.
+          fake.serve.setBusy(session.id, true);
+          const child = fake.serve.startJob(session.id, 'subagent', 'Synthetic child task');
+          const childKey = `agent:${child.id}`;
+          const running = await stream.waitForFrame(activityFrame(childKey, 'running'), { after: from });
+          expect(running.message).toMatchObject({ kind: 'subagent', title: 'Synthetic child task', subtitle: 'General', startedAtMs: child.time.started, agentsDone: 0, agentsTotal: 1 });
+          fake.serve.setBusy(session.id, false);
+          const idle = await stream.waitForFrame((frame) => frame.kind === 'message' && frame.message.type === 'status' && frame.message.status === 'idle', { after: from });
+          // The idle status ends running subagent rows on the client, so the row is stated again after it.
+          await stream.waitForFrame(activityFrame(childKey, 'running'), { after: stream.frames.indexOf(idle) + 1 });
+          await context.client.waitForSession((row) => row.id === session.id && row.status === 'idle');
+          const shell = fake.serve.startJob(session.id, 'shell', 'sleep 3; echo shell-finished');
+          const shellKey = `cmd:${shell.id}`;
+          expect((await stream.waitForFrame(activityFrame(shellKey, 'running'), { after: from })).message)
+            .toMatchObject({ kind: 'command', title: 'sleep 3; echo shell-finished', subtitle: 'sleep 3; echo shell-finished', startedAtMs: shell.time.started });
+          // A client that opens the session now is given the rows that still run.
+          const reader = await context.client.attach('opencode', session.id, { readOnly: true });
+          try {
+            await reader.waitForMessage((message) => message.type === 'agent-activity' && message.key === childKey && message.status === 'running');
+            await reader.waitForMessage((message) => message.type === 'agent-activity' && message.key === shellKey && message.status === 'running');
+          } finally { reader.close(); }
+          // Outcomes are the job's own: a shell ends `completed` whatever its exit code (captured) and the
+          // job carries none, so the row has none either; a cancelled job did not finish.
+          const evented = fake.ledger.mark();
+          const shellEnded = fake.serve.finishJob(shell.id);
+          const shellDone = await stream.waitForFrame(activityFrame(shellKey, 'done'), { after: from });
+          expect(shellDone.message.elapsedMs).toBe(shellEnded.time.completed - shellEnded.time.started);
+          expect(shellDone.message.exitCode).toBeUndefined();
+          fake.serve.finishJob(child.id);
+          expect((await stream.waitForFrame(activityFrame(childKey, 'done'), { after: from })).message).toMatchObject({ agentsDone: 1, agentsTotal: 1 });
+          const cancelled = fake.serve.startJob(session.id, 'shell', 'sleep 30; echo never');
+          fake.serve.finishJob(cancelled.id, 'cancelled');
+          await stream.waitForFrame(activityFrame(`cmd:${cancelled.id}`, 'error'), { after: from });
+          // The service reports every change, so nothing asks for the list between reconnects.
+          expect(fake.ledger.routed('GET', JOB_LIST, evented)).toEqual([]);
+          // A job that ended unseen while the stream was down is retired by the reconnect's list read.
+          const lost = fake.serve.startJob(session.id, 'shell', 'sleep 60');
+          await stream.waitForFrame(activityFrame(`cmd:${lost.id}`, 'running'), { after: from });
+          const gap = stream.frames.length, reconnect = fake.ledger.mark();
+          fake.serve.finishJob(lost.id, 'completed', false);
+          fake.serve.disconnectStreams();
+          await stream.waitForFrame(activityFrame(`cmd:${lost.id}`, 'retired'), { after: gap });
+          const reads = fake.ledger.routed('GET', JOB_LIST, reconnect);
+          expect(reads.length).toBeGreaterThan(0);
+          expect(reads.every((entry) => (entry.query as Record<string, string>).sessionID === session.id)).toBe(true);
+          // A client that opens the session after the jobs ended is given each one's outcome.
+          const later = await context.client.attach('opencode', session.id, { readOnly: true });
+          try {
+            const outcomes: Array<[string, string]> = [[childKey, 'done'], [shellKey, 'done'], [`cmd:${cancelled.id}`, 'error'], [`cmd:${lost.id}`, 'retired']];
+            for (const [key, status] of outcomes) {
+              await later.waitForMessage((message) => message.type === 'agent-activity' && message.key === key && message.status === status);
+            }
+          } finally { later.close(); }
+        } finally { stream.close(); }
+        // 2.2.0 (captured) has no job list: it is never asked, at attach or after a turn.
+        fake.setVersion('2.2.0');
+        await context.restart();
+        const mark = fake.ledger.mark();
+        const older = await context.drivableSession('no job list');
+        const olderStream = await context.openDrive(older);
+        try {
+          expect((await context.prompt(olderStream, 'a turn without a job list')).kind).toBe('ack');
+          await olderStream.waitForFrame((frame) => frame.kind === 'message' && frame.message.type === 'run-summary' && frame.message.status === 'done');
+          expect(fake.ledger.routed('GET', JOB_LIST, mark)).toEqual([]);
+        } finally { olderStream.close(); }
+      } finally { fake.setVersion('2.3.2'); await context.restart(); }
+    },
+  },
+  {
+    title: 'a service without job events is asked for a session\'s jobs after its turn and every two seconds only while one runs',
+    async run(context) {
+      const fake = context.fake as OpencodeV2Fake;
+      const session = await context.drivableSession('polled jobs');
+      const stream = await context.openDrive(session);
+      try {
+        const mark = fake.ledger.mark();
+        const from = stream.frames.length;
+        // 2.3.2 (captured): a shell past its timeout is listed as a running job, with no event.
+        fake.serve.setBusy(session.id, true);
+        const shell = fake.serve.startJob(session.id, 'shell', 'sleep 4; echo shell-finished');
+        fake.serve.setBusy(session.id, false);
+        const key = `cmd:${shell.id}`;
+        const running = await stream.waitForFrame(activityFrame(key, 'running'), { after: from });
+        expect(running.message).toMatchObject({ kind: 'command', title: 'sleep 4; echo shell-finished', startedAtMs: shell.time.started });
+        await eventually(() => fake.ledger.routed('GET', JOB_LIST, mark).length >= 2, { what: 'another job read while the shell runs' });
+        // Its report delivered, the job leaves the list; nobody saw its outcome, so its row is retired.
+        fake.serve.finishJob(shell.id);
+        await stream.waitForFrame(activityFrame(key, 'retired'), { after: from });
+        const reads = fake.ledger.routed('GET', JOB_LIST, mark);
+        expect(reads.every((entry) => (entry.query as Record<string, string>).sessionID === session.id)).toBe(true);
+        for (let i = 1; i < reads.length; i++) expect(reads[i]!.at - reads[i - 1]!.at).toBeGreaterThanOrEqual(1500);
+        const settled = fake.ledger.mark();
+        await never(() => fake.ledger.routed('GET', JOB_LIST, settled).length > 0, 2500, 'a job read with no job running');
+      } finally { stream.close(); }
+    },
+  },
+  {
+    title: 'a client away when a background job ends is given the job\'s last row when it opens the session again, not a running one',
+    async run(context) {
+      const fake = context.fake as OpencodeV2Fake;
+      const session = await context.drivableSession('jobs while away');
+      const stream = await context.openDrive(session);
+      try {
+        const from = stream.frames.length;
+        // 2.3.2 (captured): a shell past its timeout is listed as a running job, with no event.
+        fake.serve.setBusy(session.id, true);
+        const shell = fake.serve.startJob(session.id, 'shell', 'sleep 5; echo while away');
+        fake.serve.setBusy(session.id, false);
+        const key = `cmd:${shell.id}`;
+        const statusesIn = (client: SessionStream): string[] => client.messages()
+          .filter((message) => message.type === 'agent-activity' && message.key === key).map((message) => message.status);
+        await stream.waitForFrame(activityFrame(key, 'running'), { after: from });
+        const away = await context.client.attach('opencode', session.id, { readOnly: true });
+        try {
+          await away.waitForMessage((message) => message.type === 'agent-activity' && message.key === key && message.status === 'running');
+        } finally { away.close(); }
+        // The job ends while that client is away; only the client still attached sees its row change.
+        fake.serve.finishJob(shell.id);
+        await stream.waitForFrame(activityFrame(key, 'retired'), { after: from });
+        const back = await context.client.attach('opencode', session.id, { readOnly: true });
+        try {
+          await back.waitForMessage((message) => message.type === 'agent-activity' && message.key === key && message.status === 'retired');
+          expect(statusesIn(back).at(-1)).toBe('retired');
+        } finally { back.close(); }
+      } finally { stream.close(); }
+    },
+  },
+  {
+    title: 'an archived session leaves the roster and is read-only while open, and returns live when restored',
+    async run(context) {
+      const fake = context.fake as OpencodeV2Fake;
+      const session = await context.drivableSession('archived later');
+      const listed = fake.seedSession({ title: 'stays listed' });
+      await context.client.waitForSession((row) => row.id === listed.id);
+      const feed = new RosterFeed(context.client);
+      await feed.start();
+      let stream = await context.openDrive(session);
+      let releaseRoster!: () => void;
+      const rosterGate = new Promise<void>((resolve) => { releaseRoster = resolve; });
+      try {
+        // Archived in OpenCode while open here: the connection turns read-only and sends nothing.
+        const from = stream.frames.length;
+        fake.serve.setArchived(session.id, true);
+        const readOnly = await stream.waitForFrame((frame) => frame.kind === 'session' && frame.info.control?.drive?.supported === false, { after: from });
+        expect(readOnly.info.control.drive.reason).toContain('archived');
+        expect(readOnly.authority?.canMutate).toBe(false);
+        const mark = fake.ledger.mark();
+        expect((await stream.sendAndAwait({ kind: 'prompt', text: 'not while archived' })).kind).toBe('nack');
+        expect(fake.ledger.routed('POST', new RegExp(`^/api/session/${session.id}/prompt$`), mark)).toEqual([]);
+        stream.close();
+        // With nothing holding it open, the next roster read leaves it out, as OpenCode's list does.
+        await eventually(async () => !(await context.client.sessions({ refresh: true })).some((row: any) => row.id === session.id), { what: 'the archived session to leave the roster' });
+        await feed.waitFor((delta) => delta.sessionId === session.id && delta.removed === true);
+        // A later change to the archived session publishes no row; one to a listed session does.
+        const quiet = feed.seen.length;
+        fake.serve.emit('session.renamed', { sessionID: session.id, title: 'renamed while archived' }, true);
+        fake.serve.emit('session.renamed', { sessionID: listed.id, title: 'renamed while listed' }, true);
+        await feed.waitFor((delta) => delta.sessionId === listed.id && delta.session?.title === 'renamed while listed', { from: quiet });
+        expect(feed.of(session.id, quiet)).toEqual([]);
+        // Restored in OpenCode: the row returns from the event itself, while no roster read can answer.
+        fake.serve.beforeRosterReply = () => rosterGate;
+        const restoring = feed.seen.length;
+        fake.serve.setArchived(session.id, false);
+        const restored = await feed.waitFor((delta) => delta.sessionId === session.id && !delta.removed, { from: restoring });
+        expect(restored.changedFields).toEqual(['session']);
+        expect(restored.session.control.drive.supported).toBe(true);
+        fake.serve.beforeRosterReply = undefined; releaseRoster();
+        stream = await context.openDrive(session);
+        expect((await context.prompt(stream, 'after the restore')).kind).toBe('ack');
+      } finally { fake.serve.beforeRosterReply = undefined; releaseRoster(); stream.close(); }
     },
   },
 );

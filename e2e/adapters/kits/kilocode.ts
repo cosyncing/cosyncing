@@ -606,4 +606,26 @@ const kiloExtras: ConformanceExtra[] = [
       stream.close();
     },
   },
+  {
+    title: 'the mode picker lists the serve\'s agents; a choice sends the serve nothing, shows at once, and the next prompt names it',
+    async run(context) {
+      const fake = context.fake as KiloFake;
+      const session = await context.drivableSession('agent choice');
+      const stream = await context.openDrive(session);
+      const options = stream.ofKind('options').at(-1)!;
+      expect(((options.agents ?? []) as Array<{ name: string }>).map((agent) => agent.name)).toEqual(['code', 'plan']);
+      const mark = fake.ledger.mark();
+      expect((await stream.sendAndAwait({ kind: 'set-agent', agent: 'plan' })).kind).toBe('ack');
+      await stream.waitForFrame((frame) => frame.kind === 'session' && frame.info?.currentAgent === 'plan', {
+        after: 0, what: 'the session to show the plan agent',
+      });
+      // Kilo keeps a session's agent only from a prompt that names one: nothing is written for the choice.
+      expect(fake.ledger.paths(mark).filter((path) => !path.startsWith('GET '))).toEqual([]);
+      expect((await stream.sendAndAwait({ kind: 'set-agent', agent: 'not-an-agent' })).kind).toBe('nack');
+      expect((await context.prompt(stream, 'after the agent choice')).kind).toBe('ack');
+      const prompts = fake.ledger.routed('POST', /\/prompt_async$/, mark);
+      expect(prompts.map((entry) => (entry.body as { agent?: unknown } | undefined)?.agent)).toEqual(['plan']);
+      stream.close();
+    },
+  },
 ];

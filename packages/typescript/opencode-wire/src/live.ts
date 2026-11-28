@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import type {
   AgentMessage,
   AgentMessageHandler,
+  AgentOption,
   HistoryQuery,
   HistorySourceIdentity,
   ModelOption,
@@ -126,6 +127,13 @@ export interface OpenCodeLiveConnectionOptions {
   /** Kilo create cannot persist a model, so its prompt route must receive the current selection. */
   sendCurrentModelOnPrompt?: boolean;
   onModelObserved?: (model: NonNullable<SessionInfo['currentModel']>) => void;
+  /**
+   * The agents (modes) a prompt may name. With it, this connection offers the agent choice: a chosen
+   * agent is named by every later prompt it sends, since the server records a session's agent only
+   * from a prompt that names one (a prompt naming none runs the session's last agent). Without it, no
+   * agent is offered and none can be chosen.
+   */
+  loadAgents?: () => Promise<AgentOption[]>;
   loadStatus?: (context: OpenCodeLiveRequestContext) => Promise<SessionInfo['status'] | undefined>;
   disconnectedControl?: (reason: string) => SessionControlState;
   fetch?: typeof globalThis.fetch;
@@ -320,6 +328,11 @@ export class OpenCodeLiveConnection implements SessionConnection {
   private nativeModelGeneration = 0;
   /** Invalidated whenever native activity proves that this connection no longer owns writes. */
   private ownershipGeneration = 0;
+  /**
+   * The agent chosen on this connection ({@link setAgent}), named by each later prompt. Until one is
+   * chosen, `info.currentAgent` follows the session's own agent from the server's snapshots.
+   */
+  private chosenAgent?: string;
 
   constructor(private readonly options: OpenCodeLiveConnectionOptions) {
     this.info = options.info;
@@ -496,7 +509,8 @@ export class OpenCodeLiveConnection implements SessionConnection {
       body.model = { providerID: promptModel.providerID, modelID: promptModel.modelID };
       if (promptModel.variant) body.variant = promptModel.variant;
     }
-    if (input.agent) body.agent = input.agent;
+    const agent = input.agent ?? this.chosenAgent;
+    if (agent) body.agent = agent;
     const nativeId = messageId();
     const claimGeneration = this.ownershipGeneration;
     body.messageID = nativeId;
@@ -548,6 +562,28 @@ export class OpenCodeLiveConnection implements SessionConnection {
 
   async listModels(): Promise<ModelOption[]> {
     return this.options.loadModels?.(this.info.currentModel) ?? [];
+  }
+
+  /** Choosing an agent is a write (the next prompt names it), so a connection that cannot write,
+   *  such as one demoted to Observe, offers none, and the broker refuses a choice it did not offer. */
+  async listAgents(): Promise<AgentOption[]> {
+    if (!this.writable()) return [];
+    return this.options.loadAgents?.() ?? [];
+  }
+
+  /**
+   * Choose the agent this connection's later prompts run under. Nothing reaches the server now: it
+   * keeps a session's agent only from a prompt that names one, so the choice is named by each later
+   * prompt, and the server records it with the first. The broker has checked the name against
+   * {@link listAgents}.
+   */
+  async setAgent(agent: string): Promise<void> {
+    this.assertWritable('agent choice');
+    if (!this.options.loadAgents) {
+      throw new ControlRefusedError(`${this.options.dialect.displayName} offers no agent choice here.`, 'command-unsupported');
+    }
+    this.chosenAgent = agent;
+    this.noteAgent(agent);
   }
 
   async respondPermission(requestId: string, decision: PermissionDecision): Promise<void> {
@@ -902,6 +938,8 @@ export class OpenCodeLiveConnection implements SessionConnection {
     }
     if (event?.type === 'session.updated') {
       this.noteNativeModel(nativeModel(properties.info), 'live');
+      // A chosen agent is what this connection's next prompt runs; until then, the session's own.
+      if (this.chosenAgent === undefined) this.noteAgent(properties.info?.agent);
       if (properties.info?.revert !== undefined) {
         this.emit({ type: 'history-reset' });
         this.markUnavailable(
@@ -1164,8 +1202,18 @@ export class OpenCodeLiveConnection implements SessionConnection {
     });
   }
 
+  private noteAgent(agent: unknown): void {
+    if (typeof agent !== 'string' || !agent || agent.length > 512 || agent === this.info.currentAgent) return;
+    this.info.currentAgent = agent;
+    this.emit({ type: 'metadata-update', key: 'sessionInfo', value: { currentAgent: agent } });
+  }
+
+  private writable(): boolean {
+    return !this.closed && !this.unavailable && !this.serverLoss && this.info.attachMode !== 'observe';
+  }
+
   private assertWritable(action: string): void {
-    if (!this.closed && !this.unavailable && !this.serverLoss && this.info.attachMode !== 'observe') return;
+    if (this.writable()) return;
     throw new Error(this.info.control?.drive.reason
       ?? `${this.options.dialect.displayName} ${action} refused: this connection is read-only.`);
   }

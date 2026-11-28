@@ -1,0 +1,9 @@
+{
+  "provenance": "captured pi 1.6.0 2026-11-28 scripted local model, cache warming every 2 s; paths scrubbed",
+  "description": "cache-warm usage entries count toward the turn totals and never become rows: warms written while a turn runs count toward it, warms written between turns toward the next turn",
+  "userTexts": [
+    "first turn",
+    "HOLD6 second turn"
+  ],
+  "sessionId": "01a2206c-d174-71c4-b46b-8722fe037d98"
+}

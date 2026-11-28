@@ -63,6 +63,13 @@ Sessions that a 1.x release from 1.38.8 on keeps in `sessions-v4/`, and the
   not shown.
 - On 2.61.0 a driven session also shows its context-window use, which
   Reasonix reports before each answer.
+- A tool's text result is shown as soon as the tool finishes. Reasonix
+  shortens a live result to 8,000 bytes; after a reload the stored result is
+  shown, up to 64 KiB.
+- The task list the model keeps with `todo_write` is shown as the session's
+  task panel, live and after a reload. While the app drives the session, the
+  panel also follows the steps Reasonix marks done when `complete_step` signs
+  one off.
 - A turn that fails at the model provider ends with an error message and the
   session stays writable; the next prompt can retry.
 - Continuation instructions Reasonix writes into the transcript on 2.61.0 are
@@ -86,8 +93,12 @@ Sessions that a 1.x release from 1.38.8 on keeps in `sessions-v4/`, and the
   own echo. This is a residual native-identity limitation, not a safe
   coexistence mode; do not run another writer against a driven session.
 - Existing-session model switching, files, images, artifact delivery, question
-  dialogs, task lists, subagent rows, rename, fork, and export
-  are not exposed by this adapter.
+  dialogs, subagent rows, rename, fork, and export are not exposed by this
+  adapter.
+- Reasonix does not store the task list that `complete_step` advances. After a
+  reload, and on Observe-only connections, the panel shows the last list the
+  model wrote with `todo_write`, which can trail steps signed off after it.
+  Reasonix's own session reload shows the same list.
 - The app offers the Ask, Auto and Yolo approval modes. The `readOnly` and
   `dontAsk` modes Reasonix 2.61.0 has only under `reasonix acp
   --permission-mode` are not offered, and a session saved in one of them shows
