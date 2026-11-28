@@ -2413,6 +2413,8 @@ await (async () => {
   const PARENT = '00000000-0000-4000-8000-0000000000a0'; // deliberately NOT written: this child is an orphan
   const NORMAL = '00000000-0000-4000-8000-0000000000b2';
   const LOADED = '00000000-0000-4000-8000-0000000000b3'; // a normal session in the same loaded set: the control for "loaded ⇒ live"
+  const SIDE = '00000000-0000-4000-8000-0000000000d4'; // a side chat of NORMAL
+  const FORK = '00000000-0000-4000-8000-0000000000e5'; // an ordinary fork of NORMAL: the control for "attached ⇒ child"
   const childPath = join(sessionsDir, `rollout-2026-07-25T00-00-00-${CHILD}.jsonl`);
   const normalPath = join(sessionsDir, `rollout-2026-07-25T00-00-00-${NORMAL}.jsonl`);
   const loadedPath = join(sessionsDir, `rollout-2026-07-25T00-00-00-${LOADED}.jsonl`);
@@ -2428,6 +2430,29 @@ await (async () => {
   );
   writeFileSync(normalPath, line({ type: 'session_meta', payload: { id: NORMAL, cwd: dir, thread_source: 'user' } }));
   writeFileSync(loadedPath, line({ type: 'session_meta', payload: { id: LOADED, cwd: dir, thread_source: 'user' } }));
+  // A side chat is persisted as its own rollout. These are the session_meta fields Codex 0.172.0's TUI
+  // wrote for a `/side` conversation (ids, offsets and paths are this fixture's; the provider is left
+  // out as for the other rows): an attached fork of the thread it was opened from, followed by the
+  // side policy, its boundary and the side question.
+  writeFileSync(
+    join(sessionsDir, `rollout-2026-07-25T00-00-01-${SIDE}.jsonl`),
+    line({ type: 'session_meta', payload: {
+      id: SIDE, forked_from_id: NORMAL, attached_thread: true, cwd: dir, originator: 'codex-tui', cli_version: '0.172.0',
+      source: 'vscode', thread_source: 'tui_side_chat', history_mode: 'paginated',
+      history_base: { thread_id: NORMAL, end_ordinal_exclusive: 14, end_byte_offset: 4096 },
+    } }) +
+      line({ type: 'response_item', payload: { type: 'message', role: 'developer', content: [{ type: 'input_text', text: '<side_conversation>You are in a side conversation, not the main thread.</side_conversation>' }] } }) +
+      line({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Side conversation boundary.' }] } }) +
+      line({ type: 'event_msg', payload: { type: 'task_started', turn_id: 't-side' } }) +
+      line({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'What did the parent answer?' }] } }) +
+      line({ type: 'event_msg', payload: { type: 'item_completed', thread_id: SIDE, turn_id: 't-side', started_at_ms: 1795837699904, completed_at_ms: 1795837699904, item: { type: 'UserMessage', id: 'u-side', content: [{ type: 'text', text: 'What did the parent answer?' }] } } }) +
+      line({ type: 'response_item', payload: { type: 'message', role: 'assistant', id: 'msg_side1', content: [{ type: 'output_text', text: 'It said OK.' }] } }) +
+      line({ type: 'event_msg', payload: { type: 'task_complete', turn_id: 't-side' } }),
+  );
+  writeFileSync(
+    join(sessionsDir, `rollout-2026-07-25T00-00-02-${FORK}.jsonl`),
+    line({ type: 'session_meta', payload: { id: FORK, forked_from_id: NORMAL, cwd: dir, originator: 'codex-tui', source: 'cli', thread_source: 'user' } }),
+  );
   const marker = join(dir, 'spawned.log');
   const fakeCodex = join(binDir, 'codex');
   writeFileSync(fakeCodex, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${marker}\nexit 0\n`);
@@ -2656,6 +2681,22 @@ await (async () => {
       'a normal session discovered alongside it still offers Drive (the boundary is origin, not the scan)',
       normal?.attachMode === 'observe' && normal?.drive?.supported === true && normal?.drive?.state === 'observing',
       JSON.stringify(normal ?? null),
+    );
+    // A side chat is a child row of the thread it was opened from, and nothing more: the user drives
+    // it, so it keeps Drive and Terminal Sync, unlike the agent-owned subagent above.
+    const side = rows.find((r) => r.nativeId === SIDE);
+    const fork = rows.find((r) => r.nativeId === FORK);
+    check(
+      'discovery lists a side chat as a child row of its thread, with Drive and Terminal Sync still offered',
+      !!side && side.parentThreadId === NORMAL && side.origin === undefined
+        && side.attachMode === 'observe' && side.drive?.supported === true && side.drive?.state === 'observing'
+        && side.sync?.supported === true && side.sync?.action === 'join',
+      JSON.stringify(side ?? null),
+    );
+    check(
+      'an ordinary fork of the same thread stays a session of its own',
+      !!fork && fork.parentThreadId === undefined && fork.origin === undefined && fork.drive?.supported === true,
+      JSON.stringify(fork ?? null),
     );
     check(
       'a daemon-loaded NORMAL session still maps loaded → live + driving (the loaded set really is in effect)',

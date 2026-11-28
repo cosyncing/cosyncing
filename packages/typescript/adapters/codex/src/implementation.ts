@@ -9306,18 +9306,27 @@ const AUTO_ORIGINATORS = new Set(['Claude Code']);
  *     originator ({@link AUTO_ORIGINATORS} + our 'cosyncing-*' / 'cosyncing-*' harnesses);
  *   - vscode:   `originator:'codex_vscode'`;
  *   - undefined (displayed): human surfaces (codex-tui / codex_cli_rs / the app's 'cosyncing')
- *     AND any unrecognized front-end. */
+ *     AND any unrecognized front-end.
+ *
+ *  A side chat is the one other child: Codex persists it as a fork with `attached_thread: true` and
+ *  `forked_from_id` naming the thread it belongs to (captured on 0.172.0 from the TUI's `/side` and
+ *  from `thread/fork {attachToSource}`). It gets that parent link so the roster nests it under its
+ *  thread, and keeps the origin its originator gives: the user drives it, so it is not agent-owned.
+ *  An ordinary fork carries `forked_from_id` too, but without the flag it stays a session of its own. */
 export function codexSessionOrigin(meta: any): { origin?: 'subagent' | 'exec' | 'vscode'; parentThreadId?: string } {
   if (!meta || typeof meta !== 'object') return {};
   if (meta.thread_source === 'subagent' || meta.source?.subagent) {
     const parent = meta.parent_thread_id ?? meta.source?.subagent?.thread_spawn?.parent_thread_id;
     return { origin: 'subagent', ...(parent ? { parentThreadId: String(parent) } : {}) };
   }
+  const attachedTo = meta.attached_thread === true && meta.forked_from_id != null && String(meta.forked_from_id)
+    ? { parentThreadId: String(meta.forked_from_id) }
+    : {};
   const originator = typeof meta.originator === 'string' ? meta.originator : '';
-  if (originator === 'codex_exec' || meta.thread_source === 'exec') return { origin: 'exec' };
-  if (originator === 'codex_vscode') return { origin: 'vscode' };
-  if (AUTO_ORIGINATORS.has(originator) || originator.startsWith('cosyncing-') || originator.startsWith('cosyncing-')) return { origin: 'exec' };
-  return {};
+  if (originator === 'codex_exec' || meta.thread_source === 'exec') return { origin: 'exec', ...attachedTo };
+  if (originator === 'codex_vscode') return { origin: 'vscode', ...attachedTo };
+  if (AUTO_ORIGINATORS.has(originator) || originator.startsWith('cosyncing-') || originator.startsWith('cosyncing-')) return { origin: 'exec', ...attachedTo };
+  return attachedTo;
 }
 
 /** Drive reason for a child thread the parent agent owns. Single-sourced: the roster/attach control
