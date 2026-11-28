@@ -1326,6 +1326,13 @@ try {
     await catalogConnection.close();
     check('every answer so far came from the one cached catalog read', catalogHub.providerListCalls === 1,
       `calls=${catalogHub.providerListCalls}`);
+    // The roster sweeps on a timer; only the picker, Create and Resume read the catalog.
+    catalogClock += 60_001;
+    const sweepRows = await unpairedAdapter.discoverSessions();
+    check('a roster sweep never reads the catalog, even after the cached read has expired',
+      catalogHub.providerListCalls === 1
+        && sweepRows.some((row) => row.id === catalogCreated.id && row.control?.drive.supported === true),
+      `calls=${catalogHub.providerListCalls}`);
 
     const pairedAdapter = catalogAdapter({
       ...catalogEnv,

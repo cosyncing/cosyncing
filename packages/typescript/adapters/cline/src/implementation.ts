@@ -202,6 +202,14 @@ interface ClineManagedModels {
   providers: ReadonlySet<string>;
 }
 
+/** One catalog read for one Hub epoch; `settled` once it has answered. */
+interface ClineCatalogRead {
+  epoch: string;
+  expiresAt: number;
+  value: Promise<ClineManagedModels>;
+  settled?: ClineManagedModels;
+}
+
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
@@ -339,7 +347,7 @@ export class ClineAdapter implements AgentBackend {
   private readonly recordStoredPromptCorrelation?: ClineAdapterOptions['recordStoredPromptCorrelation'];
   private readonly promptCorrelations = new Map<string, ClinePromptCorrelationRegistry>();
   private readonly terminalSummaries = new Map<string, TerminalSummaryRegistry<ClineTerminalSummary>>();
-  private hubCatalog?: { epoch: string; expiresAt: number; value: Promise<ClineManagedModels> };
+  private hubCatalog?: ClineCatalogRead;
   readonly listModels: () => Promise<ModelOption[]>;
   readonly listModes: () => Promise<ModeOption[]>;
   readonly createSession: (options?: {
@@ -468,9 +476,11 @@ export class ClineAdapter implements AgentBackend {
 
   async discoverSessions(options?: SessionDiscoveryOptions): Promise<SessionInfo[]> {
     const sessions = await this.storedSessions(options);
-    const writer = await this.writerModels(options?.signal);
+    const writer = await this.managedWriter(options?.signal);
     const writerAvailable = writer !== undefined;
-    const modelCatalog = writer?.models ?? [];
+    // The roster also sweeps on a timer, so it never reads the Hub's provider catalog: Create,
+    // the picker and Resume read it when asked. Labels come from the pair or a still-cached read.
+    const modelCatalog = writer ? this.cachedManagedModels(writer) : [];
     // ONE Hub probe for the whole pass. Created lazily and NOT awaited here: a
     // sweep with no managed session must not pay for a probe nobody reads, and
     // the sessions below share this promise rather than each issuing their own.
@@ -590,21 +600,38 @@ export class ClineAdapter implements AgentBackend {
   }
 
   /**
-   * What a broker-owned, ready managed Hub lets Create and Resume use right
-   * now, or `undefined` when there is no writer: an off-version binary, no
-   * ready or no owned Hub, neither the pair nor a Hub provider catalog, a
-   * catalog that cannot be read, or a profile with no configured provider.
-   * Ownership is proven before the catalog is read and only when one of the
-   * two sources could answer, so a host with neither pays no ownership proof.
+   * The broker-owned, ready managed Hub a writer would use, or `undefined`: an
+   * off-version binary, no ready or no owned Hub, or neither the pair nor a
+   * Hub provider catalog. Ownership is proven only when one of the two sources
+   * could answer, so a host with neither pays no ownership proof. Reads no
+   * catalog.
    */
-  private async writerModels(signal?: AbortSignal): Promise<ClineManagedModels | undefined> {
+  private async managedWriter(signal?: AbortSignal): Promise<{ discovery: ClineHubDiscovery } | undefined> {
     if (await clineVerifiedInvocation(this.command, this.env, this.now) === undefined) return undefined;
     const discovery = await this.probeManagedHub(signal);
     if (!discovery || (!this.configuredHubModel() && !clineHubOffersProviderCatalog(discovery))) return undefined;
     const descriptor = await this.describeManagedHost();
     if (await this.isManagedHostOwned?.(descriptor.identityKey) !== true) return undefined;
-    const models = await this.managedModels(discovery).catch(() => undefined);
+    return { discovery };
+  }
+
+  /** What that Hub lets Create use right now, reading the catalog if no read is cached; `undefined`
+   *  also for a catalog that cannot be read or a profile with no configured provider. */
+  private async writerModels(signal?: AbortSignal): Promise<ClineManagedModels | undefined> {
+    const writer = await this.managedWriter(signal);
+    if (!writer) return undefined;
+    const models = await this.managedModels(writer.discovery).catch(() => undefined);
     return models && models.providers.size > 0 ? models : undefined;
+  }
+
+  /** The pair, or the models of a catalog read already settled for this Hub epoch and not expired. */
+  private cachedManagedModels(writer: { discovery: ClineHubDiscovery }): ModelOption[] {
+    const pair = this.configuredHubModel();
+    if (pair) return [pair];
+    const cached = this.hubCatalog;
+    return cached?.settled && cached.epoch === clineHubEpoch(writer.discovery) && cached.expiresAt > this.now()
+      ? cached.settled.models
+      : [];
   }
 
   /** The pair when set; otherwise the Hub's catalog, cached per Hub epoch. A
@@ -621,9 +648,15 @@ export class ClineAdapter implements AgentBackend {
     const cached = this.hubCatalog;
     if (cached && cached.epoch === epoch && cached.expiresAt > this.now()) return cached.value;
     const value = this.readHubCatalog(discovery);
-    const entry = { epoch, expiresAt: this.now() + CLINE_HUB_CATALOG_TTL_MS, value };
+    const entry: ClineCatalogRead = {
+      epoch,
+      expiresAt: this.now() + CLINE_HUB_CATALOG_TTL_MS,
+      value,
+    };
     this.hubCatalog = entry;
-    value.catch(() => {
+    value.then((models) => {
+      entry.settled = models;
+    }, () => {
       if (this.hubCatalog === entry) this.hubCatalog = undefined;
     });
     return value;
@@ -633,7 +666,9 @@ export class ClineAdapter implements AgentBackend {
    * One short-lived client that advertises no capability, so the Hub never
    * routes an approval to it. Only providers the Hub reports enabled and
    * configured are kept, each with the models Cline lists for it; a provider
-   * whose model list fails or is malformed is skipped, not guessed.
+   * whose model list fails or is malformed is skipped, not guessed. The
+   * `providers.list` reply carries API keys: nothing of it but the parsed
+   * fields outlives this call, and no trace or error repeats any of it.
    */
   private async readHubCatalog(discovery: ClineHubDiscovery): Promise<ClineManagedModels> {
     const cwd = clineManagedDataRoot(this.env, this.homeDir);
@@ -1119,8 +1154,9 @@ export class ClineAdapter implements AgentBackend {
       && storedBoundaryInvalid) {
       this.invalidateDriveEligibility(sessionId);
     }
-    const writer = managed ? await this.writerModels() : undefined;
-    const writerReady = writer !== undefined;
+    // Observe needs no catalog; only Resume, below, reads it.
+    const writerHub = managed ? await this.managedWriter() : undefined;
+    const writerReady = writerHub !== undefined;
     const eligible = (writerReady || activeDriving)
       && !isSubagent && (this.driveEligible.has(sessionId) || storedBoundaryValid);
     if (effectiveMode === 'resume') {
@@ -1139,6 +1175,9 @@ export class ClineAdapter implements AgentBackend {
       const openingToken = Symbol('Cline Resume');
       this.opening.set(sessionId, openingToken);
       try {
+        const writer = writerHub
+          ? await this.managedModels(writerHub.discovery).catch(() => undefined)
+          : undefined;
         const nativeModel = preserveModelLabel(session.currentModel, stored?.currentModel);
         const listed = nativeModel ? writer?.models.find((candidate) =>
           candidate.providerID === nativeModel.providerID && candidate.modelID === nativeModel.modelID) : undefined;
