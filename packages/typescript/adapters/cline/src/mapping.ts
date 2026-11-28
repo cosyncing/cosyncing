@@ -290,8 +290,17 @@ export function clineTurnId(sessionId: string, messageId: string): string {
   return `cline:${sessionId}:turn:${messageId}`;
 }
 
-/** Cline 3.0.60 persists human prompts inside its own exact mode envelope. */
+/** Cline 3.0.60 persists human prompts inside its own exact mode envelope: `act` or `plan`, and
+ *  `yolo` for a CLI run that approves every tool (measured on 3.0.75). */
 export function clineUserText(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length === 0) return undefined;
+  const match = /^<user_input mode="(?:act|plan|yolo)">([\s\S]*)<\/user_input>$/u.exec(value);
+  return match ? match[1] : value;
+}
+
+/** A prompt as Drive's causal match reads it. Drive only ever runs `act` or `plan`, so a `yolo`
+ *  row was written by some other run: it keeps its envelope here and never matches Drive's text. */
+export function clineDrivenUserText(value: unknown): string | undefined {
   if (typeof value !== 'string' || value.length === 0) return undefined;
   const match = /^<user_input mode="(?:act|plan)">([\s\S]*)<\/user_input>$/u.exec(value);
   return match ? match[1] : value;

@@ -24,12 +24,12 @@ import {
 } from './hub.ts';
 import {
   boundedText,
+  clineDrivenUserText,
   clineMessageKey,
   clineSubagentFinished,
   clineSubagentStarted,
   clineTurnId,
   clineTurnTokens,
-  clineUserText,
   mapClineTranscript,
 } from './mapping.ts';
 import type { ClineMapTrace, ClineTerminalSummary } from './mapping.ts';
@@ -216,7 +216,7 @@ function sameModel(left: PromptInput['model'] | undefined, right: SessionInfo['c
 function nativeUserText(message: ClineNativeMessage): string | undefined {
   if (message.role !== 'user' || message.content.length !== 1) return undefined;
   const block = message.content[0];
-  return block?.type === 'text' ? clineUserText(block.text) : undefined;
+  return block?.type === 'text' ? clineDrivenUserText(block.text) : undefined;
 }
 
 function messageIds(messages: readonly ClineNativeMessage[]): string[] {
