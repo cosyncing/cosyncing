@@ -5,7 +5,7 @@ import { OPENCODE_SHARED_ACTIONS } from '../commands.ts';
 import type { V2Binding } from '../binding.ts';
 import type { OpenCodeV2Backend } from './backend.ts';
 import { JOB_POLL_MS, V2JobRows } from './jobs.ts';
-import { arrayData, compactAttachments, contentKey, finite, formAnswer, formCard, historyRows, isRunInput, messageRows, nativeId, newNativeId, object, permissionCard, runSummary, sessionPatch, toolMessages, type Native } from './mapping.ts';
+import { arrayData, compactAttachments, contentKey, finite, formAnswer, formCard, historyRows, isRunInput, messageRows, nativeId, newNativeId, object, OPENCODE_ARCHIVED_REASON, permissionCard, runSummary, sessionPatch, toolMessages, type Native } from './mapping.ts';
 import { MAX_MESSAGE_RESPONSE_BYTES, MESSAGE_READ_BUDGET_MS, V2Error, type V2Event } from './transport.ts';
 
 /** A V1 history seat switches source when the shared service imports that same native ID. */
@@ -167,7 +167,9 @@ class BoundV2Connection implements SessionConnection {
     this.info.status = this.backend.status(this.info.id);
     if (this.observe) {
       this.info.attachMode = 'observe';
-      this.info.control = { drive: native?.parentID ? { supported: false, state: 'observing', reason: 'This session is controlled by its parent agent.' } : { supported: true, state: 'observing' }, terminalSync: this.info.control!.terminalSync };
+      this.info.control = { drive: native?.parentID ? { supported: false, state: 'observing', reason: 'This session is controlled by its parent agent.' }
+        : this.backend.archived.has(this.info.id) ? { supported: false, state: 'observing', reason: OPENCODE_ARCHIVED_REASON }
+          : { supported: true, state: 'observing' }, terminalSync: this.info.control!.terminalSync };
     }
     this.publishInfo();
   }
@@ -420,6 +422,9 @@ class BoundV2Connection implements SessionConnection {
   private path(suffix: string): string { return `/api/session/${encodeURIComponent(this.info.id)}${suffix}`; }
   private assertMutable(): void {
     if (this.closed || this.observe || !this.ready) throw new ControlRefusedError('This OpenCode connection is read-only or reconnecting.', 'command-unsupported');
+    // From 2.4.2 OpenCode would restore the session on send; on older services the turn would run
+    // in a session its list no longer shows. Either way the user restores it in OpenCode first.
+    if (this.backend.archived.has(this.info.id)) throw new ControlRefusedError(OPENCODE_ARCHIVED_REASON, 'command-unsupported');
   }
 
   async sendPrompt(input: PromptInput): Promise<void> {

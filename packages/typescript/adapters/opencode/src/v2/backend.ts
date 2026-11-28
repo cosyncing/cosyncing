@@ -5,7 +5,7 @@ import type { BindingResolver, V2Binding } from '../binding.ts';
 import { attachedV2TuiSessions, v2TuiPresenceSupported, TUI_PRESENCE_WATCH_MS } from '../tui-presence.ts';
 import { OpenCodeV2Connection } from './connection.ts';
 import { JOB_EVENT_MINIMUM_VERSION, JOB_LIST_MINIMUM_VERSION } from './jobs.ts';
-import { arrayData, compactAttachments, formCard, isSession, modelsFrom, nativeId, newNativeId, object, permissionCard, sessionInfo, type Native } from './mapping.ts';
+import { arrayData, compactAttachments, finite, formCard, isSession, modelsFrom, nativeId, newNativeId, object, OPENCODE_ARCHIVED_REASON, permissionCard, sessionInfo, type Native } from './mapping.ts';
 import { MAX_MESSAGE_RESPONSE_BYTES, MESSAGE_READ_BUDGET_MS, V2Error, V2ResponseTooLargeError, V2Transport, type V2Event } from './transport.ts';
 
 export interface LegacySession { id: string; title?: string; directory?: string; time?: { created?: number; updated?: number }; model?: { providerID?: string; id?: string; modelID?: string }; }
@@ -22,6 +22,8 @@ const AGENT_LIST_SETTLE_MS = 5_000;
 /** Whether an `agent.updated` from location `from` speaks for a read of `directory`: an event or a
  *  read without a location speaks for every location. */
 const agentUpdateFor = (directory: string | undefined, from: string) => directory === undefined || from === '' || from === directory;
+
+const ARCHIVED_LIMIT = 4096;
 
 /** One event subscription and activity projection for the complete shared service. */
 export class OpenCodeV2Backend {
@@ -53,6 +55,11 @@ export class OpenCodeV2Backend {
    *  waiting for their location's next one (see {@link listAgents}). */
   private readonly agentUpdates = new Map<string, number>();
   private readonly agentWaiters = new Set<(directory: string) => void>();
+  /** Sessions OpenCode reports archived. The roster list already leaves them out; this keeps a
+   *  watcher snapshot from putting one back and keeps an open connection to one read-only. */
+  readonly archived = new Set<string>();
+  /** Changes with every archive event, so a read started before one cannot overrule it. */
+  private archiveRevision = 0;
 
   constructor(readonly resolver: BindingResolver, private readonly options: V2BackendOptions) {}
 
@@ -67,6 +74,16 @@ export class OpenCodeV2Backend {
   async jobs(id: string, signal?: AbortSignal): Promise<unknown[] | undefined> {
     if (!this.jobSupport().list || !this.transport) return undefined;
     return arrayData(await this.transport.json(`/api/experimental/job?sessionID=${encodeURIComponent(id)}`, { signal }));
+  }
+
+  private markArchived(id: string, archived: boolean): boolean {
+    const was = this.archived.has(id);
+    if (archived) {
+      this.archived.delete(id);
+      this.archived.add(id);
+      while (this.archived.size > ARCHIVED_LIMIT) this.archived.delete(this.archived.values().next().value!);
+    } else this.archived.delete(id);
+    return was !== archived;
   }
 
   useBinding(binding: V2Binding): void {
@@ -113,6 +130,7 @@ export class OpenCodeV2Backend {
 
   info(value: Native): SessionInfo {
     const info = sessionInfo(value, this.status(value.id));
+    if (this.archived.has(info.id) && !value.parentID) info.control = { ...info.control!, drive: { supported: false, state: 'observing', reason: OPENCODE_ARCHIVED_REASON } };
     const binding = this.binding;
     if (!binding) return info;
     const quote = (text: string) => `'${text.replace(/'/g, `'\\''`)}'`;
@@ -132,7 +150,8 @@ export class OpenCodeV2Backend {
   private changed(id: string): void {
     this.revisions.set(id, ++this.revision);
     const native = this.sessions.get(id);
-    if (native) for (const listener of this.watchers) listener(this.info(native));
+    // An archived session has left OpenCode's list; a snapshot would put its row back.
+    if (native && !this.archived.has(id)) for (const listener of this.watchers) listener(this.info(native));
     for (const connection of this.connections) if (connection.info.id === id) connection.updateInfo(native);
   }
 
@@ -283,6 +302,21 @@ export class OpenCodeV2Backend {
           changed = JSON.stringify(next) !== JSON.stringify(before);
           this.sessions.set(id, next);
         }
+      } else if (event.type === 'session.archived' || event.type === 'session.unarchived') {
+        // As captured (2.3.2, 2.4.2): one durable event naming only the session, with no session
+        // update. Archiving stamps `time.archived` and `time.updated`; restoring removes the stamp.
+        const archived = event.type === 'session.archived';
+        this.archiveRevision++;
+        changed = this.markArchived(id, archived);
+        const before = this.sessions.get(id);
+        const at = finite(event.created) ? event.created : Date.now();
+        if (before) {
+          const { archived: _archived, ...time } = before.time ?? {};
+          this.sessions.set(id, { ...before, time: { ...time, updated: at, ...(archived ? { archived: at } : {}) } });
+        } else if (!archived) {
+          // Restored before this broker read it: read it so its row returns now.
+          void this.getSession(id).then(() => this.changed(id)).catch(() => {});
+        }
       }
       const session = data.session ?? (isSession(data) ? data : undefined);
       if (isSession(session)) {
@@ -297,7 +331,7 @@ export class OpenCodeV2Backend {
       this.agentUpdates.set(directory, (this.agentUpdates.get(directory) ?? 0) + 1);
       for (const wake of [...this.agentWaiters]) wake(directory);
     }
-    if (!['server.connected', 'server.heartbeat', 'agent.updated', 'session.created', 'session.updated', 'session.renamed', 'session.forked', 'session.deleted', 'session.status', 'session.execution.started', 'session.execution.succeeded', 'session.execution.failed', 'session.execution.interrupted', 'session.inbox.enqueued', 'session.inbox.delivered', 'session.text.started', 'session.text.delta', 'session.text.ended', 'session.reasoning.started', 'session.reasoning.delta', 'session.reasoning.ended', 'session.step.started', 'session.step.first-token', 'session.step.streamed', 'session.step.ended', 'session.step.failed', 'session.usage.updated', 'session.instructions.updated', 'session.revert.staged', 'session.revert.cleared', 'session.revert.committed', 'session.compaction.started', 'session.compaction.delta', 'session.compaction.ended', 'session.compaction.failed', 'session.tool.input.started', 'session.tool.input.ended', 'session.tool.progress', 'session.tool.called', 'session.tool.success', 'session.tool.failed', 'permission.asked', 'permission.replied', 'form.created', 'form.replied', 'form.cancelled', 'experimental.job.updated'].includes(event.type)) this.unknownEvents++;
+    if (!['server.connected', 'server.heartbeat', 'agent.updated', 'session.created', 'session.updated', 'session.renamed', 'session.forked', 'session.deleted', 'session.status', 'session.execution.started', 'session.execution.succeeded', 'session.execution.failed', 'session.execution.interrupted', 'session.inbox.enqueued', 'session.inbox.delivered', 'session.text.started', 'session.text.delta', 'session.text.ended', 'session.reasoning.started', 'session.reasoning.delta', 'session.reasoning.ended', 'session.step.started', 'session.step.first-token', 'session.step.streamed', 'session.step.ended', 'session.step.failed', 'session.usage.updated', 'session.instructions.updated', 'session.revert.staged', 'session.revert.cleared', 'session.revert.committed', 'session.compaction.started', 'session.compaction.delta', 'session.compaction.ended', 'session.compaction.failed', 'session.tool.input.started', 'session.tool.input.ended', 'session.tool.progress', 'session.tool.called', 'session.tool.success', 'session.tool.failed', 'permission.asked', 'permission.replied', 'form.created', 'form.replied', 'form.cancelled', 'session.archived', 'session.unarchived', 'experimental.job.updated'].includes(event.type)) this.unknownEvents++;
     if (event.type === 'session.inbox.enqueued' && object(data.item?.payload)) {
       event = { ...event, data: { ...data, item: { ...data.item, payload: compactAttachments(data.item.payload) } } };
     }
@@ -349,6 +383,7 @@ export class OpenCodeV2Backend {
     const cursors = new Set<string>();
     let cursor: string | undefined;
     let complete = false;
+    const archiveRevision = this.archiveRevision;
     for (let page = 0; page < 50; page++) {
       const value = await this.transport!.json('/api/session?limit=100&archived=false' + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''), { signal: options?.signal });
       const data = arrayData(value);
@@ -356,6 +391,8 @@ export class OpenCodeV2Backend {
         if (!isSession(item)) continue;
         const before = this.sessions.get(item.id);
         this.sessions.set(item.id, item);
+        // Listed means restored, unless an archive event arrived while this list was read.
+        if (archiveRevision === this.archiveRevision) this.markArchived(item.id, false);
         if (!before || before.time.updated !== item.time.updated) this.changed(item.id);
         for (const listener of this.importWatchers.get(item.id) ?? []) listener();
         const info = this.info(item);
@@ -385,9 +422,11 @@ export class OpenCodeV2Backend {
   async getSession(id: string): Promise<Native> {
     if (!nativeId(id, 'ses')) throw new SessionNotFoundError('Invalid OpenCode session ID.');
     try {
+      const archiveRevision = this.archiveRevision;
       const response = await this.transport!.json(`/api/session/${encodeURIComponent(id)}`);
       if (!isSession(response?.data) || response.data.id !== id) throw new V2Error('invalid-response');
       this.sessions.set(id, response.data);
+      if (archiveRevision === this.archiveRevision) this.markArchived(id, finite(response.data.time.archived));
       return response.data;
     } catch (error) {
       if (error instanceof V2Error && error.reason === 'not-found') throw new SessionNotFoundError('OpenCode does not list this session.');

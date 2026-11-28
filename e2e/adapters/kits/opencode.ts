@@ -28,6 +28,7 @@ import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { eventually, fixturePath, never, type FixturePaths, type SessionStream } from '../../harness/index.ts';
+import { RosterFeed } from '../../harness/roster.ts';
 import { openCodeRows } from '../../harness/fakes/opencode-server.ts';
 import { FakeOpenCodeServe } from './fakes/opencode-serve.ts';
 import { FakeOpenCodeV2Serve } from './fakes/opencode-v2-serve.ts';
@@ -1192,6 +1193,51 @@ opencodeV2Kit.extras!.push(
         const settled = fake.ledger.mark();
         await never(() => fake.ledger.routed('GET', JOB_LIST, settled).length > 0, 2500, 'a job read with no job running');
       } finally { stream.close(); }
+    },
+  },
+  {
+    title: 'an archived session leaves the roster and is read-only while open, and returns live when restored',
+    async run(context) {
+      const fake = context.fake as OpencodeV2Fake;
+      const session = await context.drivableSession('archived later');
+      const listed = fake.seedSession({ title: 'stays listed' });
+      await context.client.waitForSession((row) => row.id === listed.id);
+      const feed = new RosterFeed(context.client);
+      await feed.start();
+      let stream = await context.openDrive(session);
+      let releaseRoster!: () => void;
+      const rosterGate = new Promise<void>((resolve) => { releaseRoster = resolve; });
+      try {
+        // Archived in OpenCode while open here: the connection turns read-only and sends nothing.
+        const from = stream.frames.length;
+        fake.serve.setArchived(session.id, true);
+        const readOnly = await stream.waitForFrame((frame) => frame.kind === 'session' && frame.info.control?.drive?.supported === false, { after: from });
+        expect(readOnly.info.control.drive.reason).toContain('archived');
+        expect(readOnly.authority?.canMutate).toBe(false);
+        const mark = fake.ledger.mark();
+        expect((await stream.sendAndAwait({ kind: 'prompt', text: 'not while archived' })).kind).toBe('nack');
+        expect(fake.ledger.routed('POST', new RegExp(`^/api/session/${session.id}/prompt$`), mark)).toEqual([]);
+        stream.close();
+        // With nothing holding it open, the next roster read leaves it out, as OpenCode's list does.
+        await eventually(async () => !(await context.client.sessions({ refresh: true })).some((row: any) => row.id === session.id), { what: 'the archived session to leave the roster' });
+        await feed.waitFor((delta) => delta.sessionId === session.id && delta.removed === true);
+        // A later change to the archived session publishes no row; one to a listed session does.
+        const quiet = feed.seen.length;
+        fake.serve.emit('session.renamed', { sessionID: session.id, title: 'renamed while archived' }, true);
+        fake.serve.emit('session.renamed', { sessionID: listed.id, title: 'renamed while listed' }, true);
+        await feed.waitFor((delta) => delta.sessionId === listed.id && delta.session?.title === 'renamed while listed', { from: quiet });
+        expect(feed.of(session.id, quiet)).toEqual([]);
+        // Restored in OpenCode: the row returns from the event itself, while no roster read can answer.
+        fake.serve.beforeRosterReply = () => rosterGate;
+        const restoring = feed.seen.length;
+        fake.serve.setArchived(session.id, false);
+        const restored = await feed.waitFor((delta) => delta.sessionId === session.id && !delta.removed, { from: restoring });
+        expect(restored.changedFields).toEqual(['session']);
+        expect(restored.session.control.drive.supported).toBe(true);
+        fake.serve.beforeRosterReply = undefined; releaseRoster();
+        stream = await context.openDrive(session);
+        expect((await context.prompt(stream, 'after the restore')).kind).toBe('ack');
+      } finally { fake.serve.beforeRosterReply = undefined; releaseRoster(); stream.close(); }
     },
   },
 );

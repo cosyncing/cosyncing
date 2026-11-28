@@ -213,11 +213,22 @@ export class FakeOpenCodeV2Serve {
     if (atLeast(this.version, '2.4.0')) this.emit('experimental.job.updated', { info: job }, false, this.session(job.sessionID).info.location);
   }
 
-  emit(type: string, data: Json, durable = false, location?: Json): void {
+  /** Archive or restore as OpenCode does (captured on 2.3.2 and 2.4.2): one durable event naming
+   *  only the session, `time.archived` stamped or removed, `time.updated` moved; a repeat is a no-op. */
+  setArchived(id: string, archived: boolean): void {
+    const session = this.session(id);
+    if (archived === (session.info.time.archived !== undefined)) return;
+    const at = this.now();
+    if (archived) session.info.time.archived = at; else delete session.info.time.archived;
+    session.info.time.updated = at;
+    this.emit(archived ? 'session.archived' : 'session.unarchived', { sessionID: id }, true, null);
+  }
+
+  emit(type: string, data: Json, durable = false, location?: Json | null): void {
     const sessionID = data.sessionID ?? data.form?.sessionID;
     const seq = (this.sequences.get(sessionID) ?? 0) + 1;
     if (durable) this.sequences.set(sessionID, seq);
-    const scope = location ?? (sessionID && this.sessions.has(sessionID) ? this.session(sessionID).info.location : undefined);
+    const scope = location === null ? undefined : location ?? (sessionID && this.sessions.has(sessionID) ? this.session(sessionID).info.location : undefined);
     const event = { id: this.id('evt'), created: this.now(), type, data, ...(scope ? { location: scope } : {}), ...(durable ? { durable: { aggregateID: sessionID, seq, version: 1 } } : {}) };
     const bytes = new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`);
     for (const stream of this.streams) try { stream.enqueue(bytes); } catch { this.streams.delete(stream); }
@@ -319,6 +330,10 @@ export class FakeOpenCodeV2Serve {
     const id = decodeURIComponent(match[1]!), sub = match[2]!, session = this.sessions.get(id);
     if (!session) return Response.json({ _tag: 'SessionNotFoundError', sessionID: id }, { status: 404 });
     if (!sub && method === 'GET') return Response.json({ data: session.info });
+    if (!sub && method === 'PATCH' && typeof body?.archived === 'boolean') {
+      this.setArchived(id, body.archived);
+      return new Response(null, { status: 204 });
+    }
     if (!sub && method === 'PATCH') {
       session.info.title = body?.title ?? id; session.info.time.updated = this.now();
       this.emit('session.renamed', { sessionID: id, title: session.info.title }, true);
@@ -403,6 +418,8 @@ export class FakeOpenCodeV2Serve {
       session.inbox.push(input);
       this.record({ kind: 'prompt-model', sessionId: id, model: session.info.model });
       this.emit('session.inbox.enqueued', { sessionID: id, inboxID: input.id, item: { type: 'user', payload: input.payload, delivery: input.delivery } }, true);
+      // 2.4.2 (captured): sending to an archived session restores it, right after the enqueue.
+      if (session.info.time.archived !== undefined && atLeast(this.version, '2.4.2')) this.setArchived(id, false);
       if (!session.busy) { session.busy = true; session.cancelled = false; this.emit('session.execution.started', { sessionID: id }, true); void this.drain(id); }
       if (this.ambiguous.delete(path)) return Response.json({});
       return Response.json({ data: input });

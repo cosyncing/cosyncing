@@ -7,6 +7,9 @@ export const object = (value: unknown): value is Native => !!value && typeof val
 export const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
 export const nativeId = (value: unknown, prefix: string): value is string => typeof value === 'string' && value.startsWith(prefix) && isOpaqueSessionId(value);
 
+/** Why an archived session is read-only here. OpenCode lists it again once it is restored. */
+export const OPENCODE_ARCHIVED_REASON = 'This session is archived in OpenCode. Restore it there to continue.';
+
 export function arrayData(value: unknown): Native[] {
   if (!object(value) || !Array.isArray(value.data) || !value.data.every(object)) throw new V2Error('invalid-response');
   return value.data;

@@ -54,6 +54,10 @@ session is open; a job that ended unseen is removed without an outcome. When
 one finishes, OpenCode starts a new turn in that session by itself, and the
 app shows that turn's answer and summary like any other turn.
 
+A session archived in OpenCode leaves the session list at the next refresh,
+as it leaves OpenCode's own list, and is read-only while it stays open.
+Restoring it in OpenCode brings its row back.
+
 For OpenCode 2, the terminal sync hint opens the same session with:
 
 ```bash
