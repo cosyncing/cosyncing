@@ -1409,6 +1409,8 @@ class PiConnection implements SessionConnection {
   private thinkingSelectors: string[] | undefined;
   /** The build refused `get_available_thinking_levels`: it lacks the command, so it is not asked again. */
   private thinkingLevelsRefused = false;
+  /** Usage written while no turn was open (an idle cache warm): the next turn's, as a reload counts it. */
+  private heldUsage: { tokens?: PiOpenTurn['tokens'] } = {};
   /** Connection-wide prompt transaction tail. Broker clients have independent WebSocket queues,
    *  so the adapter must serialize native-state reconciliation, optimistic FIFO mutation, model
    *  override, and prompt acknowledgement across every caller sharing this PiConnection. */
@@ -1616,11 +1618,13 @@ class PiConnection implements SessionConnection {
       this.turnSeq = countJsonlLines(raw);
       this.userSeq = this.turnSeq;
       this.nextUserTurnOrdinal = countPiJsonlUserMessages(raw);
-      for (const row of activePiJsonlRows(parsePiJsonlRows(raw.split('\n')))) {
+      const rows = parsePiJsonlRows(raw.split('\n'));
+      for (const row of activePiJsonlRows(rows)) {
         const message = piJsonlRowMessage(row.obj);
         const base = message?.role === 'assistant' ? piAssistantKeyBase(message) : undefined;
         if (base) nextPiAssistantKeyBase(base, this.assistantKeyBaseCounts);
       }
+      this.heldUsage = { tokens: piTrailingUsage(rows) };
     } catch {
       /* a fresh session file may not exist yet — counters stay at 0 */
     }
@@ -1817,6 +1821,13 @@ class PiConnection implements SessionConnection {
     } catch {
       return;
     }
+    // Pi announces each entry it appends; usage spent outside a message (a cache warm) is one. omp
+    // announces none, so its model usage reaches the totals when the file is read again.
+    if (obj.type === 'entry_appended') {
+      const usage = piUsageEntryUsage(obj.entry);
+      if (usage) accumulatePiUsage(this.currentRun ?? this.heldUsage, usage);
+      return;
+    }
     if (obj.type === 'response' && obj.id && this.pendingRpc.has(obj.id)) {
       if (obj.command === 'get_state' && obj.success === true) this.noteThinkingState(obj.data);
       this.pendingRpc.get(obj.id)!(obj);
@@ -1916,6 +1927,13 @@ class PiConnection implements SessionConnection {
     return `${streaming.base}:${suffix}:${ordinal}`;
   }
 
+  /** The usage written while no turn was open, for the turn opening now. */
+  private takeHeldUsage(): { tokens?: PiOpenTurn['tokens'] } {
+    const tokens = this.heldUsage.tokens;
+    this.heldUsage = {};
+    return tokens ? { tokens } : {};
+  }
+
   /** Degraded RPC fallback: Pi normally emits turn_start BEFORE the user message_start, so
    *  turn_start itself must never mint a summary. If a runtime omits the user event entirely,
    *  the first assistant event opens the turn here using the run clock and queued prompt link. */
@@ -1934,6 +1952,7 @@ class PiConnection implements SessionConnection {
         ? undefined
         : this.consumePendingUserTurn() ?? this.lastUserMessageKey,
       startedAt: this.runStartedAt ?? Date.now(),
+      ...this.takeHeldUsage(),
     };
     this.emit({ type: 'run-summary', ...this.currentRun, status: 'running', source: this.rt.dialect.eventSources.rpc });
   }
@@ -2140,6 +2159,7 @@ class PiConnection implements SessionConnection {
           // The message's own clock is the turn's start — the durable record of the same
           // instant the JSONL entry carries, so live and reload agree.
           startedAt: userStartedAt,
+          ...this.takeHeldUsage(),
         };
         this.emit({ type: 'run-summary', ...this.currentRun, status: 'running', source: this.rt.dialect.eventSources.rpc });
         return;
@@ -3732,6 +3752,8 @@ export interface PiJsonlTurnCarry {
   /** Arguments of the tool calls read so far whose result has not been read yet, by call id: a
    *  result in a later window is built from them exactly as a whole-file read builds it. */
   toolArgs?: Map<string, any>;
+  /** Usage written while no turn was open, held for the next turn. */
+  heldTokens?: PiOpenTurn['tokens'];
 }
 
 /** Tool calls a tail keeps waiting for their result; the oldest are forgotten beyond this. */
@@ -3767,10 +3789,19 @@ function mapPiJsonlLines(
   activeBranchOnly = false,
   userEchoes?: PiUserEchoAssigner,
 ): AgentMessage[] {
-  const entries: { message: any; index: number; keyBase: string; entryAt?: number; messageAt?: number }[] = [];
+  const entries: PiMappedEntry[] = [];
   const parsedRows = parsePiJsonlRows(lines, firstIndex);
-  const rows = activeBranchOnly ? activePiJsonlRows(parsedRows) : parsedRows;
-  for (const { obj, index } of rows) {
+  const active = activeBranchOnly ? new Set(activePiJsonlRows(parsedRows)) : undefined;
+  for (const row of parsedRows) {
+    const { obj, index } = row;
+    // Usage the runtime spent outside a message (Pi's cache warms, omp's model usage) counts toward
+    // the turn totals wherever it sits in the tree, an abandoned branch included, and is never a row.
+    const usage = piUsageEntryUsage(obj);
+    if (usage) {
+      entries.push({ message: undefined, usage, index, keyBase: `h${index}` });
+      continue;
+    }
+    if (active && !active.has(row)) continue;
     const message = piJsonlRowMessage(obj);
     if (!message) continue;
     const keyBase = obj.id != null ? String(obj.id) : message.id != null ? String(message.id) : `h${index}`;
@@ -3859,7 +3890,7 @@ function accumulatePiUsage(
  *  - Missing or contradictory clocks omit the duration rather than guess.
  */
 function mapPiMessages(
-  entries: { message: any; index: number; keyBase: string; entryAt?: number; messageAt?: number }[],
+  entries: PiMappedEntry[],
   argsByCallId: Map<string, any>,
   includeTotals: boolean,
   carry?: PiJsonlTurnCarry,
@@ -3933,7 +3964,29 @@ function mapPiMessages(
     summaries.push(summary);
   };
 
+  // Usage outside a message counts toward the turn open where it was written, and usage written
+  // between turns (an idle cache warm, omp's judge before the prompt it judges) toward the next
+  // turn: the live paths can then add it as it comes, and no finished summary changes afterwards.
+  let held = carry?.heldTokens;
+  const countUsage = (usage: any): void => {
+    if (open) return accumulatePiUsage(open, usage);
+    const into: { tokens?: PiOpenTurn['tokens'] } = { tokens: held };
+    accumulatePiUsage(into, usage);
+    held = into.tokens;
+  };
+  const opened = (turn: PiOpenTurn): PiOpenTurn => {
+    if (held) {
+      turn.tokens = held;
+      held = undefined;
+    }
+    return turn;
+  };
+
   for (const e of entries) {
+    if (e.usage) {
+      countUsage(e.usage);
+      continue;
+    }
     if (e.message?.role === 'cosyncingRunEnd') {
       const end = e.message;
       const anchor = open?.summaryAnchor;
@@ -3982,15 +4035,15 @@ function mapPiMessages(
         : correlation && allowCorrelation
           ? correlation.messageKey
           : (skill ? ordinalAnchor! : echo?.key ?? e.keyBase);
-      open = {
+      open = opened({
         summaryAnchor: correlation
           ? (allowCorrelation ? correlation.messageKey : e.keyBase)
           : ordinalAnchor!,
         userKey,
         startedAt: correlation?.sentAt ?? skill?.sentAt ?? e.messageAt ?? e.entryAt,
-      };
+      });
     } else if (e.message?.role === 'assistant') {
-      open ??= {};
+      open ??= opened({});
       const supersededRetry = piAssistantRetryIsSuperseded(e.message);
       if (!supersededRetry) {
         open.lastAssistant = {
@@ -4018,6 +4071,7 @@ function mapPiMessages(
     // report the turn as running, so nothing fabricates a completion.
     carry.open = open;
     carry.nextUserOrdinal = nextUserOrdinal;
+    carry.heldTokens = held;
     close(open, false);
   } else {
     close(open, false);
@@ -4063,6 +4117,34 @@ function firstPiAssistantTextKey(message: any, keyBase: string): string | undefi
   if (message.content.some((c: any) => c?.type === 'text' && c.text)) return `${keyBase}:t:0`;
   if (message.content.some((c: any) => c?.type === 'thinking' && c.thinking)) return `${keyBase}:r:0`;
   return undefined;
+}
+
+/** Usage written after the session's last turn boundary, which a reload counts toward the next turn. */
+function piTrailingUsage(rows: ParsedPiJsonlRow[]): PiOpenTurn['tokens'] {
+  const into: { tokens?: PiOpenTurn['tokens'] } = {};
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const obj = rows[index]!.obj;
+    const usage = piUsageEntryUsage(obj);
+    if (usage) {
+      accumulatePiUsage(into, usage);
+      continue;
+    }
+    const message = piJsonlRowMessage(obj);
+    if (message?.role === 'user' || message?.role === 'assistant'
+      || piCollabPromptCorrelation(message) || piSkillPromptInvocation(message)) break;
+  }
+  return into.tokens;
+}
+
+/** One mapped session entry: a message, or usage the runtime spent outside a message. */
+type PiMappedEntry = { message: any; index: number; keyBase: string; entryAt?: number; messageAt?: number; usage?: any };
+
+/** The usage of an entry that records spend outside any message: Pi's `usage` entries (cache
+ *  warms, captured Pi 1.6.0) and omp's `model_usage` (titles, the auto-thinking judge, cache warms
+ *  and discarded turns; captured omp 19.1.0). Both runtimes count them in their own totals. */
+function piUsageEntryUsage(obj: any): any | undefined {
+  if (obj?.type !== 'usage' && obj?.type !== 'model_usage') return undefined;
+  return obj.usage && typeof obj.usage === 'object' ? obj.usage : undefined;
 }
 
 function piUsageTokens(usage: any): { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: number } | undefined {

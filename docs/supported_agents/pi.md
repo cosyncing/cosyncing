@@ -54,6 +54,11 @@ Pi's own rule allows: `xhigh` and `max` appear only for a model whose
 `thinkingLevelMap` names them, and a level the map sets to `null` is not
 offered.
 
+A turn's token and cost totals include what Pi spends outside a message, such
+as keeping the prompt cache warm: a warm that runs during a turn counts toward
+that turn, and one that runs while the session is idle counts toward the next
+turn.
+
 Multiple foreground cosyncing clients can join the same broker-owned Pi Drive
 session without starting another native Resume. Background Observe connections
 remain read-only. The legacy `@mariozechner/pi-coding-agent` package name is

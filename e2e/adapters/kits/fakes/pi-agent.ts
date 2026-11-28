@@ -52,6 +52,9 @@
  *   [[hold:TAG]]     keep the run open until the control file `release-TAG` appears, or `abort`
  *   [[retry]]        one failed attempt (`auto_retry_start`/`auto_retry_end`) before the answer
  *   [[tool]]         a bash tool call and its result before the answer
+ *   [[warm]]         Pi only: a cache warm while the turn runs, before the answer: a `usage` entry
+ *                    in the captured Pi 1.6.0 shape, announced by `entry_appended`
+ *   [[warmafter]]    Pi only: the same cache warm once the run has ended, while the session is idle
  *
  * A prompt that arrives while a run is open and says `streamingBehavior: 'steer'` is injected at the
  * next turn boundary of the same run (answered in order). Everything observable is appended to the
@@ -441,6 +444,20 @@ function runFakePi(): void {
     return message;
   };
 
+  /** A cache warm as Pi 1.6.0 records and announces it (captured 2026-11-28; usage from the run). */
+  const cacheWarm = (): void => {
+    const entry: Json = {
+      type: 'usage', id: shortId(), parentId: lastEntryId(file), timestamp: new Date().toISOString(),
+      kind: 'cache_warm', provider: model.provider, model: model.id,
+      usage: {
+        input: 500, output: 1, cacheRead: 1500, cacheWrite: 0, reasoning: 0, totalTokens: 2001,
+        cost: { input: 0.5, output: 0.001, cacheRead: 0.015, cacheWrite: 0, total: 0.516, totalFromProvider: false },
+      },
+    };
+    appendLines(file, [entry]);
+    emit({ type: 'entry_appended', entry: snapshot(entry) });
+  };
+
   const released = (tag: string): Promise<void> => new Promise((resolve) => {
     stopHold = resolve;
     const tickRelease = (): void => {
@@ -529,6 +546,7 @@ function runFakePi(): void {
       emit({ type: 'auto_retry_start', attempt: 1, maxAttempts: 3, delayMs: 10, errorMessage: '429 rate limited' });
       emit({ type: 'auto_retry_end', success: true, attempt: 1 });
     }
+    if (text.includes('[[warm]]') && dialect === 'pi') cacheWarm();
     const hold = /\[\[hold:([\w-]+)\]\]/.exec(text)?.[1];
     if (hold) await released(hold);
     if (aborted) {
@@ -598,6 +616,7 @@ function runFakePi(): void {
     }
     emit({ type: 'agent_end', messages: [] });
     running = false;
+    if (first.text.includes('[[warmafter]]') && dialect === 'pi') cacheWarm();
   };
 
   // ------------------------------------------------------------ the commands

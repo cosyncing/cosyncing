@@ -1106,6 +1106,32 @@ export function piFamilyExtras(dialect: PiFamilyDialect): ConformanceExtra[] {
     },
   });
 
+  if (!omp) extras.push({
+    title: 'a cache warm counts toward the turn it ran in, or the next turn when it ran between turns, live and on reload, and is never a row',
+    async run(context) {
+      const fake = asFake(context);
+      const session = await context.drivableSession('cache warms');
+      const owner = await context.openDrive(session);
+      expect((await context.prompt(owner, '[[warm]] [[warmafter]] warm turn')).kind).toBe('ack');
+      expect((await context.prompt(owner, 'after the warm')).kind).toBe('ack');
+      const finished = (messages: any[]): Map<string, any> => new Map(messages
+        .filter((message) => message.type === 'run-summary' && message.status === 'done')
+        .map((message) => [message.key, message.tokens]));
+      const live = finished(owner.messages());
+      // Each answer used 3 in and 2 out; each warm 500 in, 1 out, 1500 read, 0.516 (captured Pi 1.6.0).
+      const withWarm = { input: 503, output: 3, cacheRead: 1500, cacheWrite: 0, cost: 0.516 };
+      expect([...live.values()].slice(-2)).toEqual([withWarm, withWarm]);
+      const reader = await context.client.attach(agent, session.id, { mode: 'resume', reason: 'takeover' });
+      const replayed = finished((await reader.waitForKind('history')).messages as any[]);
+      reader.close();
+      for (const [key, tokens] of live) expect(replayed.get(key)).toEqual(tokens);
+      // The warm entries are on disk and nothing rendered them.
+      expect(readEntries(piFileOf(session.id)).filter((entry) => entry.type === 'usage')).toHaveLength(2);
+      expect(fake.ledger.faults()).toEqual([]);
+      owner.close();
+    },
+  });
+
   extras.push({
     title: 'a prompt on the model and thinking level the session already runs switches nothing before it is sent',
     async run(context) {

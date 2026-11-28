@@ -56,6 +56,11 @@ service reconfiguration instead of leaving omp without its bridge.
   included. On omp 19.1.0 it also offers `auto`, where omp picks the effort for
   each turn; a session left in auto mode is still in it when it is resumed.
   omp 17.4.2 has no `auto`, so the picker does not offer it there.
+- A turn's token and cost totals include omp's own model usage records
+  (titles, the auto-thinking judge, cache warms), including records written
+  off the active branch; usage between turns counts toward the next turn. In
+  sessions driven from the app these records count once the session is read
+  again, because omp does not announce them while it runs.
 - New sessions and session names are supported.
 - Multiple clients reuse one bridge/Drive owner.
 - On omp 19.1.0, extension HTML form dialogs appear as question cards. Radio

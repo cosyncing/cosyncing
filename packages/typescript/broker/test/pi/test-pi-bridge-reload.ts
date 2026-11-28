@@ -403,6 +403,37 @@ try {
           && store.listObservations().length === openBefore;
         return [ok, `reset=${reset} hellos=${helloBodies.length} backfill=${JSON.stringify([...backfill])} live=${JSON.stringify(live)} events=${eventsBefore}->${store.listEvents().length} open=${openBefore}->${store.listObservations().length}`];
       });
+
+      await test('cache warms count toward the turn they ran in, or the next turn, live and after a reload', async () => {
+        phase = 'warms';
+        // A Pi 1.6.0 cache warm (captured 2026-11-28): spend outside any message, never a row.
+        const warm = (id: string, parentId: string, ms: number) => ({
+          type: 'usage', id, parentId, timestamp: new Date(ms).toISOString(), kind: 'cache_warm', provider: 'fixture', model: 'fixture-reasoning',
+          usage: { input: 500, output: 1, cacheRead: 1500, cacheWrite: 0, reasoning: 0, totalTokens: 2001, cost: { input: 0.5, output: 0.001, cacheRead: 0.015, cacheWrite: 0, total: 0.516, totalFromProvider: false } },
+        });
+        const start = at + 20_000;
+        // One warm while the session sat idle between turns, one while the next turn ran.
+        entries = [...entries, warm('warm-idle', 'live-assistant-2', start - 1_000)];
+        await fire('agent_start', { timestamp: start });
+        await fire('turn_start', { timestamp: start });
+        await fire('message_start', { message: { role: 'user', content: [{ type: 'text', text: 'warmed turn' }], timestamp: start } });
+        entries = [...entries, userEntry('live-user-3', 'warm-idle', 'warmed turn', start), warm('warm-run', 'live-user-3', start + 1_000)];
+        await fire('message_end', { timestamp: start + 2_000, message: assistantMessage('reply: warmed turn', false) });
+        await fire('agent_end', { timestamp: start + 2_000 });
+        await waitUntil(() => summariesIn('warms').some((m) => m.key === 'pi:run:u3' && m.status === 'done'));
+        const live = summariesIn('warms').find((m) => m.key === 'pi:run:u3' && m.status === 'done');
+        entries = [...entries, { type: 'message', id: 'live-assistant-3', parentId: 'warm-run', timestamp: new Date(start + 2_000).toISOString(), message: assistantMessage('reply: warmed turn', false) }];
+        await fire('session_shutdown', { reason: 'reload' });
+        fire = await loadExtension();
+        await fire('session_start');
+        await waitUntil(() => helloBodies.length === 3);
+        const backfilled = (helloBodies[2]?.history ?? []).find((ev: any) => ev.t === 'run-summary' && ev.key === 'pi:run:u3');
+        const counted = (tokens: any) => tokens && tokens.input === 1001 && tokens.output === 3 && tokens.cacheRead === 3000
+          && tokens.cacheWrite === 0 && tokens.cost === 1.032;
+        const rows = (helloBodies[2]?.history ?? []).filter((ev: any) => ev.t !== 'run-summary' && ev.t !== 'runtime-totals' && ev.t !== 'context-usage');
+        const ok = counted(live?.tokens) && counted(backfilled?.tokens) && rows.length === 8;
+        return [ok, `live=${JSON.stringify(live?.tokens)} backfilled=${JSON.stringify(backfilled?.tokens)} rows=${JSON.stringify(rows.map((ev: any) => ev.t))}`];
+      });
     } finally {
       await fire('session_shutdown', { reason: 'quit' }).catch(() => undefined);
       fakeBroker.stop(true);
