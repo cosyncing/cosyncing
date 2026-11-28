@@ -937,6 +937,97 @@ function kimiElapsedMs(startedAt: number | undefined, endedAt: number | undefine
     : undefined;
 }
 
+/** Characters of a background task's title or command on its row. */
+const KIMI_BACKGROUND_TASK_TEXT_MAX = 200;
+
+/** One background-task row: its upsert key, whether it is still running, and the row itself. */
+export interface KimiBackgroundTaskRow {
+  key: string;
+  running: boolean;
+  message: Extract<AgentMessage, { type: 'agent-activity' }>;
+}
+
+/**
+ * One entry of a KAP `task` or `task.list` frame → its `agent-activity` row,
+ * or undefined for a task this adapter does not show.
+ *
+ * Captured on Kimi Code 2.7.2: `{task_id, kind: shell|subagent|other, status:
+ * running|ended, outcome?: completed|failed|timed_out|killed|lost, detached,
+ * description?, command?, child_agent_id?, parent_tool_call_id?,
+ * swarm_index?, started_at?, ended_at?}`. `parent_tool_call_id` is the id of
+ * the tool call that started the task, the same id the transcript's call card
+ * carries.
+ *
+ * WHICH TASKS. Kimi runs EVERY shell call and every subagent as a task, so the
+ * frames name far more than background work. Two kinds are shown:
+ *  - a DETACHED shell task, the command the agent sent to the background. A
+ *    foreground one is the tool call's own card, already on screen;
+ *  - a SWARM MEMBER (`swarm_index` set). An `AgentSwarm` call has no other
+ *    per-member surface.
+ * A lone subagent is not shown from here: the transcript's bar for its `Agent`
+ * call already is that row (opened by the call or its spawn result, closed by
+ * the result or the settlement notification), and a second source writing the
+ * same key would replace the bar's subagent type with nothing.
+ *
+ * KEYS. A shell task is `cmd:<call id>`, as every adapter keys a background
+ * command. A swarm member is `agent:<call id>#<index>`, because every member
+ * shares its `AgentSwarm` call. A task with no call id keys on its task id.
+ *
+ * STATUS. Running is running; an ended task is `done` when it completed and
+ * `error` when it failed, timed out or was killed. `lost` (and an ending this
+ * version does not know) is `retired`: the server itself can no longer say
+ * what became of the task, so the row is taken down rather than given an
+ * outcome. The exit code is not on the frame and is never invented.
+ */
+export function mapKimiBackgroundTask(raw: unknown): KimiBackgroundTaskRow | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const task = raw as Record<string, unknown>;
+  const taskId = optionalString(task.task_id);
+  if (!taskId) return undefined;
+  const swarmIndex = typeof task.swarm_index === 'number' && Number.isSafeInteger(task.swarm_index) && task.swarm_index >= 0
+    ? task.swarm_index
+    : undefined;
+  const kind = task.kind === 'shell' && task.detached === true
+    ? 'command' as const
+    : task.kind === 'subagent' && swarmIndex !== undefined
+      ? 'subagent' as const
+      : undefined;
+  if (!kind) return undefined;
+  const callId = optionalString(task.parent_tool_call_id);
+  const anchor = callId ?? `task:${taskId}`;
+  const key = kind === 'command' ? `cmd:${anchor}` : `agent:${anchor}#${swarmIndex}`;
+  const running = task.status !== 'ended';
+  const outcome = optionalString(task.outcome);
+  const status = running
+    ? 'running' as const
+    : outcome === 'completed'
+      ? 'done' as const
+      : outcome === 'failed' || outcome === 'timed_out' || outcome === 'killed'
+        ? 'error' as const
+        : 'retired' as const;
+  const command = optionalString(task.command)?.trim().slice(0, KIMI_BACKGROUND_TASK_TEXT_MAX);
+  const description = optionalString(task.description)?.trim().slice(0, KIMI_BACKGROUND_TASK_TEXT_MAX);
+  const title = description || command || (kind === 'command' ? 'Background command' : 'Subagent task');
+  const startedAt = optionalEpochMs(task.started_at);
+  const endedAt = optionalEpochMs(task.ended_at);
+  const elapsedMs = running ? undefined : kimiElapsedMs(startedAt, endedAt);
+  return {
+    key,
+    running,
+    message: {
+      type: 'agent-activity',
+      key,
+      kind,
+      title,
+      ...(kind === 'command' && description && command ? { subtitle: command } : {}),
+      status,
+      ...(elapsedMs !== undefined ? { elapsedMs } : {}),
+      ...(running && startedAt !== undefined ? { startedAtMs: startedAt } : {}),
+      ...(kind === 'subagent' ? { agentsDone: running ? 0 : 1, agentsTotal: 1 } : {}),
+    },
+  };
+}
+
 /** The parsed contents of a `<notification …>` task-settlement envelope. */
 interface KimiTaskNotification {
   type?: string;
@@ -1472,6 +1563,18 @@ export function mapKimiMessage(raw: KimiMessage, state?: KimiMappingState): Kimi
   for (const [index, part] of parts.entries()) {
     const key = partKey(id, index);
     const kind = part.type;
+    if (kind === KIMI_TURN_FAILURE_PART) {
+      // A failed turn's own ending, as the KAP turn read carries it
+      // (`kap.ts`). Keyed by TURN, not by message, so it is the same row the
+      // live `turn.ended` path and the journal recovery deliver for that turn.
+      const turnRef = optionalString(part.turn_ref);
+      if (!turnRef) continue;
+      out.push(
+        { type: 'error', message: mapKimiTurnFailure({ error: part.error, interruptReason: part.interrupt_reason }) },
+        kimiTurnFailureKey(turnRef),
+      );
+      continue;
+    }
     if (kind === 'text') {
       const text = textOf(part, 'text');
       if (!text) continue;
@@ -2072,6 +2175,36 @@ export function mapKimiTurnFailure(payload: unknown): string {
 }
 
 /**
+ * Envelope types the KAP socket (`kap.ts`) adds to the 0.x event stream for
+ * state 0.x never pushed. The `cosyncing.` prefix is never a native frame type.
+ *
+ *  - {@link KIMI_AGENT_STATE_EVENT}: the main agent's `agent` or `context`
+ *    frame arrived, so the model, effort, mode and context readings changed
+ *    now rather than at the next poll. Payload: `{agentId}`.
+ *  - {@link KIMI_BACKGROUND_TASKS_EVENT}: the main agent's background tasks,
+ *    `{agentId, tasks, snapshot}`; `snapshot` is true for the full list a
+ *    subscribe answers with, false for one task's change.
+ */
+export const KIMI_AGENT_STATE_EVENT = 'cosyncing.agent_state';
+export const KIMI_BACKGROUND_TASKS_EVENT = 'cosyncing.background_tasks';
+
+/**
+ * The content part a KAP turn read adds for a turn that FAILED (`kap.ts`):
+ * `{type, turn_ref, error, interrupt_reason}`. Never sent by a 0.x server.
+ */
+export const KIMI_TURN_FAILURE_PART = 'cosyncing_turn_failure';
+
+/**
+ * The native key of one turn's failure row. Every route to a failure — the
+ * live `turn.ended`, the KAP turn read, the journal recovery — delivers it
+ * under `error:` plus this key, so a failure seen live and read again later
+ * is one row.
+ */
+export function kimiTurnFailureKey(turnRef: string): string {
+  return `kimi-turn-failed:${turnRef}`;
+}
+
+/**
  * The visible marker a truncated detail ends with, and part of the BUDGET
  * rather than an addition to it: a cap the suffix is then appended past is not a
  * cap. Counted in bytes below like everything else here.
@@ -2143,6 +2276,61 @@ export function boundedKimiToolInput(value: unknown): string | undefined {
  */
 export const KIMI_APPROVAL_OPTIONS: readonly string[] = ['approve', 'approve-session', 'reject'];
 
+/**
+ * The decisions a PLAN REVIEW card offers: approve or reject, never the
+ * session-wide approval. Kimi's own terminal and ACP clients offer no such
+ * choice for a plan, and a session-scoped approval of `ExitPlanMode` would let
+ * every later plan leave plan mode unreviewed. Both answers are the same
+ * bodies the other approvals send: `{decision:'approved'}` exits plan mode
+ * with the plan approved, `{decision:'rejected'}` keeps plan mode on
+ * (captured on Kimi Code 2.7.2).
+ */
+export const KIMI_PLAN_REVIEW_OPTIONS: readonly string[] = ['approve', 'reject'];
+
+/**
+ * Bytes of a plan a plan-review card carries: the plan IS what the user is
+ * asked to approve, so it gets the room the Claude mod gives a card's details
+ * rather than the tool-input cap.
+ */
+export const KIMI_PLAN_REVIEW_DETAIL_CAP_BYTES = 8 * 1024;
+
+/** Characters of one offered approach's label or description on the card. */
+const KIMI_PLAN_OPTION_MAX_CHARS = 300;
+
+/**
+ * A plan review's card text, or undefined when the display is not one.
+ *
+ * Kimi's `ExitPlanMode` asks through an ordinary approval whose display is
+ * `{kind:'plan_review', plan, path?, options?}` (captured on Kimi Code 2.7.2).
+ * The card shows the plan as written rather than as JSON. When the agent
+ * offered alternative approaches, they are listed after it: the card's two
+ * answers cannot pick one, so the text says how to choose. The list is kept
+ * whole and the PLAN is what gives way to the cap.
+ */
+function kimiPlanReviewDetail(display: unknown): string | undefined {
+  if (!display || typeof display !== 'object' || Array.isArray(display)) return undefined;
+  const row = display as Record<string, unknown>;
+  if (row.kind !== 'plan_review' || typeof row.plan !== 'string' || !row.plan.trim()) return undefined;
+  const options = Array.isArray(row.options)
+    ? row.options.flatMap((option) => {
+      if (!option || typeof option !== 'object' || Array.isArray(option)) return [];
+      const label = optionalString((option as Record<string, unknown>).label)?.trim().slice(0, KIMI_PLAN_OPTION_MAX_CHARS);
+      const description = optionalString((option as Record<string, unknown>).description)?.trim()
+        .slice(0, KIMI_PLAN_OPTION_MAX_CHARS);
+      return label ? [description ? `- ${label}: ${description}` : `- ${label}`] : [];
+    })
+      // Upstream allows three; a longer list is not one this card was sized for.
+      .slice(0, 3)
+    : [];
+  const choices = options.length >= 2
+    ? `\n\nApproaches offered:\n${options.join('\n')}\nApproving does not choose one; name the approach in your next message.`
+    : '';
+  const plan = row.plan.trim();
+  const budget = Math.max(256, KIMI_PLAN_REVIEW_DETAIL_CAP_BYTES - Buffer.byteLength(choices, 'utf8'));
+  const body = Buffer.byteLength(plan, 'utf8') <= budget ? plan : truncateToUtf8Budget(plan, budget);
+  return `${body}${choices}`;
+}
+
 /** `event.approval.requested` → a canonical permission card. Undefined when the id is unusable. */
 export function mapKimiApprovalRequest(
   payload: unknown,
@@ -2154,7 +2342,8 @@ export function mapKimiApprovalRequest(
   if (!requestId) return undefined;
   const toolName = optionalString(row.tool_name);
   const action = optionalString(row.action);
-  const detail = boundedKimiToolInput(row.tool_input_display);
+  const plan = kimiPlanReviewDetail(row.tool_input_display);
+  const detail = plan ?? boundedKimiToolInput(row.tool_input_display);
   return {
     type: 'permission-request',
     requestId,
@@ -2164,7 +2353,9 @@ export function mapKimiApprovalRequest(
     // An observe-mode card is a NOTICE: it is non-actionable by design, this
     // connection has no write door to answer it through, and advertising
     // options on it would grow buttons that resolve nothing.
-    ...(readOnly ? { readOnly: true } : { options: [...KIMI_APPROVAL_OPTIONS] }),
+    ...(readOnly
+      ? { readOnly: true }
+      : { options: [...(plan !== undefined ? KIMI_PLAN_REVIEW_OPTIONS : KIMI_APPROVAL_OPTIONS)] }),
   };
 }
 
