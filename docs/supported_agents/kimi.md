@@ -54,8 +54,25 @@ cosyncing maps Kimi Code 2.7's protocol onto the behavior described under
 - A session shows as working while a turn runs. Once the turn ends it shows as
   idle, even while background commands or subagents it started are still
   working.
+- A shell command the agent runs in the background shows as an activity row
+  until it ends, and so does each member of an agent swarm. Kimi does not
+  report an exit code for these commands, so none is shown. When the
+  connection to `kimi web` drops, these rows are removed, and the ones still
+  running come back when the connection does.
 - The model, effort and context-window details of a session appear once the
-  session is open in cosyncing, not on the session list.
+  session is open in cosyncing, not on the session list. They update as soon
+  as Kimi reports a change.
+- When the agent asks to leave plan mode, the plan shows on an approval card
+  with approve and reject. If the agent offered alternative approaches, they
+  are listed under the plan. Approving does not choose one, so name the
+  approach you want in your next message.
+- A message sent while a turn runs reaches the agent after the current tool
+  call instead of after the turn. Kimi records it as the start of a new turn.
+- When a turn fails, the reason Kimi gives shows in the transcript, also when
+  the session is opened later.
+- A subagent's child row is titled with the first line of the task it was
+  given. Kimi Code 2.7 keeps the subagent's short description only in the
+  parent session.
 - An attached file shows as a notice with its name, type and size.
 
 ## Current behavior
