@@ -4208,6 +4208,14 @@ const NATIVE_SESSION_UNRESUMABLE_CODES = new Set([
   'THREAD_RESUME_UNSUPPORTED',
 ]);
 
+/** Codex refuses `thread/resume` (captured on 0.172.0) for a thread whose saved model provider
+ *  this host can no longer serve: the provider left the config (`modelProviderNotConfigured`) or a
+ *  managed policy requires another one (`modelProviderPolicyConflict`). Both arrive as `-32600`
+ *  with the kind in `data.type` and a message that says what to restore. Only the user can change
+ *  either, so a retry would be refused the same way: the session stays readable in Observe with
+ *  that message. */
+const CODEX_PROVIDER_REFUSAL_TYPES = new Set(['modelProviderNotConfigured', 'modelProviderPolicyConflict']);
+
 const NATIVE_OWNERSHIP_CONFLICT_CODES = new Set([
   'ACTIVE_WRITER',
   'SESSION_ACTIVE_WRITER',
@@ -4257,6 +4265,7 @@ function nativeSessionUnresumableRejection(error: unknown): boolean {
     const normalized = normalizedNativeSignal(value);
     return normalized !== undefined && NATIVE_SESSION_UNRESUMABLE_CODES.has(normalized);
   })) return true;
+  if (typeof data?.type === 'string' && CODEX_PROVIDER_REFUSAL_TYPES.has(data.type)) return true;
   return data?.appOnly === true || data?.resumable === false;
 }
 
@@ -6577,10 +6586,19 @@ class CodexResumeConnection implements SessionConnection {
     ));
     if (configured.length) return configured.slice(0, CODEX_MAX_MODEL_OPTIONS);
 
+    // Scoped to the thread's own provider, so a thread on a custom provider lists that provider's
+    // models rather than the default provider's (Codex before 0.171 has no such field, and its
+    // params schema does not refuse unknown ones). Unscoped when the thread names no provider, and
+    // when the provider is defined only in a profile overlay: an app-server that loaded the base
+    // config alone does not know that name (the resume injected it for this thread only), so asking
+    // for it would just be refused.
+    const scope = current?.providerID?.trim() && resolveCodexModelProvider(providerID)?.source !== 'profile'
+      ? { modelProvider: providerID }
+      : {};
     try {
       const response = await this.rpc(
         'model/list',
-        { limit: CODEX_MAX_MODEL_OPTIONS, includeHidden: false },
+        { limit: CODEX_MAX_MODEL_OPTIONS, includeHidden: false, ...scope },
         10000,
       );
       return codexModelOptions(
