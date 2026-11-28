@@ -61,6 +61,10 @@ service reconfiguration instead of leaving omp without its bridge.
   off the active branch; usage between turns counts toward the next turn. In
   sessions driven from the app these records count once the session is read
   again, because omp does not announce them while it runs.
+- On omp 19.1.0, a prompt sent from the app while a turn runs is accepted as
+  soon as omp queues it, so more prompts can follow at once; each shows as
+  queued until omp starts it at its next turn boundary. On omp 17.4.2 the app
+  waits for each such prompt to start before it sends the next.
 - New sessions and session names are supported.
 - Multiple clients reuse one bridge/Drive owner.
 - On omp 19.1.0, extension HTML form dialogs appear as question cards. Radio

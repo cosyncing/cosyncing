@@ -1132,6 +1132,46 @@ export function piFamilyExtras(dialect: PiFamilyDialect): ConformanceExtra[] {
     },
   });
 
+  if (omp) extras.push({
+    title: 'omp 19.1.0 accepts a prompt sent during a run once its queue lists it: later prompts are not held until the turn ends, and the rows stay queued until each starts',
+    async run(context) {
+      const fake = asFake(context);
+      // omp 19.1.0 (captured) lists queued prompts in `queue_update`; 17.4.2 has no such event.
+      fake.setVersion('19.1.0', 'omp/19.1.0\n');
+      await context.restart();
+      try {
+        const session = await context.drivableSession('queued prompts');
+        const owner = await context.openDrive(session);
+        const mark = fake.ledger.mark();
+        expect((await owner.sendAndAwait({ kind: 'prompt', text: '[[hold:queued-run]] first' })).kind).toBe('ack');
+        await eventually(() => fake.ledger.since(mark).some((entry) => entry.kind === 'turn' && entry.text.endsWith('first')),
+          { what: 'the held turn to start' });
+        // Both are accepted while the first turn is still held, each once omp's queue lists it.
+        const steers = ['second while running', 'third while running'];
+        for (const steer of steers) expect((await owner.sendAndAwait({ kind: 'prompt', text: steer })).kind).toBe('ack');
+        expect(fake.ledger.since(mark).filter((entry) => entry.kind === 'turn-end')).toEqual([]);
+        const rows = (sent: string) => owner.messages().filter((message) => message.type === 'user-message' && message.text === sent);
+        for (const steer of steers) expect(rows(steer).map((row) => row.queued)).toEqual([true]);
+        fake.release('queued-run');
+        await owner.waitForMessage((message) => message.type === 'model-output' && text(message) === 'answer: third while running');
+        // Each queued row is replaced by its own started row, under the same key, in send order.
+        for (const sent of steers) {
+          const [queued, started] = rows(sent);
+          expect(started?.queued).toBe(false);
+          expect(started?.key).toBe(queued?.key);
+        }
+        expect(fake.ledger.since(mark).filter((entry) => entry.kind === 'turn').map((entry) => entry.text))
+          .toEqual(['[[hold:queued-run]] first', ...steers]);
+        expect(fake.ledger.faults(mark)).toEqual([]);
+        owner.close();
+      } finally {
+        fake.release('queued-run');
+        fake.setVersion(dialect.version.current);
+        await context.restart();
+      }
+    },
+  });
+
   extras.push({
     title: 'a prompt on the model and thinking level the session already runs switches nothing before it is sent',
     async run(context) {

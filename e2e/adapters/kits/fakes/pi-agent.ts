@@ -57,7 +57,10 @@
  *   [[warmafter]]    Pi only: the same cache warm once the run has ended, while the session is idle
  *
  * A prompt that arrives while a run is open and says `streamingBehavior: 'steer'` is injected at the
- * next turn boundary of the same run (answered in order). Everything observable is appended to the
+ * next turn boundary of the same run (answered in order). omp 19 and later list the queued prompts
+ * in `queue_update {steering, followUp, liveSteered}` (captured, omp 19.1.0): when one is queued,
+ * before the prompt's response; when one starts, between `turn_end` and `turn_start`; and when the
+ * queue is cleared. Everything observable is appended to the
  * ledger (JSONL): every start with argv, cwd and the variables it inherited, every version probe,
  * every stdin command (`recv`, with the session file it reached), every turn start and end, every
  * abort, and every exit. Tests read the ledger; they never patch the fake.
@@ -379,6 +382,11 @@ function runFakePi(): void {
   let turnNumber = 0;
   const steers: Input[] = [];
   const awaiting = new Map<string, (response: Json) => void>();
+  /** omp 19.1.0's queue snapshot, sent whenever the queued prompts change. */
+  const queueUpdate = (): void => {
+    if (dialect !== 'omp' || !versionAtLeast(19)) return;
+    emit({ type: 'queue_update', steering: steers.map((steer) => steer.text), followUp: [], liveSteered: 0 });
+  };
 
   const decode = (message: string): Input => {
     if (dialect === 'omp' && message.startsWith(PI_COLLAB_PROMPT_PREFIX)) {
@@ -576,8 +584,10 @@ function runFakePi(): void {
       }
       record({ kind: 'turn-end', text: input.text, session: file, aborted });
       emit({ type: 'turn_end', toolResults: [] });
+      const queued = steers.length;
       if (aborted) steers.length = 0;
       input = steers.shift();
+      if (queued) queueUpdate();
     }
     const background = /\[\[background(gone)?:([\w-]+)\]\]/.exec(first.text);
     if (background && !aborted) {
@@ -732,9 +742,12 @@ function runFakePi(): void {
         }
         const input = decode(String(command.message ?? ''));
         if (running && command.streamingBehavior !== 'steer') return fail(command, 'Agent is already processing a prompt.');
+        if (running) {
+          steers.push(input);
+          queueUpdate();
+        }
         ok(command);
-        if (running) steers.push(input);
-        else void run(input).catch((error) => record({ kind: 'fault', message: String(error) }));
+        if (!running) void run(input).catch((error) => record({ kind: 'fault', message: String(error) }));
         return;
       }
       case 'abort': {

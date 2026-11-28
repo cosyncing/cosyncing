@@ -38,6 +38,7 @@
     "message_end",
     "message_start",
     "message_update",
+    "queue_update",
     "session_settled",
     "tool_execution_end",
     "turn_start"

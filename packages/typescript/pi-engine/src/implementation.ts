@@ -1484,6 +1484,11 @@ class PiConnection implements SessionConnection {
     reject: (error: Error) => void;
     timer?: ReturnType<typeof setTimeout>;
   }>();
+  /** OMP prompts its queue already listed (`queue_update`): accepted and waiting for omp's next
+   *  turn boundary, not yet started. Until they start, a degraded stream links no fallback turn. */
+  private readonly ompQueuedPromptKeys = new Set<string>();
+  /** The prompt texts omp's queue listed last (steering, then follow-up). */
+  private ompQueuedTexts: string[] = [];
   private closed = false;
   /** When the current RUN began: stamped at agent_start. Only the FALLBACK turn anchor (a
    *  degraded stream that never forwards `message_start`) consumes it; the authoritative
@@ -1941,7 +1946,7 @@ class PiConnection implements SessionConnection {
     if (this.currentRun) return;
     const anchor = `u${this.nextUserTurnOrdinal++}`;
     const ompCorrelationPending = this.rt.dialect.toolId === 'omp'
-      && this.pendingNativePromptAcks.size > 0;
+      && (this.pendingNativePromptAcks.size > 0 || this.ompQueuedPromptKeys.size > 0);
     this.currentRun = {
       key: `${this.rt.dialect.eventKeyNamespace}${anchor}`,
       turnId: anchor,
@@ -1961,6 +1966,7 @@ class PiConnection implements SessionConnection {
    *  prompts. A blanket shift/pop is wrong when several steers are pending: the later successful
    *  message_start must still consume its own optimistic bubble key. */
   private removePendingUserTurn(userKey: string): void {
+    this.ompQueuedPromptKeys.delete(userKey);
     const index = this.pendingUserTurns.indexOf(userKey);
     if (index !== -1) this.pendingUserTurns.splice(index, 1);
     this.pendingUserEchoes.delete(userKey);
@@ -2043,6 +2049,28 @@ class PiConnection implements SessionConnection {
 
   private resolveNativePromptAck(userKey: string): void {
     this.pendingNativePromptAcks.get(userKey)?.resolve();
+  }
+
+  /**
+   * omp 19.1.0 lists the prompts it has queued (`queue_update`, captured): on each enqueue (before
+   * the prompt's RPC response), when a queued prompt starts, and when an abort clears the list. A
+   * prompt sent while a run is open otherwise proves itself only when it starts, at omp's next turn
+   * boundary, and every later prompt waits behind it. Prompt delivery is serialized, so at most one
+   * prompt is waiting; a snapshot that lists its text once more than the last one did is omp
+   * accepting it, so its sender, and the prompts after it, need not wait for that boundary. Its row
+   * stays queued until its exact correlated message starts.
+   */
+  private noteOmpQueue(ev: any): void {
+    const texts = [...(Array.isArray(ev?.steering) ? ev.steering : []), ...(Array.isArray(ev?.followUp) ? ev.followUp : [])]
+      .filter((text: unknown): text is string => typeof text === 'string');
+    const count = (list: string[], text: string): number => list.filter((entry) => entry === text).length;
+    const [waiting, ...others] = this.pendingNativePromptAcks.keys();
+    const text = waiting && !others.length ? this.pendingUserEchoes.get(waiting)?.text : undefined;
+    if (waiting && text !== undefined && count(texts, text) > count(this.ompQueuedTexts, text)) {
+      this.ompQueuedPromptKeys.add(waiting);
+      this.resolveNativePromptAck(waiting);
+    }
+    this.ompQueuedTexts = texts;
   }
 
   /** The end of a run the runtime will not continue: a terminal `agent_end`, or `session_settled`
@@ -2150,7 +2178,10 @@ class PiConnection implements SessionConnection {
             queued: false,
           });
         }
-        if (correlation) this.resolveNativePromptAck(correlation.messageKey);
+        if (correlation) {
+          this.resolveNativePromptAck(correlation.messageKey);
+          this.ompQueuedPromptKeys.delete(correlation.messageKey);
+        }
         const anchor = correlation?.messageKey ?? ordinalAnchor;
         this.currentRun = {
           key: `${this.rt.dialect.eventKeyNamespace}${anchor}`,
@@ -2222,6 +2253,9 @@ class PiConnection implements SessionConnection {
           return;
         }
         this.finishRun(ev);
+        return;
+      case 'queue_update':
+        this.noteOmpQueue(ev);
         return;
       case 'session_settled':
         // omp's "nothing is live, queued or scheduled" (measured after every terminal agent_end).
@@ -3008,6 +3042,7 @@ class PiConnection implements SessionConnection {
       pending.reject(new Error(`${this.rt.dialect.displayName} Drive connection closed before prompt persistence.`));
     }
     this.pendingNativePromptAcks.clear();
+    this.ompQueuedPromptKeys.clear();
     try {
       this.write({ type: 'abort' });
     } catch {
