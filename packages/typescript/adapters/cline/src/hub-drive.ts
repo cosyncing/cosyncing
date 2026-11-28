@@ -112,9 +112,8 @@ function eventAgent(payload: Record<string, unknown>): ClineEventAgent | undefin
 }
 
 /** A child agent's event: a subagent or teammate, or any agent with a parent. */
-function isChildAgent(agent: ClineEventAgent | undefined): agent is ClineEventAgent {
-  return agent !== undefined
-    && (agent.kind === 'subagent' || agent.kind === 'teammate' || agent.parentAgentId !== undefined);
+function isChildAgent(agent: ClineEventAgent): boolean {
+  return agent.kind === 'subagent' || agent.kind === 'teammate' || agent.parentAgentId !== undefined;
 }
 
 interface PendingPrompt {
@@ -1203,7 +1202,7 @@ export class ClineHubDriveConnection implements SessionConnection {
     // lead's answer row, its iterations and tools moved the lead's row keys off the ones history
     // gives, and its usage replaced the lead's counts.
     const agent = eventAgent(payload);
-    if (isChildAgent(agent)) {
+    if (agent && isChildAgent(agent)) {
       this.acceptSubagentEvent(event.event, agent, payload);
       return;
     }
