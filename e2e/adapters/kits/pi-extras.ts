@@ -835,9 +835,9 @@ export function piFamilyExtras(dialect: PiFamilyDialect): ConformanceExtra[] {
       const stream = await context.openDrive(session);
       const mark = fake.ledger.mark();
       expect((await context.prompt(stream, 'think hard', { model: { providerID: 'fake', modelID: 'pi-reason', reasoningEffort: 'high' } })).kind).toBe('ack');
-      // (The broker may check the model against the runtime's catalog first.)
+      // (The broker may check the model against the runtime's catalog, and its levels, first.)
       const types = fake.ledger.since(mark).filter((entry) => entry.kind === 'recv').map((entry) => entry.frame!.type)
-        .filter((type) => type !== 'get_available_models');
+        .filter((type) => type !== 'get_available_models' && type !== 'get_available_thinking_levels');
       expect(types.slice(0, 4)).toEqual(['get_state', 'set_model', 'set_thinking_level', 'prompt']);
       expect(fake.ledger.commands('set_model', mark)[0]!.frame).toMatchObject({ provider: 'fake', modelId: 'pi-reason' });
       expect(fake.ledger.commands('set_thinking_level', mark)[0]!.frame).toMatchObject({ level: 'high' });
@@ -1001,6 +1001,108 @@ export function piFamilyExtras(dialect: PiFamilyDialect): ConformanceExtra[] {
       const outcome = await refused.waitForFrame((frame) => frame.kind === 'error' || frame.kind === 'attach-conflict' || frame.kind === 'session');
       if (outcome.kind === 'session') expect(outcome.authority?.canMutate).toBe(false);
       refused.close();
+    },
+  });
+
+  extras.push({
+    title: 'the effort picker offers the levels the runtime takes for each model: max where the model has it, and auto only on an omp that lists it',
+    async run(context) {
+      const fake = asFake(context);
+      const previous = fake.configure({
+        models: [
+          { provider: 'fake', id: 'pi-fake', name: 'Pi Fake' },
+          { provider: 'fake', id: 'pi-reason', name: 'Pi Reason', reasoning: true },
+          // The catalog shapes Pi 1.6.0 and omp 19.1.0 answered (captured): Pi's level map, omp's efforts.
+          {
+            provider: 'fake', id: 'pi-max', name: 'Pi Max', reasoning: true,
+            thinkingLevelMap: { xhigh: 'high', max: 'high', minimal: null },
+            efforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+          },
+        ],
+      });
+      const levels = (models: any[], id: string): string[] =>
+        (models.find((model) => model.modelID === id)?.reasoningEfforts ?? []).map((effort: any) => effort.effort);
+      const creationModels = async (): Promise<any[]> => {
+        const started = Date.now();
+        const response = await context.client.get(`/api/agents/${agent}/models`);
+        expect(response.status, response.text).toBe(200);
+        // A build without the levels command refuses it without an id; the picker does not wait out
+        // the request's 15 s bound for an answer that never comes.
+        expect(Date.now() - started).toBeLessThan(10_000);
+        return response.body.models;
+      };
+      const createOn = async (effort: string) => {
+        fake.prepareCreate();
+        const cwd = fake.workspace('levels');
+        const created = await post(context, `/api/sessions/${agent}`, {
+          directory: cwd,
+          title: `levels ${effort}`,
+          model: { providerID: 'fake', modelID: 'pi-max', reasoningEffort: effort },
+        });
+        return { created, cwd };
+      };
+      const mark = fake.ledger.mark();
+      const sentLevels = (from: number): string[] => fake.ledger.commands('set_thinking_level', from).map((entry) => entry.frame?.level);
+      try {
+        const models = await creationModels();
+        expect(levels(models, 'pi-fake')).toEqual([]);
+        expect(levels(models, 'pi-reason')).toEqual(['off', 'minimal', 'low', 'medium', 'high']);
+        expect(levels(models, 'pi-max')).toEqual(omp
+          ? ['minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+          : ['off', 'low', 'medium', 'high', 'xhigh', 'max']);
+        // No build here lists auto, so a create that asks for it is refused before the runtime hears of it.
+        const refused = await createOn('auto');
+        expect(refused.created.ok, refused.created.text).toBe(false);
+        expect(sentLevels(mark)).toEqual([]);
+
+        const { created, cwd } = await createOn('max');
+        expect(created.status, created.text).toBe(200);
+        expect(created.body.session.currentModel).toEqual({ providerID: 'fake', modelID: 'pi-max', reasoningEffort: 'max' });
+        expect(sentLevels(mark)).toEqual(['max']);
+        const owner = await context.openDrive({ id: created.body.session.id, cwd, reason: 'create' });
+        const driven = owner.ofKind('options').at(-1)!.models as any[];
+        expect(levels(driven, 'pi-max')).toEqual(levels(models, 'pi-max'));
+        expect(driven.find((model) => model.modelID === 'pi-max')?.defaultReasoningEffort).toBe('max');
+        owner.close();
+
+        if (omp) {
+          // omp 19.1.0 (captured) lists `off`, `auto` and the model's efforts for a model with reasoning.
+          fake.setVersion('19.1.0', 'omp/19.1.0\n');
+          await context.restart();
+          const selectors = await creationModels();
+          expect(levels(selectors, 'pi-reason')).toEqual(['off', 'auto', 'minimal', 'low', 'medium', 'high']);
+          expect(levels(selectors, 'pi-max')).toEqual(['off', 'auto', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+          const autoMark = fake.ledger.mark();
+          const auto = await createOn('auto');
+          expect(auto.created.status, auto.created.text).toBe(200);
+          expect(auto.created.body.session.currentModel).toEqual({ providerID: 'fake', modelID: 'pi-max', reasoningEffort: 'auto' });
+          expect(sentLevels(autoMark)).toEqual(['auto']);
+          // The file keeps omp's own auto shape, so the next process restores auto from it, not from argv.
+          const thinking = readEntries(piFileOf(auto.created.body.session.id)).filter((entry) => entry.type === 'thinking_level_change');
+          expect(thinking.at(-1)).toMatchObject({ configured: 'auto' });
+          const driveMark = fake.ledger.mark();
+          const autoOwner = await context.openDrive({ id: auto.created.body.session.id, cwd: auto.cwd, reason: 'create' });
+          const start = fake.ledger.spawns(driveMark).find((entry) => entry.session === piFileOf(auto.created.body.session.id))!;
+          expect(start.argv).not.toContain('--thinking');
+          const autoModels = autoOwner.ofKind('options').at(-1)!.models as any[];
+          expect(autoModels.find((model) => model.modelID === 'pi-max')?.defaultReasoningEffort).toBe('auto');
+          // Another model in auto mode: the runtime is asked only once its state lists auto for that model.
+          const switchMark = fake.ledger.mark();
+          expect((await context.prompt(autoOwner, 'auto on another model', { model: { providerID: 'fake', modelID: 'pi-reason', reasoningEffort: 'auto' } })).kind).toBe('ack');
+          const types = commandsOf(fake, start.pid, switchMark).map((command) => command.type)
+            .filter((type) => type !== 'get_available_models');
+          expect(types.slice(0, 5)).toEqual(['get_state', 'set_model', 'get_state', 'set_thinking_level', 'prompt']);
+          expect(sentLevels(switchMark)).toEqual(['auto']);
+          autoOwner.close();
+        }
+        expect(fake.ledger.faults(mark)).toEqual([]);
+      } finally {
+        fake.configure(previous);
+        if (omp) {
+          fake.setVersion(dialect.version.current);
+          await context.restart();
+        }
+      }
     },
   });
 

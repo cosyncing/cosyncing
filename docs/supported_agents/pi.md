@@ -48,6 +48,12 @@ Missing or invalid receipts, user edits, symlinks, unsafe targets, and changes
 detected during replacement fail closed and require operator action. Doctor
 reports an owned stale bridge as an actionable warning.
 
+The app's thinking picker offers the levels Pi lists for the current model
+(Pi 0.81.0 and newer answer this directly) and, for any other model, the levels
+Pi's own rule allows: `xhigh` and `max` appear only for a model whose
+`thinkingLevelMap` names them, and a level the map sets to `null` is not
+offered.
+
 Multiple foreground cosyncing clients can join the same broker-owned Pi Drive
 session without starting another native Resume. Background Observe connections
 remain read-only. The legacy `@mariozechner/pi-coding-agent` package name is

@@ -91,7 +91,9 @@ const SHUTDOWN_SAFETY_MS = 250;
 // ownership boundary and cannot be reconstructed; buffered events can, from the
 // native transcript on the next replay. So the transcript yields to it.
 const SHUTDOWN_BYE_RESERVE_MS = 600;
-const PI_THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh']);
+// Every level the extension API sets, `max` included (Pi and omp both take it for a model that
+// lists it). omp's `auto` is a selector its extension API does not take.
+const PI_THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 const COLLAB_PROMPT_TYPE = 'collab-prompt';
 const SKILL_PROMPT_TYPE = 'skill-prompt';
 const REMOTE_USER_KEY_PREFIX = 'u:remote:';

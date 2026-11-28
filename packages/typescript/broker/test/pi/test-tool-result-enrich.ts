@@ -235,6 +235,34 @@ function check(name: string, ok: boolean, detail = ''): void {
   );
 }
 {
+  // Model shapes from Pi 1.6.0 and omp 19.1.0 catalogs (captured 2026-11-28): Pi offers xhigh and max
+  // only when the model's map names them; omp lists its efforts, max among them.
+  const conn = new PiBridgeConnection({ id: 'q-model-levels', tool: 'pi', title: 'levels', status: 'idle', attachMode: 'live' });
+  conn.setModelOptions([
+    { provider: 'fixture', id: 'fixture-xmax', name: 'Fixture Xhigh Max', reasoning: true, thinkingLevelMap: { xhigh: 'high', max: 'high', minimal: null } },
+    { provider: 'fixture', id: 'fixture-reasoning', name: 'Fixture Reasoning', reasoning: true },
+    { provider: 'fixture', id: 'omp-reasoning', name: 'omp Reasoning', reasoning: true, thinking: { mode: 'effort', efforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'], requiresEffort: true } },
+  ], 'auto');
+  const models = await conn.listModels?.();
+  await conn.sendPrompt({ text: 'auto please', model: { providerID: 'fixture', modelID: 'omp-reasoning', reasoningEffort: 'auto' } });
+  const cmds = await conn.takeCommands();
+  await conn.close();
+  const levels = (id: string): string => (models?.find((m) => m.modelID === id)?.reasoningEfforts ?? []).map((e) => e.effort).join(',');
+  check(
+    'bridge model wire: levels follow the model map and efforts, with max and without auto',
+    levels('fixture-xmax') === 'off,low,medium,high,xhigh,max' &&
+      levels('fixture-reasoning') === 'off,minimal,low,medium,high' &&
+      levels('omp-reasoning') === 'minimal,low,medium,high,xhigh,max' &&
+      !models?.some((m) => m.defaultReasoningEffort === 'auto'),
+    `models=${JSON.stringify(models)}`,
+  );
+  check(
+    'bridge model wire: an auto selection switches the model without a level the extension cannot set',
+    cmds[0]?.kind === 'set-model' && cmds[0]?.modelID === 'omp-reasoning' && cmds[0]?.reasoningEffort === undefined && cmds[1]?.kind === 'prompt',
+    `cmds=${JSON.stringify(cmds)}`,
+  );
+}
+{
   const registry = new PiBridgeRegistry(() => undefined);
   const conn = registry.hello('same', {
     id: 'same',

@@ -52,9 +52,17 @@ import {
 // → canonical chips) with the resume adapter — both paths enrich identically (shared-surface fix).
 import { enrichPiToolResult, piContextUsageMessage, piToolDisplayClass, piToolSemantic } from './implementation.ts';
 import { PI_DIALECT, type PiDialect } from './dialect.ts';
+import { normalizePiThinkingLevel as normalizeAnyPiThinkingLevel, piThinkingEfforts } from './thinking-levels.ts';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { dirname, join, extname, resolve } from 'node:path';
+
+/** A level the bridge extension can set: every Pi level, never omp's `auto`, which omp's
+ *  extension API (`setThinkingLevel`) does not take. */
+function normalizePiThinkingLevel(value: unknown): string | undefined {
+  const level = normalizeAnyPiThinkingLevel(value);
+  return level === 'auto' ? undefined : level;
+}
 
 export interface BridgeCommand {
   id: number;
@@ -103,16 +111,6 @@ function bridgeUserMessage(ev: any): AgentMessage {
     ...(Number.isInteger(ev?.imageCount) && ev.imageCount > 0 ? { imageCount: ev.imageCount } : {}),
   };
 }
-
-const PI_THINKING_LEVELS = [
-  { effort: 'off', label: 'Off' },
-  { effort: 'minimal', label: 'Minimal' },
-  { effort: 'low', label: 'Low' },
-  { effort: 'medium', label: 'Medium' },
-  { effort: 'high', label: 'High' },
-  { effort: 'xhigh', label: 'Extra high' },
-] as const;
-const PI_THINKING_LEVEL_SET = new Set(PI_THINKING_LEVELS.map((x) => x.effort));
 
 /** Build a canonical tool-result from a bridge wire event, enriching with diff/additions/deletions/
  *  exitCode/truncated/path via the shared Pi enricher (the extension now relays `details`/`args`) so a
@@ -189,11 +187,6 @@ function normalizePermissionDecision(v: unknown): PermissionDecision {
  */
 const BRIDGED_APPROVAL_OPTIONS: readonly PermissionDecision[] = ['approve', 'approve-session', 'reject'];
 
-function normalizePiThinkingLevel(value: unknown): string | undefined {
-  const level = typeof value === 'string' ? value.trim() : '';
-  return PI_THINKING_LEVEL_SET.has(level as any) ? level : undefined;
-}
-
 function piCurrentModelFromWire(model: any, thinkingLevel?: unknown): SessionInfo['currentModel'] | undefined {
   const modelID = model?.modelID ?? model?.id ?? model?.model;
   if (typeof modelID !== 'string' || !modelID) return undefined;
@@ -203,23 +196,6 @@ function piCurrentModelFromWire(model: any, thinkingLevel?: unknown): SessionInf
     modelID,
     ...(effort ? { reasoningEffort: effort } : {}),
   };
-}
-
-function piThinkingEfforts(model: any): ModelOption['reasoningEfforts'] | undefined {
-  if (model?.reasoning !== true) return undefined;
-  const nativeEfforts = Array.isArray(model?.thinking)
-    ? model.thinking
-    : Array.isArray(model?.thinking?.efforts)
-      ? model.thinking.efforts
-      : undefined;
-  const nativeThinking = nativeEfforts
-    ? new Set(nativeEfforts.map((value: unknown) => normalizePiThinkingLevel(value)).filter(Boolean))
-    : undefined;
-  const map = model?.thinkingLevelMap && typeof model.thinkingLevelMap === 'object' ? model.thinkingLevelMap : undefined;
-  const efforts = PI_THINKING_LEVELS
-    .filter(({ effort }) => nativeThinking ? nativeThinking.has(effort) : map?.[effort] !== null)
-    .map(({ effort, label }) => ({ effort, label }));
-  return efforts.length ? efforts : undefined;
 }
 
 function piModelOptionFromWire(model: any, currentEffort?: string): ModelOption | undefined {
