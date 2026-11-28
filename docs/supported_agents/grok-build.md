@@ -59,9 +59,11 @@ deliberate nonstandard executable.
   writes or transcript rewrites terminate and revoke the broker writer.
 - While the app drives a session, the title Grok generates after the first
   prompt replaces the session title, unless you named the session when you
-  created it. If the running Grok child reports a switch to another listed
-  model, the current model follows; 1.0.92 was seen sending that report only
-  while it loaded a session.
+  created it. The broker keeps that name only in memory: if it restarts between
+  Create and the first prompt, Grok's title replaces the name you gave. If the
+  running Grok child reports a switch to another listed model, the current
+  model follows; 1.0.92 was seen sending that report only while it loaded a
+  session.
 - A custom model whose `[model.<key>]` key differs from the `model` id it names
   keeps Drive on Resume. Grok stores the id and loads the model under its key,
   so the app shows the key, as the model picker lists it. The broker learns
