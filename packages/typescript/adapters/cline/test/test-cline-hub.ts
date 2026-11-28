@@ -1260,11 +1260,18 @@ try {
     let catalogClock = Date.parse('2026-11-28T01:00:00.000Z');
     let catalogOwnershipChecks = 0;
     const catalogTraces: string[] = [];
+    // Every `/health` probe the catalog adapters send, so a sweep's probe count can be asserted.
+    let catalogHealthProbes = 0;
+    const catalogHealth = healthAt(captured076.hubCoreVersion) as unknown as () => Promise<Response>;
+    const countedCatalogHealth = (async () => {
+      catalogHealthProbes += 1;
+      return catalogHealth();
+    }) as unknown as typeof globalThis.fetch;
     const catalogAdapter = (adapterEnv: NodeJS.ProcessEnv, catalogTimeoutMs?: number) => new ClineAdapter({
       command: fake.path,
       env: adapterEnv,
       homeDir: fake.root,
-      fetcher: healthAt(captured076.hubCoreVersion),
+      fetcher: countedCatalogHealth,
       hubSocketFactory: catalogHub.socketFactory,
       isManagedHostOwned: async () => {
         catalogOwnershipChecks += 1;
@@ -1275,6 +1282,12 @@ try {
       ...(catalogTimeoutMs === undefined ? {} : { catalogTimeoutMs }),
     });
     const unpairedAdapter = catalogAdapter(catalogEnv);
+    // The managed profile holds no session yet, so no row could use a writer.
+    const probesBeforeEmptySweep = catalogHealthProbes;
+    await unpairedAdapter.discoverSessions();
+    check('a sweep with no managed session sends no Hub probe, with the pair unset',
+      catalogHealthProbes === probesBeforeEmptySweep,
+      `probes=${catalogHealthProbes - probesBeforeEmptySweep}`);
     const expectedCatalog = [
       { providerID: 'deepseek', providerLabel: 'DeepSeek', modelID: 'deepseek-v4-flash', label: 'deepseek-v4-flash' },
       { providerID: 'deepseek', providerLabel: 'DeepSeek', modelID: 'deepseek-flash', label: 'DeepSeek V4.1 Flash 1017' },
@@ -1334,11 +1347,34 @@ try {
       `calls=${catalogHub.providerListCalls}`);
     // The roster sweeps on a timer; only the picker, Create and Resume read the catalog.
     catalogClock += 60_001;
+    const probesBeforeSweep = catalogHealthProbes;
     const sweepRows = await unpairedAdapter.discoverSessions();
-    check('a roster sweep never reads the catalog, even after the cached read has expired',
+    check('a roster sweep never reads the catalog, even after the cached read has expired, and probes the Hub once',
       catalogHub.providerListCalls === 1
+        && catalogHealthProbes - probesBeforeSweep === 1
         && sweepRows.some((row) => row.id === catalogCreated.id && row.control?.drive.supported === true),
-      `calls=${catalogHub.providerListCalls}`);
+      `calls=${catalogHub.providerListCalls} probes=${catalogHealthProbes - probesBeforeSweep}`);
+    // A managed row with a stored boundary compares it against the Hub's epoch. That comparison and
+    // the writer check share the sweep's one probe rather than each sending their own. The stored
+    // boundary names an earlier Hub, so the sweep drops it without opening a Hub client.
+    const boundarySweeper = new ClineAdapter({
+      command: fake.path,
+      env: catalogEnv,
+      homeDir: fake.root,
+      fetcher: countedCatalogHealth,
+      hubSocketFactory: catalogHub.socketFactory,
+      isManagedHostOwned: async () => true,
+      now: () => catalogClock,
+      resolveStoredDriveState: () => ({
+        historyBoundary: clineHubHistoryIdentity(catalogProfile, catalogCreated.id, 'earlier-hub:2026-11-27T00:00:00.000Z', []),
+      }),
+    });
+    const probesBeforeBoundarySweep = catalogHealthProbes;
+    const boundaryRows = await boundarySweeper.discoverSessions();
+    check('a sweep that also checks a stored boundary still probes the Hub once',
+      catalogHealthProbes - probesBeforeBoundarySweep === 1
+        && boundaryRows.some((row) => row.id === catalogCreated.id),
+      `probes=${catalogHealthProbes - probesBeforeBoundarySweep}`);
 
     const pairedAdapter = catalogAdapter({
       ...catalogEnv,

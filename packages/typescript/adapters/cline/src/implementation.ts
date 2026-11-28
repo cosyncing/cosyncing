@@ -506,21 +506,21 @@ export class ClineAdapter implements AgentBackend {
 
   async discoverSessions(options?: SessionDiscoveryOptions): Promise<SessionInfo[]> {
     const sessions = await this.storedSessions(options);
-    const writer = await this.managedWriter(options?.signal);
+    // ONE Hub probe for the whole pass, created lazily: a sweep with no managed
+    // session must not pay for a probe nobody reads, and the writer check and
+    // the sessions below share this promise rather than each issuing their own.
+    // See `currentHistoryBoundary` for the measurement.
+    let hubProbe: Promise<ClineHubDiscovery | undefined> | undefined;
+    const sharedHubProbe = (): Promise<ClineHubDiscovery | undefined> =>
+      (hubProbe ??= this.probeManagedHub(options?.signal));
+    // Only a managed, non-subagent row can be written to, so only such a row
+    // makes the writer check ask the Hub; without one it stops at the version.
+    const writable = sessions.some((session) => session.origin !== 'subagent' && this.isManagedSession(session));
+    const writer = await this.managedWriter(writable ? sharedHubProbe : async () => undefined);
     const writerAvailable = writer !== undefined;
     // The roster also sweeps on a timer, so it never reads the Hub's provider catalog: Create,
     // the picker and Resume read it when asked. Labels come from the pair or a still-cached read.
     const modelCatalog = writer ? this.cachedManagedModels(writer) : [];
-    // ONE Hub probe for the whole pass. Created lazily and NOT awaited here: a
-    // sweep with no managed session must not pay for a probe nobody reads, and
-    // the sessions below share this promise rather than each issuing their own.
-    // See `currentHistoryBoundary` for the measurement.
-    let hubProbe: Promise<ClineHubDiscovery | undefined> | undefined;
-    const sharedHubProbe = (): Promise<ClineHubDiscovery | undefined> => (hubProbe ??= probeClineHub({
-      env: this.env,
-      ...(this.homeDir ? { homeDir: this.homeDir } : {}),
-      fetcher: this.fetcher,
-    }));
     // Batched, not fanned out over all of them at once: each element below reads
     // this session's boundary and, for a managed row, its message snapshot. At
     // the 127 rows this store holds today an unbounded map is 127 simultaneous
@@ -634,11 +634,14 @@ export class ClineAdapter implements AgentBackend {
    * off-version binary, no ready or no owned Hub, or neither the pair nor a
    * Hub provider catalog. Ownership is proven only when one of the two sources
    * could answer, so a host with neither pays no ownership proof. Reads no
-   * catalog.
+   * catalog. `probe` is called only past the version check; a roster sweep
+   * passes the probe its rows share.
    */
-  private async managedWriter(signal?: AbortSignal): Promise<{ discovery: ClineHubDiscovery } | undefined> {
+  private async managedWriter(
+    probe: () => Promise<ClineHubDiscovery | undefined> = () => this.probeManagedHub(),
+  ): Promise<{ discovery: ClineHubDiscovery } | undefined> {
     if (await clineVerifiedInvocation(this.command, this.env, this.now) === undefined) return undefined;
-    const discovery = await this.probeManagedHub(signal);
+    const discovery = await probe();
     if (!discovery || (!this.configuredHubModel() && !clineHubOffersProviderCatalog(discovery))) return undefined;
     const descriptor = await this.describeManagedHost();
     if (await this.isManagedHostOwned?.(descriptor.identityKey) !== true) return undefined;
@@ -648,7 +651,7 @@ export class ClineAdapter implements AgentBackend {
   /** What that Hub lets Create use right now, reading the catalog if no read is cached; `undefined`
    *  also for a catalog that cannot be read or a profile with no configured provider. */
   private async writerModels(signal?: AbortSignal): Promise<ClineManagedModels | undefined> {
-    const writer = await this.managedWriter(signal);
+    const writer = await this.managedWriter(() => this.probeManagedHub(signal));
     if (!writer) return undefined;
     const models = await this.managedModels(writer.discovery).catch(() => undefined);
     return models && models.providers.size > 0 ? models : undefined;
