@@ -1256,6 +1256,7 @@ try {
     catalogHub.providerCatalog = capturedCatalog;
     let catalogClock = Date.parse('2026-11-28T01:00:00.000Z');
     let catalogOwnershipChecks = 0;
+    const catalogTraces: string[] = [];
     const catalogAdapter = (adapterEnv: NodeJS.ProcessEnv) => new ClineAdapter({
       command: fake.path,
       env: adapterEnv,
@@ -1266,6 +1267,7 @@ try {
         catalogOwnershipChecks += 1;
         return true;
       },
+      trace: (event) => { catalogTraces.push(JSON.stringify(event)); },
       now: () => catalogClock,
     });
     const unpairedAdapter = catalogAdapter(catalogEnv);
@@ -1364,6 +1366,48 @@ try {
     await assert.rejects(unpairedAdapter.listModels!(), /providers\.list failed/u);
     check('a catalog the Hub fails to return is no answer rather than an empty one, and leaves Create off',
       !await unpairedAdapter.canCreateSession());
+
+    // Cline 3.0.75 (Hub core 0.2.1) answers in the same shapes as 3.0.76 (core 0.2.2).
+    catalogClock += 60_001;
+    catalogHub.providerCatalog = { list: captured076.providers021.list, models: captured076.providers021.models };
+    const listed021 = await unpairedAdapter.listModels!();
+    check('a core 0.2.1 Hub, captured from Cline 3.0.75, yields the same picker',
+      captured076.providers021.coreVersion === '0.2.1'
+        && JSON.stringify(listed021) === JSON.stringify(expectedCatalog),
+      JSON.stringify(listed021));
+
+    // `providers.list` carries each configured provider's API key in clear, in `apiKey` and in
+    // `configValues.apiKey` (measured on both cores; the fixture drops them). A recognisable fake
+    // key must not reach the picker, a trace, or an error, read whole or refused as malformed.
+    const fakeKey = 'sk-fixture-provider-key-4f1c9e';
+    const keyed = (capturedCatalog.list.providers as Array<Record<string, unknown>>).map((provider) =>
+      provider.configured === true
+        ? { ...provider, apiKey: fakeKey, configValues: { apiKey: fakeKey, baseUrl: 'https://provider.invalid/v1' } }
+        : provider);
+    catalogClock += 60_001;
+    catalogHub.providerCatalog = {
+      list: { providers: keyed, settingsPath: '/fixture/settings/providers.json' },
+      models: Object.fromEntries(Object.entries(capturedCatalog.models).map(([id, reply]) => [id, { ...reply, apiKey: fakeKey }])),
+    };
+    const keyedListed = await unpairedAdapter.listModels!();
+    const keyedCreatable = await unpairedAdapter.canCreateSession();
+    catalogClock += 60_001;
+    catalogHub.providerCatalog = {
+      list: { providers: Object.fromEntries(keyed.map((provider) => [String(provider.id), provider])), apiKey: fakeKey },
+      models: capturedCatalog.models,
+    };
+    const malformed = await unpairedAdapter.listModels!().then(
+      () => 'resolved',
+      (error: unknown) => (error instanceof Error ? `${error.name}: ${error.message}\n${error.stack ?? ''}` : String(error)),
+    );
+    check('a key in the catalog reply reaches no model, trace or error, whether the reply is read or refused',
+      JSON.stringify(keyedListed) === JSON.stringify(expectedCatalog)
+        && keyedCreatable
+        && /providers\.list reply is not the measured shape/u.test(malformed)
+        && !JSON.stringify(keyedListed).includes(fakeKey)
+        && !malformed.includes(fakeKey)
+        && !catalogTraces.some((entry) => entry.includes(fakeKey)),
+      JSON.stringify({ malformed: malformed.split('\n')[0], traces: catalogTraces.length }));
 
     catalogHub.providerCatalog = capturedCatalog;
     writeCatalogDiscovery([]);

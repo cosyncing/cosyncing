@@ -1,8 +1,9 @@
 {
   "nativeVersion": "3.0.76",
   "hubCoreVersion": "0.2.2",
-  "captured": "2026-11-28, isolated home and a managed Hub on a scratch port, against a scripted OpenAI-compatible model on loopback. Scrubbed: the providers.list reply is cut to its first 10 providers and to the fields id, name, enabled, configured, defaultModelId (API keys, base URLs, config values and the profile settings path dropped). Every other value is as Cline wrote it.",
+  "captured": "2026-11-28, isolated homes and a managed Hub on a scratch port, against a scripted OpenAI-compatible model on loopback; `providers` from Cline 3.0.76, `providers021` from Cline 3.0.75. Scrubbed: each providers.list reply is cut to its first 10 providers and to the fields id, name, enabled, configured, defaultModelId (API keys, base URLs, config values and the profile settings path dropped). Every other value is as Cline wrote it.",
   "providers": {
+    "coreVersion": "0.2.2",
     "capabilities": [
       "providers.list",
       "providers.models.list",
@@ -86,6 +87,140 @@
       ]
     },
     "listedProviderCount": 329,
+    "models": {
+      "deepseek": {
+        "providerId": "deepseek",
+        "models": [
+          {
+            "id": "deepseek-flash",
+            "name": "DeepSeek V4.1 Flash 1017",
+            "contextWindow": 1048576,
+            "supportsAttachments": false,
+            "supportsVision": true,
+            "supportsReasoning": true
+          },
+          {
+            "id": "deepseek-v4-flash",
+            "name": "deepseek-v4-flash",
+            "contextWindow": 128000,
+            "supportsAttachments": false,
+            "supportsVision": true,
+            "supportsReasoning": false
+          },
+          {
+            "id": "deepseek-v4-pro",
+            "name": "DeepSeek V4 Pro",
+            "contextWindow": 1048576,
+            "supportsAttachments": false,
+            "supportsVision": false,
+            "supportsReasoning": true
+          }
+        ]
+      },
+      "openai-compatible": {
+        "providerId": "openai-compatible",
+        "models": [
+          {
+            "id": "gpt-4o",
+            "name": "gpt-4o",
+            "contextWindow": 128000,
+            "supportsAttachments": false,
+            "supportsVision": true,
+            "supportsReasoning": false
+          }
+        ]
+      },
+      "no-such-provider": {
+        "providerId": "no-such-provider",
+        "models": []
+      }
+    }
+  },
+  "providers021": {
+    "coreVersion": "0.2.1",
+    "capabilities": [
+      "providers.list",
+      "providers.models.list",
+      "providers.models.recommended",
+      "providers.settings.save",
+      "providers.add",
+      "providers.models.update"
+    ],
+    "list": {
+      "providers": [
+        {
+          "id": "cline",
+          "name": "Cline Usage-Billing",
+          "enabled": false,
+          "configured": false,
+          "defaultModelId": "cline-free/nemotron-3.5-super-vl"
+        },
+        {
+          "id": "openai-codex",
+          "name": "OpenAI ChatGPT Subscription",
+          "enabled": false,
+          "configured": false,
+          "defaultModelId": "gpt-5.6-terra"
+        },
+        {
+          "id": "deepseek",
+          "name": "DeepSeek",
+          "enabled": true,
+          "configured": true,
+          "defaultModelId": "deepseek-v4-flash"
+        },
+        {
+          "id": "anthropic",
+          "name": "Anthropic",
+          "enabled": false,
+          "configured": false,
+          "defaultModelId": "claude-sonnet-5-5"
+        },
+        {
+          "id": "openrouter",
+          "name": "OpenRouter",
+          "enabled": false,
+          "configured": false,
+          "defaultModelId": "anthropic/claude-sonnet-5.5"
+        },
+        {
+          "id": "ollama",
+          "name": "Ollama",
+          "enabled": false,
+          "configured": false,
+          "defaultModelId": "default"
+        },
+        {
+          "id": "bedrock",
+          "name": "AWS Bedrock",
+          "enabled": false,
+          "configured": false,
+          "defaultModelId": "minimax.minimax-m2.5"
+        },
+        {
+          "id": "openai-compatible",
+          "name": "OpenAI Compatible",
+          "enabled": true,
+          "configured": true,
+          "defaultModelId": "gpt-4o"
+        },
+        {
+          "id": "litellm",
+          "name": "LiteLLM",
+          "enabled": false,
+          "configured": false,
+          "defaultModelId": "gpt-5.4"
+        },
+        {
+          "id": "gemini",
+          "name": "Google Gemini",
+          "enabled": false,
+          "configured": false,
+          "defaultModelId": "gemini-4-neon"
+        }
+      ]
+    },
+    "listedProviderCount": 327,
     "models": {
       "deepseek": {
         "providerId": "deepseek",
