@@ -63,6 +63,7 @@ import {
   GrokDriveConnection,
   grokLoadedReasoningEffort,
   parseGrokModelCatalog,
+  rememberGrokCustomModelId,
 } from './drive.ts';
 import {
   GrokObserveConnection,
@@ -292,6 +293,8 @@ export class GrokAdapter implements AgentBackend {
   private readonly driveModes = new Map<string, string>();
   private readonly driveModels = new Map<string, SessionInfo['currentModel']>();
   private readonly driveTitles = new Map<string, string>();
+  /** The id summary.json stores for a custom model whose `[model.<key>]` key differs from it, by key. */
+  private readonly customModelIds = new Map<string, string>();
   private readonly drivenSessions = new Map<string, GrokDriveConnection>();
   private readonly pendingDriveOpens = new Set<string>();
   private readonly replayCorrelations = new Map<string, GrokReplayCorrelations>();
@@ -540,6 +543,13 @@ export class GrokAdapter implements AgentBackend {
       const selectedModel = options.model
         ? { ...options.model, ...(catalogModel?.label ? { label: catalogModel.label } : {}) }
         : undefined;
+      // A custom model listed under a key that differs from its `model` id: session/load confirmed
+      // the key and summary.json stores the id. The session is new, so that id is the key's.
+      const listedTokens = new Set([...catalog, ...parseGrokModelCatalog(loadedModels)]
+        .map((candidate) => candidate.providerID === 'xai' ? candidate.modelID : `${candidate.providerID}/${candidate.modelID}`));
+      if (model !== undefined && session.model !== undefined && session.model !== model && !listedTokens.has(session.model)) {
+        rememberGrokCustomModelId(this.customModelIds, model, session.model);
+      }
       if (selectedModel) this.driveModels.set(createdId, selectedModel);
       if (options.title?.trim()) this.driveTitles.set(createdId, options.title.trim());
       const historyBoundary = await grokHistorySourceIdentity(session);
@@ -660,6 +670,7 @@ export class GrokAdapter implements AgentBackend {
           if (configured.currentMode) this.driveModes.set(sessionId, configured.currentMode);
         },
         keepTitle: title !== undefined,
+        customModelIds: this.customModelIds,
         onHistoryBoundary: (historyBoundary, terminalSummary) => {
           this.recordStoredDriveBoundary?.({
             tool: this.id,

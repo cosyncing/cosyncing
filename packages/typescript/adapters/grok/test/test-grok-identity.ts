@@ -530,6 +530,7 @@ try {
     let customDrive: GrokDriveConnection | undefined;
     let resumedDrive: GrokDriveConnection | undefined;
     let fallbackDrive: GrokDriveConnection | undefined;
+    let listedDrive: GrokDriveConnection | undefined;
     try {
       const customCreated = await customAdapter.createSession({
         directory: cwd,
@@ -578,10 +579,30 @@ try {
       check('Resume refuses a session/load that answers the stored id with a different model',
         fallbackRefused && !fallbackDrive.driving,
         JSON.stringify({ info: fallbackDrive.info.currentModel }));
+
+      // A listed model whose summary names a custom model's id (as a summary from before a switch
+      // away from that model still can) is not running: only the key that names that id accepts it.
+      const listedCreated = await customAdapter.createSession({
+        directory: cwd,
+        model: { providerID: 'xai', modelID: 'grok-4.6' },
+        permissionMode: 'default',
+      });
+      customFake.env.FAKE_GROK_SUMMARY_MODEL_OVERRIDE = 'byok-model';
+      listedDrive = await customAdapter.attach(listedCreated.id, 'resume') as GrokDriveConnection;
+      let listedError: unknown;
+      try { await listedDrive.sendPrompt({ text: 'must not run while the summary names another model' }); } catch (error) { listedError = error; }
+      delete customFake.env.FAKE_GROK_SUMMARY_MODEL_OVERRIDE;
+      check('a listed model is refused while summary.json names a custom model\'s id instead',
+        listedError !== undefined
+          && /durable summary reports model byok-model/u.test(String(listedError))
+          && !listedDrive.driving,
+        JSON.stringify({ error: String(listedError ?? ''), info: listedDrive.info.currentModel }));
     } finally {
+      delete customFake.env.FAKE_GROK_SUMMARY_MODEL_OVERRIDE;
       await customDrive?.close();
       await resumedDrive?.close();
       await fallbackDrive?.close();
+      await listedDrive?.close();
     }
   }
 

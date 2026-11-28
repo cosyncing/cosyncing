@@ -72,6 +72,9 @@ export interface GrokDriveOpenOptions extends Omit<GrokObserveOptions, 'session'
   onConfiguration?: (info: Pick<SessionInfo, 'currentModel' | 'currentMode' | 'model'>) => void;
   /** The session has a title the user gave it when creating it; the title Grok generates does not replace it. */
   keepTitle?: boolean;
+  /** Custom models whose `[model.<key>]` key differs from the `model` id summary.json stores: the
+   *  id by key, as the adapter has seen them (Create, or a Resume that resolved one). */
+  customModelIds?: Map<string, string>;
   onHistoryBoundary?: (
     identity: HistorySourceIdentity,
     terminalSummary?: GrokTerminalSummary,
@@ -94,6 +97,16 @@ interface GrokLazyHooks {
   onModelResolved(model: NonNullable<SessionInfo['currentModel']>): void;
   /** Grok generated the session's title. */
   onTitle(title: string): void;
+}
+
+/** Custom model ids kept per adapter, most recent last; a catalogue lists at most 256 models. */
+const GROK_CUSTOM_MODEL_ID_LIMIT = 256;
+
+/** Remember the id summary.json stores for a custom model's key. */
+export function rememberGrokCustomModelId(ids: Map<string, string>, key: string, id: string): void {
+  ids.delete(key);
+  ids.set(key, id);
+  while (ids.size > GROK_CUSTOM_MODEL_ID_LIMIT) ids.delete(ids.keys().next().value!);
 }
 
 /** A title as the store accepts one (`store.ts`): at most 4,096 characters, trimmed, not blank. */
@@ -269,12 +282,14 @@ class LazyGrokAcpTransport implements GrokAcpTransport {
   private desiredEffort?: string;
   private desiredMode: string;
   private verifyRelaunchConfiguration = false;
+  private readonly customModelIds: Map<string, string>;
 
   constructor(
     private readonly session: GrokStoredSession,
     private readonly options: GrokDriveOpenOptions,
     private readonly hooks: GrokLazyHooks,
   ) {
+    this.customModelIds = options.customModelIds ?? new Map();
     this.desiredModel = options.model ?? session.model;
     this.desiredEffort = options.reasoningEffort ?? session.currentModel?.reasoningEffort;
     this.desiredMode = options.permissionMode ?? 'default';
@@ -494,14 +509,16 @@ class LazyGrokAcpTransport implements GrokAcpTransport {
     }
     // summary.json stores a custom model's own id, which no catalogue entry names. Once session/load
     // resolved the stored id to a key, the summary must still store that id: one naming another
-    // model means Grok runs that model instead. For a requested catalogue id, which session/load
-    // has confirmed, the summary holds either that id or an id the catalogue does not list.
+    // model means Grok runs that model instead. A requested key whose id is known (Create saw it,
+    // or a Resume resolved it) also accepts a summary that stores that id. Any other id the summary
+    // holds is not the requested model's: it can be the previous model's, from before this relaunch.
     const requestedModel = this.desiredModel;
-    const durableModelMatches = (row: GrokStoredSession): boolean => {
-      if (requestedModel === undefined || row.model === requestedModel) return true;
-      if (resolvedModel !== undefined) return false;
-      return row.model !== undefined && catalogIds.has(requestedModel) && !catalogIds.has(row.model);
-    };
+    const knownModelId = requestedModel !== undefined && resolvedModel === undefined
+      ? this.customModelIds.get(requestedModel)
+      : undefined;
+    const durableModelMatches = (row: GrokStoredSession): boolean =>
+      requestedModel === undefined || row.model === requestedModel
+      || (knownModelId !== undefined && row.model === knownModelId);
     // A promptless session's stored effort may lag a load that confirmed the requested one.
     const durableEffortMatches = (row: GrokStoredSession): boolean =>
       this.desiredEffort === undefined
@@ -525,7 +542,9 @@ class LazyGrokAcpTransport implements GrokAcpTransport {
     }
     this.verifyRelaunchConfiguration = false;
     if (resolvedModel !== undefined) {
-      // Later relaunches ask for the key, which session/load answers unchanged.
+      // Later relaunches ask for the key, which session/load answers unchanged, and the summary
+      // still stores the id.
+      rememberGrokCustomModelId(this.customModelIds, resolvedModel, requestedModel!);
       this.desiredModel = resolvedModel;
       this.hooks.onModelResolved(this.currentModelFor(resolvedModel));
     }

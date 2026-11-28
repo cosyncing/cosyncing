@@ -227,7 +227,9 @@ const ensureSession = (cwd) => {
     updated_at: '2026-08-30T10:00:00.000Z',
     last_active_at: '2026-08-30T10:00:00.000Z',
     num_messages: 0,
-    current_model_id: storedModelId(customModel ? runningModel : argValue('--model') || 'grok-4.6'),
+    // FAKE_GROK_SUMMARY_MODEL_OVERRIDE: a summary that names another model than the one loaded.
+    current_model_id: process.env.FAKE_GROK_SUMMARY_MODEL_OVERRIDE
+      || storedModelId(customModel ? runningModel : argValue('--model') || 'grok-4.6'),
     reasoning_effort: process.env.FAKE_GROK_SUMMARY_EFFORT_OVERRIDE || argValue('--reasoning-effort') || 'high',
     agent_name: 'build',
   }) + '\\n');

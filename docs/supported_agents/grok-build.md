@@ -64,7 +64,10 @@ deliberate nonstandard executable.
   while it loaded a session.
 - A custom model whose `[model.<key>]` key differs from the `model` id it names
   keeps Drive on Resume. Grok stores the id and loads the model under its key,
-  so the app shows the key, as the model picker lists it.
+  so the app shows the key, as the model picker lists it. The broker learns
+  which id a key stores when it creates or resumes a session on that model;
+  choosing such a model in the picker before then ends Drive, because Grok's
+  stored id does not show that the switch took effect.
 - In the default mode Grok 1.0.92 asks before writing a file and reads without
   asking. Rejecting a write ends the turn as cancelled: Grok stops the turn
   itself rather than letting the model continue.
