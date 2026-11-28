@@ -591,7 +591,10 @@ export class KimiDriveConnection extends KimiObserveConnection {
       // reasoning effort passes through as itself.
       ...(model?.reasoningEffort ? { thinking: model.reasoningEffort } : {}),
       ...(permissionMode ? { permission_mode: permissionMode } : {}),
-    }, input);
+      // A message sent while a turn runs steers that turn, as on the other
+      // agents, rather than waiting for it to end (KAP servers only; see
+      // `KimiDriveHttp.submitPrompt`).
+    }, { text: input.text, ...(input.clientMessageId ? { clientMessageId: input.clientMessageId } : {}), steer: true });
   }
 
   /** Legacy standalone attachment: the same pipeline, with no text of its own. */
@@ -669,10 +672,14 @@ export class KimiDriveConnection extends KimiObserveConnection {
    * prompt the text is empty and folds to no row of its own, so the evidence
    * derivable from the attachments in `body` is remembered instead ({@link
    * uncorrelatedEchoEvidence}).
+   *
+   * `echo.steer` asks a KAP server to move the prompt into a running turn
+   * ({@link KimiDriveHttp.submitPrompt}). Only a typed message asks: a goal
+   * kickoff waits for its own turn.
    */
   private async submitBody(
     body: KimiPromptSubmissionBody,
-    echo: { text: string; clientMessageId?: string },
+    echo: { text: string; clientMessageId?: string; steer?: boolean },
   ): Promise<void> {
     // THE SUBMISSION FENCE opens INSIDE the write's own frame, one statement
     // before the POST leaves. Upstream can publish `prompt.completed` for a turn
@@ -700,7 +707,7 @@ export class KimiDriveConnection extends KimiObserveConnection {
         this.inFlightSubmits += 1;
         fenced = true;
         dispatchMark = this.streamMark;
-        return drive.submitPrompt(this.info.id, body);
+        return drive.submitPrompt(this.info.id, body, { steer: echo.steer === true });
       });
     } catch (error) {
       if (fenced) this.endSubmission();

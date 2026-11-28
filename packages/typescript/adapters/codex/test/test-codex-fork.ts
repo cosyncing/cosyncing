@@ -371,6 +371,28 @@ await test('CR4 a fork of a NORMAL thread still advertises Drive and a copyable 
   ];
 });
 
+// A side chat is a fork saved with `attached_thread: true` and `forked_from_id` naming its thread
+// (captured from Codex 0.172's `/side`), which is what nests it under that thread. Forks do not
+// inherit attachment, so forking the side chat from the app gives a top-level session: the row must
+// not borrow the side chat's parent link, while the source's origin still carries over.
+await test('forking a side chat returns a top-level row that keeps only the source origin', async () => {
+  const SIDE_META = { originator: 'codex-tui', attached_thread: true, forked_from_id: 'parent-thread' };
+  const fromTui = await forkRow(SIDE_META, { originator: 'codex-tui', forked_from_id: 'source-thread' });
+  const fromVscode = await forkRow({ ...SIDE_META, originator: 'codex_vscode' }, {});
+  const ok =
+    (fromTui as any).parentThreadId === undefined &&
+    (fromTui as any).origin === undefined &&
+    fromTui.lineageId === 'source-thread' &&
+    fromTui.control?.drive.supported === true &&
+    (fromVscode as any).parentThreadId === undefined &&
+    (fromVscode as any).origin === 'vscode' &&
+    fromVscode.control?.drive.supported === true;
+  return [
+    ok,
+    `tui=${JSON.stringify({ origin: (fromTui as any).origin, parent: (fromTui as any).parentThreadId, lineage: fromTui.lineageId })} vscode=${JSON.stringify({ origin: (fromVscode as any).origin, parent: (fromVscode as any).parentThreadId })}`,
+  ];
+});
+
 await new Promise<void>((resolve) => daemonSocket.close(() => resolve()));
 
 const failed = results.filter((r) => !r.ok);

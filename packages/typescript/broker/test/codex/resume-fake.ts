@@ -463,6 +463,74 @@ for await (const chunk of Bun.stdin.stream()) {
   });
 });
 
+await test('item lifecycle times give the live prompt the sentAt its rollout record replays, and a file change its duration', async () => {
+  // Frames in the shape Codex 0.172.0 streamed them (ids, paths and times are this fixture's). Since
+  // 0.171 an item has no `createdAt`: its time is `startedAtMs`, and `completedAtMs` once it is done.
+  return await withFakeCodex(`#!/usr/bin/env bun
+import { appendFileSync } from 'node:fs';
+const enc = new TextDecoder();
+let buf = '';
+const send = (o) => console.log(JSON.stringify(o));
+const record = (o) => appendFileSync('__ROLLOUT__', JSON.stringify(o) + String.fromCharCode(10));
+const inputText = (input) => (input || []).map((p) => p.text || '').join(' ').trim();
+for await (const chunk of Bun.stdin.stream()) {
+  buf += enc.decode(chunk, { stream: true });
+  let nl;
+  while ((nl = buf.indexOf(String.fromCharCode(10))) !== -1) {
+    const raw = buf.slice(0, nl);
+    buf = buf.slice(nl + 1);
+    if (!raw.trim()) continue;
+    const msg = JSON.parse(raw);
+    if (msg.method === 'initialize') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/loaded/list') send({ id: msg.id, result: { data: [], nextCursor: null } });
+    else if (msg.method === 'thread/settings/update') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/resume') send({ id: msg.id, result: { thread: { name: 'fake' }, model: 'fake-model', modelProvider: 'fake-provider' } });
+    else if (msg.method === 'turn/start') {
+      const threadId = 'fake-thread';
+      const turnId = 'turn-times';
+      const text = inputText(msg.params.input);
+      const user = { type: 'userMessage', id: 'u-times', clientId: msg.params.clientUserMessageId ?? null, content: [{ type: 'text', text, text_elements: [] }] };
+      const patch = { type: 'fileChange', id: 'call_times_patch', changes: [{ path: '__DIR__/notes.txt', kind: { type: 'add' }, diff: 'one line\\n' }] };
+      const view = { type: 'imageView', id: 'call_times_view', path: '__DIR__/pixel.png' };
+      send({ id: msg.id, result: { turn: { id: turnId } } });
+      send({ method: 'turn/started', params: { threadId, turn: { id: turnId, items: [], status: 'inProgress', error: null, startedAt: 1795837269, completedAt: null, durationMs: null } } });
+      record({ timestamp: '2026-11-28T03:41:09.020Z', type: 'event_msg', payload: { type: 'task_started', turn_id: turnId } });
+      send({ method: 'item/started', params: { threadId, turnId, startedAtMs: 1795837269026, item: { ...user, startedAtMs: 1795837269026, completedAtMs: null } } });
+      record({ timestamp: '2026-11-28T03:41:09.026Z', type: 'event_msg', payload: { type: 'item_completed', thread_id: threadId, turn_id: turnId, started_at_ms: 1795837269026, completed_at_ms: 1795837269026, item: { type: 'UserMessage', id: 'u-times', content: [{ type: 'text', text, text_elements: [] }] } } });
+      send({ method: 'item/completed', params: { threadId, turnId, completedAtMs: 1795837269026, item: { ...user, startedAtMs: 1795837269026, completedAtMs: 1795837269026 } } });
+      send({ method: 'item/started', params: { threadId, turnId, startedAtMs: 1795837269163, item: { ...patch, status: 'inProgress', startedAtMs: 1795837269163, completedAtMs: null } } });
+      send({ method: 'item/completed', params: { threadId, turnId, completedAtMs: 1795837269175, item: { ...patch, status: 'completed', startedAtMs: 1795837269163, completedAtMs: 1795837269175 } } });
+      send({ method: 'item/started', params: { threadId, turnId, startedAtMs: 1795837269180, item: { ...view, startedAtMs: 1795837269180, completedAtMs: null } } });
+      send({ method: 'item/completed', params: { threadId, turnId, completedAtMs: 1795837269186, item: { ...view, startedAtMs: 1795837269180, completedAtMs: 1795837269186 } } });
+      send({ method: 'item/completed', params: { threadId, turnId, completedAtMs: 1795837269197, item: { type: 'agentMessage', id: 'msg_times', text: 'TIMES_DONE', phase: null, startedAtMs: 1795837269197, completedAtMs: 1795837269197 } } });
+      send({ method: 'turn/completed', params: { threadId, turn: { id: turnId, items: [], status: 'completed', error: null, startedAt: 1795837269, completedAt: 1795837269, durationMs: 185 } } });
+    }
+  }
+}
+`, async (rollout) => {
+    const conn = await new CodexAdapter().attach(Buffer.from(rollout, 'utf8').toString('base64url'), 'resume');
+    const messages: any[] = [];
+    conn.subscribe((m: any) => messages.push(m));
+    try {
+      await conn.sendPrompt({ text: 'timed by lifecycle' });
+      await waitFor(() => messages.some((m) => m.type === 'model-output' && m.text === 'TIMES_DONE'), 5000);
+      const user = messages.find((m) => m.type === 'user-message' && m.turnId === 'turn-times');
+      const patch = messages.find((m) => m.type === 'tool-result' && m.callId === 'call_times_patch');
+      const view = messages.find((m) => m.type === 'tool-result' && m.callId === 'call_times_view');
+      const saved = ((await conn.getHistory()) as any[]).find((m) => m.type === 'user-message' && m.text === 'timed by lifecycle');
+      return [
+        user?.sentAt === 1795837269026 &&
+          saved?.sentAt === user.sentAt &&
+          patch?.durationMs === 12 &&
+          view !== undefined && view.durationMs === undefined,
+        `user=${user?.sentAt} saved=${saved?.sentAt} patch=${patch?.durationMs} view=${JSON.stringify(view?.durationMs)}`,
+      ];
+    } finally {
+      await conn.close().catch(() => {});
+    }
+  });
+});
+
 await test('CR4b: the live prompt uses the canonical (turn, ordinal) identity and the terminal summary names it', async () => {
   return await withFakeCodex(`#!/usr/bin/env bun
 const enc = new TextDecoder();
@@ -624,7 +692,8 @@ for await (const chunk of Bun.stdin.stream()) {
 // triple is one item from the real app-server (0.157.1): its rollout record, then the started and
 // completed item it streamed (content invented for the capture, working directory rewritten). The
 // fake below writes the records and streams the items, so the live rows come from the adapter's own
-// live mapping and the saved rows from its history read.
+// live mapping and the saved rows from its history read. It streams each item with the lifecycle
+// times Codex 0.171+ adds (`startedAtMs`, then `completedAtMs`), the same pair the record saves.
 const STREAMED_TOOL_ITEMS: Array<[any, any, any]> = [
   [{"type": "CommandExecution", "id": "f2f435b6-4091-4c0b-a29f-5b1cc649a388", "command": ["/bin/bash", "-lc", "printf 'shell out\\n'"], "cwd": "file:///work/proj", "parsed_cmd": [{"type": "unknown", "cmd": "printf 'shell out\\n'"}], "source": "user_shell", "status": "completed", "stdout": "shell out\n", "stderr": "", "aggregated_output": "shell out\n", "exit_code": 0, "duration": {"secs": 0, "nanos": 8153766}, "formatted_output": "shell out\n"},
     {"type": "commandExecution", "id": "f2f435b6-4091-4c0b-a29f-5b1cc649a388", "pluginId": null, "scriptPath": null, "command": "/bin/bash -lc \"printf 'shell out\\\\n'\"", "cwd": "/work/proj", "processId": null, "source": "userShell", "status": "inProgress", "commandActions": [{"type": "unknown", "command": "printf 'shell out\\n'"}], "aggregatedOutput": null, "exitCode": null, "durationMs": null},
@@ -673,21 +742,23 @@ for await (const chunk of Bun.stdin.stream()) {
       const turnId = 'turn-tools';
       const threadId = 'fake-thread';
       const done = (item) => ({ type: 'event_msg', payload: { type: 'item_completed', thread_id: threadId, turn_id: turnId, started_at_ms: 1, completed_at_ms: 2, item } });
+      const begun = (item) => ({ ...item, startedAtMs: 1, completedAtMs: null });
+      const ended = (item) => ({ ...item, startedAtMs: 1, completedAtMs: 2 });
       send({ id: msg.id, result: { turn: { id: turnId } } });
       send({ method: 'turn/started', params: { threadId, turn: { id: turnId } } });
       record({ type: 'event_msg', payload: { type: 'task_started', turn_id: turnId } });
       // A model-issued call: streamed as an item too, but saved from its response items.
-      const modelCall = { ...items[1][2], id: 'call_model1' };
+      const modelCall = ended({ ...items[1][2], id: 'call_model1' });
       record({ type: 'response_item', payload: { type: 'function_call', name: 'exec_command', call_id: 'call_model1', arguments: JSON.stringify({ cmd: 'ls' }) } });
-      send({ method: 'item/started', params: { threadId, turnId, item: { ...items[1][1], id: 'call_model1' } } });
+      send({ method: 'item/started', params: { threadId, turnId, startedAtMs: 1, item: begun({ ...items[1][1], id: 'call_model1' }) } });
       record(done({ ...items[1][0], id: 'call_model1' }));
       send({ method: 'item/completed', params: { threadId, turnId, completedAtMs: 2, item: modelCall } });
       record({ type: 'response_item', payload: { type: 'function_call_output', call_id: 'call_model1', output: 'a' } });
       record({ type: 'response_item', payload: { type: 'custom_tool_call', status: 'completed', call_id: 'call_cell1', name: 'exec', input: 'x' } });
       for (const [rollout, started, completed] of items) {
-        send({ method: 'item/started', params: { threadId, turnId, item: started } });
+        send({ method: 'item/started', params: { threadId, turnId, startedAtMs: 1, item: begun(started) } });
         record(done(rollout));
-        send({ method: 'item/completed', params: { threadId, turnId, completedAtMs: 2, item: completed } });
+        send({ method: 'item/completed', params: { threadId, turnId, completedAtMs: 2, item: ended(completed) } });
       }
       record({ type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: 'call_cell1', output: 'done' } });
       record({ type: 'event_msg', payload: { type: 'task_complete', turn_id: turnId } });
@@ -715,12 +786,19 @@ for await (const chunk of Bun.stdin.stream()) {
           : v
       ));
       const modelRows = history.filter((m) => m.callId === 'call_model1').map((m) => m.type);
+      const durationOf = (kind: string) => saved.find((m) => m.type === 'tool-result' && m.callId === STREAMED_TOOL_ITEMS.find(([record]) => record.type === kind)?.[0].id)?.durationMs;
       return [
         live.length === ids.length * 2 &&
           canon(saved) === canon(live) &&
+          // The lifecycle times reach both sides: a file change has no duration of its own, so its
+          // row takes their span; a command keeps its own; an image view takes none.
+          durationOf('FileChange') === 1 &&
+          durationOf('CommandExecution') === 8 &&
+          durationOf('ImageView') === undefined &&
           // The model-issued call keeps exactly its response-item rows.
           JSON.stringify(modelRows) === JSON.stringify(['tool-call', 'tool-result']),
         `live=${live.length} saved=${saved.length} equal=${canon(saved) === canon(live)} model=${JSON.stringify(modelRows)}`
+          + ` durations=${JSON.stringify(['FileChange', 'CommandExecution', 'ImageView'].map(durationOf))}`
           + (canon(saved) === canon(live) ? '' : ` first-diff=${live.findIndex((m, i) => canon(m) !== canon(saved[i]))}`),
       ];
     } finally {
@@ -4303,7 +4381,7 @@ setInterval(() => {}, 1000);
 
 type TransactionalStartupFailure =
   'initialize-timeout' | 'resume-timeout' | 'resume-reject' | 'resume-internal-reject' |
-  'resume-active-writer';
+  'resume-active-writer' | 'resume-provider-not-configured' | 'resume-provider-policy-conflict';
 
 function transactionalStartupFake(failure: TransactionalStartupFailure): string {
   return `#!/usr/bin/env bun
@@ -4334,6 +4412,12 @@ for await (const chunk of Bun.stdin.stream()) {
         send({ id: msg.id, error: { code: -32600, message: 'thread fake-thread already has an active writer' } });
       } else if (failure === 'resume-internal-reject') {
         send({ id: msg.id, error: { code: -32603, message: 'transient native internal error' } });
+      } else if (failure === 'resume-provider-not-configured') {
+        // Codex 0.172.0's refusal, verbatim, for a thread whose provider was removed from config.toml.
+        send({ id: msg.id, error: { code: -32600, data: { type: 'modelProviderNotConfigured', modelProvider: 'second' }, message: 'This chat uses model provider “second”, which is no longer configured. Restore this provider’s configuration to continue.' } });
+      } else if (failure === 'resume-provider-policy-conflict') {
+        // The same, for a provider that requirements.toml no longer allows.
+        send({ id: msg.id, error: { code: -32600, data: { type: 'modelProviderPolicyConflict', modelProvider: 'second', requiredModelProvider: 'fixture' }, message: 'This chat uses model provider “second”, but your organization requires “fixture”. Contact your administrator or start a new chat using the required provider.' } });
       } else if (failure !== 'resume-timeout') {
         send({ id: msg.id, result: { thread: { name: 'fake' } } });
       }
@@ -4401,10 +4485,14 @@ async function exerciseTransactionalStartupFailure(
       'resume-reject': 'native session is not resumable',
       'resume-internal-reject': 'transient native internal error',
       'resume-active-writer': 'active writer',
+      'resume-provider-not-configured': 'model provider “second”, which is no longer configured',
+      'resume-provider-policy-conflict': 'model provider “second”, but your organization requires “fixture”',
     };
     const stageOk = thrown instanceof Error &&
       thrown.message.includes(expectedMessage[failure]);
-    const rejectedTypeOk = failure === 'resume-reject'
+    const unresumable = failure === 'resume-reject' || failure === 'resume-provider-not-configured'
+      || failure === 'resume-provider-policy-conflict';
+    const rejectedTypeOk = unresumable
       ? isNativeSessionUnresumableError(thrown)
       : failure === 'resume-active-writer'
         ? isOwnershipConflictError(thrown) && thrown.conflict === 'native-active-writer'
@@ -4413,7 +4501,9 @@ async function exerciseTransactionalStartupFailure(
       ? driveAttachRefusalCode(thrown) === 'DRIVE_RESTORE_FAILED'
       : failure === 'resume-active-writer'
         ? driveAttachRefusalCode(thrown) === 'DRIVE_OWNERSHIP_CONFLICT'
-        : true;
+        : unresumable
+          ? driveAttachRefusalCode(thrown) === 'DRIVE_NATIVE_SESSION_UNRESUMABLE'
+          : true;
     return [
       rejectedTypeOk &&
         refusalCodeOk &&
@@ -4444,6 +4534,12 @@ await test('C4 transient thread/resume rejection stays a generic restore failure
 
 await test('C5 native active-writer rejection is an ownership conflict and retires the partial owner', async () =>
   exerciseTransactionalStartupFailure('resume-active-writer'));
+
+await test('a thread whose model provider is no longer configured is refused as unresumable, with the native reason', async () =>
+  exerciseTransactionalStartupFailure('resume-provider-not-configured'));
+
+await test('a thread whose model provider a managed policy forbids is refused as unresumable, with the native reason', async () =>
+  exerciseTransactionalStartupFailure('resume-provider-policy-conflict'));
 
 await test('C4 ordinary Codex Desktop metadata remains resumable', async () => {
   return withFakeCodex(RESUME_ONLY_FAKE, async (rollout, dir) => withFakeSock(async () => {
@@ -5340,6 +5436,94 @@ await test('base-provider drift (no profile match): private Drive keeps the exac
             conn.info.control?.terminalSync.syncAvailable === false &&
             hint.note?.includes('not running or reachable') === true,
           `resumeConfig=${JSON.stringify(resume?.config)} hint=${JSON.stringify(hint)} current=${JSON.stringify(conn.info.currentModel)}`,
+        ];
+      } finally {
+        await conn.close().catch(() => {});
+      }
+    });
+  });
+});
+
+// A Drive owner's picker asks its app-server for the models of the thread's own provider. This fake
+// resumes onto the provider and model it is given and answers `model/list` the way Codex 0.172.0 did
+// in a scratch home: an unscoped list is the default provider's, a known provider gets its list, and
+// one it does not know is refused with the native `modelProviderNotConfigured` error.
+function scopedModelListFake(provider: string, model: string, known: string[]): string {
+  return `#!/usr/bin/env bun
+const enc = new TextDecoder();
+let buf = '';
+const { appendFileSync } = require('node:fs');
+const send = (o) => console.log(JSON.stringify(o));
+const mark = (entry) => appendFileSync('__MARKER__', JSON.stringify(entry) + String.fromCharCode(10));
+const known = ${JSON.stringify(known)};
+for await (const chunk of Bun.stdin.stream()) {
+  buf += enc.decode(chunk, { stream: true });
+  let nl;
+  while ((nl = buf.indexOf(String.fromCharCode(10))) !== -1) {
+    const raw = buf.slice(0, nl);
+    buf = buf.slice(nl + 1);
+    if (!raw.trim()) continue;
+    const msg = JSON.parse(raw);
+    if (msg.method === 'initialize') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/loaded/list') send({ id: msg.id, result: { data: [], nextCursor: null } });
+    else if (msg.method === 'thread/resume') {
+      send({ id: msg.id, result: { thread: { name: 'picker session' }, model: ${JSON.stringify(model)}, modelProvider: ${JSON.stringify(provider)} } });
+    } else if (msg.method === 'model/list') {
+      mark({ kind: 'model/list', params: msg.params });
+      const asked = msg.params ? msg.params.modelProvider : undefined;
+      if (asked !== undefined && !known.includes(asked)) {
+        send({ id: msg.id, error: { code: -32600, data: { type: 'modelProviderNotConfigured', modelProvider: asked }, message: 'This chat uses model provider “' + asked + '”, which is no longer configured. Restore this provider’s configuration to continue.' } });
+      } else {
+        const id = asked === undefined ? 'default-provider-model' : asked + '-model';
+        send({ id: msg.id, result: { data: [{ id, model: id, displayName: id, hidden: false, supportedReasoningEfforts: [], defaultReasoningEffort: 'medium' }], nextCursor: null } });
+      }
+    }
+  }
+}
+`;
+}
+
+await test('the Drive model picker lists the models of the thread\'s own base-config provider', async () => {
+  return await withCodexHome({ 'config.toml': BASE_CONFIG_TOML }, async () => {
+    return await withFakeCodex(scopedModelListFake('volcengine-coding-plan', 'volc-model', ['volcengine-coding-plan', 'openai']), async (rollout, dir, marker) => {
+      writeFileSync(rollout, profileRollout(dir, 'volcengine-coding-plan', 'volc-model').join('\n'));
+      const conn = await new CodexAdapter().attach(Buffer.from(rollout, 'utf8').toString('base64url'), 'resume');
+      try {
+        const models = await conn.listModels?.() ?? [];
+        const asked = readMarkers(marker).filter((r) => r.kind === 'model/list').map((r) => r.params);
+        return [
+          asked.length === 1 &&
+            asked[0]?.modelProvider === 'volcengine-coding-plan' &&
+            models.length === 1 &&
+            models[0]?.modelID === 'volcengine-coding-plan-model' &&
+            models[0]?.providerID === 'volcengine-coding-plan',
+          `asked=${JSON.stringify(asked)} models=${JSON.stringify(models)}`,
+        ];
+      } finally {
+        await conn.close().catch(() => {});
+      }
+    });
+  });
+});
+
+await test('the Drive model picker does not ask an app-server for a provider only a profile defines', async () => {
+  // The model has drifted off the profile's catalog, so the picker reaches the native list. The
+  // provider exists only in the overlay, which this app-server never loaded: asking for it by name
+  // would be refused, so the list stays unscoped as before.
+  return await withCodexHome({ 'config.toml': BASE_CONFIG_TOML, 'vllm-hpc.config.toml': PROFILE_PROVIDER_TOML }, async () => {
+    return await withFakeCodex(scopedModelListFake('vllm-hpc', 'qwen3.8-27B-FP8-drift', ['openai']), async (rollout, dir, marker) => {
+      writeFileSync(rollout, profileRollout(dir, 'vllm-hpc', 'qwen3.8-27B-FP8-drift').join('\n'));
+      const conn = await new CodexAdapter().attach(Buffer.from(rollout, 'utf8').toString('base64url'), 'resume');
+      try {
+        const models = await conn.listModels?.() ?? [];
+        const asked = readMarkers(marker).filter((r) => r.kind === 'model/list').map((r) => r.params);
+        return [
+          asked.length === 1 &&
+            asked[0] !== undefined &&
+            !('modelProvider' in asked[0]) &&
+            models.length === 1 &&
+            models[0]?.modelID === 'default-provider-model',
+          `asked=${JSON.stringify(asked)} models=${JSON.stringify(models)}`,
         ];
       } finally {
         await conn.close().catch(() => {});

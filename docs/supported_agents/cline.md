@@ -37,16 +37,24 @@ cosy doctor
 Use Cline's own authentication flow to configure the isolated profile before
 enabling Create. `COSYNCING_CLINE_PROFILE_DIR` can select an absolute profile
 path; its default is `~/.cosyncing/agents/cline`.
-`COSYNCING_CLINE_PROVIDER` and `COSYNCING_CLINE_MODEL` select the exact
-non-secret provider/model pair used for managed sessions.
+With Cline 3.0.75 or newer, New Session offers the providers that the managed
+Hub reports configured in that profile, each with the models Cline lists for
+it, and no further setting is needed. Cline's list for an OpenAI-compatible
+endpoint is its own placeholder (`gpt-4o`), not the endpoint's models, so name
+such a model with the pair below.
+`COSYNCING_CLINE_PROVIDER` and `COSYNCING_CLINE_MODEL` select one exact
+non-secret provider/model pair for managed sessions. When both are set they
+replace the Hub's list, and they are required with an older Cline.
 `COSYNCING_CLINE_HUB_PORT` can replace the dedicated port when needed. Run
 `cosyncing setup` from that configured shell so the installed service retains
-those non-secret values. Until the service has both, `cosy doctor` reports
-`cline.create-configuration` as a warning and New Session stays unavailable;
-restarting the broker does not change that, rerunning setup does.
+those non-secret values. When the profile has no provider settings and the
+service lacks the pair, `cosy doctor` reports `cline.create-configuration` as a
+warning and New Session stays unavailable; restarting the broker does not
+change that, configuring a provider or rerunning setup does.
 
 Setup does not install or update Cline, copy credentials, or read
-`data/settings/providers.json`. `CLINE_DIR` selects a non-default Observe root,
+`data/settings/providers.json`; doctor checks only that the managed profile's
+`settings/providers.json` exists. `CLINE_DIR` selects a non-default Observe root,
 `CLINE_DATA_DIR` selects its Observe data directory, and
 `COSYNCING_CLINE_BIN` selects a deliberate nonstandard executable.
 
@@ -55,7 +63,8 @@ Setup does not install or update Cline, copy credentials, or read
 - Parent sessions are discovered from `<data>/sessions/<id>/<id>.json` and
   `<id>.messages.json` through bounded, read-only, no-follow reads.
 - Measured `agent_*.messages.json` siblings appear as nested subagent sessions.
-  Their native id and parent native id remain separate.
+  Their native id and parent native id remain separate. This includes the ones
+  the managed Hub writes for sessions created here, which are Observe-only.
 - Answer, thinking, user text, tool calls/results, and `spawn_agent` activity
   map from the rewritten message document. Unknown blocks become named neutral
   context, never user messages.
@@ -65,9 +74,13 @@ Setup does not install or update Cline, copy credentials, or read
   never as live.
 - Token input is already cache-inclusive in the measured store. Cache read and
   write values are retained as subsets and are not added again.
-- New Session appears only when a floor-or-newer binary, configured model, ready
+- New Session appears only when a floor-or-newer binary, a configured model
+  (from the pair, or from a provider the Hub reports configured), a ready
   isolated Hub, and broker ownership proof all agree. Provider/model and
-  Ask/Auto/Plan mode propagate into native `session.create`.
+  Ask/Auto/Plan mode propagate into native `session.create`. A session keeps
+  its model. With the pair set, Resume needs the session's model to be the
+  pair's model; without the pair, it needs the session's provider to be one the
+  Hub still reports configured.
 - Hub Drive serializes prompts. A queued user row becomes durable only after a
   terminal native run reply and an exact transcript reread identify one causal
   native user row. Joined app clients reuse that one writer.
@@ -75,6 +88,9 @@ Setup does not install or update Cline, copy credentials, or read
   every pending prompt and approval.
 - Live answer, reasoning, tool, usage, and status events feed the common client
   surfaces; the bounded native message document remains replay authority.
+  A `spawn_agent` subagent streams on its parent's session: its card appears
+  when the call starts and carries the subagent's own token usage, while its
+  text and usage stay out of the parent's answer and token count.
 - Native rename updates a parent title through the exact-id CLI route.
 - A replacement broker client can rejoin while the same managed Hub process is
   alive and the durable boundary is unchanged.

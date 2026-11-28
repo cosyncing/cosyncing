@@ -458,6 +458,15 @@ const APP_SERVER_TOOL_ITEMS: Array<[any, any, any]> = [
       return `${record.id}: expected ${canon(completed).slice(0, 300)} got ${canon(converted?.completed).slice(0, 300)}`;
     }).join(' | '),
   );
+  // Since 0.171 the app-server also streams each item's lifecycle times, which the record keeps
+  // beside the item: given the record, the converted items carry them the same way.
+  const timed = codexRolloutToolItem(APP_SERVER_TOOL_ITEMS[16]![0], { started_at_ms: 1795837269163, completed_at_ms: 1795837269175 });
+  check(
+    'tool items: the record\'s lifecycle times come back on the started and completed items',
+    timed?.started.startedAtMs === 1795837269163 && timed?.started.completedAtMs === null
+      && timed?.completed.startedAtMs === 1795837269163 && timed?.completed.completedAtMs === 1795837269175,
+    JSON.stringify({ started: [timed?.started.startedAtMs, timed?.started.completedAtMs], completed: [timed?.completed.startedAtMs, timed?.completed.completedAtMs] }),
+  );
 
   const turn = '01a0defd-e83e-78a3-82d8-30487a0277bc';
   const done = (item: any) => ({ type: 'event_msg', payload: { type: 'item_completed', thread_id: 't', turn_id: turn, started_at_ms: 1, completed_at_ms: 2, item } });
@@ -516,6 +525,12 @@ const APP_SERVER_TOOL_ITEMS: Array<[any, any, any]> = [
       && mcp?.result?.isError === undefined && mcp?.toolName === 'fake.lookup'
       && search?.toolName === 'web_search',
     JSON.stringify({ title: quoted?.title, cwd: quoted?.args?.cwd, moved: moved?.fileChanges?.map((c: any) => c.path), mcp: mcp?.result, search: search?.toolName }),
+  );
+  const view = byId(APP_SERVER_TOOL_ITEMS.find(([record]) => record.type === 'ImageView')![0].id, 'tool-result');
+  check(
+    'tool items: a nested file change and web search take their duration from the record\'s lifecycle times; an image view takes none',
+    moved?.durationMs === 1 && search?.durationMs === 1 && view !== undefined && view.durationMs === undefined,
+    JSON.stringify({ moved: moved?.durationMs, search: search?.durationMs, view: view?.durationMs }),
   );
   // A read that starts after a model-issued call (an attach boundary between the two records)
   // still adds nothing for its `item_completed` record.
@@ -2413,6 +2428,8 @@ await (async () => {
   const PARENT = '00000000-0000-4000-8000-0000000000a0'; // deliberately NOT written: this child is an orphan
   const NORMAL = '00000000-0000-4000-8000-0000000000b2';
   const LOADED = '00000000-0000-4000-8000-0000000000b3'; // a normal session in the same loaded set: the control for "loaded ⇒ live"
+  const SIDE = '00000000-0000-4000-8000-0000000000d4'; // a side chat of NORMAL
+  const FORK = '00000000-0000-4000-8000-0000000000e5'; // an ordinary fork of NORMAL: the control for "attached ⇒ child"
   const childPath = join(sessionsDir, `rollout-2026-07-25T00-00-00-${CHILD}.jsonl`);
   const normalPath = join(sessionsDir, `rollout-2026-07-25T00-00-00-${NORMAL}.jsonl`);
   const loadedPath = join(sessionsDir, `rollout-2026-07-25T00-00-00-${LOADED}.jsonl`);
@@ -2428,6 +2445,29 @@ await (async () => {
   );
   writeFileSync(normalPath, line({ type: 'session_meta', payload: { id: NORMAL, cwd: dir, thread_source: 'user' } }));
   writeFileSync(loadedPath, line({ type: 'session_meta', payload: { id: LOADED, cwd: dir, thread_source: 'user' } }));
+  // A side chat is persisted as its own rollout. These are the session_meta fields Codex 0.172.0's TUI
+  // wrote for a `/side` conversation (ids, offsets and paths are this fixture's; the provider is left
+  // out as for the other rows): an attached fork of the thread it was opened from, followed by the
+  // side policy, its boundary and the side question.
+  writeFileSync(
+    join(sessionsDir, `rollout-2026-07-25T00-00-01-${SIDE}.jsonl`),
+    line({ type: 'session_meta', payload: {
+      id: SIDE, forked_from_id: NORMAL, attached_thread: true, cwd: dir, originator: 'codex-tui', cli_version: '0.172.0',
+      source: 'vscode', thread_source: 'tui_side_chat', history_mode: 'paginated',
+      history_base: { thread_id: NORMAL, end_ordinal_exclusive: 14, end_byte_offset: 4096 },
+    } }) +
+      line({ type: 'response_item', payload: { type: 'message', role: 'developer', content: [{ type: 'input_text', text: '<side_conversation>You are in a side conversation, not the main thread.</side_conversation>' }] } }) +
+      line({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Side conversation boundary.' }] } }) +
+      line({ type: 'event_msg', payload: { type: 'task_started', turn_id: 't-side' } }) +
+      line({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'What did the parent answer?' }] } }) +
+      line({ type: 'event_msg', payload: { type: 'item_completed', thread_id: SIDE, turn_id: 't-side', started_at_ms: 1795837699904, completed_at_ms: 1795837699904, item: { type: 'UserMessage', id: 'u-side', content: [{ type: 'text', text: 'What did the parent answer?' }] } } }) +
+      line({ type: 'response_item', payload: { type: 'message', role: 'assistant', id: 'msg_side1', content: [{ type: 'output_text', text: 'It said OK.' }] } }) +
+      line({ type: 'event_msg', payload: { type: 'task_complete', turn_id: 't-side' } }),
+  );
+  writeFileSync(
+    join(sessionsDir, `rollout-2026-07-25T00-00-02-${FORK}.jsonl`),
+    line({ type: 'session_meta', payload: { id: FORK, forked_from_id: NORMAL, cwd: dir, originator: 'codex-tui', source: 'cli', thread_source: 'user' } }),
+  );
   const marker = join(dir, 'spawned.log');
   const fakeCodex = join(binDir, 'codex');
   writeFileSync(fakeCodex, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${marker}\nexit 0\n`);
@@ -2656,6 +2696,22 @@ await (async () => {
       'a normal session discovered alongside it still offers Drive (the boundary is origin, not the scan)',
       normal?.attachMode === 'observe' && normal?.drive?.supported === true && normal?.drive?.state === 'observing',
       JSON.stringify(normal ?? null),
+    );
+    // A side chat is a child row of the thread it was opened from, and nothing more: the user drives
+    // it, so it keeps Drive and Terminal Sync, unlike the agent-owned subagent above.
+    const side = rows.find((r) => r.nativeId === SIDE);
+    const fork = rows.find((r) => r.nativeId === FORK);
+    check(
+      'discovery lists a side chat as a child row of its thread, with Drive and Terminal Sync still offered',
+      !!side && side.parentThreadId === NORMAL && side.origin === undefined
+        && side.attachMode === 'observe' && side.drive?.supported === true && side.drive?.state === 'observing'
+        && side.sync?.supported === true && side.sync?.action === 'join',
+      JSON.stringify(side ?? null),
+    );
+    check(
+      'an ordinary fork of the same thread stays a session of its own',
+      !!fork && fork.parentThreadId === undefined && fork.origin === undefined && fork.drive?.supported === true,
+      JSON.stringify(fork ?? null),
     );
     check(
       'a daemon-loaded NORMAL session still maps loaded → live + driving (the loaded set really is in effect)',

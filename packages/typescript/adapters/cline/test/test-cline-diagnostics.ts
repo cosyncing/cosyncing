@@ -11,11 +11,14 @@ import {
   CLINE_MINIMUM_VERSION,
   diagnoseClineSetup,
 } from '../src/diagnostics.ts';
-import { CLINE_HUB_CORE_MINIMUM_VERSION } from '../src/hub.ts';
+import { CLINE_HUB_CORE_MINIMUM_VERSION, clineManagedDataRoot } from '../src/hub.ts';
 import {
+  CLINE_MEASURED_HUB_CORE,
   CLINE_MEASURED_VERSIONS,
   CLINE_MINIMUM_SUPPORTED_VERSION,
+  CLINE_PROVIDER_CATALOG_MINIMUM_VERSION,
   CLINE_VERIFIED_VERSION,
+  clineVersionOffersProviderCatalog,
   clineVersionStanding,
 } from '../src/store.ts';
 
@@ -207,6 +210,85 @@ const defaultData = `${HOME}/.cline/data`;
     JSON.stringify(configured));
   check('without a binary there is no Create configuration finding; cline.binary already says why',
     checkOf(await diagnoseClineSetup(context({})), CLINE_CREATE_CONFIGURATION_CHECK_ID) === undefined);
+
+  // A Hub with `providers.list` offers the managed profile's own providers, so the pair is optional
+  // once that profile has provider settings. Doctor may not ask the Hub and must not read the file
+  // (it holds the API keys), so it inspects the file's presence only.
+  const providerSettings = `${clineManagedDataRoot({}, HOME)}/settings/providers.json`;
+  const catalogCheck = async (
+    version: string,
+    status: SetupPathInspection['status'] | undefined,
+    env: Record<string, string | undefined> = {},
+  ) => {
+    let read = false;
+    const world = context({
+      env,
+      executable: '/fixture/bin/cline',
+      version,
+      paths: {
+        [defaultData]: 'directory',
+        [`${defaultData}/sessions`]: 'directory',
+        ...(status ? { [providerSettings]: status } : {}),
+      },
+    });
+    const finding = checkOf(await diagnoseClineSetup({
+      ...world,
+      readText: (path, maxBytes) => {
+        if (path === providerSettings) read = true;
+        return world.readText(path, maxBytes);
+      },
+    }), CLINE_CREATE_CONFIGURATION_CHECK_ID);
+    return { finding, read };
+  };
+  check('the catalog floor is a measured build whose Hub core has the provider commands',
+    CLINE_PROVIDER_CATALOG_MINIMUM_VERSION !== undefined
+      && CLINE_MEASURED_VERSIONS.includes(CLINE_PROVIDER_CATALOG_MINIMUM_VERSION)
+      && CLINE_MEASURED_HUB_CORE[CLINE_PROVIDER_CATALOG_MINIMUM_VERSION] === '0.2.1'
+      && clineVersionOffersProviderCatalog(CLINE_VERIFIED_VERSION)
+      && !clineVersionOffersProviderCatalog(CLINE_MINIMUM_SUPPORTED_VERSION),
+    String(CLINE_PROVIDER_CATALOG_MINIMUM_VERSION));
+  const profileConfigured = await catalogCheck(CLINE_VERIFIED_VERSION, 'file');
+  check('a catalog-capable Cline with managed-profile provider settings passes without the pair, unread',
+    profileConfigured.finding?.status === 'pass'
+      && profileConfigured.finding.detailCode === 'create-providers-in-managed-profile'
+      && profileConfigured.finding.evidence?.providerSettings === providerSettings
+      && /COSYNCING_CLINE_PROVIDER and COSYNCING_CLINE_MODEL are optional/.test(profileConfigured.finding.summary)
+      && profileConfigured.finding.remediation === undefined
+      && !profileConfigured.read,
+    JSON.stringify(profileConfigured));
+  const profileUnreadable = await catalogCheck(CLINE_VERIFIED_VERSION, 'unreadable');
+  const profileDirectory = await catalogCheck(CLINE_VERIFIED_VERSION, 'directory');
+  check('provider settings that are unreadable or not a file do not pass',
+    profileUnreadable.finding?.status === 'warn' && profileUnreadable.finding.detailCode === 'create-model-unset'
+      && profileDirectory.finding?.status === 'warn' && profileDirectory.finding.detailCode === 'create-model-unset',
+    JSON.stringify([profileUnreadable.finding, profileDirectory.finding]));
+  const profileEmpty = await catalogCheck(CLINE_VERIFIED_VERSION, undefined);
+  check('without them it still names both variables and setup, and now the managed profile too, never a restart',
+    profileEmpty.finding?.status === 'warn'
+      && profileEmpty.finding.detailCode === 'create-model-unset'
+      && /managed Cline profile/.test(profileEmpty.finding.summary)
+      && /COSYNCING_CLINE_PROVIDER and COSYNCING_CLINE_MODEL are not set/.test(profileEmpty.finding.summary)
+      && /Observe is unaffected/.test(profileEmpty.finding.summary)
+      && profileEmpty.finding.remediation?.command === 'cosyncing setup'
+      && /COSYNCING_CLINE_PROVIDER and COSYNCING_CLINE_MODEL/.test(profileEmpty.finding.remediation.message)
+      && !/restart/i.test(`${profileEmpty.finding.summary} ${profileEmpty.finding.remediation.message}`),
+    JSON.stringify(profileEmpty.finding));
+  const preCatalog = await catalogCheck(CLINE_MINIMUM_SUPPORTED_VERSION, 'file');
+  check('a Cline whose Hub has no provider commands still needs the pair, whatever the profile holds',
+    preCatalog.finding?.status === 'warn'
+      && preCatalog.finding.detailCode === 'create-model-unset'
+      && !/managed Cline profile/.test(preCatalog.finding.summary)
+      && !preCatalog.read,
+    JSON.stringify(preCatalog.finding));
+  const pairWins = await catalogCheck(CLINE_VERIFIED_VERSION, 'file', {
+    COSYNCING_CLINE_PROVIDER: 'openai-compatible',
+    COSYNCING_CLINE_MODEL: 'fixture-model',
+  });
+  check('a configured pair still passes as the pair, which Create prefers',
+    pairWins.finding?.status === 'pass'
+      && pairWins.finding.detailCode === 'create-model-configured'
+      && pairWins.finding.evidence?.model === 'fixture-model',
+    JSON.stringify(pairWins.finding));
 }
 {
   const unsafe = await diagnoseClineSetup(context({

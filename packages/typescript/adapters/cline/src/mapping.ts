@@ -150,6 +150,61 @@ function commandOutcome(
   return { state, command: queries.join('\n') };
 }
 
+type SubagentActivity = Extract<AgentMessage, { type: 'agent-activity' }>;
+
+/**
+ * The subagent's own token usage from a `spawn_agent` result. Measured on Hub cores 0.2.1 and
+ * 0.2.2: the live `tool.finished` output is `{text, iterations, finishReason, usage}`, and the
+ * persisted `tool_result` content is that object as a JSON string. Absent counts stay absent.
+ */
+export function clineSpawnResultTokens(value: unknown): SubagentActivity['tokens'] {
+  let result: unknown = value;
+  if (typeof value === 'string') {
+    if (value.length > MAX_TOOL_PAYLOAD_BYTES) return undefined;
+    try { result = JSON.parse(value); } catch { return undefined; }
+  }
+  const usage = isRecord(result) && isRecord(result.usage) ? result.usage : undefined;
+  if (!usage) return undefined;
+  const tokens = {
+    ...(nonNegative(usage.inputTokens) === undefined ? {} : { input: nonNegative(usage.inputTokens)! }),
+    ...(nonNegative(usage.outputTokens) === undefined ? {} : { output: nonNegative(usage.outputTokens)! }),
+    ...(nonNegative(usage.cacheReadTokens) === undefined ? {} : { cacheRead: nonNegative(usage.cacheReadTokens)! }),
+    ...(nonNegative(usage.cacheWriteTokens) === undefined ? {} : { cacheWrite: nonNegative(usage.cacheWriteTokens)! }),
+  };
+  return Object.keys(tokens).length > 0 ? tokens : undefined;
+}
+
+/** The card a `spawn_agent` call opens, keyed as its tool call so the terminal frame replaces it. */
+export function clineSubagentStarted(callId: string, input: unknown, startedAtMs?: number): SubagentActivity {
+  const task = isRecord(input) ? boundedString(input.task, 1_024) : undefined;
+  return {
+    type: 'agent-activity',
+    key: `agent:${callId}`,
+    kind: 'subagent',
+    title: task ?? 'Cline subagent',
+    status: 'running',
+    ...(startedAtMs === undefined ? {} : { startedAtMs }),
+    agentsDone: 0,
+    agentsTotal: 1,
+  };
+}
+
+/** The terminal card. A persisted result does not repeat the task, so the title is the generic one,
+ *  and a live terminal frame uses it too so that it equals the copy history replays. */
+export function clineSubagentFinished(callId: string, isError: boolean, result: unknown): SubagentActivity {
+  const tokens = clineSpawnResultTokens(result);
+  return {
+    type: 'agent-activity',
+    key: `agent:${callId}`,
+    kind: 'subagent',
+    title: 'Cline subagent',
+    status: isError ? 'error' : 'done',
+    ...(tokens ? { tokens } : {}),
+    agentsDone: 1,
+    agentsTotal: 1,
+  };
+}
+
 function contextEvent(source: string, body: string): AgentMessage {
   const bounded = boundContextBody(body);
   return {
@@ -235,8 +290,17 @@ export function clineTurnId(sessionId: string, messageId: string): string {
   return `cline:${sessionId}:turn:${messageId}`;
 }
 
-/** Cline 3.0.60 persists human prompts inside its own exact mode envelope. */
+/** Cline 3.0.60 persists human prompts inside its own exact mode envelope: `act` or `plan`, and
+ *  `yolo` for a CLI run that approves every tool (measured on 3.0.75). */
 export function clineUserText(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length === 0) return undefined;
+  const match = /^<user_input mode="(?:act|plan|yolo)">([\s\S]*)<\/user_input>$/u.exec(value);
+  return match ? match[1] : value;
+}
+
+/** A prompt as Drive's causal match reads it. Drive only ever runs `act` or `plan`, so a `yolo`
+ *  row was written by some other run: it keeps its envelope here and never matches Drive's text. */
+export function clineDrivenUserText(value: unknown): string | undefined {
   if (typeof value !== 'string' || value.length === 0) return undefined;
   const match = /^<user_input mode="(?:act|plan)">([\s\S]*)<\/user_input>$/u.exec(value);
   return match ? match[1] : value;
@@ -293,18 +357,7 @@ function mapKnownBlock(
       ...(args === undefined ? {} : { args }),
     };
     if (name !== 'spawn_agent') return [call];
-    const input = isRecord(block.input) ? block.input : undefined;
-    const title = boundedString(input?.task, 1_024) ?? 'Cline subagent';
-    return [call, {
-      type: 'agent-activity',
-      key: `agent:${callId}`,
-      kind: 'subagent',
-      title,
-      status: 'running',
-      ...(timestamp(message.ts) === undefined ? {} : { startedAtMs: timestamp(message.ts) }),
-      agentsDone: 0,
-      agentsTotal: 1,
-    }];
+    return [call, clineSubagentStarted(callId, block.input, timestamp(message.ts))];
   }
   if (message.role === 'user' && kind === 'tool_result') {
     const callId = boundedString(block.tool_use_id) ?? `cline-tool-result:${message.id}:${index}`;
@@ -329,15 +382,7 @@ function mapKnownBlock(
       }),
     };
     if (name !== 'spawn_agent') return [result];
-    return [result, {
-      type: 'agent-activity',
-      key: `agent:${callId}`,
-      kind: 'subagent',
-      title: 'Cline subagent',
-      status: block.is_error === true ? 'error' : 'done',
-      agentsDone: 1,
-      agentsTotal: 1,
-    }];
+    return [result, clineSubagentFinished(callId, block.is_error === true, block.content)];
   }
   context.trace?.({
     op: message.role === 'user' || message.role === 'assistant' ? 'unknown-block' : 'unknown-role',

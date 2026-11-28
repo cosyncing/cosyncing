@@ -11,12 +11,51 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Added
+
+- Kimi Code 2.7 and newer: a shell command the agent runs in the background,
+  and each member of an agent swarm, gets an activity row. The row shows it
+  running until it finishes, and then its outcome.
+- Kimi Code 2.7 and newer: a plan review shows the plan on its approval card,
+  with any alternative approaches the agent offered.
+- Kimi Code 2.7 and newer: a message sent while a turn runs reaches the agent
+  after the current tool call instead of after the turn.
+
 ### Changed
 
 - Development and CI use Flutter 3.44.9, the latest 3.44 stable patch, and CI
   test jobs run on Bun 1.4.5. The broker's minimum Bun and the Bun runtime the
   installers place stay at 1.4.3, and releases are still built and verified on
   it.
+- Codex side chats (`/side` in Codex 0.172 and newer) are listed under the
+  session they were opened from instead of as separate sessions. You can still
+  Drive them and sync them with your terminal.
+- Cline: New Session no longer needs `COSYNCING_CLINE_PROVIDER` and
+  `COSYNCING_CLINE_MODEL` with Cline 3.0.75 or newer. The model picker lists the
+  providers configured in the managed Cline profile, each with the models Cline
+  lists for it. When both variables are set they still decide, which is how to
+  name an OpenAI-compatible endpoint's model. `cosy doctor` no longer warns
+  about the variables once the managed profile has provider settings.
+
+### Fixed
+
+- Codex: driving a session whose model provider was removed from Codex's
+  configuration, or that a managed requirements policy no longer allows, now
+  leaves it read-only with Codex's own explanation, instead of failing as a
+  restore error.
+- Codex 0.171 and newer: while you Drive a session on a custom provider, the
+  model picker asks Codex for the models of that session's own provider. A
+  prompt sent while driving carries Codex's send time, and file edits and web
+  searches show how long they took, as they do after reopening the session.
+- Kimi Code 2.7 and newer: a failed turn shows the reason Kimi gives, also when
+  the session is opened later. Model, effort and context details update as soon
+  as Kimi reports a change instead of on the next poll.
+- Cline: a subagent's answer and token usage no longer join the parent
+  session's answer and token count while a turn streams; its card appears when
+  the subagent starts and shows its own usage. Subagents of sessions created in
+  the app are listed under their parent.
+- Cline: prompts from a CLI run that approves every tool show without the
+  `<user_input mode="yolo">` wrapper.
 
 ## 0.9.0 — 2026-11-27
 

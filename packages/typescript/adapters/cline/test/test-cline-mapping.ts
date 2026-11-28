@@ -1,7 +1,9 @@
 #!/usr/bin/env bun
 export {};
 import { CONTEXT_INJECTION_EVENT, type AgentMessage } from '@cosyncing/adapter-api';
+import { readFileSync } from 'node:fs';
 import {
+  clineDrivenUserText,
   clinePendingToolUse,
   clineSessionUsage,
   clineTurnTokens,
@@ -34,6 +36,28 @@ check('spawn_agent call/result pairs share identity and activity state',
     && typed(mapped, 'tool-result').some((message) => message.callId === 'call-spawn')
     && typed(mapped, 'agent-activity').some((message) => message.key === 'agent:call-spawn' && message.status === 'running')
     && typed(mapped, 'agent-activity').some((message) => message.key === 'agent:call-spawn' && message.status === 'done'));
+// The envelope Cline writes around a prompt. The `act` row is a 3.0.76 Hub write (fixture
+// `cline-3.0.76-hub-redacted.json`). A 3.0.75 CLI run that approves every tool recorded its row as
+// `<user_input mode="yolo">Reply with exactly the word PONG and nothing else.</user`..., which
+// showed in Observe as typed, envelope and all.
+{
+  const captured076 = JSON.parse(readFileSync(new URL('./fixtures/cline-3.0.76-hub-redacted.json', import.meta.url), 'utf8'));
+  const userRow = (id: string, text: string) => typed(mapClineMessage(
+    { id, role: 'user', content: [{ type: 'text', text }] },
+    { sessionId: CLINE_FIXTURE_ID },
+  ), 'user-message')[0]?.text;
+  const capturedAct = captured076.subagentTurn.userMessage.content[0].text as string;
+  const yolo = '<user_input mode="yolo">Reply with exactly the word PONG and nothing else.</user_input>';
+  check('a prompt shows without its mode envelope, act or yolo',
+    capturedAct === `<user_input mode="act">${captured076.subagentTurn.prompt}</user_input>`
+      && userRow('act-row', capturedAct) === captured076.subagentTurn.prompt
+      && userRow('yolo-row', yolo) === 'Reply with exactly the word PONG and nothing else.',
+    JSON.stringify([userRow('act-row', capturedAct), userRow('yolo-row', yolo)]));
+  check('but only act and plan rows can match a prompt Drive sent: Drive never runs yolo',
+    clineDrivenUserText(capturedAct) === captured076.subagentTurn.prompt
+      && clineDrivenUserText(yolo) === yolo);
+}
+
 const token = typed(mapped, 'token-count')[0];
 check('input tokens remain cache-inclusive without double addition',
   token?.input === 100 && token.output === 20 && token.cacheRead === 40 && token.cacheWrite === 10,

@@ -162,6 +162,8 @@ try {
       kind: 'subagent',
       title: 'Cline subagent',
       status: 'done',
+      // The subagent's own usage, read from the result Cline persisted; not the lead's counts above.
+      tokens: { input: 1802, output: 241 },
       agentsDone: 1,
       agentsTotal: 1,
     },
@@ -205,6 +207,75 @@ try {
   });
   check('an unmeasured broker-managed Hub parent discriminator still fails closed',
     !unmeasuredManagedOrigin.some((session) => session.id === tree.id));
+
+  // The subagent document a managed Hub writes for an app-created session's spawn_agent,
+  // captured on 3.0.75 (fixture `managedSubagent`): origin `source: 'cosyncing'` and, like the
+  // managed parent, no `version`. It was refused, so the child was missing from the roster.
+  {
+    const managedChild = captured.managedSubagent;
+    const managedChildSuffix = managedChild.origin.subagent as string;
+    const managedChildId = `${tree.id}__${managedChildSuffix}`;
+    const managedChildPath = join(tree.sessionDir, managedChild.file);
+    check('the captured managed subagent origin has exactly the five measured keys and no version',
+      managedChild.origin.source === 'cosyncing'
+        && managedChild.origin.mode === 'subagent'
+        && managedChild.file === `${managedChildSuffix}.messages.json`
+        && isDeepStrictEqual(Object.keys(managedChild.origin).sort(),
+          ['mode', 'parentThreadId', 'sessionId', 'source', 'subagent']),
+      JSON.stringify(managedChild.origin));
+    const writeManagedChild = (origin: Record<string, unknown>): void => {
+      writeFileSync(managedChildPath, `${JSON.stringify({
+        version: captured.messagesDocumentVersion,
+        agent: managedChild.agent,
+        taskType: managedChild.taskType,
+        sessionId: managedChildId,
+        updated_at: '2026-08-23T10:00:05.000Z',
+        origin,
+        messages: fixtureChildMessages(),
+      })}\n`);
+    };
+    const capturedOrigin = { ...managedChild.origin, sessionId: managedChildId, parentThreadId: tree.id };
+    tree.writeParent(fixtureParentMessages(), undefined, { origin: {
+      source: 'cosyncing', mode: 'user', sessionId: tree.id,
+    } });
+    writeManagedChild(capturedOrigin);
+    const managedRoster = await discoverClineStore({
+      env: { CLINE_DIR: tree.root }, managedCosyncingRoot: tree.dataRoot, processAlive: () => false,
+    });
+    const managedChildRow = managedRoster.find((session) => session.id === managedChildId);
+    check('a managed Hub subagent beneath the exact managed root is listed under its parent',
+      managedRoster.some((session) => session.id === tree.id)
+        && managedChildRow?.origin === 'subagent'
+        && managedChildRow.parentThreadId === tree.id
+        && managedChildRow.messagesPath === managedChildPath,
+      managedRoster.map((session) => session.id).join(','));
+    check('and its messages replay',
+      managedChildRow !== undefined && (await readClineMessages(managedChildRow)).issues.length === 0);
+    // The same document outside the managed root is an ordinary profile claiming the Hub's
+    // discriminator, exactly as for the parent above.
+    tree.writeParent(fixtureParentMessages());
+    const ordinaryRoster = await discoverClineStore({ env: { CLINE_DIR: tree.root }, processAlive: () => false });
+    check('an ordinary-profile subagent cannot claim the managed Hub discriminator',
+      !ordinaryRoster.some((session) => session.id === managedChildId));
+    tree.writeParent(fixtureParentMessages(), undefined, { origin: {
+      source: 'cosyncing', mode: 'user', sessionId: tree.id,
+    } });
+    for (const [label, origin] of [
+      ['a version', { ...capturedOrigin, version: '3.0.75' }],
+      ['an extra key', { ...capturedOrigin, extra: true }],
+      ['another parent', { ...capturedOrigin, parentThreadId: 'another_parent' }],
+      ['another subagent', { ...capturedOrigin, subagent: 'agent_other' }],
+    ] as const) {
+      writeManagedChild(origin);
+      const refused = await discoverClineStore({
+        env: { CLINE_DIR: tree.root }, managedCosyncingRoot: tree.dataRoot, processAlive: () => false,
+      });
+      check(`a managed subagent origin with ${label} is refused`,
+        !refused.some((session) => session.id === managedChildId),
+        refused.map((session) => session.id).join(','));
+    }
+    rmSync(managedChildPath);
+  }
   tree.writeParent(fixtureParentMessages());
 
   const snapshot = await readClineMessages(parent!);

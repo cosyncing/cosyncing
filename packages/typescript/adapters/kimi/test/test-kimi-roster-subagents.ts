@@ -683,6 +683,10 @@ try {
     line({ type: 'context.append_loop_event', event: { type: 'step.end', usage: { output: 1 } }, time: 10 }),
     line({ type: 'usage.record', usage: {}, usageScope: 'turn', time: 11 }),
     line({ type: 'turn.ended', turnId: 0, reason: 'completed', durationMs: 5, time: 12 }),
+    // Three lines every Kimi Code 2.7.2 child journal writes (captured shapes).
+    line({ type: 'environment.set_binding', environmentId: 'local', agentId: 'agent-0', time: 12 }),
+    line({ type: 'tool_select.initialized', agentId: 'agent-0', tools: [{ name: 'Bash', description: 'Run a shell command.' }], time: 12 }),
+    line({ type: 'prompt.completed', agentId: 'agent-0', promptId: 'msg_fixture', finishedAt: '2026-01-01T00:00:00.000Z', reason: 'completed', time: 12 }),
     line({ type: 'brand.new.line.type', time: 13 }),
     line({ type: 'context.append_loop_event', event: { type: 'brand.new.event' }, time: 14 }),
     'this line is not json\n',
@@ -722,6 +726,12 @@ try {
     mapped.unmapped['usage.record'] === undefined
       && mapped.unmapped['turn.ended'] === undefined
       && mapped.unmapped['loop:step.begin'] === undefined,
+    JSON.stringify(mapped.unmapped));
+  check('the bookkeeping lines a Kimi Code 2.7 child journal adds render nothing and are not drift',
+    mapped.unmapped['environment.set_binding'] === undefined
+      && mapped.unmapped['tool_select.initialized'] === undefined
+      && mapped.unmapped['prompt.completed'] === undefined
+      && Object.keys(mapped.unmapped).sort().join(',') === 'brand.new.line.type,loop:brand.new.event',
     JSON.stringify(mapped.unmapped));
   check('an unknown line type renders NOTHING and is counted',
     mapped.unmapped['brand.new.line.type'] === 1 && mapped.unmapped['loop:brand.new.event'] === 1,

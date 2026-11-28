@@ -104,6 +104,36 @@ export const CLINE_MINIMUM_SUPPORTED_VERSION = lowestSemanticVersion(
   CLINE_DRIVABLE_MEASURED_VERSIONS,
 );
 
+/**
+ * The first Hub core whose command set has `providers.list` and `providers.models.list`, through
+ * which Create offers the managed profile's own providers (`hub.ts`). Measured: 0.2.1 and 0.2.2
+ * have both; 0.0.82 has neither.
+ */
+export const CLINE_HUB_PROVIDER_CATALOG_CORE = '0.2.1';
+
+const CLINE_PROVIDER_CATALOG_MEASURED_VERSIONS = CLINE_MEASURED_VERSIONS.filter((cli) => {
+  if (!Object.hasOwn(CLINE_MEASURED_HUB_CORE, cli)) return false;
+  const core = CLINE_MEASURED_HUB_CORE[cli];
+  if (typeof core !== 'string') return false;
+  const order = compareSemanticVersions(core, CLINE_HUB_PROVIDER_CATALOG_CORE);
+  return order !== undefined && order >= 0;
+});
+
+/** The oldest measured CLI shipping such a Hub, derived from {@link CLINE_MEASURED_HUB_CORE}, or
+ *  `undefined` while none is measured. Doctor reads it, because a diagnosis may not open a
+ *  connection to ask the Hub. */
+export const CLINE_PROVIDER_CATALOG_MINIMUM_VERSION: string | undefined =
+  CLINE_PROVIDER_CATALOG_MEASURED_VERSIONS.length > 0
+    ? lowestSemanticVersion(CLINE_PROVIDER_CATALOG_MEASURED_VERSIONS)
+    : undefined;
+
+/** Whether the Hub this CLI version ships reports the managed profile's providers. */
+export function clineVersionOffersProviderCatalog(version: string | undefined): boolean {
+  if (!version || !CLINE_PROVIDER_CATALOG_MINIMUM_VERSION) return false;
+  const order = compareSemanticVersions(version, CLINE_PROVIDER_CATALOG_MINIMUM_VERSION);
+  return order !== undefined && order >= 0;
+}
+
 /** The newest physically verified build, retained under its original name. */
 export const CLINE_VERIFIED_VERSION = '3.0.75';
 
@@ -655,6 +685,30 @@ function measuredParentOriginMatches(
     && Object.keys(origin).length === 3;
 }
 
+/**
+ * The subagent document a managed Hub writes for a `spawn_agent` of an app-created session,
+ * measured on Hub cores 0.2.1 and 0.2.2: the CLI's subagent document with origin
+ * `{source: 'cosyncing', mode, sessionId, parentThreadId, subagent}` and, like the managed parent,
+ * no `version`. Admitted only where the parent's own managed shape is: canonically beneath the
+ * exact broker-managed root, beside its parent's snapshot.
+ */
+function measuredManagedSubagentOriginMatches(
+  origin: Record<string, unknown>,
+  session: ClineStoredSession,
+): boolean {
+  const managedRoot = session.managedCosyncingRoot;
+  const parentId = session.parentThreadId;
+  const subagent = session.id.split('__')[1];
+  if (managedRoot === undefined || !parentId || !subagent) return false;
+  const exactSessionDir = join(resolve(managedRoot), 'sessions', parentId);
+  return resolve(session.dataRoot) === resolve(managedRoot)
+    && session.nativeId === session.id
+    && resolve(session.sessionDir) === exactSessionDir
+    && resolve(session.messagesPath) === join(exactSessionDir, `${subagent}.messages.json`)
+    && origin.source === 'cosyncing'
+    && Object.keys(origin).length === 5;
+}
+
 interface ReadClineMessagesOptions extends BoundedReadOptions {}
 
 export async function readClineMessages(
@@ -688,13 +742,13 @@ export async function readClineMessages(
     && (session.origin === 'subagent'
       ? parsed.agent === 'subagent'
         && parsed.taskType === 'subagent_task'
-        && origin?.source === 'cli'
-        && origin.mode === 'subagent'
+        && origin?.mode === 'subagent'
         && origin.sessionId === session.id
         && origin.parentThreadId === session.parentThreadId
         && origin.subagent === session.id.split('__')[1]
-        && typeof origin.version === 'string'
-        && CLINE_OBSERVE_VERSION_SET.has(origin.version)
+        && (origin.source === 'cli'
+          ? typeof origin.version === 'string' && CLINE_OBSERVE_VERSION_SET.has(origin.version)
+          : measuredManagedSubagentOriginMatches(origin, session))
       : parsed.agent === 'lead'
         && parsed.taskType === undefined
         && measuredParentOriginMatches(origin, session));

@@ -53,15 +53,23 @@ import {
   KimiDriveHttp,
   isKimiIdempotentWriteCode,
   isKimiWriteError,
+  type KimiPromptSubmissionBody,
 } from '../src/drive-http.ts';
 import { KimiKapHub } from '../src/kap.ts';
 import {
+  KIMI_AGENT_STATE_EVENT,
+  KIMI_BACKGROUND_TASKS_EVENT,
+  createKimiMappingState,
   mapKimiApprovalRequest,
+  mapKimiBackgroundTask,
   mapKimiCreatedSession,
+  mapKimiMessagePage,
   mapKimiQuestionRequest,
   mapKimiSessionPage,
   mapKimiTurnFailure,
   mapKimiWorkChanged,
+  type KimiMappedRow,
+  type KimiMessagePage,
   type KimiV1Session,
   type KimiV2SessionPage,
 } from '../src/mapping.ts';
@@ -1916,7 +1924,8 @@ try {
 // a real Kimi Code 2.7.2 server answered (fixtures/kimi-2.7.2.json, scrubbed),
 // served or replayed verbatim; what is asserted is what the 0.x surface
 // receives after translation, read through the same mappers the connections
-// use.
+// use. Section 9h replays a second capture from the same version
+// (fixtures/kimi-2.7.2-tasks.json) the same way.
 
 interface KapExchange { method: string; path: string; httpStatus: number; body?: unknown; response: Record<string, unknown> }
 interface KapFrameRow { dir: string; frame?: Record<string, unknown>; code?: number }
@@ -1947,6 +1956,68 @@ const KAP_LOCKED = KAP.lockedSessionId;
 const KAP_APPROVAL_ID = 'approval_ef926868-8f8b-4efa-8fb2-9055513707b0';
 const KAP_QUESTION_ID = 'question_e4a132db-bc50-41d1-b7ad-06de25205563';
 const KAP_DISMISSED_ID = 'question_2ae05e8c-9a06-4a25-9606-a8c83cd82641';
+
+/**
+ * The second 2.7.2 capture (fixtures/kimi-2.7.2-tasks.json), from the same
+ * server version and scrubbed the same way, one session per conversation:
+ * background shell tasks (one completed, one failed), a foreground and a
+ * detached subagent, a two-member swarm, plan reviews, a prompt promoted into
+ * a running turn, and a turn the provider refused.
+ */
+const KAP_TASKS = await Bun.file(new URL('./fixtures/kimi-2.7.2-tasks.json', import.meta.url)).json() as {
+  kimiVersion: string;
+  sessions: Record<string, string | undefined>;
+  rest: Record<string, KapExchange | undefined>;
+  ws: Record<string, KapFrameRow[] | undefined>;
+};
+const kapTaskExchange = (key: string): KapExchange => {
+  const entry = KAP_TASKS.rest[key];
+  if (!entry) throw new Error(`the 2.7.2 task fixture has no rest.${key}`);
+  return entry;
+};
+const kapTaskServe = (key: string): Response => {
+  const exchange = kapTaskExchange(key);
+  return Response.json(exchange.response, { status: exchange.httpStatus });
+};
+const kapTaskSession = (key: string): string => {
+  const id = KAP_TASKS.sessions[key];
+  if (!id) throw new Error(`the 2.7.2 task fixture has no session ${key}`);
+  return id;
+};
+const kapTaskFrames = (key: string): KapFrameRow[] => {
+  const frames = KAP_TASKS.ws[key];
+  if (!frames) throw new Error(`the 2.7.2 task fixture has no ws.${key}`);
+  return frames;
+};
+const KAP_BGSHELL = kapTaskSession('bgshell');
+const KAP_BGFAIL = kapTaskSession('bgfail');
+const KAP_AGENTFG = kapTaskSession('agentfg');
+const KAP_AGENTBG = kapTaskSession('agentbg');
+const KAP_SWARM = kapTaskSession('swarm');
+const KAP_PLAN = kapTaskSession('plan');
+const KAP_PLAN_ONE = kapTaskSession('planOneOption');
+const KAP_PLAN_REJECT = kapTaskSession('planReject');
+const KAP_PROMOTE = kapTaskSession('promote');
+const KAP_REFUSED = kapTaskSession('fail');
+/** Each session's turn read, as captured once its conversation had ended. */
+const KAP_TASK_TURNS: ReadonlyArray<readonly [string, string]> = [
+  [KAP_BGSHELL, 'bgshellTurns'], [KAP_BGFAIL, 'bgfailTurns'], [KAP_AGENTFG, 'agentfgTurns'],
+  [KAP_AGENTBG, 'agentbgTurns'], [KAP_SWARM, 'swarmTurns'], [KAP_PLAN, 'planTurns'],
+  [KAP_PLAN_REJECT, 'planRejectTurns'], [KAP_PROMOTE, 'promoteTurns'], [KAP_REFUSED, 'failTurns'],
+];
+const KAP_TASK_SESSIONS = [
+  KAP_BGSHELL, KAP_BGFAIL, KAP_AGENTFG, KAP_AGENTBG, KAP_SWARM,
+  KAP_PLAN, KAP_PLAN_ONE, KAP_PLAN_REJECT, KAP_PROMOTE, KAP_REFUSED,
+];
+/**
+ * Serve the refused session's history as it stood before its one turn ran:
+ * no turns, as the socket's opening `turns` frame reported (captured).
+ */
+let kapRefusedBeforeTurn = false;
+/** Which captured answer a prompt to the steered session gets: queued behind the running turn, or running. */
+let kapPromptAnswer = 'promoteQueue';
+/** Which captured promotion answer: promoted, or not pending (40402) because the turn already took it. */
+let kapSteerAnswer = 'promoteSteer';
 
 const kapRequests: Array<{ method: string; path: string; query: URLSearchParams; body?: unknown }> = [];
 /** Which captured interaction list the live session answers with. */
@@ -1988,6 +2059,25 @@ const kapServer = Bun.serve({
         if (before === '4') return kapServe('turnsOlder');
         if (before === '2') return kapServe('turnsApproval');
       }
+      const taskTurns = KAP_TASK_TURNS.find(([sessionId]) => path === `/api/v1/sessions/${sessionId}/agents/main/turns`);
+      if (taskTurns) {
+        if (taskTurns[0] === KAP_REFUSED && kapRefusedBeforeTurn) {
+          return Response.json({ ...kapTaskExchange('failTurns').response, data: { turns: [], has_more: false } });
+        }
+        return kapTaskServe(taskTurns[1]);
+      }
+      if (path === `/api/v1/sessions/${KAP_REFUSED}`) return kapTaskServe('failSession');
+      if (path === `/api/v1/sessions/${KAP_BGSHELL}`) {
+        // No session read was captured for this conversation; the `:wait`
+        // answer carries the session row (captured while the task ran).
+        const wait = kapTaskExchange('bgshellWaitWhileRunning').response as { data?: { session?: unknown } };
+        return Response.json({ code: 0, msg: 'success', data: wait.data?.session });
+      }
+      if (path === `/api/v1/sessions/${KAP_PLAN}/interactions`) return kapTaskServe('planInteractions');
+      if (path === `/api/v1/sessions/${KAP_PLAN_ONE}/interactions`) return kapTaskServe('planOneOptionInteractions');
+      if (KAP_TASK_SESSIONS.some((sessionId) => path === `/api/v1/sessions/${sessionId}/interactions`)) {
+        return kapServe('interactionsEmpty');
+      }
       // The 0.x routes are gone on 2.7.2 (captured 404s). Answering them the
       // way the real server does makes an untranslated read fail visibly.
       if (path === '/api/v2/sessions') return kapServe('oldV2Sessions');
@@ -2001,6 +2091,10 @@ const kapServer = Bun.serve({
         const [, sessionId, action, tail] = target;
         if (action === 'cancel') return kapServe(kapCancel);
         if (action === 'abort') return kapServe('oldAbort');
+        if (sessionId === KAP_PROMOTE && tail === 'prompts') return kapTaskServe(kapPromptAnswer);
+        if (sessionId === KAP_PROMOTE && tail === 'prompts:steer') return kapTaskServe(kapSteerAnswer);
+        if (sessionId === KAP_PLAN_ONE && tail?.startsWith('interactions/')) return kapTaskServe('planOneOptionRespond');
+        if (sessionId === KAP_PLAN_REJECT && tail?.startsWith('interactions/')) return kapTaskServe('planRejectRespond');
         if (tail === 'prompts') return kapServe(sessionId === KAP_LOCKED ? 'promptWhileLocked' : 'submitPrompt');
         if (tail === 'profile') return kapServe(sessionId === KAP_LOCKED ? 'renameWhileLocked' : 'rename');
         if (tail?.startsWith('interactions/')) {
@@ -2324,8 +2418,11 @@ try {
       && kapPayloads(approvalEvents, 'prompt.completed')[0]?.promptId === 'approval-1'
       && approvalTypes.indexOf('prompt.completed') > approvalTypes.indexOf('turn.ended'),
     JSON.stringify(approvalEnded));
+  // Only the state notices for the opening task list and the agent and
+  // context frames (section 9h) come ahead of the reset.
   check('the transcript is re-read when KAP replaces it, when the prompt is written, and after every step',
-    approvalTypes[0] === 'transcript.reset' && approvalTypes.includes('transcript.ops')
+    approvalTypes.filter((type) => !type.startsWith('cosyncing.'))[0] === 'transcript.reset'
+      && approvalTypes.includes('transcript.ops')
       && approvalTypes.filter((type) => type === 'turn.step.completed').length === 3,
     approvalTypes.join(','));
   approval.socket.send(JSON.stringify({ type: 'pong', payload: {} }));
@@ -2592,6 +2689,357 @@ try {
     userLive = [];
     check('...but suppresses nothing: no launch of this adapter produced it',
       !!(await userStarted.describeManagedHost())?.launch);
+  }
+
+  // ── 9h. Refused turns, background tasks, plan reviews and steering ────────
+  //
+  // Against the second 2.7.2 capture, every conversation its own session,
+  // served or replayed as captured. The scripted local model behind it only
+  // chose which tool to call; every frame and answer is the server's own.
+  {
+    type Activity = Extract<AgentMessage, { type: 'agent-activity' }>;
+    type ToolResult = Extract<AgentMessage, { type: 'tool-result' }>;
+    type Overlay = Extract<AgentMessage, { type: 'metadata-update' }>;
+    const settle = async (done: () => boolean): Promise<boolean> => {
+      for (let round = 0; round < 400 && !done(); round += 1) await Bun.sleep(5);
+      return done();
+    };
+    /** A fresh adapter, so each attach below starts with no live state, with a hand on its poll timer. */
+    const taskAdapter = () => {
+      const wires: KapWire[] = [];
+      const ticks: Array<() => void> = [];
+      const adapter = new KimiAdapter({
+        env: {},
+        homeDir: '/fixture/home',
+        instanceScan: () => kapScan,
+        readToken: () => 'fixture-token',
+        observe: {
+          socketFactory: () => {
+            const wire = new KapWire();
+            wires.push(wire);
+            return wire;
+          },
+          setInterval: (handler: () => void) => {
+            ticks.push(handler);
+            return ticks.length;
+          },
+          clearInterval: () => {},
+        },
+      });
+      return { adapter, wires, ticks };
+    };
+    /** Open a connection's socket (unless it is open already) and play captured server frames into it. */
+    const play = (wire: KapWire | undefined, frames: KapFrameRow[], open = true): void => {
+      if (!wire) throw new Error('the connection opened no socket');
+      if (open) wire.fire('open', {});
+      const requestId = wire.sent.find((frame) => frame.type === 'subscribe')?.request_id;
+      for (const row of frames) {
+        if (row.dir !== 'in' || !row.frame) continue;
+        wire.deliver(row.frame.type === 'response' ? { ...row.frame, request_id: requestId } : row.frame);
+      }
+    };
+    /** A session's history through the read door, folded by the mapper with one walk's state. */
+    const historyRows = async (sessionId: string): Promise<KimiMappedRow[]> => {
+      const page = await kapHttp.getJson<KimiMessagePage>(`/api/v1/sessions/${sessionId}/messages`, { page_size: 100 });
+      if (!page.ok) throw new Error(`the read door refused ${sessionId}: ${page.reason}`);
+      return mapKimiMessagePage(page.data, createKimiMappingState()).rows;
+    };
+    const activities = (messages: readonly AgentMessage[], key: string): Activity[] =>
+      messages.filter((message): message is Activity => message.type === 'agent-activity' && message.key === key);
+    const resultsOf = (messages: readonly AgentMessage[], callId: string): ToolResult[] =>
+      messages.filter((message): message is ToolResult => message.type === 'tool-result' && message.callId === callId);
+    const errorText = (message: AgentMessage | undefined): unknown =>
+      message?.type === 'error' ? message.message : undefined;
+    /** A captured conversation through the socket shim, its task states, and the rows they map to. */
+    const taskReplay = (frames: KapFrameRow[], sessionId: string) => {
+      const events = kapEvents(kapReplay(hub, frames, sessionId).received);
+      const payloads = kapPayloads(events, KIMI_BACKGROUND_TASKS_EVENT);
+      const tasks = payloads.flatMap((payload) => (Array.isArray(payload.tasks) ? payload.tasks as unknown[] : []));
+      const rows = tasks.flatMap((task) => {
+        const row = mapKimiBackgroundTask(task);
+        return row ? [row] : [];
+      });
+      return { events, payloads, tasks, rows };
+    };
+
+    // A turn the provider refused. The reason is on the turn itself, so it is
+    // read from the server rather than from the journal's tail.
+    const REFUSAL = 'fixture quota refusal: you\'ve reached your usage limit, see https://example.invalid/billing';
+    const refusedRows = await historyRows(KAP_REFUSED);
+    const refusedErrors = refusedRows.filter((row) => row.message.type === 'error');
+    check('a refused KAP turn reads back with its reason from the server\'s turn read, last in that turn and keyed by it',
+      refusedErrors.length === 1
+        && refusedErrors[0]?.identity === 'error:kimi-turn-failed:0'
+        && errorText(refusedErrors[0]?.message) === REFUSAL
+        && refusedRows.at(-1) === refusedErrors[0],
+      JSON.stringify(refusedRows.map((row) => row.identity)));
+    const unconfigured = (await historyRows(KAP_FAILED)).filter((row) => row.message.type === 'error');
+    check('...and so does the first capture\'s turn that had no model set',
+      unconfigured.length === 1 && errorText(unconfigured[0]?.message) === 'Model not set',
+      JSON.stringify(unconfigured));
+    const refusedReplay = kapEvents(kapReplay(hub, kapTaskFrames('fail'), KAP_REFUSED).received);
+    check('each `agent` and `context` frame of the main agent is passed on as a state change',
+      kapPayloads(refusedReplay, KIMI_AGENT_STATE_EVENT).length === 5,
+      JSON.stringify(refusedReplay.map((frame) => frame.type)));
+
+    {
+      const { adapter, wires } = taskAdapter();
+      const refused = await adapter.attach(KAP_REFUSED);
+      const seen: AgentMessage[] = [];
+      refused.subscribe((message) => seen.push(message));
+      const history = await refused.getHistory();
+      const shown = history.filter((message) => message.type === 'error');
+      check('an attach shows a refused turn\'s reason once, in the history it reads',
+        shown.length === 1 && errorText(shown[0]) === REFUSAL, JSON.stringify(shown));
+      const readings = () => seen.filter((message): message is Overlay =>
+        message.type === 'metadata-update' && message.key === 'contextUsage');
+      const latest = () => readings().at(-1)?.value as { used?: unknown; max?: unknown } | undefined;
+      check('(setup) no context reading is known before the session\'s socket has spoken', readings().length === 0);
+      const requestsBefore = kapRequests.length;
+      play(wires.at(-1), kapTaskFrames('fail'));
+      await settle(() => latest()?.used === 81);
+      check('the chips follow the `agent` and `context` frames: the latest reading arrives with no poll and no status request',
+        latest()?.used === 81 && latest()?.max === 262_144
+          && !kapRequests.slice(requestsBefore).some((entry) => entry.path.endsWith('/status')),
+        JSON.stringify(readings()));
+      await Bun.sleep(50);
+      check('...and the live `turn.ended` for the refused turn adds no second row',
+        !seen.some((message) => message.type === 'error'),
+        JSON.stringify(seen.filter((message) => message.type === 'error')));
+      await refused.close();
+    }
+    {
+      const { adapter, wires } = taskAdapter();
+      kapRefusedBeforeTurn = true;
+      const refused = await adapter.attach(KAP_REFUSED);
+      const seen: AgentMessage[] = [];
+      refused.subscribe((message) => seen.push(message));
+      const history = await refused.getHistory();
+      check('(setup) before its turn ran, the refused session has no failure to show',
+        !history.some((message) => message.type === 'error'));
+      play(wires.at(-1), kapTaskFrames('fail'));
+      // The turn has run, so the server's read now carries it, failure and all.
+      kapRefusedBeforeTurn = false;
+      const afterTurn = kapRequests.length;
+      await settle(() => kapRequests.slice(afterTurn).some((entry) =>
+        entry.path === `/api/v1/sessions/${KAP_REFUSED}/agents/main/turns`));
+      await Bun.sleep(50);
+      const errors = seen.filter((message) => message.type === 'error');
+      check('a failure seen live and then read from the server is one row',
+        errors.length === 1 && errorText(errors[0]) === REFUSAL, JSON.stringify(errors));
+      await refused.close();
+    }
+
+    // Background shell tasks and subagents, read back from history: the
+    // settlement notification folds into the call that started the task.
+    const bgshellHistory = (await historyRows(KAP_BGSHELL)).map((row) => row.message);
+    const bgResults = resultsOf(bgshellHistory, 'call_fixture_Bash_bae8b5');
+    check('a background command\'s settlement folds into its call as the deferred result, naming where its output was saved',
+      bgResults.length === 2
+        && String(bgResults[0]?.result).startsWith('task_id: bash-84nnpsi8\n')
+        && String(bgResults[1]?.result).startsWith('Background process completed\nWall time: 6.010 seconds\n')
+        && String(bgResults[1]?.result).includes('\nFull output: /fixture/kimi-code-home/sessions/')
+        && bgResults[1]?.isError !== true
+        && !bgshellHistory.some((message) => message.type === 'notice'
+          || (message.type === 'user-message' && message.text.includes('<notification'))),
+      JSON.stringify(bgResults.map((message) => message.result)));
+    const bgfailResults = resultsOf((await historyRows(KAP_BGFAIL)).map((row) => row.message), 'call_fixture_Bash_6d3afe');
+    check('...and a failed one as a failed result',
+      bgfailResults.length === 2 && bgfailResults[1]?.isError === true
+        && String(bgfailResults[1]?.result).startsWith('Background process failed\n'),
+      JSON.stringify(bgfailResults.map((message) => [message.isError, message.result])));
+    const agentbgHistory = (await historyRows(KAP_AGENTBG)).map((row) => row.message);
+    const detachedBar = activities(agentbgHistory, 'agent:call_fixture_Agent_1a6ac8');
+    check('a detached subagent\'s bar opens at its spawn result and closes at its settlement notification',
+      detachedBar.map((message) => message.status).join(',') === 'running,done'
+        && detachedBar.every((message) => message.title === 'fixture background child')
+        && String(resultsOf(agentbgHistory, 'call_fixture_Agent_1a6ac8').at(-1)?.result).startsWith('Background agent completed\n'),
+      JSON.stringify(detachedBar));
+    const foregroundBar = activities((await historyRows(KAP_AGENTFG)).map((row) => row.message), 'agent:call_fixture_Agent_2dacb2');
+    check('a foreground subagent\'s bar opens at its call and closes at its result',
+      foregroundBar.map((message) => message.status).join(',') === 'running,done'
+        && foregroundBar[0]?.title === 'fixture child task',
+      JSON.stringify(foregroundBar));
+
+    // The same tasks live, from the task frames.
+    const bgshell = taskReplay(kapTaskFrames('bgshell'), KAP_BGSHELL);
+    check('task frames reach the connection as task states: the subscribe\'s whole list first, then each change',
+      bgshell.payloads.length === 5 && bgshell.tasks.length === 4
+        && bgshell.payloads[0]?.snapshot === true
+        && bgshell.payloads.slice(1).every((payload) => payload.snapshot === false)
+        && bgshell.payloads.every((payload) => payload.agentId === 'main'),
+      JSON.stringify(bgshell.payloads.map((payload) => [payload.snapshot, payload.tasks])));
+    const bgKey = 'cmd:call_fixture_Bash_bae8b5';
+    const bgEnd = bgshell.rows.at(-1)?.message;
+    check('a background command is one row under its call: running from its start, then done with its run time',
+      bgshell.rows.length === 4
+        && bgshell.rows.every((row) => row.key === bgKey && row.message.key === bgKey && row.message.kind === 'command')
+        && bgshell.rows.slice(0, 3).every((row) => row.running && row.message.status === 'running'
+          && row.message.startedAtMs === Date.parse('2026-11-28T03:37:06.137Z') && row.message.elapsedMs === undefined)
+        && bgEnd?.status === 'done' && bgEnd.elapsedMs === 6010 && bgEnd.startedAtMs === undefined,
+      JSON.stringify(bgshell.rows.map((row) => row.message)));
+    check('...titled by its description, with the command beneath it',
+      bgEnd?.title === 'fixture background sleep' && bgEnd.subtitle === 'sleep 6; echo bg-shell-done',
+      JSON.stringify(bgEnd));
+    const bgfailEnd = taskReplay(kapTaskFrames('bgfail'), KAP_BGFAIL).rows.at(-1)?.message;
+    check('a background command that failed ends as an error, with no exit code invented',
+      bgfailEnd?.key === 'cmd:call_fixture_Bash_6d3afe' && bgfailEnd.status === 'error'
+        && bgfailEnd.elapsedMs === 2009 && bgfailEnd.exitCode === undefined,
+      JSON.stringify(bgfailEnd));
+    const swarm = taskReplay(kapTaskFrames('swarm'), KAP_SWARM);
+    check('swarm members are a row each under their shared call, running then done',
+      JSON.stringify(swarm.rows.map((row) => `${row.key}:${row.message.status}`)) === JSON.stringify([
+        'agent:call_fixture_AgentSwarm_11e311#1:running', 'agent:call_fixture_AgentSwarm_11e311#2:running',
+        'agent:call_fixture_AgentSwarm_11e311#1:done', 'agent:call_fixture_AgentSwarm_11e311#2:done',
+      ])
+        && swarm.rows.every((row) => row.message.kind === 'subagent' && row.message.agentsTotal === 1)
+        && swarm.rows[0]?.message.title === 'fixture swarm #1 (coder)',
+      JSON.stringify(swarm.rows.map((row) => row.message)));
+    const promote = taskReplay(kapTaskFrames('promote'), KAP_PROMOTE);
+    const unshown = [
+      taskReplay(kapTaskFrames('agentfg'), KAP_AGENTFG),
+      taskReplay(kapTaskFrames('agentbg'), KAP_AGENTBG),
+      promote,
+      taskReplay(KAP.ws.question ?? [], KAP_LIVE),
+    ];
+    check('a foreground command, a lone subagent and a question\'s task add no row: each has its card or bar already',
+      unshown.every((replay) => replay.tasks.length > 0 && replay.rows.length === 0),
+      JSON.stringify(unshown.map((replay) => [replay.tasks.length, replay.rows.length])));
+    const endedTask = bgshell.tasks.at(-1) as Record<string, unknown> | undefined;
+    const endedAs = (outcome: string) => mapKimiBackgroundTask({ ...endedTask, outcome })?.message.status;
+    check('an ending the server cannot vouch for withdraws the row instead of giving it an outcome (the captured ending, its outcome varied)',
+      endedAs('timed_out') === 'error' && endedAs('killed') === 'error'
+        && endedAs('lost') === 'retired' && endedAs('an-ending-not-yet-known') === 'retired',
+      ['timed_out', 'killed', 'lost', 'an-ending-not-yet-known'].map(endedAs).join(','));
+
+    {
+      // One connection watches a background command through to its end...
+      const { adapter, wires } = taskAdapter();
+      const watched = await adapter.attach(KAP_BGSHELL);
+      const seen: AgentMessage[] = [];
+      watched.subscribe((message) => seen.push(message));
+      await watched.getHistory();
+      play(wires.at(-1), kapTaskFrames('bgshell'));
+      const statuses = () => activities(seen, bgKey).map((message) => message.status).join(',');
+      check('an attached connection shows the background command as one row, running and then done, each once',
+        statuses() === 'running,done', statuses());
+      wires.at(-1)?.close();
+      check('...and losing the stream after it ended takes nothing down', statuses() === 'running,done', statuses());
+      await watched.close();
+    }
+    {
+      // ...another loses the stream while it runs.
+      const { adapter, wires, ticks } = taskAdapter();
+      const watched = await adapter.attach(KAP_BGSHELL);
+      const seen: AgentMessage[] = [];
+      watched.subscribe((message) => seen.push(message));
+      await watched.getHistory();
+      const frames = kapTaskFrames('bgshell');
+      const firstTask = frames.findIndex((row) => row.frame?.type === 'task');
+      play(wires.at(-1), frames.slice(0, firstTask + 1));
+      const statuses = () => activities(seen, bgKey).map((message) => message.status).join(',');
+      check('(setup) the background command is running', statuses() === 'running', statuses());
+      const socketsBefore = wires.length;
+      wires.at(-1)?.close();
+      check('a running background row is withdrawn with the stream that vouched for it',
+        statuses() === 'running,retired', statuses());
+      // The resync re-resolves the server and reopens the stream; the poll tick would too.
+      ticks.at(-1)?.();
+      await settle(() => wires.length > socketsBefore);
+      play(wires.at(-1), kapTaskFrames('bgshellResubscribe'));
+      check('...and put back by the whole list the resubscribe answers with, while the task still runs (captured)',
+        statuses() === 'running,retired,running', statuses());
+      // The list this session's first subscribe answered (no tasks), standing
+      // in for a resubscribe after the task ended unseen.
+      wires.at(-1)?.deliver(frames.find((row) => row.frame?.type === 'task.list')?.frame);
+      check('a whole list that no longer names a running row withdraws it',
+        statuses() === 'running,retired,running,retired', statuses());
+      await watched.close();
+    }
+
+    // Plan reviews: an ordinary approval whose display is the plan.
+    const PLAN = '# Fixture plan\n\n1. Read the README.\n2. Write a summary.\n\nTwo approaches are possible: A (short) or B (long).';
+    const planPending = await kapHttp.getJson<{ items: unknown[] }>(`/api/v1/sessions/${KAP_PLAN}/approvals`, { status: 'pending' });
+    const planCard = planPending.ok ? mapKimiApprovalRequest(planPending.data.items[0], false) : undefined;
+    check('a plan review is an approval card showing the plan as written, then the approaches the agent offered',
+      planCard?.requestId === 'approval_d2445e03-faf4-47da-821d-be5294a250cb'
+        && planCard.toolName === 'ExitPlanMode'
+        && planCard.title === 'ExitPlanMode — Presenting plan and exiting plan mode'
+        && planCard.detail === `${PLAN}\n\nApproaches offered:\n- Approach A: The short way.\n- Approach B: The long way.\n`
+          + 'Approving does not choose one; name the approach in your next message.',
+      JSON.stringify(planCard));
+    check('...answered by approve or reject only: a plan is never approved for the whole session',
+      JSON.stringify(planCard?.options) === JSON.stringify(['approve', 'reject']), JSON.stringify(planCard?.options));
+    const onePending = await kapHttp.getJson<{ items: unknown[] }>(`/api/v1/sessions/${KAP_PLAN_ONE}/approvals`, { status: 'pending' });
+    const oneCard = onePending.ok ? mapKimiApprovalRequest(onePending.data.items[0], false) : undefined;
+    const oneNotice = onePending.ok ? mapKimiApprovalRequest(onePending.data.items[0], true) : undefined;
+    check('a plan offered without alternatives shows the plan alone',
+      oneCard?.detail === PLAN && JSON.stringify(oneCard.options) === JSON.stringify(['approve', 'reject']),
+      JSON.stringify(oneCard));
+    check('...and an observer sees it on a read-only card with no answers',
+      oneNotice?.readOnly === true && oneNotice.options === undefined && oneNotice.detail === PLAN,
+      JSON.stringify(oneNotice));
+    const planEvents = kapEvents(kapReplay(hub, kapTaskFrames('plan'), KAP_PLAN).received);
+    const livePlan = mapKimiApprovalRequest(kapPayloads(planEvents, 'event.approval.requested')[0], false);
+    check('the live plan review arrives as the same card, then resolves as approved',
+      livePlan?.detail === planCard?.detail
+        && kapPayloads(planEvents, 'event.approval.resolved')[0]?.decision === 'approved',
+      JSON.stringify(planEvents.map((frame) => frame.type)));
+    const rejectEvents = kapEvents(kapReplay(hub, kapTaskFrames('planReject'), KAP_PLAN_REJECT).received);
+    check('...and a rejected one resolves as rejected',
+      kapPayloads(rejectEvents, 'event.approval.resolved')[0]?.decision === 'rejected',
+      JSON.stringify(kapPayloads(rejectEvents, 'event.approval.resolved')));
+    const approvedPlan = kapTaskExchange('planOneOptionRespond');
+    await kapDoor.resolveApproval(KAP_PLAN_ONE, approvedPlan.path.split('/').at(-1) ?? '', { decision: 'approved' });
+    check('approving a plan posts the captured plan approval',
+      lastPost()?.path === approvedPlan.path && JSON.stringify(lastPost()?.body) === JSON.stringify(approvedPlan.body),
+      JSON.stringify(lastPost()));
+    const rejectedPlan = kapTaskExchange('planRejectRespond');
+    await kapDoor.resolveApproval(KAP_PLAN_REJECT, rejectedPlan.path.split('/').at(-1) ?? '', { decision: 'rejected' });
+    check('...and rejecting one the captured rejection',
+      lastPost()?.path === rejectedPlan.path && JSON.stringify(lastPost()?.body) === JSON.stringify(rejectedPlan.body),
+      JSON.stringify(lastPost()));
+
+    // A prompt sent while a turn runs steers it: queued by the server, then
+    // promoted into the running turn.
+    const steerBody: KimiPromptSubmissionBody = { content: [{ type: 'text', text: 'also mention this' }] };
+    const postsSince = (start: number) => kapPosts().slice(start);
+    kapPromptAnswer = 'promoteQueue';
+    kapSteerAnswer = 'promoteSteer';
+    let postsBefore = kapPosts().length;
+    const steered = await kapDoor.submitPrompt(KAP_PROMOTE, steerBody, { steer: true });
+    check('a prompt the server queued behind a running turn is promoted into it with the captured promotion body',
+      postsSince(postsBefore).map((entry) => entry.path).join(',')
+        === `/api/v1/sessions/${KAP_PROMOTE}/prompts,/api/v1/sessions/${KAP_PROMOTE}/prompts:steer`
+        && JSON.stringify(postsSince(postsBefore)[1]?.body) === JSON.stringify(kapTaskExchange('promoteSteer').body)
+        && (steered.data as { status?: unknown } | undefined)?.status === 'queued',
+      JSON.stringify(postsSince(postsBefore)));
+    postsBefore = kapPosts().length;
+    await kapDoor.submitPrompt(KAP_PROMOTE, steerBody);
+    check('...only when asked: a prompt sent without steering stays queued',
+      postsSince(postsBefore).length === 1, JSON.stringify(postsSince(postsBefore)));
+    kapSteerAnswer = 'promoteSteerAgain';
+    postsBefore = kapPosts().length;
+    const late = await kapDoor.submitPrompt(KAP_PROMOTE, steerBody, { steer: true }).then(() => undefined, (error: unknown) => error);
+    check('a promotion the turn already took (40402, captured) does not fail the prompt',
+      postsSince(postsBefore).length === 2 && late === undefined, String(late));
+    kapSteerAnswer = 'promoteSteer';
+    kapPromptAnswer = 'promoteSubmit';
+    postsBefore = kapPosts().length;
+    await kapDoor.submitPrompt(KAP_PROMOTE, steerBody, { steer: true });
+    check('a prompt that opened a turn of its own is not promoted',
+      postsSince(postsBefore).length === 1, JSON.stringify(postsSince(postsBefore)));
+    kapPromptAnswer = 'promoteQueue';
+    postsBefore = kapPosts().length;
+    await new KimiDriveHttp({ baseUrl: kapBaseUrl, token: 'fixture-token' })
+      .submitPrompt(KAP_PROMOTE, steerBody, { steer: true });
+    check('the 0.x door never promotes: that wire has no promotion route',
+      postsSince(postsBefore).length === 1, JSON.stringify(postsSince(postsBefore)));
+    check('on the steered session each prompt settles with the turn that ran it, the promoted one opening the next',
+      JSON.stringify(kapPayloads(promote.events, 'turn.started').map((payload) => payload.turnId)) === JSON.stringify([0, 1])
+        && JSON.stringify(kapPayloads(promote.events, 'prompt.completed').map((payload) => payload.promptId))
+          === JSON.stringify(['promote-1', 'promote-queued-1']),
+      JSON.stringify(promote.events.map((frame) => frame.type)));
   }
 } catch (error) {
   check('KAP harness completed', false, error instanceof Error ? `${error.message}\n${error.stack}` : String(error));

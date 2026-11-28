@@ -54,12 +54,16 @@ import type {
 import { KimiReadOnlyHttp, isKimiReadOnlyWsFrame, type KimiReadOnlyWsFrame } from './server.ts';
 import type { KimiDriveHttp } from './drive-http.ts';
 import {
+  KIMI_AGENT_STATE_EVENT,
+  KIMI_BACKGROUND_TASKS_EVENT,
   KIMI_MAIN_AGENT_ID,
   KimiModelCatalogCache,
   createKimiMappingState,
   kimiStatusModel,
+  kimiTurnFailureKey,
   mapKimiApprovalRequest,
   mapKimiApprovalResolved,
+  mapKimiBackgroundTask,
   mapKimiMessagePage,
   mapKimiModelCatalog,
   mapKimiQuestionRequest,
@@ -271,6 +275,9 @@ export const KIMI_INTERACTION_REGISTRY_LIMIT = 64;
  * millisecond are not two silences.
  */
 export type KimiWalkKind = 'poll' | 'event';
+
+/** Background-task rows one connection keeps track of; a session runs a handful at a time. */
+const KIMI_BACKGROUND_TASK_ROW_LIMIT = 256;
 
 const REFRESH_TRIGGER_EVENTS: ReadonlySet<string> = new Set([
   'transcript.reset',
@@ -551,6 +558,19 @@ export class KimiObserveConnection implements SessionConnection {
    */
   private clientCount?: number;
   private readonly seen = new Set<string>();
+  /**
+   * Background-task rows this connection put up from a KAP server's task
+   * frames, by row key: the row last emitted and whether it was running. What
+   * {@link retireBackgroundTask} takes down when the stream that vouched for a
+   * running row is lost. Bounded at {@link KIMI_BACKGROUND_TASK_ROW_LIMIT}.
+   */
+  private readonly backgroundTaskRows = new Map<string, { running: boolean; json: string; message: AgentMessage }>();
+  /** Emissions so far; makes each background-task row's identity unique, so a reopened row is not deduped away. */
+  private backgroundTaskEmits = 0;
+  /** The overlay read a KAP `agent` or `context` frame started, while it runs ({@link refreshOverlaysOnAgentState}). */
+  private agentStateRead?: Promise<void>;
+  /** Another such frame arrived while that read ran, so one more read follows it. */
+  private agentStateReadAgain = false;
   private readonly pollIntervalMs: number;
   private readonly socketFactory?: KimiSocketFactory;
   private readonly setIntervalImpl: (handler: () => void, ms: number) => unknown;
@@ -1191,11 +1211,20 @@ export class KimiObserveConnection implements SessionConnection {
    * sees, so the live path has to be told here or a replayed `turn.ended` for
    * the same turn would add a second copy.
    */
-  private recoverLastTurnFailure(): AgentMessage | undefined {
+  private recoverLastTurnFailure(read: readonly KimiMappedRow[]): AgentMessage | undefined {
     if (this.info.status !== 'idle') return undefined;
     const failure = this.readLastTurnFailure();
     if (!failure) return undefined;
-    this.remember(kimiTurnFailureIdentity(failure.turnRef));
+    const identity = kimiTurnFailureIdentity(failure.turnRef);
+    // A KAP server's turn read carries each failed turn's own error, so the
+    // rows THIS read delivered already hold the failure whenever the server saw
+    // the turn end (`kap.ts`). The journal remains the answer only where they
+    // do not: a 0.x server, or a session a terminal or Kimi Desktop holds,
+    // whose turns the server shows as last saved. Checked against this read,
+    // never against what was delivered before: the reset replaces the
+    // transcript, so a failure shown live earlier still has to be in it.
+    if (read.some((row) => row.identity === identity)) return undefined;
+    this.remember(identity);
     return { type: 'error', message: failure.message };
   }
 
@@ -1365,7 +1394,7 @@ export class KimiObserveConnection implements SessionConnection {
     // the transcript above is already incomplete, and a terminal outcome
     // pinned to the end of a partial view would claim the session stopped
     // where the READ stopped.
-    const failure = this.closed || readFailed ? undefined : this.recoverLastTurnFailure();
+    const failure = this.closed || readFailed ? undefined : this.recoverLastTurnFailure(rows);
     if (readFailed) {
       return [{ type: 'notice', message: KIMI_HISTORY_PARTIAL_NOTICE }, ...messages];
     }
@@ -2316,6 +2345,13 @@ export class KimiObserveConnection implements SessionConnection {
       this.socketOpen = false;
       if (this.closed) return;
       this.noteStreamBreak();
+      // A running background-task row is vouched for by this stream alone
+      // (KAP task frames; no read can confirm it), so it is taken down with
+      // the stream. The list a resubscribe answers with puts back every task
+      // still running.
+      for (const [key, shown] of [...this.backgroundTaskRows]) {
+        if (shown.running) this.retireBackgroundTask(key);
+      }
       // A lost socket is a resync: this refresh restores correctness now, and
       // the next poll tick calls restoreSocket() (see start()) to restore the
       // stream. Reopening from here instead would reconnect in a tight loop
@@ -2587,9 +2623,99 @@ export class KimiObserveConnection implements SessionConnection {
         this.emit({ type: 'question-resolved', requestId }, `question-resolved:${requestId}`);
         return;
       }
+      case KIMI_AGENT_STATE_EVENT: {
+        // KAP only: the model, effort, mode or context reading changed. The
+        // overlay read is answered from the frame just stored, so this costs
+        // no request, and an unchanged reading emits nothing.
+        if (!this.isMainAgentFrame(payload)) return;
+        this.refreshOverlaysOnAgentState();
+        return;
+      }
+      case KIMI_BACKGROUND_TASKS_EVENT: {
+        if (!this.isMainAgentFrame(payload)) return;
+        this.applyBackgroundTasks(payload.tasks, payload.snapshot === true);
+        return;
+      }
       default:
         return;
     }
+  }
+
+  /**
+   * Re-read the overlays because a KAP `agent` or `context` frame arrived.
+   *
+   * One read at a time. A turn sends these frames in bursts, and each read
+   * snapshots the state when it starts but may finish late (the first one
+   * waits on the model catalog), so overlapping reads could emit an older
+   * reading after a newer one and leave it on screen until the next poll. A
+   * frame that lands while a read runs asks for one more read after it
+   * instead, so the last reading emitted is always the latest.
+   */
+  private refreshOverlaysOnAgentState(): void {
+    if (this.agentStateRead) {
+      this.agentStateReadAgain = true;
+      return;
+    }
+    this.agentStateRead = (async () => {
+      try {
+        do {
+          this.agentStateReadAgain = false;
+          await this.refreshOverlays();
+        } while (this.agentStateReadAgain && !this.closed);
+      } catch {
+        // The poll tick reads the overlays again.
+      } finally {
+        this.agentStateRead = undefined;
+      }
+    })();
+  }
+
+  /**
+   * The main agent's background tasks (KAP only) → `agent-activity` rows.
+   *
+   * A row is emitted when its content changes, so the repeated `running`
+   * frames a task sends cost nothing. A `snapshot` is the whole list a
+   * subscribe answers with: a row this connection still shows running that
+   * the list leaves out ended while the stream was away, with an outcome
+   * nobody can now state, so it is retired. The working state is untouched:
+   * it follows the turn, as it always has.
+   */
+  private applyBackgroundTasks(raw: unknown, snapshot: boolean): void {
+    const rows = (Array.isArray(raw) ? raw : []).flatMap((task) => {
+      const row = mapKimiBackgroundTask(task);
+      return row ? [row] : [];
+    });
+    if (snapshot) {
+      const listed = new Set(rows.map((row) => row.key));
+      for (const [key, shown] of [...this.backgroundTaskRows]) {
+        if (shown.running && !listed.has(key)) this.retireBackgroundTask(key);
+      }
+    }
+    for (const row of rows) this.showBackgroundTask(row.key, row.running, row.message);
+  }
+
+  /** Emit one background-task row if it differs from what this connection last showed for its key. */
+  private showBackgroundTask(key: string, running: boolean, message: AgentMessage): void {
+    const json = JSON.stringify(message);
+    const shown = this.backgroundTaskRows.get(key);
+    if (shown?.json === json) return;
+    this.backgroundTaskRows.delete(key);
+    this.backgroundTaskRows.set(key, { running, json, message });
+    while (this.backgroundTaskRows.size > KIMI_BACKGROUND_TASK_ROW_LIMIT) {
+      const oldest = this.backgroundTaskRows.keys().next();
+      if (oldest.done) break;
+      this.backgroundTaskRows.delete(oldest.value);
+    }
+    this.backgroundTaskEmits += 1;
+    this.emit(message, `agent-activity:background-task:${key}:${this.backgroundTaskEmits}`);
+  }
+
+  /** Take down one running background-task row: this connection can no longer vouch for it. */
+  private retireBackgroundTask(key: string): void {
+    const shown = this.backgroundTaskRows.get(key);
+    if (!shown || shown.message.type !== 'agent-activity') return;
+    const { key: rowKey, kind, title } = shown.message;
+    this.showBackgroundTask(key, false, { type: 'agent-activity', key: rowKey, kind, title, status: 'retired' });
   }
 
   /**
@@ -3197,7 +3323,7 @@ export class KimiObserveConnection implements SessionConnection {
  * this would put the same failure on screen twice after a resync.
  */
 function kimiTurnFailureIdentity(turnRef: string): string {
-  return `error:kimi-turn-failed:${turnRef}`;
+  return `error:${kimiTurnFailureKey(turnRef)}`;
 }
 
 function runStatusOf(status: SessionInfo['status']): 'running' | 'idle' {

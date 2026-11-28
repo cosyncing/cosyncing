@@ -1,0 +1,758 @@
+{
+  "nativeVersion": "3.0.76",
+  "hubCoreVersion": "0.2.2",
+  "captured": "2026-11-28, isolated homes and a managed Hub on a scratch port, against a scripted OpenAI-compatible model on loopback; `providers` from Cline 3.0.76, `providers021` from Cline 3.0.75. Scrubbed: each providers.list reply is cut to its first 10 providers and to the fields id, name, enabled, configured, defaultModelId (API keys, base URLs, config values and the profile settings path dropped). Every other value is as Cline wrote it.",
+  "providers": {
+    "coreVersion": "0.2.2",
+    "capabilities": [
+      "providers.list",
+      "providers.models.list",
+      "providers.models.recommended",
+      "providers.settings.save",
+      "providers.add",
+      "providers.models.update"
+    ],
+    "list": {
+      "providers": [
+        {
+          "id": "cline",
+          "name": "Cline Usage-Billing",
+          "enabled": false,
+          "configured": false,
+          "defaultModelId": "cline-free/nemotron-3.5-super-vl"
+        },
+        {
+          "id": "openai-codex",
+          "name": "OpenAI ChatGPT Subscription",
+          "enabled": false,
+          "configured": false,
+          "defaultModelId": "gpt-5.6-terra"
+        },
+        {
+          "id": "deepseek",
+          "name": "DeepSeek",
+          "enabled": true,
+          "configured": true,
+          "defaultModelId": "deepseek-v4-flash"
+        },
+        {
+          "id": "anthropic",
+          "name": "Anthropic",
+          "enabled": false,
+          "configured": false,
+          "defaultModelId": "claude-sonnet-5-5"
+        },
+        {
+          "id": "openrouter",
+          "name": "OpenRouter",
+          "enabled": false,
+          "configured": false,
+          "defaultModelId": "anthropic/claude-sonnet-5.5"
+        },
+        {
+          "id": "ollama",
+          "name": "Ollama",
+          "enabled": false,
+          "configured": false,
+          "defaultModelId": "default"
+        },
+        {
+          "id": "bedrock",
+          "name": "AWS Bedrock",
+          "enabled": false,
+          "configured": false,
+          "defaultModelId": "minimax.minimax-m2.5"
+        },
+        {
+          "id": "openai-compatible",
+          "name": "OpenAI Compatible",
+          "enabled": true,
+          "configured": true,
+          "defaultModelId": "gpt-4o"
+        },
+        {
+          "id": "litellm",
+          "name": "LiteLLM",
+          "enabled": false,
+          "configured": false,
+          "defaultModelId": "gpt-5.4"
+        },
+        {
+          "id": "gemini",
+          "name": "Google Gemini",
+          "enabled": false,
+          "configured": false,
+          "defaultModelId": "gemini-4-neon"
+        }
+      ]
+    },
+    "listedProviderCount": 329,
+    "models": {
+      "deepseek": {
+        "providerId": "deepseek",
+        "models": [
+          {
+            "id": "deepseek-flash",
+            "name": "DeepSeek V4.1 Flash 1017",
+            "contextWindow": 1048576,
+            "supportsAttachments": false,
+            "supportsVision": true,
+            "supportsReasoning": true
+          },
+          {
+            "id": "deepseek-v4-flash",
+            "name": "deepseek-v4-flash",
+            "contextWindow": 128000,
+            "supportsAttachments": false,
+            "supportsVision": true,
+            "supportsReasoning": false
+          },
+          {
+            "id": "deepseek-v4-pro",
+            "name": "DeepSeek V4 Pro",
+            "contextWindow": 1048576,
+            "supportsAttachments": false,
+            "supportsVision": false,
+            "supportsReasoning": true
+          }
+        ]
+      },
+      "openai-compatible": {
+        "providerId": "openai-compatible",
+        "models": [
+          {
+            "id": "gpt-4o",
+            "name": "gpt-4o",
+            "contextWindow": 128000,
+            "supportsAttachments": false,
+            "supportsVision": true,
+            "supportsReasoning": false
+          }
+        ]
+      },
+      "no-such-provider": {
+        "providerId": "no-such-provider",
+        "models": []
+      }
+    }
+  },
+  "providers021": {
+    "coreVersion": "0.2.1",
+    "capabilities": [
+      "providers.list",
+      "providers.models.list",
+      "providers.models.recommended",
+      "providers.settings.save",
+      "providers.add",
+      "providers.models.update"
+    ],
+    "list": {
+      "providers": [
+        {
+          "id": "cline",
+          "name": "Cline Usage-Billing",
+          "enabled": false,
+          "configured": false,
+          "defaultModelId": "cline-free/nemotron-3.5-super-vl"
+        },
+        {
+          "id": "openai-codex",
+          "name": "OpenAI ChatGPT Subscription",
+          "enabled": false,
+          "configured": false,
+          "defaultModelId": "gpt-5.6-terra"
+        },
+        {
+          "id": "deepseek",
+          "name": "DeepSeek",
+          "enabled": true,
+          "configured": true,
+          "defaultModelId": "deepseek-v4-flash"
+        },
+        {
+          "id": "anthropic",
+          "name": "Anthropic",
+          "enabled": false,
+          "configured": false,
+          "defaultModelId": "claude-sonnet-5-5"
+        },
+        {
+          "id": "openrouter",
+          "name": "OpenRouter",
+          "enabled": false,
+          "configured": false,
+          "defaultModelId": "anthropic/claude-sonnet-5.5"
+        },
+        {
+          "id": "ollama",
+          "name": "Ollama",
+          "enabled": false,
+          "configured": false,
+          "defaultModelId": "default"
+        },
+        {
+          "id": "bedrock",
+          "name": "AWS Bedrock",
+          "enabled": false,
+          "configured": false,
+          "defaultModelId": "minimax.minimax-m2.5"
+        },
+        {
+          "id": "openai-compatible",
+          "name": "OpenAI Compatible",
+          "enabled": true,
+          "configured": true,
+          "defaultModelId": "gpt-4o"
+        },
+        {
+          "id": "litellm",
+          "name": "LiteLLM",
+          "enabled": false,
+          "configured": false,
+          "defaultModelId": "gpt-5.4"
+        },
+        {
+          "id": "gemini",
+          "name": "Google Gemini",
+          "enabled": false,
+          "configured": false,
+          "defaultModelId": "gemini-4-neon"
+        }
+      ]
+    },
+    "listedProviderCount": 327,
+    "models": {
+      "deepseek": {
+        "providerId": "deepseek",
+        "models": [
+          {
+            "id": "deepseek-flash",
+            "name": "DeepSeek V4.1 Flash 1017",
+            "contextWindow": 1048576,
+            "supportsAttachments": false,
+            "supportsVision": true,
+            "supportsReasoning": true
+          },
+          {
+            "id": "deepseek-v4-flash",
+            "name": "deepseek-v4-flash",
+            "contextWindow": 128000,
+            "supportsAttachments": false,
+            "supportsVision": true,
+            "supportsReasoning": false
+          },
+          {
+            "id": "deepseek-v4-pro",
+            "name": "DeepSeek V4 Pro",
+            "contextWindow": 1048576,
+            "supportsAttachments": false,
+            "supportsVision": false,
+            "supportsReasoning": true
+          }
+        ]
+      },
+      "openai-compatible": {
+        "providerId": "openai-compatible",
+        "models": [
+          {
+            "id": "gpt-4o",
+            "name": "gpt-4o",
+            "contextWindow": 128000,
+            "supportsAttachments": false,
+            "supportsVision": true,
+            "supportsReasoning": false
+          }
+        ]
+      },
+      "no-such-provider": {
+        "providerId": "no-such-provider",
+        "models": []
+      }
+    }
+  },
+  "subagentTurn": {
+    "source": "the baseline Create + Drive turn of session 1795837202697_ouboy, prompted with `prompt`",
+    "sessionId": "1795837202697_ouboy",
+    "prompt": "SPAWN_PARENT: call spawn_agent, then reply DONE.",
+    "events": [
+      {
+        "event": "iteration.started",
+        "timestamp": 1795837202779,
+        "payload": {
+          "iteration": 1,
+          "agent": {
+            "kind": "lead",
+            "agentId": "agent_883901eb-5fe8-4ff2-a1ef-a889201f2907",
+            "conversationId": "conv_1795837202769_ef3s3gd",
+            "parentAgentId": null,
+            "teamRole": "lead"
+          }
+        }
+      },
+      {
+        "event": "usage.updated",
+        "timestamp": 1795837202809,
+        "payload": {
+          "sessionId": "1795837202697_ouboy",
+          "delta": {
+            "inputTokens": 8,
+            "outputTokens": 4,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "totalCost": 0
+          },
+          "totals": {
+            "inputTokens": 8,
+            "outputTokens": 4,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "totalCost": 0
+          },
+          "usage": {
+            "inputTokens": 8,
+            "outputTokens": 4,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "totalCost": 0
+          },
+          "aggregateUsage": {
+            "inputTokens": 8,
+            "outputTokens": 4,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "totalCost": 0
+          },
+          "agent": {
+            "kind": "lead",
+            "agentId": "agent_883901eb-5fe8-4ff2-a1ef-a889201f2907",
+            "conversationId": "conv_1795837202769_ef3s3gd",
+            "parentAgentId": null,
+            "teamRole": "lead"
+          }
+        }
+      },
+      {
+        "event": "tool.started",
+        "timestamp": 1795837202811,
+        "payload": {
+          "toolCallId": "call_fixture_j6ci11",
+          "toolName": "spawn_agent",
+          "input": {
+            "task": "SUB_TASK: reply with the single word SUB.",
+            "systemPrompt": "You are a helper."
+          },
+          "agent": {
+            "kind": "lead",
+            "agentId": "agent_883901eb-5fe8-4ff2-a1ef-a889201f2907",
+            "conversationId": "conv_1795837202769_ef3s3gd",
+            "parentAgentId": null,
+            "teamRole": "lead"
+          }
+        }
+      },
+      {
+        "event": "iteration.started",
+        "timestamp": 1795837202826,
+        "payload": {
+          "iteration": 1,
+          "agent": {
+            "kind": "subagent",
+            "agentId": "agent_191cf64a-99b5-45dd-88a0-57792e59236e",
+            "conversationId": "conv_1795837202813_557s58n",
+            "parentAgentId": "agent_883901eb-5fe8-4ff2-a1ef-a889201f2907"
+          }
+        }
+      },
+      {
+        "event": "assistant.delta",
+        "timestamp": 1795837202831,
+        "payload": {
+          "text": "SUB",
+          "agent": {
+            "kind": "subagent",
+            "agentId": "agent_191cf64a-99b5-45dd-88a0-57792e59236e",
+            "conversationId": "conv_1795837202813_557s58n",
+            "parentAgentId": "agent_883901eb-5fe8-4ff2-a1ef-a889201f2907"
+          }
+        }
+      },
+      {
+        "event": "usage.updated",
+        "timestamp": 1795837202832,
+        "payload": {
+          "sessionId": "1795837202697_ouboy",
+          "delta": {
+            "inputTokens": 8,
+            "outputTokens": 4,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "totalCost": 0
+          },
+          "totals": {
+            "inputTokens": 8,
+            "outputTokens": 4,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "totalCost": 0
+          },
+          "usage": {
+            "inputTokens": 8,
+            "outputTokens": 4,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "totalCost": 0
+          },
+          "aggregateUsage": {
+            "inputTokens": 16,
+            "outputTokens": 8,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "totalCost": 0
+          },
+          "agent": {
+            "kind": "subagent",
+            "agentId": "agent_191cf64a-99b5-45dd-88a0-57792e59236e",
+            "conversationId": "conv_1795837202813_557s58n",
+            "parentAgentId": "agent_883901eb-5fe8-4ff2-a1ef-a889201f2907"
+          }
+        }
+      },
+      {
+        "event": "assistant.finished",
+        "timestamp": 1795837202833,
+        "payload": {
+          "text": "SUB",
+          "agent": {
+            "kind": "subagent",
+            "agentId": "agent_191cf64a-99b5-45dd-88a0-57792e59236e",
+            "conversationId": "conv_1795837202813_557s58n",
+            "parentAgentId": "agent_883901eb-5fe8-4ff2-a1ef-a889201f2907"
+          }
+        }
+      },
+      {
+        "event": "iteration.finished",
+        "timestamp": 1795837202833,
+        "payload": {
+          "iteration": 1,
+          "hadToolCalls": false,
+          "toolCallCount": 0,
+          "agent": {
+            "kind": "subagent",
+            "agentId": "agent_191cf64a-99b5-45dd-88a0-57792e59236e",
+            "conversationId": "conv_1795837202813_557s58n",
+            "parentAgentId": "agent_883901eb-5fe8-4ff2-a1ef-a889201f2907"
+          }
+        }
+      },
+      {
+        "event": "agent.done",
+        "timestamp": 1795837202834,
+        "payload": {
+          "reason": "completed",
+          "text": "SUB",
+          "iterations": 1,
+          "usage": {
+            "inputTokens": 8,
+            "outputTokens": 4,
+            "totalCost": 0
+          },
+          "agent": {
+            "kind": "subagent",
+            "agentId": "agent_191cf64a-99b5-45dd-88a0-57792e59236e",
+            "conversationId": "conv_1795837202813_557s58n",
+            "parentAgentId": "agent_883901eb-5fe8-4ff2-a1ef-a889201f2907"
+          }
+        }
+      },
+      {
+        "event": "tool.finished",
+        "timestamp": 1795837202845,
+        "payload": {
+          "toolCallId": "call_fixture_j6ci11",
+          "toolName": "spawn_agent",
+          "output": {
+            "text": "SUB",
+            "iterations": 1,
+            "finishReason": "completed",
+            "usage": {
+              "inputTokens": 8,
+              "outputTokens": 4
+            }
+          },
+          "agent": {
+            "kind": "lead",
+            "agentId": "agent_883901eb-5fe8-4ff2-a1ef-a889201f2907",
+            "conversationId": "conv_1795837202769_ef3s3gd",
+            "parentAgentId": null,
+            "teamRole": "lead"
+          }
+        }
+      },
+      {
+        "event": "iteration.finished",
+        "timestamp": 1795837202846,
+        "payload": {
+          "iteration": 1,
+          "hadToolCalls": true,
+          "toolCallCount": 1,
+          "agent": {
+            "kind": "lead",
+            "agentId": "agent_883901eb-5fe8-4ff2-a1ef-a889201f2907",
+            "conversationId": "conv_1795837202769_ef3s3gd",
+            "parentAgentId": null,
+            "teamRole": "lead"
+          }
+        }
+      },
+      {
+        "event": "iteration.started",
+        "timestamp": 1795837202846,
+        "payload": {
+          "iteration": 2,
+          "agent": {
+            "kind": "lead",
+            "agentId": "agent_883901eb-5fe8-4ff2-a1ef-a889201f2907",
+            "conversationId": "conv_1795837202769_ef3s3gd",
+            "parentAgentId": null,
+            "teamRole": "lead"
+          }
+        }
+      },
+      {
+        "event": "assistant.delta",
+        "timestamp": 1795837202857,
+        "payload": {
+          "text": "DONE",
+          "agent": {
+            "kind": "lead",
+            "agentId": "agent_883901eb-5fe8-4ff2-a1ef-a889201f2907",
+            "conversationId": "conv_1795837202769_ef3s3gd",
+            "parentAgentId": null,
+            "teamRole": "lead"
+          }
+        }
+      },
+      {
+        "event": "usage.updated",
+        "timestamp": 1795837202858,
+        "payload": {
+          "sessionId": "1795837202697_ouboy",
+          "delta": {
+            "inputTokens": 8,
+            "outputTokens": 4,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "totalCost": 0
+          },
+          "totals": {
+            "inputTokens": 16,
+            "outputTokens": 8,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "totalCost": 0
+          },
+          "usage": {
+            "inputTokens": 16,
+            "outputTokens": 8,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "totalCost": 0
+          },
+          "aggregateUsage": {
+            "inputTokens": 24,
+            "outputTokens": 12,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "totalCost": 0
+          },
+          "agent": {
+            "kind": "lead",
+            "agentId": "agent_883901eb-5fe8-4ff2-a1ef-a889201f2907",
+            "conversationId": "conv_1795837202769_ef3s3gd",
+            "parentAgentId": null,
+            "teamRole": "lead"
+          }
+        }
+      },
+      {
+        "event": "assistant.finished",
+        "timestamp": 1795837202858,
+        "payload": {
+          "text": "DONE",
+          "agent": {
+            "kind": "lead",
+            "agentId": "agent_883901eb-5fe8-4ff2-a1ef-a889201f2907",
+            "conversationId": "conv_1795837202769_ef3s3gd",
+            "parentAgentId": null,
+            "teamRole": "lead"
+          }
+        }
+      },
+      {
+        "event": "iteration.finished",
+        "timestamp": 1795837202860,
+        "payload": {
+          "iteration": 2,
+          "hadToolCalls": false,
+          "toolCallCount": 0,
+          "agent": {
+            "kind": "lead",
+            "agentId": "agent_883901eb-5fe8-4ff2-a1ef-a889201f2907",
+            "conversationId": "conv_1795837202769_ef3s3gd",
+            "parentAgentId": null,
+            "teamRole": "lead"
+          }
+        }
+      },
+      {
+        "event": "agent.done",
+        "timestamp": 1795837202861,
+        "payload": {
+          "reason": "completed",
+          "text": "DONE",
+          "iterations": 2,
+          "usage": {
+            "inputTokens": 16,
+            "outputTokens": 8,
+            "totalCost": 0
+          },
+          "agent": {
+            "kind": "lead",
+            "agentId": "agent_883901eb-5fe8-4ff2-a1ef-a889201f2907",
+            "conversationId": "conv_1795837202769_ef3s3gd",
+            "parentAgentId": null,
+            "teamRole": "lead"
+          }
+        }
+      }
+    ],
+    "userMessage": {
+      "id": "f5e98f6a-d5d7-4059-b5ec-979a2f0c8589",
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "<user_input mode=\"act\">SPAWN_PARENT: call spawn_agent, then reply DONE.</user_input>"
+        }
+      ],
+      "ts": 1795837202774
+    },
+    "messages": [
+      {
+        "id": "msg_3tbm5Xdm",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "call_fixture_j6ci11",
+            "name": "spawn_agent",
+            "input": {
+              "task": "SUB_TASK: reply with the single word SUB.",
+              "systemPrompt": "You are a helper."
+            }
+          }
+        ],
+        "ts": 1795837202809,
+        "modelInfo": {
+          "id": "fixture-model",
+          "provider": "openai-compatible"
+        },
+        "metrics": {
+          "inputTokens": 8,
+          "outputTokens": 4,
+          "cacheReadTokens": 0,
+          "cacheWriteTokens": 0
+        }
+      },
+      {
+        "id": "msg_q9saWs5_",
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "call_fixture_j6ci11",
+            "name": "spawn_agent",
+            "content": "{\"text\":\"SUB\",\"iterations\":1,\"finishReason\":\"completed\",\"usage\":{\"inputTokens\":8,\"outputTokens\":4}}"
+          }
+        ],
+        "ts": 1795837202845
+      },
+      {
+        "id": "msg_g7DR3wlv",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "DONE"
+          }
+        ],
+        "ts": 1795837202858,
+        "modelInfo": {
+          "id": "fixture-model",
+          "provider": "openai-compatible"
+        },
+        "metrics": {
+          "inputTokens": 8,
+          "outputTokens": 4,
+          "cacheReadTokens": 0,
+          "cacheWriteTokens": 0
+        }
+      }
+    ],
+    "parentOrigin": {
+      "source": "cosyncing",
+      "mode": "user",
+      "sessionId": "1795837202697_ouboy"
+    },
+    "childFile": "agent_191cf64a-99b5-45dd-88a0-57792e59236e.messages.json",
+    "childDocument": {
+      "version": 1,
+      "updated_at": "2026-11-28T03:40:02.840Z",
+      "agent": "subagent",
+      "sessionId": "1795837202697_ouboy__agent_191cf64a-99b5-45dd-88a0-57792e59236e",
+      "taskType": "subagent_task",
+      "origin": {
+        "source": "cosyncing",
+        "mode": "subagent",
+        "sessionId": "1795837202697_ouboy__agent_191cf64a-99b5-45dd-88a0-57792e59236e",
+        "parentThreadId": "1795837202697_ouboy",
+        "subagent": "agent_191cf64a-99b5-45dd-88a0-57792e59236e"
+      },
+      "messages": [
+        {
+          "id": "42360073-5e04-49d8-9cb3-58509ecbdaef",
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "SUB_TASK: reply with the single word SUB."
+            }
+          ],
+          "ts": 1795837202825
+        },
+        {
+          "id": "msg_JVpL7j_A",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "SUB"
+            }
+          ],
+          "ts": 1795837202832,
+          "modelInfo": {
+            "id": "fixture-model",
+            "provider": "openai-compatible"
+          },
+          "metrics": {
+            "inputTokens": 8,
+            "outputTokens": 4,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0
+          }
+        }
+      ]
+    }
+  }
+}

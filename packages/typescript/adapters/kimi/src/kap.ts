@@ -32,6 +32,7 @@ import type {
   KimiWire,
 } from './server.ts';
 import { KIMI_WS_FRAME_MAX_BYTES, type KimiSocketFactory, type KimiSocketLike } from './observe.ts';
+import { KIMI_AGENT_STATE_EVENT, KIMI_BACKGROUND_TASKS_EVENT, KIMI_TURN_FAILURE_PART } from './mapping.ts';
 
 // ── Live state ──────────────────────────────────────────────────────────────
 
@@ -293,6 +294,19 @@ function fileAttachmentText(attachment: Row): string {
   return size === undefined ? `Attached file "${name}" (${media})` : `Attached file "${name}" (${media}, ${size} bytes)`;
 }
 
+/** The task-state fields a background-task row is built from (KAP `TaskState`, captured on 2.7.2). */
+const KAP_TASK_FIELDS = [
+  'task_id', 'kind', 'status', 'outcome', 'phase', 'detached', 'description', 'command',
+  'child_agent_id', 'parent_tool_call_id', 'swarm_index', 'started_at', 'ended_at',
+] as const;
+
+/** One KAP task state, reduced to {@link KAP_TASK_FIELDS}: a `task` frame carries routing fields too. */
+function kapTaskState(task: Row): Row {
+  const out: Row = {};
+  for (const field of KAP_TASK_FIELDS) if (task[field] !== undefined) out[field] = task[field];
+  return out;
+}
+
 /** An item is settled once it has ended; a running one is read again when it ends. */
 function ended(item: Row): boolean {
   return item.status === 'ended';
@@ -378,7 +392,10 @@ export function kapTurnMessages(turn: Row, sessionId: string): Row[] {
       case 'notification': {
         const title = str(item.title);
         const body = str(item.body);
-        if (title || body) {
+        const settled = backgroundTaskSettlement(item);
+        if (settled) {
+          out.push({ ...base, id, ...settled });
+        } else if (title || body) {
           out.push({ ...base, id, role: 'system', content: [{ type: 'text', text: [title, body].filter(Boolean).join('\n') }] });
         }
         break;
@@ -399,7 +416,68 @@ export function kapTurnMessages(turn: Row, sessionId: string): Row[] {
         break;
     }
   }
+  // A FAILED turn says why on the turn itself (`error{code, message}` and
+  // `end_reason`, captured on the turn read and on `turn.ended` alike), so
+  // the reason is read from the server here rather than from the wire
+  // journal's tail. One row per failed turn, last in that turn, keyed by the
+  // turn so the live `turn.ended` row for the same turn is the same row.
+  const ref = kapTurnRef(turn);
+  if (turn.outcome === 'failed' && ref !== undefined) {
+    out.push({
+      session_id: sessionId,
+      created_at: turn.ended_at ?? turn.started_at,
+      id: `${str(turn.turn_id) ?? `turn-${ref}`}:failure`,
+      role: 'system',
+      content: [{
+        type: KIMI_TURN_FAILURE_PART,
+        turn_ref: String(ref),
+        ...(turn.error != null ? { error: turn.error } : {}),
+        ...(turn.end_reason != null ? { interrupt_reason: turn.end_reason } : {}),
+      }],
+    });
+  }
   return out;
+}
+
+/**
+ * A background task's settlement notification → the 0.x row the mapper folds
+ * into the call that started the task.
+ *
+ * On 0.x a settled background task wrote a `role:'user'` row with origin
+ * `{kind:'task', taskId, status}` and a `<notification …>` envelope as its
+ * text; the mapper turns that into the spawning call's deferred result and
+ * closes a detached subagent's bar. KAP keeps the same notification as a
+ * structured item (captured on 2.7.2: `{type:'notification', title, body,
+ * severity, notification_type:'task.completed'|'task.failed'…, source:{kind:
+ * 'background_task', id}, task_id}`), so the row is rebuilt in that shape.
+ * Without it a detached subagent's bar, opened by the spawn result, would
+ * never close on a KAP history read.
+ */
+function backgroundTaskSettlement(item: Row): Row | undefined {
+  const source = asRow(item.source);
+  const taskId = str(item.task_id) ?? (source?.kind === 'background_task' ? str(source.id) : undefined);
+  if (!taskId || source?.kind !== 'background_task') return undefined;
+  const type = str(item.notification_type);
+  const status = type?.startsWith('task.') ? type.slice('task.'.length) : 'completed';
+  const attribute = (value: string): string => value
+    .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  // Where the task's full output was saved, as 0.x named it in an
+  // `<output-file>` child (KAP: `output.file`, captured).
+  const outputFile = str(asRow(item.output)?.file);
+  const lines = [
+    ...(str(item.title) ? [`Title: ${str(item.title)}`] : []),
+    ...(str(item.severity) ? [`Severity: ${str(item.severity)}`] : []),
+    ...(str(item.body) ? [str(item.body)!.replace(/<\/notification>/g, '</ notification>')] : []),
+    ...(outputFile ? [`<output-file path="${attribute(outputFile)}"></output-file>`] : []),
+  ];
+  return {
+    role: 'user',
+    content: [{
+      type: 'text',
+      text: `<notification${type ? ` type="${attribute(type)}"` : ''}>\n${lines.join('\n')}\n</notification>`,
+    }],
+    metadata: { origin: { kind: 'task', taskId, status } },
+  };
 }
 
 /** Record what a turn tells the live state: its number and its prompts. */
@@ -893,11 +971,23 @@ export class KimiKapSocket implements KimiSocketLike {
       case 'interaction':
         return this.interaction(frame, envelope);
       case 'agent':
-        if (main) live.agent = frame;
-        return [];
       case 'context':
-        if (main) live.context = frame;
-        return [];
+        if (!main) return [];
+        if (type === 'agent') live.agent = frame;
+        else live.context = frame;
+        // The `.../status` read answers from these two frames, so a new one is
+        // a new reading NOW: say so, and the connection reads it at once
+        // instead of on its next poll.
+        return [envelope(KIMI_AGENT_STATE_EVENT, {})];
+      case 'task':
+      case 'task.list': {
+        // The main agent's background shell tasks and subagents (`task` per
+        // change, `task.list` as the whole list right after every subscribe,
+        // captured), passed on as the task states themselves.
+        if (!main) return [];
+        const tasks = type === 'task' ? [kapTaskState(frame)] : rows(frame.tasks).map(kapTaskState);
+        return [envelope(KIMI_BACKGROUND_TASKS_EVENT, { tasks, snapshot: type === 'task.list' })];
+      }
       case 'goal':
         if (main) live.goal = { goal: frame.goal ?? null };
         return [];

@@ -14,7 +14,7 @@ import {
 import { join } from 'node:path';
 import type { AgentMessage, AttachMode, HistorySourceIdentity, SessionConnection } from '@cosyncing/adapter-api';
 import { AgentRegistry, isNativeSessionRenameUnsupportedError } from '@cosyncing/adapter-api';
-import { ClineAdapter } from '../src/implementation.ts';
+import { CLINE_HUB_CATALOG_FAILURE_TTL_MS, ClineAdapter } from '../src/implementation.ts';
 import { ClineHubDriveConnection } from '../src/hub-drive.ts';
 import type { ClineTerminalSummary } from '../src/mapping.ts';
 import { Hub } from '../../../broker/src/sessions/hub.ts';
@@ -80,6 +80,22 @@ function runShape(rows: readonly AgentMessage[]): string {
   return JSON.stringify(runSummaries(rows).map((row) => `${row.status}@${row.key}`));
 }
 
+/** A Hub turn captured from Cline 3.0.76 (fixture `cline-3.0.76-hub-redacted.json`, `subagentTurn`). */
+interface CapturedSubagentTurn {
+  sessionId: string;
+  prompt: string;
+  events: Array<{ event: string; timestamp: number; payload: Record<string, unknown> }>;
+  messages: Array<ClineNativeMessage & { ts: number }>;
+  childFile: string;
+  childDocument: Record<string, unknown>;
+}
+
+/** The managed profile's providers as a Hub with `providers.list` reports them. */
+interface FakeProviderCatalog {
+  list: Record<string, unknown>;
+  models: Record<string, Record<string, unknown>>;
+}
+
 class FakeHub {
   readonly sessionId = '1787424308272_2eapl';
   readonly messages: ClineNativeMessage[] = [];
@@ -130,6 +146,12 @@ class FakeHub {
   private delayedCreatedReply?: { received: () => void; release: Promise<void> };
   private trailingAssistantNext?: { received: () => void; release: Promise<void>; text: string; landed: () => void };
   private streamedTurnNext?: { modelTool: boolean; iterationEvents: boolean; received: () => void; release: Promise<void> };
+  private subagentTurnNext?: CapturedSubagentTurn;
+  /** Unset, `providers.*` fail as a Hub without them does. */
+  providerCatalog?: FakeProviderCatalog;
+  providerListCalls = 0;
+  /** Set, `client.register` is never answered, as by a Hub that serves `/health` but stalls. */
+  stallRegistration = false;
 
   constructor(readonly profile: string, readonly cwd: string) {}
 
@@ -177,11 +199,32 @@ class FakeHub {
       },
     });
     if (command === 'client.register') {
+      if (this.stallRegistration) return;
       reply({ clientId: payload.clientId });
       return;
     }
     if (command === 'client.unregister') {
       reply({ clientId: envelope.clientId });
+      return;
+    }
+    if (command === 'providers.list' || command === 'providers.models.list') {
+      if (command === 'providers.list') this.providerListCalls += 1;
+      const catalog = this.providerCatalog;
+      if (!catalog) {
+        socket.message({
+          kind: 'reply',
+          envelope: {
+            version: CLINE_HUB_PROTOCOL_VERSION,
+            requestId: envelope.requestId,
+            ok: false,
+            error: { code: 'not_implemented', message: `fixture Hub has no ${command}` },
+          },
+        });
+        return;
+      }
+      reply(structuredClone(command === 'providers.list'
+        ? catalog.list
+        : catalog.models[String(payload.providerId)] ?? { providerId: payload.providerId, models: [] }));
       return;
     }
     if (command === 'session.create') {
@@ -301,6 +344,16 @@ class FakeHub {
       this.snapshotFailureNext = undefined;
       const streamedTurn = this.streamedTurnNext;
       this.streamedTurnNext = undefined;
+      const subagentTurn = this.subagentTurnNext;
+      this.subagentTurnNext = undefined;
+      if (subagentTurn) {
+        this.status = 'running';
+        this.messages.push({ id: userId, role: 'user', ts: Date.now(), content: [{ type: 'text', text: String(payload.prompt) }] });
+        this.writeMessages();
+        this.event('run.started', this.sessionId, { clientId: envelope.clientId, runId: `run-${this.runCounter}` });
+        this.replaySubagentTurn(socket, envelope, subagentTurn);
+        return;
+      }
       if (streamedTurn) {
         this.status = 'running';
         this.messages.push({ id: userId, role: 'user', ts: Date.now(), content: [{ type: 'text', text: String(payload.prompt) }] });
@@ -674,6 +727,43 @@ class FakeHub {
   /** An answer delta this Drive's prompt did not cause, as a foreign client's run streams it. */
   foreignDelta(text: string): void { this.event('assistant.delta', this.sessionId, { text }); }
 
+  /** The next run.start replays a captured turn: its events in order, each message persisted as the
+   *  first event after it was written arrives, and the subagent document beside the parent's. */
+  replaySubagentTurnNext(turn: CapturedSubagentTurn): void { this.subagentTurnNext = turn; }
+
+  private replaySubagentTurn(socket: FakeSocket, envelope: Record<string, any>, turn: CapturedSubagentTurn): void {
+    const own = <T>(value: T): T => JSON.parse(JSON.stringify(value).replaceAll(turn.sessionId, this.sessionId)) as T;
+    const unwritten = [...turn.messages];
+    const persistWrittenBefore = (timestamp: number) => {
+      let wrote = false;
+      while (unwritten.length > 0 && unwritten[0]!.ts < timestamp) {
+        this.messages.push(own(unwritten.shift()!));
+        wrote = true;
+      }
+      if (wrote) this.writeMessages();
+    };
+    for (const captured of turn.events) {
+      persistWrittenBefore(captured.timestamp);
+      this.event(captured.event, this.sessionId, own(captured.payload), captured.timestamp);
+    }
+    persistWrittenBefore(Number.POSITIVE_INFINITY);
+    writeFileSync(
+      join(this.profile, 'sessions', this.sessionId, turn.childFile),
+      `${JSON.stringify(own(turn.childDocument))}\n`,
+    );
+    this.status = 'idle';
+    const last = turn.messages.at(-1)?.content[0];
+    socket.message({
+      kind: 'reply',
+      envelope: {
+        version: CLINE_HUB_PROTOCOL_VERSION,
+        requestId: envelope.requestId,
+        ok: true,
+        payload: { result: { finishReason: 'completed', text: typeof last?.text === 'string' ? last.text : '' } },
+      },
+    });
+  }
+
   private async streamTurn(
     socket: FakeSocket,
     envelope: Record<string, any>,
@@ -884,7 +974,7 @@ class FakeHub {
     this.writeMessages();
   }
 
-  private event(event: string, sessionId: string, payload: Record<string, unknown>): void {
+  private event(event: string, sessionId: string, payload: Record<string, unknown>, timestamp?: number): void {
     this.sequence += 1;
     for (const socket of this.sockets) socket.message({
       kind: 'event',
@@ -894,6 +984,7 @@ class FakeHub {
         eventId: `event-${this.sequence}`,
         sequence: this.sequence,
         sessionId,
+        ...(timestamp === undefined ? {} : { timestamp }),
         payload,
       },
     });
@@ -963,6 +1054,8 @@ class FakeSocket implements ClineHubSocketLike {
 }
 
 const fake = buildFakeClineAcp();
+// Captured from a Cline 3.0.76 managed Hub (core 0.2.2); see the fixture's `captured`.
+const captured076 = JSON.parse(readFileSync(new URL('./fixtures/cline-3.0.76-hub-redacted.json', import.meta.url), 'utf8'));
 const profile = join(fake.root, 'managed-cline');
 const discoveryPath = join(profile, 'locks', 'hub', 'cosyncing.json');
 mkdirSync(join(profile, 'locks', 'hub'), { recursive: true });
@@ -1128,6 +1221,284 @@ try {
     `${CLINE_MINIMUM_SUPPORTED_VERSION} -> ${String(CLINE_MEASURED_HUB_CORE[CLINE_MINIMUM_SUPPORTED_VERSION])}`);
 
   writeHubVersion(CLINE_HUB_CORE_MINIMUM_VERSION);
+
+  // Without COSYNCING_CLINE_PROVIDER/_MODEL, a Hub with `providers.list` offers the providers its
+  // managed profile has configured, each with the models Cline lists for it. The replies are the
+  // ones a 3.0.76 Hub gave for a profile with DeepSeek and an OpenAI-compatible endpoint configured.
+  {
+    const catalogProfile = join(fake.root, 'managed-cline-catalog');
+    const catalogDiscoveryPath = join(catalogProfile, 'locks', 'hub', 'cosyncing.json');
+    mkdirSync(join(catalogProfile, 'locks', 'hub'), { recursive: true });
+    const writeCatalogDiscovery = (capabilities: readonly string[]): void => {
+      writeFileSync(catalogDiscoveryPath, `${JSON.stringify({
+        hubId: 'fixture-catalog-hub',
+        protocolVersion: CLINE_HUB_PROTOCOL_VERSION,
+        capabilities: ['session.create', 'session.run', 'session.abort', 'run.enqueue', 'run.list', 'stream.replay', ...capabilities],
+        coreVersion: captured076.hubCoreVersion,
+        authToken: 'fixture-owner-token',
+        host: '127.0.0.1',
+        port: 25464,
+        url: 'ws://127.0.0.1:25464/hub',
+        pid: process.pid,
+        startedAt: '2026-11-28T00:00:00.000Z',
+        updatedAt: '2026-11-28T00:00:00.000Z',
+      })}\n`, { mode: 0o600 });
+    };
+    writeCatalogDiscovery(captured076.providers.capabilities);
+    const { COSYNCING_CLINE_PROVIDER: _provider, COSYNCING_CLINE_MODEL: _model, ...unpaired } = env;
+    const catalogEnv: NodeJS.ProcessEnv = {
+      ...unpaired,
+      COSYNCING_CLINE_PROFILE_DIR: catalogProfile,
+      FAKE_CLINE_MANAGED_DATA_ROOT: catalogProfile,
+    };
+    const catalogHub = new FakeHub(catalogProfile, fake.cwd);
+    const capturedCatalog: FakeProviderCatalog = {
+      list: captured076.providers.list,
+      models: captured076.providers.models,
+    };
+    catalogHub.providerCatalog = capturedCatalog;
+    let catalogClock = Date.parse('2026-11-28T01:00:00.000Z');
+    let catalogOwnershipChecks = 0;
+    const catalogTraces: string[] = [];
+    // Every `/health` probe the catalog adapters send, so a sweep's probe count can be asserted.
+    let catalogHealthProbes = 0;
+    const catalogHealth = healthAt(captured076.hubCoreVersion) as unknown as () => Promise<Response>;
+    const countedCatalogHealth = (async () => {
+      catalogHealthProbes += 1;
+      return catalogHealth();
+    }) as unknown as typeof globalThis.fetch;
+    const catalogAdapter = (adapterEnv: NodeJS.ProcessEnv, catalogTimeoutMs?: number) => new ClineAdapter({
+      command: fake.path,
+      env: adapterEnv,
+      homeDir: fake.root,
+      fetcher: countedCatalogHealth,
+      hubSocketFactory: catalogHub.socketFactory,
+      isManagedHostOwned: async () => {
+        catalogOwnershipChecks += 1;
+        return true;
+      },
+      trace: (event) => { catalogTraces.push(JSON.stringify(event)); },
+      now: () => catalogClock,
+      ...(catalogTimeoutMs === undefined ? {} : { catalogTimeoutMs }),
+    });
+    const unpairedAdapter = catalogAdapter(catalogEnv);
+    // The managed profile holds no session yet, so no row could use a writer.
+    const probesBeforeEmptySweep = catalogHealthProbes;
+    await unpairedAdapter.discoverSessions();
+    check('a sweep with no managed session sends no Hub probe, with the pair unset',
+      catalogHealthProbes === probesBeforeEmptySweep,
+      `probes=${catalogHealthProbes - probesBeforeEmptySweep}`);
+    const expectedCatalog = [
+      { providerID: 'deepseek', providerLabel: 'DeepSeek', modelID: 'deepseek-v4-flash', label: 'deepseek-v4-flash' },
+      { providerID: 'deepseek', providerLabel: 'DeepSeek', modelID: 'deepseek-flash', label: 'DeepSeek V4.1 Flash 1017' },
+      { providerID: 'deepseek', providerLabel: 'DeepSeek', modelID: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
+      { providerID: 'openai-compatible', providerLabel: 'OpenAI Compatible', modelID: 'gpt-4o', label: 'gpt-4o' },
+    ];
+    const listed = await unpairedAdapter.listModels!();
+    check('without the pair, the picker lists the configured providers in Hub order, each provider default first',
+      JSON.stringify(listed) === JSON.stringify(expectedCatalog),
+      JSON.stringify(listed));
+    check('and Create is available from them, with one catalog read for both answers',
+      await unpairedAdapter.canCreateSession() && catalogHub.providerListCalls === 1,
+      `calls=${catalogHub.providerListCalls}`);
+    check('the catalog client advertises no capability, so no approval is ever routed to it',
+      catalogHub.frames.some((frame) => frame.envelope?.command === 'client.register'
+        && Array.isArray(frame.envelope.payload.capabilities)
+        && frame.envelope.payload.capabilities.length === 0)
+        && catalogHub.activeSocketCount() === 0);
+    await assert.rejects(
+      unpairedAdapter.createSession!({ directory: fake.cwd, model: { providerID: 'openai-compatible', modelID: 'fixture-model' } }),
+      /must match the configured isolated native profile/u,
+    );
+    await assert.rejects(
+      unpairedAdapter.createSession!({ directory: fake.cwd, model: { providerID: 'anthropic', modelID: 'claude-sonnet-5-5' } }),
+      /must match the configured isolated native profile/u,
+    );
+    await assert.rejects(
+      unpairedAdapter.createSession!({
+        directory: fake.cwd,
+        model: { providerID: 'openai-compatible', modelID: 'gpt-4o', reasoningEffort: 'high' },
+      }),
+      /must match the configured isolated native profile/u,
+    );
+    check('Create refuses a model the Hub does not list, a provider it does not report configured, and a reasoning effort',
+      !catalogHub.frames.some((frame) => frame.envelope?.command === 'session.create'));
+    const catalogCreated = await unpairedAdapter.createSession!({
+      directory: fake.cwd,
+      model: { providerID: 'openai-compatible', modelID: 'gpt-4o' },
+      permissionMode: 'auto',
+    });
+    const catalogCreate = catalogHub.frames.find((frame) => frame.envelope?.command === 'session.create')?.envelope.payload;
+    check('Create with a listed model sends that provider and model, and the session carries no picker-only label',
+      JSON.stringify(catalogCreated.currentModel)
+        === JSON.stringify({ providerID: 'openai-compatible', modelID: 'gpt-4o', label: 'gpt-4o' })
+        && catalogCreate?.sessionConfig.providerId === 'openai-compatible'
+        && catalogCreate.sessionConfig.modelId === 'gpt-4o'
+        && catalogCreate.modelSelection.provider === 'openai-compatible'
+        && catalogCreate.modelSelection.model === 'gpt-4o'
+        && catalogCreate.metadata.model === 'gpt-4o',
+      JSON.stringify({ currentModel: catalogCreated.currentModel, create: catalogCreate?.sessionConfig }));
+    const catalogConnection = await unpairedAdapter.attach(catalogCreated.id, 'resume');
+    check('a driven session lists only its own model: the model does not change per turn',
+      JSON.stringify(await catalogConnection.listModels!())
+        === JSON.stringify([{ providerID: 'openai-compatible', modelID: 'gpt-4o', label: 'gpt-4o' }]));
+    await catalogConnection.close();
+    check('every answer so far came from the one cached catalog read', catalogHub.providerListCalls === 1,
+      `calls=${catalogHub.providerListCalls}`);
+    // The roster sweeps on a timer; only the picker, Create and Resume read the catalog.
+    catalogClock += 60_001;
+    const probesBeforeSweep = catalogHealthProbes;
+    const sweepRows = await unpairedAdapter.discoverSessions();
+    check('a roster sweep never reads the catalog, even after the cached read has expired, and probes the Hub once',
+      catalogHub.providerListCalls === 1
+        && catalogHealthProbes - probesBeforeSweep === 1
+        && sweepRows.some((row) => row.id === catalogCreated.id && row.control?.drive.supported === true),
+      `calls=${catalogHub.providerListCalls} probes=${catalogHealthProbes - probesBeforeSweep}`);
+    // A managed row with a stored boundary compares it against the Hub's epoch. That comparison and
+    // the writer check share the sweep's one probe rather than each sending their own. The stored
+    // boundary names an earlier Hub, so the sweep drops it without opening a Hub client.
+    const boundarySweeper = new ClineAdapter({
+      command: fake.path,
+      env: catalogEnv,
+      homeDir: fake.root,
+      fetcher: countedCatalogHealth,
+      hubSocketFactory: catalogHub.socketFactory,
+      isManagedHostOwned: async () => true,
+      now: () => catalogClock,
+      resolveStoredDriveState: () => ({
+        historyBoundary: clineHubHistoryIdentity(catalogProfile, catalogCreated.id, 'earlier-hub:2026-11-27T00:00:00.000Z', []),
+      }),
+    });
+    const probesBeforeBoundarySweep = catalogHealthProbes;
+    const boundaryRows = await boundarySweeper.discoverSessions();
+    check('a sweep that also checks a stored boundary still probes the Hub once',
+      catalogHealthProbes - probesBeforeBoundarySweep === 1
+        && boundaryRows.some((row) => row.id === catalogCreated.id),
+      `probes=${catalogHealthProbes - probesBeforeBoundarySweep}`);
+
+    const pairedAdapter = catalogAdapter({
+      ...catalogEnv,
+      COSYNCING_CLINE_PROVIDER: 'openai-compatible',
+      COSYNCING_CLINE_MODEL: 'fixture-model',
+    });
+    check('the pair, when set, still decides, because the Cline catalog cannot name an endpoint model',
+      JSON.stringify(await pairedAdapter.listModels!())
+        === JSON.stringify([{ providerID: 'openai-compatible', modelID: 'fixture-model', label: 'fixture-model' }])
+        && await pairedAdapter.canCreateSession()
+        && catalogHub.providerListCalls === 1);
+
+    catalogClock += 60_001;
+    catalogHub.providerCatalog = {
+      ...capturedCatalog,
+      list: {
+        providers: (capturedCatalog.list.providers as Array<Record<string, unknown>>)
+          .map((provider) => ({ ...provider, configured: false })),
+      },
+    };
+    check('a profile with no configured provider offers no model and no Create, once the cached read expires',
+      JSON.stringify(await unpairedAdapter.listModels!()) === '[]'
+        && !await unpairedAdapter.canCreateSession()
+        && catalogHub.providerListCalls === 2,
+      `calls=${catalogHub.providerListCalls}`);
+
+    catalogClock += 60_001;
+    catalogHub.providerCatalog = undefined;
+    await assert.rejects(unpairedAdapter.listModels!(), /providers\.list failed/u);
+    const socketsAfterFailure = catalogHub.protocols.length;
+    const listCallsAfterFailure = catalogHub.providerListCalls;
+    check('a catalog the Hub fails to return is no answer rather than an empty one, and leaves Create off',
+      !await unpairedAdapter.canCreateSession());
+    check('inside the failure window the failed read is answered again without reconnecting',
+      catalogHub.protocols.length === socketsAfterFailure
+        && catalogHub.providerListCalls === listCallsAfterFailure,
+      `sockets=${catalogHub.protocols.length - socketsAfterFailure} calls=${catalogHub.providerListCalls - listCallsAfterFailure}`);
+    catalogClock += CLINE_HUB_CATALOG_FAILURE_TTL_MS + 1;
+    await assert.rejects(unpairedAdapter.listModels!(), /providers\.list failed/u);
+    check('and once the window passes the catalog is read again',
+      catalogHub.protocols.length === socketsAfterFailure + 1
+        && catalogHub.providerListCalls === listCallsAfterFailure + 1,
+      `sockets=${catalogHub.protocols.length - socketsAfterFailure} calls=${catalogHub.providerListCalls - listCallsAfterFailure}`);
+
+    // Cline 3.0.75 (Hub core 0.2.1) answers in the same shapes as 3.0.76 (core 0.2.2).
+    catalogClock += 60_001;
+    catalogHub.providerCatalog = { list: captured076.providers021.list, models: captured076.providers021.models };
+    const listed021 = await unpairedAdapter.listModels!();
+    check('a core 0.2.1 Hub, captured from Cline 3.0.75, yields the same picker',
+      captured076.providers021.coreVersion === '0.2.1'
+        && JSON.stringify(listed021) === JSON.stringify(expectedCatalog),
+      JSON.stringify(listed021));
+
+    // `providers.list` carries each configured provider's API key in clear, in `apiKey` and in
+    // `configValues.apiKey` (measured on both cores; the fixture drops them). A recognisable fake
+    // key must not reach the picker, a trace, or an error, read whole or refused as malformed.
+    const fakeKey = 'sk-fixture-provider-key-4f1c9e';
+    const keyed = (capturedCatalog.list.providers as Array<Record<string, unknown>>).map((provider) =>
+      provider.configured === true
+        ? { ...provider, apiKey: fakeKey, configValues: { apiKey: fakeKey, baseUrl: 'https://provider.invalid/v1' } }
+        : provider);
+    catalogClock += 60_001;
+    catalogHub.providerCatalog = {
+      list: { providers: keyed, settingsPath: '/fixture/settings/providers.json' },
+      models: Object.fromEntries(Object.entries(capturedCatalog.models).map(([id, reply]) => [id, { ...reply, apiKey: fakeKey }])),
+    };
+    const keyedListed = await unpairedAdapter.listModels!();
+    const keyedCreatable = await unpairedAdapter.canCreateSession();
+    catalogClock += 60_001;
+    catalogHub.providerCatalog = {
+      list: { providers: Object.fromEntries(keyed.map((provider) => [String(provider.id), provider])), apiKey: fakeKey },
+      models: capturedCatalog.models,
+    };
+    const malformed = await unpairedAdapter.listModels!().then(
+      () => 'resolved',
+      (error: unknown) => (error instanceof Error ? `${error.name}: ${error.message}\n${error.stack ?? ''}` : String(error)),
+    );
+    check('a key in the catalog reply reaches no model, trace or error, whether the reply is read or refused',
+      JSON.stringify(keyedListed) === JSON.stringify(expectedCatalog)
+        && keyedCreatable
+        && /providers\.list reply is not the measured shape/u.test(malformed)
+        && !JSON.stringify(keyedListed).includes(fakeKey)
+        && !malformed.includes(fakeKey)
+        && !catalogTraces.some((entry) => entry.includes(fakeKey)),
+      JSON.stringify({ malformed: malformed.split('\n')[0], traces: catalogTraces.length }));
+
+    catalogHub.providerCatalog = capturedCatalog;
+
+    // A Hub that answers `/health` but never registers the catalog client. `GET /api/agents` waits
+    // on Create availability, so the whole read, registration included, stays inside its budget
+    // rather than the client's 30 s registration default. The guard is far above that budget.
+    catalogHub.stallRegistration = true;
+    const stalledAdapter = catalogAdapter(catalogEnv, 50);
+    const stalledSockets = catalogHub.protocols.length;
+    const listCallsBeforeStall = catalogHub.providerListCalls;
+    let stallGuard: ReturnType<typeof setTimeout> | undefined;
+    const stalledAnswer = await Promise.race([
+      stalledAdapter.canCreateSession(),
+      new Promise<'still waiting'>((resolve) => { stallGuard = setTimeout(() => resolve('still waiting'), 5_000); }),
+    ]);
+    clearTimeout(stallGuard);
+    check('a Hub that stalls registration leaves Create off within the catalog budget, and its socket closed',
+      stalledAnswer === false
+        && catalogHub.protocols.length === stalledSockets + 1
+        && catalogHub.activeSocketCount() === 0
+        && catalogHub.providerListCalls === listCallsBeforeStall,
+      JSON.stringify({ stalledAnswer, sockets: catalogHub.protocols.length - stalledSockets }));
+    check('a second call inside the failure window answers at once, without reconnecting',
+      !await stalledAdapter.canCreateSession()
+        && catalogHub.protocols.length === stalledSockets + 1,
+      `sockets=${catalogHub.protocols.length - stalledSockets}`);
+    catalogHub.stallRegistration = false;
+
+    writeCatalogDiscovery([]);
+    const ownershipBeforeBareHub = catalogOwnershipChecks;
+    const listCallsBeforeBareHub = catalogHub.providerListCalls;
+    check('a Hub without the provider commands keeps Create on the pair, and asks neither the Hub nor ownership',
+      JSON.stringify(await unpairedAdapter.listModels!()) === '[]'
+        && !await unpairedAdapter.canCreateSession()
+        && catalogHub.providerListCalls === listCallsBeforeBareHub
+        && catalogOwnershipChecks === ownershipBeforeBareHub,
+      `calls=${catalogHub.providerListCalls - listCallsBeforeBareHub} ownership=${catalogOwnershipChecks - ownershipBeforeBareHub}`);
+    rmSync(catalogProfile, { recursive: true, force: true });
+  }
 
   const hub = new FakeHub(profile, fake.cwd);
   let boundary: HistorySourceIdentity | undefined;
@@ -1570,6 +1941,64 @@ try {
         && owner.historyRefreshRefusal() === undefined
         && 'since' in midTurnRefresh,
       JSON.stringify(midTurnRefresh));
+  }
+
+  {
+    // A spawn_agent turn exactly as a Cline 3.0.76 Hub (core 0.2.2) streamed it. The subagent's own
+    // events arrive on this session, labelled `agent.kind: 'subagent'`: taken as the lead's, its
+    // answer joined the lead's answer row and its usage replaced the session's counts.
+    const turn = captured076.subagentTurn as CapturedSubagentTurn;
+    const spawn = turn.events.find((event) => event.event === 'tool.started')!.payload;
+    const callId = String(spawn.toolCallId);
+    const attachHistory = await connection.getHistory();
+    const turnLive: AgentMessage[] = [];
+    const unsubscribeTurn = connection.subscribe((message) => turnLive.push(message));
+    hub.replaySubagentTurnNext(turn);
+    await connection.sendPrompt({ text: turn.prompt, clientMessageId: 'client-subagent' });
+    unsubscribeTurn();
+    const settledHistory = await connection.getHistory();
+    const audit = auditLiveAgainstHistory({ attachHistory, live: turnLive, history: settledHistory });
+    check('a turn whose subagent streams on this session keeps every live row on its history key and text',
+      audit.liveOnly.length === 0
+        && audit.textMismatches.length === 0
+        && audit.duplicatesAfterRefresh.length === 0
+        && audit.duplicatesAfterReconnect.length === 0,
+      JSON.stringify(audit));
+    const answers = new Map<string, string>();
+    for (const row of turnLive) {
+      if (row.type !== 'model-output' || !row.key) continue;
+      answers.set(row.key, (answers.get(row.key) ?? '') + (row.delta ?? row.text ?? ''));
+    }
+    check('the subagent answer stays out of the lead rows',
+      JSON.stringify([...answers]) === JSON.stringify([['client-subagent:assistant:1', 'DONE']]),
+      JSON.stringify([...answers]));
+    const usage = turnLive.filter((row) => row.type === 'token-count')
+      .map((row) => (row.type === 'token-count' ? `${row.input}/${row.output}` : ''));
+    check('only the lead usage reaches the session token count',
+      JSON.stringify(usage) === JSON.stringify(['8/4', '16/8']),
+      JSON.stringify(usage));
+    const cards = turnLive.filter((row): row is Extract<AgentMessage, { type: 'agent-activity' }> =>
+      row.type === 'agent-activity' && row.key === `agent:${callId}`);
+    const settledCards = settledHistory.filter((row): row is Extract<AgentMessage, { type: 'agent-activity' }> =>
+      row.type === 'agent-activity' && row.key === `agent:${callId}`);
+    check('the spawn_agent call opens its subagent card live, gives it the subagent usage, and closes it as history does',
+      cards[0]?.status === 'running'
+        && cards[0].title === (spawn.input as { task: string }).task
+        && cards[0].tokens === undefined
+        && cards.some((card) => card.status === 'running'
+          && JSON.stringify(card.tokens) === JSON.stringify({ input: 8, output: 4, cacheRead: 0, cacheWrite: 0 }))
+        && cards.at(-1)?.status === 'done'
+        && JSON.stringify(cards.at(-1)) === JSON.stringify(settledCards.at(-1))
+        && JSON.stringify(settledCards.at(-1)?.tokens) === JSON.stringify({ input: 8, output: 4 }),
+      JSON.stringify({ cards, settledCards }));
+    const childId = `${hub.sessionId}__${turn.childFile.replace(/\.messages\.json$/u, '')}`;
+    const child = (await adapter.discoverSessions()).find((row) => row.id === childId);
+    check('the subagent document the managed Hub wrote lists under its parent, Observe-only',
+      child?.parentThreadId === hub.sessionId
+        && child.origin === 'subagent'
+        && child.control?.drive.supported === false,
+      JSON.stringify(child));
+    rmSync(join(profile, 'sessions', hub.sessionId, turn.childFile));
   }
 
   const nativeRenameSpawnsBefore = fake.ledger().filter((entry) => entry.kind === 'spawn'

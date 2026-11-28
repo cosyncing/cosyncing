@@ -238,6 +238,79 @@ export function clineManagedHubModelUnset(
   return CLINE_MANAGED_MODEL_VARIABLES.filter((name) => managedModelSetting(env[name]) === undefined);
 }
 
+/**
+ * The two Hub commands that name the managed profile's providers and the models Cline lists for
+ * each. Hub core 0.2.1 added them; 0.0.82 has neither, so a Hub that does not advertise both keeps
+ * Create on {@link CLINE_MANAGED_MODEL_VARIABLES}.
+ *
+ * Measured on core 0.2.2 (CLI 3.0.76): `providers.list` returns every provider Cline knows (329),
+ * each with `enabled` and `configured`, about 1.8 MB per call and with no filter. It also returns
+ * each configured provider's API key in clear, so only the fields parsed below are ever kept.
+ * `providers.models.list` returns Cline's own catalog for one provider, not the models its
+ * endpoint serves and not the model the profile selected: for `openai-compatible` that is the
+ * single placeholder `gpt-4o`.
+ */
+export const CLINE_HUB_PROVIDER_CATALOG_COMMANDS = Object.freeze([
+  'providers.list',
+  'providers.models.list',
+] as const);
+const MAX_LISTED_PROVIDERS = 4_096;
+const MAX_CONFIGURED_PROVIDERS = 32;
+const MAX_PROVIDER_MODELS = 1_024;
+
+export function clineHubOffersProviderCatalog(discovery: Pick<ClineHubDiscovery, 'capabilities'>): boolean {
+  return CLINE_HUB_PROVIDER_CATALOG_COMMANDS.every((name) => discovery.capabilities.includes(name));
+}
+
+export interface ClineHubProvider {
+  id: string;
+  name?: string;
+  defaultModelId?: string;
+}
+
+/** The providers a `providers.list` reply reports both enabled and configured, in the Hub's order;
+ *  `undefined` for a reply that is not that shape. */
+export function parseClineHubConfiguredProviders(reply: unknown): ClineHubProvider[] | undefined {
+  const providers = record(reply)?.providers;
+  if (!Array.isArray(providers) || providers.length > MAX_LISTED_PROVIDERS) return undefined;
+  const out: ClineHubProvider[] = [];
+  const seen = new Set<string>();
+  for (const raw of providers) {
+    const provider = record(raw);
+    const id = field(provider?.id, 256);
+    if (!provider || !id || provider.enabled !== true || provider.configured !== true || seen.has(id)) continue;
+    seen.add(id);
+    const name = field(provider.name, 256);
+    const defaultModelId = field(provider.defaultModelId, 512);
+    out.push({ id, ...(name ? { name } : {}), ...(defaultModelId ? { defaultModelId } : {}) });
+    if (out.length >= MAX_CONFIGURED_PROVIDERS) break;
+  }
+  return out;
+}
+
+/** The models a `providers.models.list` reply lists for `providerId`, provider default first. */
+export function parseClineHubProviderModels(
+  provider: ClineHubProvider,
+  reply: unknown,
+): Array<{ id: string; name?: string }> | undefined {
+  const value = record(reply);
+  if (!value || value.providerId !== provider.id || !Array.isArray(value.models)) return undefined;
+  const out: Array<{ id: string; name?: string }> = [];
+  const seen = new Set<string>();
+  for (const raw of value.models) {
+    const model = record(raw);
+    const id = field(model?.id, 512);
+    if (!model || !id || seen.has(id)) continue;
+    seen.add(id);
+    const name = field(model.name, 512);
+    out.push({ id, ...(name ? { name } : {}) });
+    if (out.length >= MAX_PROVIDER_MODELS) break;
+  }
+  const preferred = out.findIndex((model) => model.id === provider.defaultModelId);
+  if (preferred > 0) out.unshift(...out.splice(preferred, 1));
+  return out;
+}
+
 export function clineManagedHubIdentity(
   env: Readonly<Record<string, string | undefined>> = process.env,
   userHome = homedir(),

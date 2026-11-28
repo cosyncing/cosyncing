@@ -1020,10 +1020,16 @@ export class CodexAdapter implements AgentBackend {
     // roster rebuild. Both metas are still folded (`thread/fork` COPIES source provenance into the new
     // rollout on this machine's forks: user→user, marker-absent→marker-absent — never defaulted), so the
     // source arm stays as a second floor under the up-front refusal rather than its only enforcement.
+    // When the fork's own meta names no origin, only the source's ORIGIN carries over. A side chat's
+    // `parentThreadId` is its attachment to the thread it was opened from, and a fork does not inherit
+    // attachment (upstream), so a fork of a side chat is a session of its own, not a second side chat.
     const forkTag = codexSessionOrigin(readSessionMeta(newPath));
     const sourceTag = codexSessionOrigin(meta);
     const originTag =
-      forkTag.origin === 'subagent' ? forkTag : sourceTag.origin === 'subagent' ? sourceTag : forkTag.origin ? forkTag : sourceTag;
+      forkTag.origin === 'subagent' ? forkTag
+        : sourceTag.origin === 'subagent' ? sourceTag
+          : forkTag.origin ? forkTag
+            : { ...forkTag, ...(sourceTag.origin ? { origin: sourceTag.origin } : {}) };
     const agentOwned = codexAgentOwned(originTag.origin);
     const terminalSyncHint = this.syncHint(String(thread.id ?? ''), actualCwd, undefined, agentOwned);
     return {
@@ -4208,6 +4214,14 @@ const NATIVE_SESSION_UNRESUMABLE_CODES = new Set([
   'THREAD_RESUME_UNSUPPORTED',
 ]);
 
+/** Codex refuses `thread/resume` (captured on 0.172.0) for a thread whose saved model provider
+ *  this host can no longer serve: the provider left the config (`modelProviderNotConfigured`) or a
+ *  managed policy requires another one (`modelProviderPolicyConflict`). Both arrive as `-32600`
+ *  with the kind in `data.type` and a message that says what to restore. Only the user can change
+ *  either, so a retry would be refused the same way: the session stays readable in Observe with
+ *  that message. */
+const CODEX_PROVIDER_REFUSAL_TYPES = new Set(['modelProviderNotConfigured', 'modelProviderPolicyConflict']);
+
 const NATIVE_OWNERSHIP_CONFLICT_CODES = new Set([
   'ACTIVE_WRITER',
   'SESSION_ACTIVE_WRITER',
@@ -4257,6 +4271,7 @@ function nativeSessionUnresumableRejection(error: unknown): boolean {
     const normalized = normalizedNativeSignal(value);
     return normalized !== undefined && NATIVE_SESSION_UNRESUMABLE_CODES.has(normalized);
   })) return true;
+  if (typeof data?.type === 'string' && CODEX_PROVIDER_REFUSAL_TYPES.has(data.type)) return true;
   return data?.appOnly === true || data?.resumable === false;
 }
 
@@ -6082,7 +6097,8 @@ class CodexResumeConnection implements SessionConnection {
         // is echo correlation, not identity, and it is never derived from text.
         key: this.liveUserMessageKey(turnId, item),
         turnId,
-        sentAt: timestampToMs(item.createdAt ?? item.created_at ?? item.timestamp ?? item.startedAt ?? item.started_at),
+        // Codex 0.171+ stamps the item with `startedAtMs`, the instant its rollout record carries.
+        sentAt: timestampToMs(item.createdAt ?? item.created_at ?? item.timestamp ?? item.startedAt ?? item.started_at ?? item.startedAtMs),
         ...(clientKey ? { clientKey } : {}),
       });
       // Native answers have no request id. Match only a unique quoted question title and a
@@ -6577,10 +6593,20 @@ class CodexResumeConnection implements SessionConnection {
     ));
     if (configured.length) return configured.slice(0, CODEX_MAX_MODEL_OPTIONS);
 
+    // Scoped to the thread's own provider, so Codex is asked about that provider rather than the
+    // default one. Measured on 0.172: a custom gateway still answers with the bundled catalog, so this
+    // matters only where Codex has a provider-specific list (Codex before 0.171 has no such field, and
+    // its params schema does not refuse unknown ones). Unscoped when the thread names no provider, and
+    // when the provider is defined only in a profile overlay: an app-server that loaded the base
+    // config alone does not know that name (the resume injected it for this thread only), so asking
+    // for it would just be refused.
+    const scope = current?.providerID?.trim() && resolveCodexModelProvider(providerID)?.source !== 'profile'
+      ? { modelProvider: providerID }
+      : {};
     try {
       const response = await this.rpc(
         'model/list',
-        { limit: CODEX_MAX_MODEL_OPTIONS, includeHidden: false },
+        { limit: CODEX_MAX_MODEL_OPTIONS, includeHidden: false, ...scope },
         10000,
       );
       return codexModelOptions(
@@ -6977,6 +7003,21 @@ function nativeDurationMs(value: any): number | undefined {
   const startedAt = timestampToMs(value?.startedAt ?? value?.started_at);
   const completedAt = timestampToMs(value?.completedAt ?? value?.completed_at ?? value?.finishedAt ?? value?.finished_at);
   return startedAt !== undefined && completedAt !== undefined && completedAt >= startedAt ? completedAt - startedAt : undefined;
+}
+
+/** The duration of a streamed item kind that has no duration field of its own (a file change, a web
+ *  search, an image generation): the span between its lifecycle times. Codex 0.171+ stamps every
+ *  item with `startedAtMs` and, once complete, `completedAtMs` (epoch ms), and saves the same pair
+ *  on the item's rollout record, so a row rebuilt from that record gets the same value. Kinds that
+ *  carry `durationMs` keep only that, as their saved rows do. */
+function codexItemDurationMs(item: any): number | undefined {
+  const native = nativeDurationMs(item);
+  if (native !== undefined) return native;
+  const startedAt = item?.startedAtMs;
+  const completedAt = item?.completedAtMs;
+  return typeof startedAt === 'number' && typeof completedAt === 'number' && startedAt > 0 && completedAt >= startedAt
+    ? completedAt - startedAt
+    : undefined;
 }
 
 function codexToolOutputText(value: unknown): string {
@@ -7785,7 +7826,7 @@ export function mapLine(
         if (item?.type !== 'UserMessage') {
           const id = typeof item?.id === 'string' ? item.id : '';
           if (!id || runtime.isModelCall(id) || id.startsWith('call_')) return [];
-          const converted = codexRolloutToolItem(item);
+          const converted = codexRolloutToolItem(item, p);
           if (!converted) return [];
           const call = codexToolCallFromItem(converted.started, String(p.turn_id ?? runtime.currentTurnId ?? ''));
           const result = codexToolResultFromItem(converted.completed);
@@ -8413,7 +8454,7 @@ function codexToolResultFromItem(item: any): AgentMessage | null {
         additions: stats.additions,
         deletions: stats.deletions,
         exitCode: item.status === 'failed' || item.status === 'declined' ? 1 : undefined,
-        durationMs: nativeDurationMs(item),
+        durationMs: codexItemDurationMs(item),
       };
     }
     case 'mcpToolCall':
@@ -8447,7 +8488,7 @@ function codexToolResultFromItem(item: any): AgentMessage | null {
           results: Array.isArray(item.results) ? item.results : undefined,
         }))!,
         result: item.action ?? item.query ?? '',
-        durationMs: nativeDurationMs(item),
+        durationMs: codexItemDurationMs(item),
       };
     case 'imageView':
       return {
@@ -8457,6 +8498,8 @@ function codexToolResultFromItem(item: any): AgentMessage | null {
         toolClass: 'lookup',
         path: item.path ? String(item.path) : undefined,
         result: item.path ?? '',
+        // Not its lifecycle span: a view the model asked for is saved as a call and its output,
+        // which carry no time, so a history row could never match a live one that had it.
         durationMs: nativeDurationMs(item),
       };
     case 'imageGeneration':
@@ -8468,7 +8511,7 @@ function codexToolResultFromItem(item: any): AgentMessage | null {
         path: item.savedPath ? String(item.savedPath) : undefined,
         result: item.result ?? item.status ?? '',
         isError: /fail|error/i.test(String(item.status ?? '')),
-        durationMs: nativeDurationMs(item),
+        durationMs: codexItemDurationMs(item),
       };
     default:
       return null;
@@ -8499,8 +8542,27 @@ function fileChangeTitle(item: any): string | undefined {
  * client already holds. A web search item keeps the protocol's pass-through shape; a nested web
  * search needs a hosted provider, so it was not streamed during that comparison. Returns undefined
  * for items the live connection renders nothing for.
+ *
+ * Since 0.171 the streamed item also carries its lifecycle times, `startedAtMs` and, once complete,
+ * `completedAtMs`; the record keeps the same pair beside the item as `started_at_ms` and
+ * `completed_at_ms`. Passing the record restores them, so a duration read from them agrees.
  */
-export function codexRolloutToolItem(item: any): { started: any; completed: any } | undefined {
+export function codexRolloutToolItem(
+  item: any,
+  record?: { started_at_ms?: unknown; completed_at_ms?: unknown },
+): { started: any; completed: any } | undefined {
+  const converted = codexRolloutWireItem(item);
+  const started = record?.started_at_ms;
+  const completed = record?.completed_at_ms;
+  if (!converted || typeof started !== 'number') return converted;
+  return {
+    started: { ...converted.started, startedAtMs: started, completedAtMs: null },
+    completed: { ...converted.completed, startedAtMs: started, completedAtMs: typeof completed === 'number' ? completed : null },
+  };
+}
+
+/** {@link codexRolloutToolItem} without the lifecycle times. */
+function codexRolloutWireItem(item: any): { started: any; completed: any } | undefined {
   const id = String(item?.id ?? '');
   switch (item?.type) {
     case 'CommandExecution': {
@@ -9306,18 +9368,27 @@ const AUTO_ORIGINATORS = new Set(['Claude Code']);
  *     originator ({@link AUTO_ORIGINATORS} + our 'cosyncing-*' / 'cosyncing-*' harnesses);
  *   - vscode:   `originator:'codex_vscode'`;
  *   - undefined (displayed): human surfaces (codex-tui / codex_cli_rs / the app's 'cosyncing')
- *     AND any unrecognized front-end. */
+ *     AND any unrecognized front-end.
+ *
+ *  A side chat is the one other child: Codex persists it as a fork with `attached_thread: true` and
+ *  `forked_from_id` naming the thread it belongs to (captured on 0.172.0 from the TUI's `/side` and
+ *  from `thread/fork {attachToSource}`). It gets that parent link so the roster nests it under its
+ *  thread, and keeps the origin its originator gives: the user drives it, so it is not agent-owned.
+ *  An ordinary fork carries `forked_from_id` too, but without the flag it stays a session of its own. */
 export function codexSessionOrigin(meta: any): { origin?: 'subagent' | 'exec' | 'vscode'; parentThreadId?: string } {
   if (!meta || typeof meta !== 'object') return {};
   if (meta.thread_source === 'subagent' || meta.source?.subagent) {
     const parent = meta.parent_thread_id ?? meta.source?.subagent?.thread_spawn?.parent_thread_id;
     return { origin: 'subagent', ...(parent ? { parentThreadId: String(parent) } : {}) };
   }
+  const attachedTo = meta.attached_thread === true && meta.forked_from_id != null && String(meta.forked_from_id)
+    ? { parentThreadId: String(meta.forked_from_id) }
+    : {};
   const originator = typeof meta.originator === 'string' ? meta.originator : '';
-  if (originator === 'codex_exec' || meta.thread_source === 'exec') return { origin: 'exec' };
-  if (originator === 'codex_vscode') return { origin: 'vscode' };
-  if (AUTO_ORIGINATORS.has(originator) || originator.startsWith('cosyncing-') || originator.startsWith('cosyncing-')) return { origin: 'exec' };
-  return {};
+  if (originator === 'codex_exec' || meta.thread_source === 'exec') return { origin: 'exec', ...attachedTo };
+  if (originator === 'codex_vscode') return { origin: 'vscode', ...attachedTo };
+  if (AUTO_ORIGINATORS.has(originator) || originator.startsWith('cosyncing-') || originator.startsWith('cosyncing-')) return { origin: 'exec', ...attachedTo };
+  return attachedTo;
 }
 
 /** Drive reason for a child thread the parent agent owns. Single-sourced: the roster/attach control

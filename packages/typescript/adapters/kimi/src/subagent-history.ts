@@ -446,6 +446,12 @@ export function mapKimiSubagentHistory(
       case 'full_compaction.complete':
       case 'context.apply_compaction':
       case 'context.undo':
+      // Written by every Kimi Code 2.7 child journal (captured on 2.7.2): the
+      // environment binding, the tool catalog the child starts with, and the
+      // settlement of the task the parent sent. None is transcript content.
+      case 'environment.set_binding':
+      case 'tool_select.initialized':
+      case 'prompt.completed':
         break;
 
       default:
