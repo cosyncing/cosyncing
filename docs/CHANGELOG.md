@@ -43,9 +43,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   leaves it read-only with Codex's own explanation, instead of failing as a
   restore error.
 - Codex 0.171 and newer: while you Drive a session on a custom provider, the
-  model picker lists that provider's models. A prompt sent while driving carries
-  Codex's send time, and file edits and web searches show how long they took, as
-  they do after reopening the session.
+  model picker asks Codex for the models of that session's own provider. A
+  prompt sent while driving carries Codex's send time, and file edits and web
+  searches show how long they took, as they do after reopening the session.
 - Kimi Code 2.7 and newer: a failed turn shows the reason Kimi gives, also when
   the session is opened later. Model, effort and context details update as soon
   as Kimi reports a change instead of on the next poll.
