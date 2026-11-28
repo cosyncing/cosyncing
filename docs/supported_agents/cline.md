@@ -78,8 +78,9 @@ Setup does not install or update Cline, copy credentials, or read
   (from the pair, or from a provider the Hub reports configured), a ready
   isolated Hub, and broker ownership proof all agree. Provider/model and
   Ask/Auto/Plan mode propagate into native `session.create`. A session keeps
-  its model; Resume needs the pair's model, or a provider the Hub still reports
-  configured.
+  its model. With the pair set, Resume needs the session's model to be the
+  pair's model; without the pair, it needs the session's provider to be one the
+  Hub still reports configured.
 - Hub Drive serializes prompts. A queued user row becomes durable only after a
   terminal native run reply and an exact transcript reread identify one causal
   native user row. Joined app clients reuse that one writer.

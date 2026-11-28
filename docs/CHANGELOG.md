@@ -14,7 +14,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 ### Added
 
 - Kimi Code 2.7 and newer: a shell command the agent runs in the background,
-  and each member of an agent swarm, shows as an activity row until it ends.
+  and each member of an agent swarm, gets an activity row. The row shows it
+  running until it finishes, and then its outcome.
 - Kimi Code 2.7 and newer: a plan review shows the plan on its approval card,
   with any alternative approaches the agent offered.
 - Kimi Code 2.7 and newer: a message sent while a turn runs reaches the agent

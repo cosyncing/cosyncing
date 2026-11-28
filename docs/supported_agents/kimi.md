@@ -54,11 +54,13 @@ cosyncing maps Kimi Code 2.7's protocol onto the behavior described under
 - A session shows as working while a turn runs. Once the turn ends it shows as
   idle, even while background commands or subagents it started are still
   working.
-- A shell command the agent runs in the background shows as an activity row
-  until it ends, and so does each member of an agent swarm. Kimi does not
-  report an exit code for these commands, so none is shown. When the
-  connection to `kimi web` drops, these rows are removed, and the ones still
-  running come back when the connection does.
+- A shell command the agent runs in the background gets an activity row, and
+  so does each member of an agent swarm. The row shows it running until it
+  finishes, and then its outcome. Kimi does not report an exit code for these
+  commands, so none is shown. When the connection to `kimi web` drops, the
+  rows still running are removed, and the ones whose task is still running
+  come back when the connection does. Rows that have finished keep their
+  outcome.
 - The model, effort and context-window details of a session appear once the
   session is open in cosyncing, not on the session list. They update as soon
   as Kimi reports a change.
