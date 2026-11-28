@@ -1144,7 +1144,7 @@ export function piFamilyExtras(dialect: PiFamilyDialect): ConformanceExtra[] {
         const owner = await context.openDrive(session);
         const mark = fake.ledger.mark();
         expect((await owner.sendAndAwait({ kind: 'prompt', text: '[[hold:queued-run]] first' })).kind).toBe('ack');
-        await eventually(() => fake.ledger.since(mark).some((entry) => entry.kind === 'turn' && entry.text.endsWith('first')),
+        await eventually(() => fake.ledger.since(mark).some((entry) => entry.kind === 'turn' && typeof entry.text === 'string' && entry.text.endsWith('first')),
           { what: 'the held turn to start' });
         // Both are accepted while the first turn is still held, each once omp's queue lists it.
         const steers = ['second while running', 'third while running'];
