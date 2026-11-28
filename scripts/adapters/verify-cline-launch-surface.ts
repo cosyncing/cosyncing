@@ -85,7 +85,7 @@ try {
     reported !== undefined && clineVersionAllowsDrive(reported),
     `reported=${String(reported)} floor=${CLINE_MINIMUM_SUPPORTED_VERSION}`);
   check('the adapter therefore admits it for write paths',
-    clineVerifiedInvocation(command, process.env) !== undefined);
+    await clineVerifiedInvocation(command, process.env) !== undefined);
 
   // 4. The flag the adapter stopped passing. Checked BEFORE the daemon start so
   //    a rejection here cannot be confused with the daemon failing to come up.
