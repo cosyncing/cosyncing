@@ -451,6 +451,82 @@ try {
     }
   }
 
+  // A custom model whose `[model.<key>]` key differs from the model id it names. Grok 1.0.92
+  // lists and loads it under the key and stores the id in summary.json (a 2026-11-24 capture;
+  // the fake does the same under FAKE_GROK_CUSTOM_MODEL), so the stored session asks for the id.
+  {
+    const customStore = join(root, 'custom-home');
+    const customFake = writeFakeGrokBinary(join(root, 'custom-bin'), customStore);
+    customFake.env.FAKE_GROK_CUSTOM_MODEL = '1';
+    const customAdapter = new GrokAdapter({ command: customFake.path, env: customFake.env, requestTimeoutMs: 2_000 });
+    const restartedCustomAdapter = async (sessionId: string) => {
+      const row = (await discoverGrokStore({ root: customStore })).find((candidate) => candidate.id === sessionId)!;
+      const historyBoundary = await grokHistorySourceIdentity(row);
+      return new GrokAdapter({
+        command: customFake.path,
+        env: customFake.env,
+        requestTimeoutMs: 2_000,
+        resolveStoredDriveState: (info) => info.id === sessionId ? { historyBoundary } : undefined,
+      });
+    };
+    let customDrive: GrokDriveConnection | undefined;
+    let resumedDrive: GrokDriveConnection | undefined;
+    let fallbackDrive: GrokDriveConnection | undefined;
+    try {
+      const customCreated = await customAdapter.createSession({
+        directory: cwd,
+        model: { providerID: 'xai', modelID: 'byok' },
+        permissionMode: 'default',
+      });
+      customDrive = await customAdapter.attach(customCreated.id, 'resume') as GrokDriveConnection;
+      let customError: unknown;
+      try { await customDrive.sendPrompt({ text: 'prompt on the custom model' }); } catch (error) { customError = error; }
+      const customStored = (await discoverGrokStore({ root: customStore })).find((row) => row.id === customCreated.id);
+      check('a custom model picked by its key keeps Drive while summary.json stores the model id',
+        customError === undefined
+          && customDrive.driving
+          && customStored?.model === 'byok-model'
+          && customDrive.info.currentModel?.modelID === 'byok',
+        JSON.stringify({ error: String(customError ?? ''), stored: customStored?.model, info: customDrive.info.currentModel }));
+      await customDrive.close();
+
+      // After a broker restart, Resume starts from the stored id; session/load answers the key.
+      resumedDrive = await (await restartedCustomAdapter(customCreated.id))
+        .attach(customCreated.id, 'resume') as GrokDriveConnection;
+      const resumedSeen: AgentMessage[] = [];
+      resumedDrive.subscribe((message) => resumedSeen.push(message));
+      let resumedError: unknown;
+      try { await resumedDrive.sendPrompt({ text: 'resumed on the custom model' }); } catch (error) { resumedError = error; }
+      const resumedSpawn = customFake.events().filter((event) => event.kind === 'spawn').at(-1);
+      const resumedArgv = Array.isArray(resumedSpawn?.argv) ? resumedSpawn.argv as unknown[] : [];
+      check('Resume asks for the stored model id, keeps Drive, and shows the model under its key',
+        resumedError === undefined
+          && resumedDrive.driving
+          && resumedArgv[resumedArgv.indexOf('--model') + 1] === 'byok-model'
+          && resumedDrive.info.currentModel?.modelID === 'byok'
+          && resumedDrive.info.currentModel?.label === 'BYOK model'
+          && resumedSeen.some((message) => message.type === 'metadata-update' && message.key === 'sessionInfo'
+            && (message.value as { currentModel?: { modelID?: string } }).currentModel?.modelID === 'byok'),
+        JSON.stringify({ error: String(resumedError ?? ''), argv: resumedArgv, info: resumedDrive.info.currentModel }));
+      await resumedDrive.close();
+
+      // The stored id answered by a model whose own id is another one is not that model.
+      customFake.env.FAKE_GROK_LOAD_MODEL_OVERRIDE = 'grok-4.5';
+      fallbackDrive = await (await restartedCustomAdapter(customCreated.id))
+        .attach(customCreated.id, 'resume') as GrokDriveConnection;
+      let fallbackRefused = false;
+      try { await fallbackDrive.sendPrompt({ text: 'must not run on another model' }); } catch { fallbackRefused = true; }
+      delete customFake.env.FAKE_GROK_LOAD_MODEL_OVERRIDE;
+      check('Resume refuses a session/load that answers the stored id with a different model',
+        fallbackRefused && !fallbackDrive.driving,
+        JSON.stringify({ info: fallbackDrive.info.currentModel }));
+    } finally {
+      await customDrive?.close();
+      await resumedDrive?.close();
+      await fallbackDrive?.close();
+    }
+  }
+
   const spawnsBeforeSwitch = fake.spawnCount();
   fake.env.FAKE_GROK_DONE_METHOD = 'x.ai/session/update';
   await drive.sendPrompt({

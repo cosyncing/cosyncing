@@ -57,6 +57,9 @@ deliberate nonstandard executable.
 - Prompt queue, allow-once/reject permission, commands, model/mode relaunch, and
   cross-client writer sharing are covered by deterministic regressions. Foreign
   writes or transcript rewrites terminate and revoke the broker writer.
+- A custom model whose `[model.<key>]` key differs from the `model` id it names
+  keeps Drive on Resume. Grok stores the id and loads the model under its key,
+  so the app shows the key, as the model picker lists it.
 - In the default mode Grok 1.0.92 asks before writing a file and reads without
   asking. Rejecting a write ends the turn as cancelled: Grok stops the turn
   itself rather than letting the model continue.

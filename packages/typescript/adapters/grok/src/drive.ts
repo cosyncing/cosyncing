@@ -87,6 +87,8 @@ interface GrokLazyHooks {
   onUpdate(method: string, params: AcpSessionUpdateParams): void;
   onPermissionRequest(params: AcpRequestPermissionParams): Promise<AcpRequestPermissionResult> | AcpRequestPermissionResult;
   onExit(exit: AcpChildExit): void;
+  /** session/load confirmed the requested model under another catalogue id; see verifyLoadedConfiguration. */
+  onModelResolved(model: NonNullable<SessionInfo['currentModel']>): void;
 }
 
 interface PendingPrompt {
@@ -446,8 +448,21 @@ class LazyGrokAcpTransport implements GrokAcpTransport {
     const effectiveModel = boundedSelection(loadedModels, ['currentModelId', 'currentModel']);
     const effectiveEffort = grokLoadedReasoningEffort(loadedModels);
     const effectiveMode = boundedSelection(loadedModes, ['currentModeId', 'currentMode']);
+    const catalogIds = new Set(this.models.map((model) => modelToken(model)));
+    // A custom model's `[model.<key>]` key can differ from the `model` id the table names. Grok
+    // 1.0.92 lists and loads such a model under its key, stores the id in summary.json, and
+    // resolves `--model` by either (2026-11-24 capture: Resume asked for the stored id and
+    // session/load answered the key). So the stored id this session was resumed with, which the
+    // catalogue does not list, may come back as the key that names it; the summary must then
+    // still store that id. A requested catalogue id must come back unchanged.
+    let resolvedModel: string | undefined;
     if (effectiveModel !== undefined && this.desiredModel !== undefined && effectiveModel !== this.desiredModel) {
-      throw new Error(`Grok session/load reported model ${effectiveModel}, not requested ${this.desiredModel}.`);
+      if (this.desiredModel !== this.session.model
+        || catalogIds.has(this.desiredModel)
+        || !catalogIds.has(effectiveModel)) {
+        throw new Error(`Grok session/load reported model ${effectiveModel}, not requested ${this.desiredModel}.`);
+      }
+      resolvedModel = effectiveModel;
     }
     if (effectiveEffort !== undefined && this.desiredEffort !== undefined && effectiveEffort !== this.desiredEffort) {
       throw new Error(`Grok session/load reported reasoning effort ${effectiveEffort}, not requested ${this.desiredEffort}.`);
@@ -462,8 +477,16 @@ class LazyGrokAcpTransport implements GrokAcpTransport {
       && this.desiredMode !== 'default') {
       throw new Error(`Grok session/load omitted requested permission mode ${this.desiredMode}.`);
     }
-    const durableModelMatches = (row: GrokStoredSession): boolean =>
-      this.desiredModel === undefined || row.model === this.desiredModel;
+    // summary.json stores a custom model's own id, which no catalogue entry names. Once session/load
+    // resolved the stored id to a key, the summary must still store that id: one naming another
+    // model means Grok runs that model instead. For a requested catalogue id, which session/load
+    // has confirmed, the summary holds either that id or an id the catalogue does not list.
+    const requestedModel = this.desiredModel;
+    const durableModelMatches = (row: GrokStoredSession): boolean => {
+      if (requestedModel === undefined || row.model === requestedModel) return true;
+      if (resolvedModel !== undefined) return false;
+      return row.model !== undefined && catalogIds.has(requestedModel) && !catalogIds.has(row.model);
+    };
     // A promptless session's stored effort may lag a load that confirmed the requested one.
     const durableEffortMatches = (row: GrokStoredSession): boolean =>
       this.desiredEffort === undefined
@@ -486,6 +509,25 @@ class LazyGrokAcpTransport implements GrokAcpTransport {
       throw new Error(`Grok durable summary reports reasoning effort ${String(durable.currentModel?.reasoningEffort)}, not requested ${this.desiredEffort}.`);
     }
     this.verifyRelaunchConfiguration = false;
+    if (resolvedModel !== undefined) {
+      // Later relaunches ask for the key, which session/load answers unchanged.
+      this.desiredModel = resolvedModel;
+      this.hooks.onModelResolved(this.currentModelFor(resolvedModel));
+    }
+  }
+
+  /** A catalogue model as the current model: its label, and the requested effort if it offers that one. */
+  private currentModelFor(id: string): NonNullable<SessionInfo['currentModel']> {
+    const option = this.models.find((model) => modelToken(model) === id);
+    const effort = this.desiredEffort !== undefined
+      && (!option?.reasoningEfforts || option.reasoningEfforts.some((choice) => choice.effort === this.desiredEffort))
+      ? this.desiredEffort
+      : undefined;
+    return {
+      ...modelSelection(id),
+      ...(option?.label ? { label: option.label } : {}),
+      ...(effort ? { reasoningEffort: effort } : {}),
+    };
   }
 }
 
@@ -671,6 +713,7 @@ export class GrokDriveConnection extends GrokObserveConnection {
       onPermissionRequest: (params) => connection?.requestPermission(params)
         ?? { outcome: { outcome: 'cancelled' } },
       onExit: (exit) => connection?.demote(`Grok ACP child exited (code ${String(exit.code)}, signal ${String(exit.signal)}).`),
+      onModelResolved: (model) => connection?.acceptCurrentModel(model),
     });
     connection = new GrokDriveConnection(session, info, transport, options);
     try {
@@ -1355,6 +1398,19 @@ export class GrokDriveConnection extends GrokObserveConnection {
       return;
     }
     if (foreignIfUnclaimed) this.demote();
+  }
+
+  /** The model Grok reports this session runs, shown as the current model and kept for the next attach. */
+  private acceptCurrentModel(currentModel: NonNullable<SessionInfo['currentModel']>): void {
+    if (this.closedDrive || this.demoted) return;
+    this.info.currentModel = { ...currentModel };
+    this.info.model = modelToken(currentModel);
+    this.emitLive({ type: 'metadata-update', key: 'sessionInfo', value: { currentModel: { ...currentModel }, model: this.info.model } });
+    this.onConfigurationHook?.({
+      currentModel: { ...currentModel },
+      ...(this.info.currentMode ? { currentMode: this.info.currentMode } : {}),
+      ...(this.info.model ? { model: this.info.model } : {}),
+    });
   }
 
   private acceptUpdate(method: string, params: AcpSessionUpdateParams): void {

@@ -190,8 +190,16 @@ const argValue = (name) => {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : undefined;
 };
+// FAKE_GROK_CUSTOM_MODEL lists a custom model whose [model.byok] key differs from the model id
+// byok-model it names. As Grok 1.0.92 did with one (a 2026-11-24 capture), --model takes either,
+// the child answers with the key, and summary.json stores the id.
+const customModel = process.env.FAKE_GROK_CUSTOM_MODEL === '1';
+const modelKey = (value) => customModel && value === 'byok-model' ? 'byok' : value;
+const storedModelId = (key) => customModel && key === 'byok' ? 'byok-model' : key;
+// The model the child runs: a load override stands for Grok picking another one.
+const runningModel = process.env.FAKE_GROK_LOAD_MODEL_OVERRIDE || modelKey(argValue('--model')) || 'grok-4.6';
 const models = {
-  currentModelId: process.env.FAKE_GROK_LOAD_MODEL_OVERRIDE || argValue('--model') || 'grok-4.6',
+  currentModelId: runningModel,
   currentReasoningEffort: process.env.FAKE_GROK_LOAD_EFFORT_OVERRIDE || argValue('--reasoning-effort') || 'high',
   availableModels: [
     { modelId: 'grok-4.6', name: 'Grok 4.6', _meta: { reasoningEfforts: [
@@ -199,6 +207,7 @@ const models = {
       { value: 'low', label: 'Low', default: false },
     ] } },
     { modelId: 'grok-4.5', name: 'Grok 4.5' },
+    ...(customModel ? [{ modelId: 'byok', name: 'BYOK model' }] : []),
   ],
 };
 const modes = {
@@ -218,7 +227,7 @@ const ensureSession = (cwd) => {
     updated_at: '2026-08-30T10:00:00.000Z',
     last_active_at: '2026-08-30T10:00:00.000Z',
     num_messages: 0,
-    current_model_id: argValue('--model') || 'grok-4.6',
+    current_model_id: storedModelId(customModel ? runningModel : argValue('--model') || 'grok-4.6'),
     reasoning_effort: process.env.FAKE_GROK_SUMMARY_EFFORT_OVERRIDE || argValue('--reasoning-effort') || 'high',
     agent_name: 'build',
   }) + '\\n');
